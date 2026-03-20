@@ -1,0 +1,260 @@
+Title: GetBatch: Distributed Multi-Object Retrieval for ML Data Loading
+
+URL Source: https://arxiv.org/pdf/2602.22434v1
+
+Published Time: Fri, 27 Feb 2026 01:12:28 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+Alex Aizman 1 Abhishek Gaikwad 1 Piotr ˙ Zelasko 1
+
+# Abstract 
+
+Machine learning training pipelines consume data in batches. A single training step may require thousands of samples drawn from shards dis-tributed across a storage cluster. Issuing thou-sands of individual GET requests incurs per-request overhead that often dominates data trans-fer time. To solve this problem, we introduce GetBatch - a new object store API that elevates batch retrieval to a first-class storage operation, re-placing independent GET operations with a single deterministic, fault-tolerant streaming execution. GetBatch achieves up to 15 × throughput improve-ment for small objects and, in a production train-ing workload, reduces P95 batch retrieval latency by 2 × and P99 per-object tail latency by 3.7 ×
+
+compared to individual GET requests. 
+
+# 1. Introduction 
+
+The growing scale of data and training workflows forced the ML community to move away from in-memory data. Modern workflows are characterized by a data loader ab-straction that feeds batches of data into a model’s training loop. However, depending on the scale, different data load-ing mechanisms must be employed. The two main approaches are based on either random access or sequential data access patterns. With ”small enough” data, a random-access data loader also known as a ”map-style dataset,” is desirable–and typically seen in most data loading examples in frameworks such as PyTorch. The benefit of the random access approach is that it is easy to maintain almost perfect sampling randomness, at some effi-ciency cost. At a ”large enough” data scale, that efficiency cost becomes a major bottleneck in model training: when data size grows beyond local storage, object stores must be adopted. However, object stores impose a high overhead for establishing a GET request per retrieved sample. Therefore, to reduce that overhead, scalable data loading typically em-
+
+> 1
+
+NVIDIA, Santa Clara, USA. Correspondence to: Alex Aiz-man <aaizman@nvidia.com >, Abhishek Gaikwad <abhgaik-wad@nvidia.com >, Piotr ˙ Zelasko <pzelasko@nvidia.com >.
+
+Preprint. February 27, 2026. 
+
+ploys sequential I/O by packaging data samples into groups called shards—for example, using TAR archives. However, sequential I/O makes it more difficult to preserve the same high level of sampling randomness as random access I/O, requiring additional complexity such as shard order shuf-fling, data blending with stream multiplexers, or in-memory shuffling buffers. We propose an alternative approach that brings the best of both worlds: a batched random-access I/O mechanism called GetBatch. The core idea is to enable the client code to sample an arbitrary batch, and then retrieve its corre-sponding data through a single GetBatch request sent to the object store. The object store internally fetches each example concurrently, possibly from multiple shards, disks, and machines, and streams it back to the client as a single tar archive. The differences between sequential I/O and GetBatch are illustrated in Figure 1. We implement Get-Batch in NVIDIA AIStore object store and observe up to 15x data loading speedup compared to random access I/O across synthetic benchmarks and a production-scale training workload. Conceptually, GetBatch elevates batch retrieval to a first-class storage primitive by replacing thousands of independent object reads with a single deterministic, fault-tolerant streaming operation that preserves request order in the output stream. Our main contributions are: 1. A storage-native batched retrieval primitive for ML data loading that combines the sampling flexibility of random access with the throughput of sequential I/O. 2. A distributed execution model with Designated Tar-get (DT) coordination that parallelizes retrieval across cluster nodes while preserving strict output ordering. 3. Empirical evaluation demonstrating up to 15 ×
+
+throughput improvement on synthetic benchmarks and stable throughput in production-scale training. 4. An open-source implementation in NVIDIA AIS-tore with Python SDK integration for existing training frameworks. 
+
+# 2. Methods 
+
+This section describes the architecture and execution model underlying GetBatch. We begin with an overview of AI-1
+
+> arXiv:2602.22434v1 [cs.DC] 25 Feb 2026 GetBatch: Distributed Multi-Object Retrieval for ML Data Loading
+
+Store (Section 2.1), then present the design and execution semantics of GetBatch (Section 2.2), its distributed server-side execution (Section 2.3), execution options (Section 2.4), and the client-side interface (Section 2.5). 
+
+2.1. AIStore 
+
+AIStore (AIS) is a lightweight, high-performance distributed object storage system tailored for large-scale AI workloads. Built for linear scale-out and balanced I/O distribution, AI-Store can be deployed on anything from a single Linux machine to a bare-metal cluster of arbitrary size. It supports multi-cloud access, native bucket and object semantics, era-sure coding, and n-way mirroring for reliability, along with a comprehensive HTTP API compatible with Amazon S3 clients (NVIDIA/aistore, 2019). AIStore provides advanced capabilities for ML pipelines including archive operations (TAR, ZIP), inline and offline data transformations, and the batching API for multi-object retrieval described in this paper. This paper focuses on the execution semantics and distributed coordination required to support batched retrieval at scale; API syntax and opera-tional usage are documented in AIStore’s public documen-tation (NVIDIA/aistore, 2019). 
+
+2.2. GetBatch Design and Execution Semantics 
+
+Machine learning training pipelines consume data in 
+
+batches : a single training step may require hundreds or thousands of samples, often drawn from archive shards dis-tributed across a storage cluster. Conventional distributed storage systems expose retrieval at file or object granularity, forcing clients to issue thousands of independent read (or GET) requests per batch. The resulting per-request over-head—network round trips, per-request control-plane pro-cessing, and connection management—often dominates data transfer time and leaves compute resources underutilized. GetBatch addresses this mismatch by elevating batch re-trieval to a first-class storage primitive. Instead of issuing many independent requests, a client submits a single request specifying the needed data items; the storage system as-sembles them across the cluster and delivers the result as a single serialized output stream (default: uncompressed TAR archives). One request, one response, with no designed-in limit on the number of data items. Implementation-wise, a GetBatch request is issued as an HTTP GET with a JSON body that specifies the output format, retrieval entries, and execution options. Although request bodies in GET operations are uncommon, they are permitted by HTTP semantics (Fielding et al., 2022) and are required here to encode large request lists that exceed practical URL length limits. A single GetBatch request may span multiple buckets and object namespaces, allowing training pipelines to assemble composite samples (e.g., features, labels, metadata) without issuing separate requests or performing client-side joins.                
+
+> {"mime": "tar", "in": [{"bucket": "imagenet", "objname": "images/img_0001.jpg"}, {"bucket": "imagenet", "objname": "images/img_0002.jpg"}, {"bucket": "shards", "objname": "train-0003.tar", "archpath": "labels/0003.txt"}, {"bucket": "shards", "objname": "train-0003.tar", "archpath": "images/0003.jpg"} ], "strm": true, "coer": false, "coloc": 2}
+
+GetBatch enforces strict output ordering: response entries appear in the exact same order as the request list, regardless of whether individual items originate from standalone ob-jects or archive shards, or where they are physically located in the cluster. When continue-on-error mode is enabled and an entry cannot be retrieved, the output stream contains an explicit placeholder preserving positional correspondence (see Section 2.4). This ordering guarantee enables determin-istic alignment between training samples and labels without client-side reassembly and is essential for reproducible train-ing. The client’s request arrives at an arbitrary AIS gateway (typically, via standard load balancing). The gateway selects a storage node to serve as the Designated Target (DT) for this request—either randomly or, when colocation hints are provided, by choosing the node that owns the most requested items (see Section 2.4). The DT then assumes responsibility for assembling the serialized output stream, maintaining per-request execution state and enforcing output order, while other storage nodes act as senders, reading locally owned items and delivering them to the DT. This design distributes storage I/O and network transfers across the cluster while centralizing only the final serialization step. 
+
+2.3. GetBatch Server-side Execution 
+
+A GetBatch request is executed as a distributed operation coordinated by a single Designated Target (DT). Retrieval of individual data items is parallelized across storage nodes, while ordering and final assembly are handled exclusively by the DT. 2GetBatch: Distributed Multi-Object Retrieval for ML Data Loading     
+
+> (a) Sequential I/O data loading flavor. The data sampler selects a shard to read, and it must be read entirely, left-to-right. To improve the randomness, the sampler interleaves multiple shards, and pre-fills examples into a buffer. The sampling is further stratified on factors such as sequence length via dynamic bucketing.
+> (b) Random access I/O data loading flavor. The data sampler is able to select any example in the entire dataset, regardless of its physical layout, and optionally stratify the sampling prior to data access. Normally, each object must be fetched through a separate request from the data loading client with substantial overhead. GetBatch efficiently batches data access into a single request.
+> Figure 1. AIStore sequential and batched random access data loading patterns. Sequential I/O (a) reads entire shards and selects samples from a buffer, while GetBatch (b) retrieves only the sampled items in a single request.
+> Figure 2. GetBatch execution model. A client submits a batch request to a proxy, which selects a Designated Target (DT). The proxy activates all other targets as senders. Senders stream locally owned data to the DT over peer-to-peer paths, and the DT emits a single output stream in strict request order.
+
+2.3.1. E XECUTION FLOW 
+
+Clients issue GetBatch requests to any proxy, a stateless gateway node that exposes the storage API. Upon receiving a request, the proxy selects a DT using consistent hashing under the current cluster membership. This default routing strategy assumes batch entries are uniformly distributed and minimizes coordination overhead; when explicit colocation hints are provided, the proxy may apply an alternative DT selection strategy to reduce cross-node transfers. Execution proceeds in three phases: (1) DT registration, (2) distributed sender activation, and (3) client redirection and ordered assembly. 
+
+Phase 1: DT Registration. The proxy forwards the re-quest body to the selected DT. The DT allocates per-request execution state and returns a unique execution identifier, establishing itself as the sole coordinator responsible for producing the serialized output stream. 
+
+Phase 2: Distributed Sender Activation. After the DT accepts the request, the proxy broadcasts a control message to all other storage nodes - henceforth, senders . Each sender independently determines which request entries it can sat-isfy locally—either by reading full objects it owns or by extracting specified members from locally stored archive shards—and begins delivering those payloads to the DT over persistent peer-to-peer connections. Senders operate autonomously and in parallel. They do not coordinate with one another and may begin producing data as soon as local reads complete. Across the cluster, each storage node may simultaneously play multiple roles across concurrent requests (e.g., acting as DT for one GetBatch while serving as a sender for others), enabling high aggre-gate throughput under multi-tenant training workloads. 
+
+Phase 3: Client Redirection and Ordered Assembly. 
+
+Once sender activation is complete, the proxy redirects the client to the DT. The DT assembles locally read and re-motely received items, and serves the resulting serialized output stream strictly in client-specified order. While data may arrive at the DT out of order from multiple senders, output ordering is enforced unconditionally, decoupling het-erogeneous read and transfer latencies from output deter-minism. Depending on execution options, the DT may begin stream-ing to the client as soon as the first entries become available, overlapping retrieval, assembly, and consumption. This reduces latency to first byte and improves accelerator uti-lization while preserving deterministic semantics. Data transfer between storage nodes relies on a shared pool of persistent peer-to-peer connections that are reused across requests and operations, with idle connections reclaimed after a configurable timeout. This amortizes connection setup cost and avoids connection storms under concurrent 3GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+load. 
+
+2.4. GetBatch Execution Options and Capabilities 
+
+Beyond its core execution model, GetBatch exposes a small set of execution options and system capabilities that allow applications and operators to trade off latency, robustness, and data movement cost. These options do not affect correct-ness: regardless of configuration, GetBatch preserves strict ordering and deterministic output semantics. Instead, they control how the system executes under varying workload characteristics and failure conditions. 2.4.1. R EQUEST -LEVEL EXECUTION OPTIONS 
+
+GetBatch requests may specify execution options that mod-ify delivery behavior while preserving semantic guarantees. 
+
+Streaming ( strm ). When enabled, the DT begins emit-ting the output stream as soon as the earliest entries become available, overlapping retrieval, assembly, and consumption. This reduces time to first byte and improves accelerator uti-lization. When disabled, the DT buffers the entire result prior to delivery. 
+
+Continue-on-error ( coer ). By default, retrieval errors abort the request. When continue-on-error is enabled, re-coverable per-entry failures (e.g., missing objects) do not terminate execution. Instead, failed entries are surfaced as explicit placeholders in the output stream, preserving posi-tional correspondence with the request. Details of soft error classification and recovery are described in Section 2.4.2. 
+
+Colocation hints ( coloc ). By default, GetBatch routes requests opaquely: the proxy selects a DT without inspect-ing the request body, avoiding the cost of unmarshaling potentially large entry lists. When clients provide a coloca-tion hint via a query parameter, the proxy unmarshals the request and computes per-entry placement weights to select the DT that owns the largest fraction of requested data, re-ducing cross-node transfers. This two-tier approach ensures that the common case pays no coordination overhead, while structured workloads can opt in to placement-aware routing when the reduction in network traffic justifies the additional proxy-side processing. Conceptually, colocation captures two dimensions of con-tainment common in machine learning datasets: (1) objects tend to be clustered on a subset of storage nodes, and (2) samples are often grouped within a small number of archive shards. Exploiting this structure can reduce network traffic and shard re-open costs. 2.4.2. F AULT HANDLING AND COMPLETION 
+
+Errors encountered during retrieval are classified on a per-entry basis and reported to the Designated Target (DT). GetBatch distinguishes between hard errors, which abort the request, and soft errors, which may be tolerated depending on request options. Soft errors include missing objects or archived files, transient failures of peer-to-peer data streams, and timeouts while waiting for remote senders. When continue-on-error is enabled, soft errors do not termi-nate execution. Instead, the DT records the failure and emits a placeholder entry in the serialized output stream while preserving strict positional correspondence with the request. This allows downstream consumers to detect and handle missing samples without breaking batch alignment. Config-urable soft error handling is intended to prevent premature termination of long-running training jobs, which may span many hours, due to a small number of missing or transiently unavailable samples. To prevent unbounded degradation, GetBatch enforces con-figurable limits on recoverable failures and recovery at-tempts. Once these limits are exceeded, further failures are treated as fatal and the request is aborted. Upon success-ful completion or termination, the DT finalizes the serialized output stream and releases all per-request execution state. 2.4.3. C ONFIGURATION AND ADMISSION CONTROL 
+
+GetBatch exposes a dedicated configuration section that governs execution behavior under load. Configurable pa-rameters include the maximum time the DT waits for a remote sender before initiating recovery, the number of get-from-neighbor (GFN) recovery attempts permitted per request, the maximum number of tolerated soft errors per request, and the number of background read-ahead workers used to warm the page cache for upcoming local reads. Admission control is enforced at the DT to prevent resource exhaustion. Memory pressure is treated as a hard constraint: when memory utilization reaches a critical threshold, new work items are rejected with HTTP 429 (Too Many Re-quests), allowing clients to back off and retry. CPU and disk pressure are handled via throttling—the DT inserts cal-ibrated sleep intervals to provide backpressure while allow-ing in-flight work to make forward progress. These controls allow operators to tune the balance between throughput, latency, and fault tolerance without modifying application logic. 2.4.4. O BSERVABILITY AND MONITORING 
+
+GetBatch exposes lightweight, per-node Prometheus metrics that characterize both workload composition and execution bottlenecks . At the request level, the system reports the total number of executed work items and the number and cumula-4GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+tive size of delivered items, separating whole-object retrieval from shard extraction. This distinction allows operators to quantify the fraction of work spent on shard extraction ver-sus object delivery. To diagnose performance bottlenecks, GetBatch separates time spent waiting for peer senders from time spent throt-tling under resource pressure . Specifically, it exports cu-mulative time waiting to receive entries from peer targets (rxwait ) and cumulative time slept due to local pres-sure ( throttle ). This decomposition helps distinguish network- or skew-induced delays, such as slow or over-loaded senders, from local bottlenecks at the Designated Target (DT), including CPU, disk, or memory pressure, guid-ing targeted remediation. Finally, GetBatch reports error counters that distinguish 
+
+hard failures , including request failures and admission re-jections, from soft errors tolerated under configured limits, along with recovery activity such as total recovery attempts and failed recoveries. Together, these metrics support on-line monitoring of multi-tenant batch retrieval workloads and provide actionable signals for tuning timeouts, recovery bounds, and admission control. 
+
+2.5. GetBatch Client-side Interface 
+
+From the client perspective, GetBatch exposes batch re-trieval as a single logical operation. Rather than issuing indi-vidual object requests, the client constructs a batch request 
+
+after sampling , specifying the exact set of samples required for the current training step. GetBatch preserves a clean separation between sampling and data access : sampling logic—including shuffling, bucketing, and batch formation— remains entirely client-side, while the storage system han-dles retrieval. AIStore provides client-side abstractions through its Python SDK 1 that integrate directly with data loaders:                 
+
+> from aistore.sdk import Client client =Client("http://ais-gateway") bucket =client.bucket("training-data") batch =client.batch(["obj_1", "obj_2", "...", "obj_n"], bucket)
+> for obj_info, content in batch.get(): process_sample(content)
+
+This pattern integrates into existing training frameworks with minimal changes: only the data access path is modi-fied, while sampling and training logic remain unchanged. Detailed API documentation is provided in the AIStore Get-Batch documentation. 2
+
+> 1https://pypi.org/project/aistore
+> 2https://github.com/NVIDIA/aistore/blob/ main/docs/get_batch.md
+
+# 3. Synthetic Benchmark 
+
+We first evaluate GetBatch using a controlled synthetic benchmark. This benchmark isolates the performance char-acteristics of batched retrieval across varying object sizes and batch configurations under fixed concurrency and hard-ware conditions. 
+
+Cluster configuration: All experiments were conducted on a 16-node AIStore deployment hosted on Oracle Cloud Infrastructure (OCI). Each node runs one AIStore proxy and one target (16 proxies, 16 targets total) with the following resources: • Instance type: BM.DenseIO.E5.128 • CPU: 128 OCPUs; Memory: 1536 GB • Storage: 12 × 6.8 TB NVMe SSDs (81.6 TB per node) • Network: 1 × 100 Gbps NIC The total cluster capacity is 1.16 PiB across 192 NVMe drives. 
+
+3.1. Experimental Setup Benchmark Tool and Workload. We use AISLoader 3,a load-generation tool designed for AIStore and S3-compatible object storage systems. To avoid client-side bottlenecks, the workload is generated from 8 dedicated client nodes with an identical hardware configuration to the cluster nodes. Each client node runs 10 concurrent workers, resulting in a total of 80 concurrent workers issuing retrieval requests. 
+
+Experimental procedure. For each object size (10 KiB, 100 KiB, 1 MiB), we execute: 1. Individual GET per object (baseline) 2. GetBatch with batch size 32 3. GetBatch with batch size 64 4. GetBatch with batch size 128 Each configuration runs for 1 hour to capture steady-state behavior. Page caches are cleared on all cluster and client nodes before each run (to eliminate page-caching effects). 
+
+3.2. Results 
+
+Table 1 reports sustained throughput for individual GET and GetBatch across object sizes and batch configurations, while Figure 3 visualizes the corresponding scaling trends. GetBatch consistently outperforms individual GET across all evaluated object sizes. The relative improvement de-creases as object size increases, reflecting a transition from request-overhead dominance to data-transfer dominance. 
+
+> 3https://github.com/NVIDIA/aistore/blob/ main/docs/aisloader.md
+
+5GetBatch: Distributed Multi-Object Retrieval for ML Data Loading                   
+
+> Figure 3. Sustained throughput comparison between individual GET and GetBatch across object sizes and batch configurations. GetBatch yields the largest gains for small objects, where per-request overhead dominates.
+> Table 1. Throughput (GiB/s) for individual GET and GetBatch. Speedup over GET in parentheses.
+> GetBatch Object Size GET Batch 32 Batch 64 Batch 128
+> 10 KiB 0.5 4.5 (9 ×)6.0 (12 ×)7.3 (15 ×)100 KiB 4.2 20.7 (4.9 ×)24.1 (5.7 ×)26.1 (6.2 ×)1 MiB 22.3 32.4 (1.5 ×)35.2 (1.6 ×)37.0 (1.7 ×)
+
+10 KiB objects. GetBatch achieves up to 15 × through-put improvement over individual GET. At this size, per-request overheads—TCP round trips, request parsing, and scheduling—dominate total latency. GetBatch amortizes these overheads across the batch. 
+
+100 KiB objects. GetBatch delivers a 6.2 × improvement. Data transfer time becomes more significant, but batching continues to reduce request-level overhead and improve network utilization. 
+
+1 MiB objects. GetBatch achieves a 1.7 × improvement. At this size, data transfer dominates total latency, reducing the relative benefit of batching. 
+
+# 4. End-to-End Training: Canary-1B-Flash 
+
+The synthetic benchmark isolates GetBatch performance un-der controlled conditions with uniform object sizes and fixed concurrency. We next evaluate GetBatch in a production-scale training workload, where object sizes vary, access patterns are determined by the training sampler, and data loading must sustain GPU utilization under real scheduling constraints. All experiments in this section use the same 16-node AIStore cluster and hardware configuration described in Section 3. 
+
+4.1. Experimental Setup Canary-1B-Flash is an encoder-decoder speech recognition and translation model 4 trained on 85k hours of speech across four languages (English, German, Spanish, French). The model is trained using NVIDIA NeMo toolkit (Kuchaiev et al., 2019) and Lhotse for data loading ( ˙Zelasko et al., 2021). We use 128 NVIDIA A100 80GB GPUs for dis-tributed data parallel training with dynamic bucketing and OOMptimizer ( ˙Zelasko et al., 2025a) (an OOM-aware batch size optimizer) to maximize throughput. For a detailed train-ing setup description, we refer the reader to (Puvvada et al., 2024) and ( ˙ Zelasko et al., 2025b). We compare three data access configurations under identical model architecture, dataset, hardware, and hyperparameters: 1. Sequential I/O (baseline): entire archive shards are retrieved and samples selected sequentially; 2. Random access I/O (GET) : only sampled audio files are extracted from archives via individual GET re-quests 5;3. Batched random access I/O (GetBatch) : all samples for a training batch are retrieved in a single GetBatch request. 
+
+4.2. Latency Analysis 
+
+With 16 A100 nodes (128 GPUs, 1,024 data loader workers), all three configurations deliver similar aggregate throughput. At this scale, the storage cluster has ample spare capacity: network bandwidth, disk throughput, and CPU resources are all far from their limits, so the per-request overhead that GetBatch eliminates is not the bottleneck for overall band-width. However, the structural advantages of GetBatch— fewer requests, less network chatter, and lower scheduling overhead—appear clearly in request-level latency. 
+
+> 4https://huggingface.co/nvidia/ canary-1b-flash
+> 5https://aistore.nvidia.com/docs/archive
+
+6GetBatch: Distributed Multi-Object Retrieval for ML Data Loading                              
+
+> Table 2. Latency comparison during training. Values in millisec-onds (ms).
+> Method P50 P95 P99 Avg Batch Latency (ms)
+> Sequential I/O 243.7 431.2 638.9 261.4 Random GET 934.7 3668.7 4814.3 1320.0 GetBatch 427.5 1808.6 2744.7 624.7
+> Per-Object Latency (ms)
+> Sequential I/O 1.2 5.2 6.8 2.0 Random GET 9.1 27.3 53.5 12.3 GetBatch 5.1 10.5 14.5 5.7
+
+Training efficiency is governed not only by aggregate band-width but also by latency—particularly tail latency. High P95 and P99 batch latency directly translate to delayed training steps and reduced GPU utilization. Latency im-provements are most significant when the storage cluster is not continuously saturated—that is, when I/O queues at individual storage nodes are not kept full at all times. In practice, this is common: synchronous training loops create bursty access patterns with idle periods between gradient steps, smaller-scale deployments may not generate sufficient concurrency to saturate storage, and even large training runs experience phases of reduced I/O activity during checkpoint-ing or evaluation. Under sustained saturation, pipelining masks per-request latency and throughput becomes the dom-inant metric. 4.2.1. S ETUP 
+
+To evaluate latency under higher per-node contention, we use a reduced client configuration: 4 NVIDIA A100 nodes (32 GPUs, 256 data loader workers) against the same 16-node AIStore cluster. All other parameters—dataset lay-out, model configuration, storage cluster configuration, and software versions—remain identical. Only the data access method differs. We compare the same three data access strategies defined in Section 4.1. 
+
+Latency measurement. Latency is measured as the to-tal time from when the client issues a request until all re-quested bytes are received. This includes request transmis-sion, server-side processing, data transfer, and complete reception at the client. We report: • Batch latency: Time to retrieve all samples required for a training batch. • Per-object latency: Effective time per individual sam-ple. 4.2.2. R ESULTS 
+
+Sequential I/O. Sequential I/O achieves the lowest me-dian batch latency (243.7 ms) because it performs a single GET to fetch a shard and then reads samples sequentially from the open connection. This eliminates per-sample re-quest overhead entirely. However, sampling flexibility is constrained: batches must draw samples from the retrieved shard, and sampling across shards requires additional shard downloads. Per-object latency reflects sequential read from an open stream rather than an independent retrieval, and is therefore not directly comparable to the per-object latency of Random GET or GetBatch. 
+
+Random Access (GET). Random GET exhibits markedly higher tail latency. Each batch requires hundreds of inde-pendent GET operations, and batch completion time is de-termined by the slowest individual request. At P95, batch la-tency reaches 3,668.7 ms, and at P99, 4,814.3 ms. Per-object tail latency also increases substantially (P99: 53.5 ms), in-dicating exacerbated straggler effects due to request-level variability. 
+
+GetBatch. GetBatch substantially reduces both median and tail latency relative to Random GET. Batch-level P95 latency decreases from 3,668.7 ms to 1,808.6 ms (2.0 × re-duction), and P99 latency improves from 4,814.3 ms to 2,744.7 ms (1.75 × reduction). Average batch latency de-creases from 1,320.0 ms to 624.7 ms (2.1 × reduction). Per-object improvements are even more pronounced at the tail: P99 latency drops from 53.5 ms to 14.5 ms (3.7 × re-duction). The structural difference is critical: instead of issuing hun-dreds of independent GET requests per batch, GetBatch performs a single coordinated retrieval and streams all re-sults through a single response stream. This reduces request amplification, lowers control-plane overhead, minimizes network chatter, and mitigates straggler amplification. 
+
+Implications for training stability. In synchronous data-parallel training, all workers must complete their batch load before the next gradient step can begin; the slowest worker determines step time. Batch retrieval latency thus directly governs step-time variability. The absolute spread between P99 and P50 batch latency quantifies this variability: for Random GET, the spread is 3,880 ms (4,814.3 − 934.7); for GetBatch, it narrows to 2,317 ms (2,744.7 − 427.5)—a 40% reduction. In practical terms, the worst-case stall time drops from nearly 5 seconds to under 3 seconds. This tighter latency distribution reduces step-time jitter and improves GPU utilization regardless of whether the storage cluster is saturated: fat tails in batch retrieval propagate to idle GPU cycles, so reducing them improves training efficiency at any 7GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+scale. 
+
+# 5. Discussion 
+
+5.1. When Does GetBatch Help? 
+
+GetBatch helps most when per-request overhead dominates data transfer time. For small objects (10–100 KiB), over-head from TCP round trips, request parsing, and per-request scheduling accounts for most of the retrieval time; batching amortizes this across the entire batch. As object size grows, data transfer dominates and the relative benefit diminishes— consistent with the observed decline from 15 × at 10 KiB to 1.7 × at 1 MiB in the synthetic benchmark (Section 3.2). Even when aggregate throughput is comparable, as in the Canary training experiment (Section 4.2), GetBatch deliv-ers measurable latency improvements: a 2 × reduction in P95 batch latency and a 3.7 × reduction in P99 per-object latency (Section 4.2). This profile aligns well with typical ML training datasets containing images, audio segments, and text samples. 
+
+5.2. Scalability Considerations 
+
+Each GetBatch request is coordinated by a single Desig-nated Target (DT)—a storage node (randomly) selected on a per-request basis to assemble the serialized output stream. The DT serves as the serialization point, which raises ques-tions about scalability. In practice, three factors mitigate this concern. First, the DT performs only ordering and serialization; the compute-intensive work of reading data from storage is distributed across all senders. Second, dif-ferent requests are routed to different DTs via consistent hashing, distributing the serialization load across the cluster. Third, streaming mode allows the DT to begin emitting out-put before all items arrive, reducing memory pressure and enabling pipelining. Nevertheless, at very high concurrency or with extremely large batches, the DT could become a bottleneck. Under sustained synthetic load (Section 3), we observe that disk utilization saturates first as the DT serves both local reads and incoming sender streams, followed by elevated memory and CPU pressure from buffering out-of-order arrivals and enforcing output order. Once these thresholds are reached, the admission control and throttling mechanisms described in Section 2.4 engage, applying backpressure to prevent resource exhaustion while allowing in-flight requests to complete. This degradation is graceful, but it bounds the throughput a single DT can sustain. Further investigation of DT scaling behavior at larger cluster sizes (32+ nodes) and higher concurrency levels is an important direction for future work. 
+
+5.3. Client-side Integration 
+
+Beyond throughput, GetBatch simplifies client-side data loading code. Without batched retrieval, a data loader must manage concurrent connections, handle per-object errors, and reassemble results in the correct order. With GetBatch, the loader submits a single batch specification and iterates over an ordered stream. AIStore provides client-side abstractions through its Python SDK 6 that integrate directly with data loaders:                         
+
+> Listing 1. Python pseudo-code illustrating the decoupling of data sampling and fetching using GetBatch. The iterable dataset sam-ples and collects an entire batch in one step.
+> from torch.utils.data import (IterableDataset, DataLoader )
+> class MyDataset(IterableDataset):
+> def __next__(self):
+> #State was initialized in __iter__()
+> selected_paths =self._index.sample(n=self.batch_size) batch =client.batch( objects=selected_paths, bucket=bucket, )tensors =[]
+> for metadata, content in batch.get(): tensors.append( self._raw_data_to_tensor(content) )
+> return torch.stack(tensors) dl =DataLoader( MyDataset(...), batch_size=None, )
+
+The pattern in Listing 1 has been adopted in the Lhotse speech data library ( ˙Zelasko et al., 2021), where a GetBatch wrapper called AISBatchLoader is called once to re-place per-sample retrieval for an entire batch. The loader collects all object references from the batch manifest, is-sues one GetBatch request, and injects the returned content directly into in-memory data structures—eliminating per-sample I/O management from training code entirely. 
+
+5.4. Comparison with Alternative Approaches 
+
+Several alternative mechanisms could reduce per-request overhead without a storage-native batching primitive. 
+
+HTTP/2 multiplexing allows multiple requests over a sin-gle TCP connection, reducing connection setup overhead but not per-request parsing or server-side scheduling. gRPC streaming provides efficient bidirectional streaming but still requires per-object request-response cycles on the server 
+
+> 6https://pypi.org/project/aistore
+
+8GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+side. Client-side caching avoids repeated fetches but does not reduce first-access latency and increases client memory requirements. These mechanisms address subsets of the overhead that GetBatch eliminates end-to-end. By perform-ing server-side assembly, the storage system coordinates retrieval across nodes and delivers a single ordered response, amortizing not just connection overhead but also request parsing, scheduling, and intra-cluster data movement. 
+
+5.5. Limitations and Tradeoffs 
+
+GetBatch involves tradeoffs. The current implementation requires AIStore as the storage backend, as batched re-trieval semantics are not part of standard S3-compatible APIs. More broadly, the lack of server-side batch retrieval in modern object storage systems and data loading frameworks represents a gap in the current state of the art. We believe this capability would benefit the broader storage ecosystem and hope that other open-source projects and commercial vendors will adopt similar primitives. The current design enforces strict output ordering to support reproducible train-ing; server-side shuffle modes are a natural extension that could further reduce client-side complexity for workloads that do not require deterministic sample order. 
+
+# 6. Related Work 
+
+6.1. Small-Scale Data Loading with Map-Style Datasets 
+
+Traditional deep learning workflows commonly employ PyTorch’s map-style datasets, which implement the 
+
+getitem () and len () protocols to provide ran-dom access to individual samples (Paszke et al., 2019). In this paradigm, datasets maintain an index-to-sample mapping where dataset[idx] retrieves the idx -th element by reading its file path from disk. This ap-proach works well for small to medium-scale datasets that fit within available storage and where random ac-cess patterns do not significantly impact I/O performance. The standard PyTorch DataLoader consumes map-style datasets by iterating through a sampler that produces in-dices, effectively yielding collate fn([dataset[i] for i in indexes]) for each batch. However, this index-based random access pattern becomes a significant bottleneck when scaling to large datasets, as random I/O operations are substantially slower and less efficient than sequential access patterns—often by a factor of 10-20x on traditional storage systems (Leclerc et al., 2023; Mohan et al., 2021). 
+
+6.2. Large-Scale Data Formats and Sequential I/O Optimization 
+
+To address the limitations of random access at scale, the machine learning community has developed several spe-cialized data formats optimized for sequential I/O patterns. WebDataset stores samples in POSIX TAR archives, en-abling efficient sequential reads that greatly speed up I/O operations on both rotational storage and networked file systems (Aizman et al., 2019). By organizing data into shards (collections of samples stored together) WebDataset achieves parallel I/O while maintaining sequential access within each shard. Similarly, TensorFlow’s TFRecord for-mat stores sequences of binary protocol buffer records that can only be read sequentially, with sharding strategies en-abling parallel data access and prefetching to reduce train-ing step latency (Abadi et al., 2016). FFCV introduces the .beton format, which stores data in a quasi-random order optimized for both sequential disk access and distributed training, achieving order-of-magnitude speedups on stan-dard vision benchmarks (Leclerc et al., 2023). Parquet, a columnar storage format originally designed for data ana-lytics, has been adapted for deep learning through libraries like Petastorm (Yermolovich et al., 2018), which enables efficient loading from Parquet files by reading only the nec-essary columns and leveraging the format’s metadata for selective access. These formats fundamentally diverge from the assump-tions of naive map-style dataloaders (Paszke et al., 2019; Hira et al., 2025). Because they prioritize sequential ac-cess patterns and are typically accessed through iterable-style datasets rather than random-access interfaces, stan-dard index-based sampling strategies become incompati-ble. Iterable-style datasets provide an iterator over samples rather than supporting random access via getitem () ,making them ideal for streaming large datasets that exceed memory capacity. Recent work has shown that data load-ing can become the primary bottleneck in modern training pipelines, with I/O stalls accounting for significant fractions of total training time (Mohan et al., 2021; Pumma et al., 2019). This shift from random to sequential access intro-duces new challenges for data shuffling and sampling, often requiring approximate shuffling through shuffle buffers or block-based sampling strategies that balance I/O efficiency with training randomness (Leclerc et al., 2023; Hira et al., 2025). 
+
+6.3. GPU-Accelerated Data Loading 
+
+NVIDIA DALI (NVIDIA Corporation, 2018) and SPDL (Hira et al., 2025) accelerate data loading through GPU-based preprocessing and optimized CPU–GPU data transfer. These systems primarily target the transforma-tion and transfer stages of the input pipeline. GetBatch addresses a different layer of the stack: it optimizes the storage retrieval stage by pushing batching into the storage layer, reducing the number of network requests issued by the data loading framework. 9GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+Because these approaches operate at different stages of the pipeline, they are conceptually complementary. Exploring tighter integration between GetBatch and GPU-accelerated preprocessing frameworks such as DALI or SPDL is a promising direction for future work, potentially enabling end-to-end optimization from storage retrieval through trans-formation and accelerator transfer. 
+
+# 7. Conclusions 
+
+We introduced GetBatch, a storage primitive that treats batch retrieval as a first-class operation for machine learning data loading. By assembling all items required for a training batch into a single ordered response, GetBatch amortizes per-request overhead while preserving deterministic output ordering essential for reproducible training. Our evaluation on a 16-node AIStore cluster demonstrates that GetBatch achieves up to 15 × throughput improvement for small objects (10 KiB), where per-request overhead dom-inates, with consistent gains across batch sizes. For larger objects, GetBatch remains competitive with individual GET as data transfer cost becomes the primary factor. Beyond aggregate bandwidth, we show that GetBatch signif-icantly improves latency stability during training. In a realis-tic distributed training setup, GetBatch reduces batch-level P95 latency by 2.0 × and P99 latency by 1.75 × compared to individual GET requests. Per-object tail latency improves by up to 3.7 ×. By reducing request amplification and collaps-ing many independent object reads into a single coordinated retrieval, GetBatch lowers control-plane overhead, mitigates straggler effects, and improves training step-time stability. GetBatch is open source and available as part of NVIDIA AIStore. 7 The AISLoader benchmark tool used in the syn-thetic evaluation is included in the AIStore distribution. 8
+
+GetBatch documentation, including API reference and inte-gration guides, is available online. 9
+
+# Acknowledgements 
+
+We thank the AIStore engineering team for infrastructure support, and the NVIDIA NeMo, ASR Speech, and Lhotse teams for their collaboration and assistance with training integration. 
+
+> 7https://github.com/NVIDIA/aistore
+> 8https://github.com/NVIDIA/aistore/blob/ main/docs/aisloader.md
+> 9https://github.com/NVIDIA/aistore/blob/ main/docs/get_batch.md
+
+# References 
+
+Abadi, M., Barham, P., Chen, J., Chen, Z., Davis, A., Dean, J., Devin, M., Ghemawat, S., Irving, G., Isard, M., et al. Tensorflow: A system for large-scale machine learning. In 
+
+12th USENIX Symposium on Operating Systems Design and Implementation (OSDI) , pp. 265–283, 2016. Aizman, A., Maltby, G., and Breuel, T. High performance i/o for large scale deep learning. In 2019 IEEE Inter-national Conference on Big Data (Big Data) , pp. 5965– 5967. IEEE, 2019. Fielding, R. T., Nottingham, M., and Reschke, J. Http semantics. RFC 9110, jun 2022. URL https://www. rfc-editor.org/rfc/rfc9110 .Hira, M., Puhrsch, C., Andrei, V., Malinovskyy, R., Le Lan, G., Krishnan, A., Cummings, J., Martin, M., Gunasekaran, G., Inoue, Y., et al. Scalable and perfor-mant data loading. arXiv preprint arXiv:2504.20067 ,2025. Kuchaiev, O., Li, J., Nguyen, H., Hrinchuk, O., Leary, R., Ginsburg, B., Kriman, S., Beliaev, S., Lavrukhin, V., Cook, J., et al. Nemo: a toolkit for building ai applications using neural modules. arXiv preprint arXiv:1909.09577 ,2019. Leclerc, G., Ilyas, A., Engstrom, L., Park, S. M., Salman, H., and Madry, A. Ffcv: Accelerating training by remov-ing data bottlenecks. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , pp. 12011–12020, 2023. Mohan, J., Phanishayee, A., Raniwala, A., and Chi-dambaram, V. Analyzing and mitigating data stalls in dnn training. Proceedings of the VLDB Endowment , 14(5): 771–784, 2021. NVIDIA Corporation. Nvidia dali: Nvidia data load-ing library, 2018. URL https://github.com/ NVIDIA/DALI .NVIDIA/aistore. Aistore: Scalable storage for ai applica-tions, 2019. URL https://github.com/NVIDIA/ aistore .Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J., Chanan, G., Killeen, T., Lin, Z., Gimelshein, N., Antiga, L., et al. Pytorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems , volume 32, pp. 8024–8035, 2019. Pumma, S., Feng, W.-c., Bridges, P., Ferreira, K., and Brightwell, R. Scalable deep learning via i/o analysis and optimization. ACM Transactions on Parallel Com-puting , 6(2):1–34, 2019. 10 GetBatch: Distributed Multi-Object Retrieval for ML Data Loading 
+
+Puvvada, K. C., ˙Zelasko, P., Huang, H., Hrinchuk, O., Koluguri, N. R., Dhawan, K., Majumdar, S., Rastorgueva, E., Chen, Z., Lavrukhin, V., et al. Less is more: Accurate speech recognition & translation without web-scale data. In Interspeech 2024 , pp. 3964–3968, 2024. Yermolovich, Y. et al. Petastorm: A data access library for deep learning, 2018. URL https://github.com/ uber/petastorm .˙Zelasko, P., Povey, D., Trmal, J., and Khudanpur, S. Lhotse: a speech data representation library for the modern deep learning ecosystem. NeurIPS Workshop on Data-Centric AI , 2021. ˙Zelasko, P., Chen, Z., Wang, M., Galvez, D., Hrinchuk, O., Ding, S., Hu, K., Balam, J., Lavrukhin, V., and Ginsburg, B. Emmett: Efficient multimodal machine translation training. In ICASSP 2025 – 2025 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) , pp. 1–5. IEEE, 2025a. ˙Zelasko, P., Dhawan, K., Galvez, D., Puvvada, K. C., Pasad, A., Koluguri, N. R., Hu, K., Lavrukhin, V., Balam, J., and Ginsburg, B. Training and inference efficiency of encoder-decoder speech models. IEEE Workshop on Automatic Speech Recognition and Understanding (ASRU) , 2025b. 11

@@ -1,0 +1,305 @@
+Title: Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs
+
+URL Source: https://arxiv.org/pdf/2603.02731v1
+
+Published Time: Wed, 04 Mar 2026 01:53:22 GMT
+
+Number of Pages: 10
+
+Markdown Content:
+# Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+Wuyue Zhang * 1 Chongdong Huang * 1 Chunbo You 1 Cheng Gu 1 Fengjuan Wang 1 Mou Sun 1
+
+## Abstract 
+
+Training large-scale Mixture-of-Experts (MoE) models is bottlenecked by activation memory and expert-parallel communication, yet FP4 training remains impractical on Hopper-class GPUs with-out native MXFP4 or NVFP4 support. In this work, we present a training recipe that enables MXFP4 efficiency for MoE models on Hopper ar-chitectures without native 4-bit computation sup-port. A central challenge is to integrate FP4 into an existing BF16/FP8 hybrid training pipeline without incurring costly precision round-trips (e.g., FP4 ↔ BF16 ↔ FP8). We address this chal-lenge by introducing direct FP8-to-FP4 quantiza-tion and de-quantization, together with scaling-aware FP4 row-wise to column-wise conversion, enabling FP4 activations and expert-parallel com-munication with minimal overhead. Core MoE computations are executed in FP8, while acti-vations and expert-parallel communication are compressed using MXFP4, achieving substan-tial memory and bandwidth savings without de-grading convergence. At the 671B parameter scale, our method achieves end-to-end training performance comparable to strong FP8 baselines, while reducing peak activation memory by 14.8% (11.8 GB) and improving training throughput by 12.5%, from 1157 to 1302 tokens per GPU per second. These results show that FP4 efficiency can be practically realized for large-scale MoE training through careful software-hardware co-design, even without native FP4 Tensor Core sup-port. Codes are available at github. 
+
+## 1. Introduction 
+
+The rapid scaling of Large Language Models (LLMs) into the 100B-1T parameter regime has pushed the limits of modern training infrastructure. To mitigate the growing demands on memory and computation, Mixture-of-Experts  
+
+> 1Zhejiang Lab, Hangzhou, China. Correspondence to: Mou Sun <123sssmmm@gmail.com >.
+> arXiv preprint. March 4, 2026.
+
+(MoE) architectures have emerged as a dominant paradigm for efficient scaling (Lepikhin et al., 2021; Mixtral.AI, 2024; Zhao et al., 2025a; KimiTeam, 2025; OpenAI, 2025), activat-ing only a sparse subset of expert parameters per token and thus decoupling model capacity from per-token compute. Alongside architectural innovations, low-precision formats such as FP8 and FP4 have gained increasing attention for their ability to reduce memory footprint and improve arithmetic throughput, particularly for bandwidth- and memory-bound workloads. Prior work has shown that care-fully designed low-precision training can preserve conver-gence while significantly improving system efficiency (Zhao et al., 2025a; Mishra et al., 2025). Recent hardware ad-vances—most notably NVIDIA’s Blackwell GPUs—enable native FP4 tensor core support, allowing aggressive quan-tization with minimal impact on convergence (Tseng et al., 2025; NVIDIA, 2025b). However, such support is not yet available on the majority of current-generation accelera-tors—particularly Hopper GPUs—which lack both FP4 compute and communication primitives. This hardware gap presents significant challenges for adopt-ing FP4 in existing training pipelines, especially for MoE models where activation memory and expert-parallel com-munication dominate system cost. Deploying FP4 on Hopper-class GPUs without native support introduces mul-tiple technical obstacles: quantized formats such as MXFP4 rely on block-wise power-of-two scaling incompatible with Hopper’s FP8 pipeline; intermediate conversions (e.g., FP8 
+
+↔ BF16 ↔ FP4) incur latency and memory overhead; and communication libraries must be redesigned to support sub-byte packing and efficient dequantization. In this work, we address these challenges by proposing a hybrid-precision MXFP4 training framework that en-ables FP4-level memory and communication efficiency on Hopper GPUs. Our approach compresses activations and all-to-all dispatches into software-emulated MXFP4 for-mat, while preserving FP8 precision in compute-intensive GEMM operations. This design decouples compute and storage precision, maintains compatibility with Transformer Engine and DeepEP, and avoids lossy intermediate con-versions—ensuring both numerical stability and practical deployment efficiency. 
+
+Our contributions are as follows: 
+
+1
+
+> arXiv:2603.02731v1 [cs.LG] 3 Mar 2026 Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs
+
+• We introduce an FP4 communication and caching strat-egy for expert-parallel MoE layers, reducing activation memory and inter-GPU traffic by over 50%. • We design a direct bitwise FP4-to-FP8 conversion al-gorithm with hierarchical scale alignment, eliminating the need for BF16 intermediates. • We implement layout-aware CUDA kernels optimized for quantization, dispatch, and recomputation in FP4, including native support for ragged MoE tensors and transposed data layouts. • We present the first production-scale deployment of software-emulated MXFP4 for MoE training on Hop-per GPUs. At the 671B parameter scale, our method reduces peak activation memory by 14.8% (11.8 GB), improves throughput by 12.5% (from 1157 to 1302 tokens/GPU/s), and matches the convergence of strong FP8 baselines. We release our full training implementation (Appendix A) to facilitate reproducibility and adoption. Figure 1 provides a high-level overview of our approach.  
+
+> Figure 1. MXFP4-based MoE training on Hopper GPUs.
+
+## 2. Related works 
+
+Mixture-of-Experts (MoE) architectures have emerged as a dominant approach for scaling LLMs beyond 100B param-eters (Zhao et al., 2025a; KimiTeam, 2025). By activating only a sparse subset of expert layers per token, MoEs decou-ple model capacity from compute cost, enabling efficient training at trillion-parameter scales. However, this efficiency comes at the cost of increased mem-ory footprint and expert-parallel communication overhead. To further reduce training cost, recent efforts have turned to low-precision computation (Peng et al., 2023). Formats such as FP8 and FP4 not only improve compute through-put—NVIDIA GB200 NVL72, for example, supports up to 1440 PFLOPS of FP4 tensor operations compared to 720 PFLOPS for FP8 and 360 PFLOPS for BF16 (NVIDIA, 2025a)—but also reduce activation memory, enabling larger batch sizes and model scales within the same hardware foot-print. When combined with systems-level communication frameworks like DeepEP (Zhao et al., 2025b), which support expert-parallel data transfer in FP8 formats, low-precision has become a standard technique for efficient training of large language models. DeepSeek-V3 (Zhao et al., 2025a) demonstrated the first successful deployment of blockwise-scaled FP8 training at the 671B MoE scale on Hopper GPUs, using its custom FP8 kernel library DeepGEMM (DeepSeek-AI Team, 2025) to achieve high arithmetic throughput. This work validated FP8 as a viable alternative to BF16 in production-scale training, delivering substantial improvements in compute efficiency and throughput. In parallel, NVIDIA introduced MXFP8, a microscaled FP8 format with native tensor core support on Blackwell GPUs. Training recipes based on MXFP8 (Mishra et al., 2025) combine power-of-two block-level scaling with stochastic rounding to match BF16 con-vergence while significantly reducing activation and weight footprint. Subsequent work (Wang et al., 2025) shows that excessive precision casts in BF16-dominated pipelines can erode FP8’s expected gains, motivating careful end-to-end dataflow design. To further improve training efficiency, recent work has explored 4-bit floating-point formats such as MXFP4 and NVFP4. MXFP4 is a standardized narrow-precision floating-point format defined in (Open Compute Project, 2023), which introduces low-bit formats such as MXFP8, MXFP6, and MXFP4 for efficient AI training and inference. Tseng et al. (Tseng et al., 2025) demonstrated that MXFP4 can be used effectively in the backward pass by combining stochastic rounding (SR) with randomized Hadamard trans-forms (RHT), achieving near-lossless convergence on 6.7B-scale models. Meanwhile, NVFP4 introduces smaller block sizes and E4M3-style scaling, and has been used to train 12B models with near-FP8 accuracy using two-level quan-tization and format-aware rounding heuristics (NVIDIA, 2025b). Chmiel et al. (Chmiel et al., 2025) further demon-strated that fully quantized end-to-end FP4 training of LLMs is feasible with carefully designed scaling and optimization strategies. These advances suggest that FP4 formats can substantially improve training efficiency, but they typically rely on hard-ware with native FP4 tensor core support and have not yet been validated at larger MoE scales. While some large-scale models such as GPT-OSS-120B (OpenAI, 2025) are rumored to employ FP4 training, no public documentation is available regarding their training configurations. 
+
+Motivation Unlocking FP4-level efficiency without na-tive hardware support would immediately benefit ongoing workloads—particularly Mixture-of-Experts (MoE) models, where expert-parallelism amplifies both activation mem-ory and all-to-all communication costs. If software-based 2Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+MXFP4 quantization could be integrated into existing Hopper-compatible pipelines without degrading accuracy or throughput, the potential payoff would be considerable: reduced memory footprint for larger batch sizes, lighter communication payloads across GPUs, and more aggressive activation checkpointing. However, realizing this in practice introduces multiple tech-nical challenges. Hopper’s FP8-centric transformer kernels expect specific layout and scale formats, making naive in-sertion of FP4 quantization difficult. Intermediate data type conversions (e.g., FP8 ↔ BF16 ↔ FP4) incur latency, pre-cision loss, and memory overhead. Prior work on FP8-based MoE training (Wang et al., 2025) highlights that excessive precision casts can significantly erode the effi-ciency gains of low-precision operators, underscoring the need for careful dataflow and operator design when integrat-ing lower-precision formats into existing pipelines. Addi-tionally, MXFP4 employs per-block power-of-two scaling and E2M1 encoding, which are structurally incompatible with Hopper’s FP8 E4M3 layout, requiring careful bit-level remapping and scaling alignment. The recomputation strat-egy must also be aware of asymmetric precision across forward and backward passes to avoid instability. This work is driven by the need to address these system-level obstacles and fully realize MXFP4’s potential on existing Hopper infrastructure. Our approach introduces a hybrid precision framework that compresses activations and all-to-all communication into MXFP4 format, while retaining FP8 for compute-intensive paths. By decoupling storage and arithmetic precision, and co-designing the quantization, dispatch, and dequantization flows, we achieve substantial efficiency gains without relying on hardware changes. 
+
+## 3. Methodology 
+
+We propose a soft-coded MXFP4 training framework as a plug-in extension to Transformer Engine’s blockwise FP8 recipe. FP4 elements are stored via bit-level packing into 
+
+uint8 containers. As illustrated in Figure 2, our approach introduces a hybrid-precision dataflow designed to balance throughput with numerical stability. Specifically, during the forward pass, activations are quan-tized into MXFP4 immediately before the All-to-All (A2A) dispatch to reduce communication volume, while the com-bine phase retains BF16 accumulation to preserve reduction accuracy. In addition, activation replicas required for re-computation are cached in MXFP4 format, significantly reducing the activation memory footprint. In the backward pass, we intentionally revert to the stan-dard FP8 communication and storage flow. Empirical pro-filing shows that the additional dequantization overhead introduced by FP4 (e.g., FP4 → FP8) outweighs poten-tial communication savings for gradients. This asymmetric design—aggressive FP4 usage in the forward pass and con-servative precision in the backward pass—achieves favor-able end-to-end performance without compromising conver-gence. To realize this flow efficiently, we develop specialized kernels— BF16ToFP4Row , FP4RowToFP8Row , and 
+
+FP4RowToFP8Col —that perform layout-aware conver-sions bridging FP4 storage and FP8 computation. 
+
+Notation. Given FP4-quantized tensors with 4-bit values 
+
+Xfp4 and scaling factors SF fp4 , our conversion algorithm proceeds as follows. Hereafter, we use SF to denote scaling factor, sign for the sign bit, exp for exponent, and mant 
+
+for mantissa. For clarity, scaling factors and sign bits are denoted using distinct symbols throughout. We use C-style bitwise operators throughout the paper. 
+
+3.1. MXFP4 Quantization Specification on Non-Native Hardware 
+
+In MXFP4, each block of 32 elements shares a common power-of-two scale factor and uses a 4-bit floating-point encoding with one sign bit, two exponent bits, and one man-tissa bit (E2M1). This block-wise microscaling quantization achieves finer granularity than coarse per-tensor or per-row scaling schemes and has been shown to improve quantiza-tion fidelity and dynamic range in practice (Open Compute Project, 2023; Rouhani et al., 2023). The underlying floating-point representation in MXFP4 fol-lows the sign–exponent–mantissa convention of IEEE 754 formats. A real value is typically encoded with an implicit leading mantissa bit when the exponent is above its mini-mum; when the exponent bits are all zeros, values enter the subnormal (denormal) regime, where the implicit leading bit is dropped and the mantissa directly encodes fractional magnitude. Subnormal numbers extend dynamic range at the cost of leading precision, consistent with IEEE 754 defi-nitions for small exponents (Wikipedia contributors, 2026). In our software implementation, we prioritize the computa-tion of scaling factors. This design enables asynchronous scale write-backs to overlap with subsequent compute ker-nels, effectively hiding latency. The scale computation pro-ceeds as follows. For each 1 × 32 block of the input tensor, we deter-mine the maximum absolute value, denoted as group max .The floating-point scale is obtained by normalizing this value with respect to the maximum representable integer in MXFP4, denoted as FP4 MAX = 6 . Specifically, the intermediate scale is computed as group max /6 and then cast into the UE8M0 format by rounding up to the nearest 3Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs  
+
+> Figure 2. Overview of the MXFP4 hybrid-precision training flow.
+
+power of two. Formally, the scaling factor is defined as 
+
+SF = 2 ⌈log 2(max( |XBF16 |)/FP4 MAX) ⌉.
+
+Once the scale factor is computed, quantization proceeds in two stages. First, the input values are numerically mapped and cast from BF16 to the MXFP4 representation. Second, the resulting low-precision values are reorganized via bit-level extraction and packing into uint8 containers, ensur-ing compatibility with the NVIDIA Hopper memory layout and tensor core requirements. The conversion begins by normalizing each BF16 input value using the corresponding floating-point scale, mapping it into the MXFP4 dynamic range. CUDA intrinsic functions are used to facilitate the casting from floating-point to inte-ger representations. A key consideration in this process is the treatment of subnormal values. When the exponent falls below the minimum representable threshold, the implicit leading bit must be explicitly materialized and subjected to appropriate bit shifting. This mechanism trades man-tissa precision for extended dynamic range, implementing gradual underflow. The kernel implementation relies on two core bitwise op-erations. First, materializing the implicit bit : following the IEEE 754 convention, normalized values contain an implicit leading bit of one. We apply the transforma-tion (0x400000u | (mant >> 1)) , which right-shifts the 23-bit mantissa by one and performs a bitwise OR with 
+
+0x400000u , explicitly reinserting the hidden bit into the most significant position of the fraction. Second, expo-nent alignment via right shifting : the mantissa is further right-shifted by a computed offset, effectively increasing the exponent until it aligns with the minimum representable range of the target format. Rounding behavior is another critical aspect of the imple-mentation. For MXFP4, we adopt round-to-nearest, ties-to-even (RTNE). When truncating high-precision values (e.g., FP32 with a 23-bit mantissa) to ultra-low precision formats, naive truncation introduces systematic bias. RTNE, as the default rounding mode in IEEE 754, ensures that quantization error remains statistically zero-centered. The rounding decision is derived from three signals: the last bit ( L), the guard bit ( G), and the sticky bit ( S). Here, L
+
+denotes the least significant bit of the target format (bit 22), where L = 1 indicates an odd value and L = 0 an even value. The guard bit G corresponds to the first bit beyond the target precision (bit 21) and indicates whether the remainder is at least 0.5. The sticky bit S is defined as the logical OR of all remaining lower-order bits (bits 20–0). The final rounding increment is determined by R = G & ( S | L).After consolidating the sign, exponent, and mantissa fields of the MXFP4 representation, two FP4 values are packed into a single uint8 element. This final step consists of standard bit-manipulation and packing operations, which we omit for brevity. 
+
+3.2. Loss-Neutral FP4-Enabled Mixed Precision Training Flow 
+
+A key design choice is to place quantization immediately before the All-to-All (A2A) dispatch. FP4-quantized acti-vations are packed into uint8 containers, reducing both communication volume and memory footprint without alter-ing the core computation logic. As a result, the framework remains fully compatible with existing FP8-based hardware acceleration pipelines. 
+
+Quantization Timing and Communication Optimiza-
+
+4Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+tion. Strictly positioning quantization prior to A2A dis-patch enables a substantial reduction in communication payload. Specifically, the standard FP8 communication format—consisting of FP8 activations with FP32 scaling factors—is replaced by a compact representation that com-bines packed FP4 activations with 8-bit integer scales. Assuming an activation tensor of shape M × K, the com-munication footprint can be analyzed as follows. In the FP8 baseline, activations are transmitted as uint8 values, incurring M · K bytes, while scaling factors are stored as FP32 with a block size of 128, contributing an additional 
+
+(M · K/ 128) · 4 bytes. This results in a total payload of ap-proximately 1.03 · M · K bytes. In contrast, under MXFP4, two FP4 values are packed into a single uint8 byte, reduc-ing the activation payload to (M · K)/2 bytes. Scaling fac-tors follow the MXFP4 specification and are stored as 8-bit integers with a block size of 32, contributing (M · K/ 32) · 1
+
+byte. The total communication volume is therefore approxi-mately 0.53 · M · K bytes, corresponding to a reduction of roughly 50%. We implement this customized data flow within the DeepEP communication library by extending the A2A operator to support packed FP4 formats. Throughout this process, the quantization and de-quantization steps are designed to re-main logically lossless with respect to the original FP8 com-putation. 
+
+Decoupling Computation and Storage Precision. To bal-ance computational throughput and memory efficiency, we adopt a decoupled precision strategy. All forward and back-ward GEMM operations are executed in FP8, allowing us to fully leverage native Tensor Core acceleration and pre-serve numerical stability. In contrast, activation tensors produced during the forward pass are immediately quan-tized and cached in HBM as MXFP4 replicas. Compared to FP8 activation caching, this strategy reduces activation memory usage by nearly 50%, enabling larger batch sizes, more aggressive recomputation strategies, or further model scaling. 
+
+Specialized Kernel Support. Supporting this hybrid-precision flow requires layout-aware format conversion. We therefore develop three specialized CUDA kernels. 
+
+BF16ToFP4Row performs row-wise MXFP4 quantization and packing during the forward pass. FP4RowToFP8Row 
+
+efficiently de-quantizes packed FP4 activations into FP8 row-major format for standard GEMM execution. Fi-nally, FP4RowToFP8Col is designed for weight-gradient (Wgrad) computation, where a transposed view of the acti-vation tensor is required. This kernel fuses de-quantization with matrix transposition, directly converting FP4 row-major storage into FP8 column-major format to minimize memory traffic. 
+
+Strategic Fallback in Backward Propagation. Although FP4 provides significant storage and communication ben-efits, applying it uniformly across all training stages intro-duces trade-offs. Our profiling shows that, in the backward pass, the overhead of additional de-quantization steps (e.g., BF16 → FP4 → FP8) outweighs the potential communi-cation savings for gradients. Consequently, we intention-ally revert to a standard FP8 communication flow during backpropagation. This asymmetric design—aggressive FP4 usage in the forward pass and conservative precision in the backward pass—proves effective in optimizing end-to-end training throughput without compromising convergence. 
+
+3.3. Direct FP4-to-FP8 Conversion Algorithm 
+
+While NVIDIA Hopper GPUs provide efficient hardware support for FP8 matrix multiplication, they lack native in-structions for FP4 computation. As a result, the efficiency of our approach critically depends on an optimized conversion pipeline that bridges storage-efficient MXFP4 representa-tions and compute-efficient FP8 operands. A direct conversion is non-trivial due to the structural mis-match between MXFP4 and FP8 formats. MXFP4 uses an E2M1 encoding packed into uint8 containers, with a block size of 32 and scaling factors stored in UE8M0 format. In contrast, FP8 adopts an E4M3 layout with a block size of 128 and FP32 scaling. A naive conversion path that up-casts MXFP4 to BF16 and subsequently down-casts to FP8 (FP4 
+
+→ BF16 → FP8) incurs substantial latency and memory overhead. To avoid these costs, we propose a direct bit-wise FP4-to-FP8 conversion algorithm that bypasses the BF16 inter-mediate. The algorithm combines integer-domain format remapping with a hierarchical scaling alignment strategy to reconcile differences in mantissa layout, exponent bias, and block granularity. Algorithm 1 summarizes the complete FP4-to-FP8 conversion procedure. 
+
+Bit-wise Format Remapping. The conversion begins by unpacking the sign, exponent, and mantissa fields from the FP4 bitstream. The exponent is adjusted directly in the integer domain according to 
+
+Efp8 = Efp4 − Bias fp4 + Bias fp8 .
+
+The single-bit mantissa of the FP4 E2M1 format is then left-shifted to align with the most significant bit of the FP8 
+
+E4M3 mantissa field. This operation preserves relative preci-sion while avoiding floating-point arithmetic during format conversion. 
+
+Hierarchical Scaling Alignment. The primary challenge arises from the mismatch in block granularity: four MXFP4 blocks of 32 elements must be mapped onto a single FP8 block of 128 elements. We address this using a max-based 5Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+hierarchical alignment strategy. First, a target scale Starget is selected as the maximum scaling factor among the four source MXFP4 blocks. Second, to preserve numerical equivalence, each element’s exponent is compensated by the difference between the local block scale and the target scale, 
+
+E′ 
+
+> fp8
+
+= Efp8 − (Starget − Ssub ).
+
+To mitigate underflow when the disparity between local and global scales is large, we introduce a small empirically chosen shift constant δ, which is folded into the target scale selection during implementation. Finally, because MXFP4 scaling factors are stored in UE8M0 format and represent exact powers of two, we map each 8-bit scale directly into the exponent field of an FP32 value via bit shifting. This avoids costly floating-point ex-ponentiation and ensures hardware-efficient casting. 
+
+Algorithm 1 Direct FP4-to-FP8 Conversion Algorithm 
+
+Input: Xfp4 (X0 ∼ X3), SF fp4 (SF 0 ∼ SF 3)
+
+Output: Xfp8 , SF fp8  
+
+> 1:
+
+SF fp8 = max(SF fp4 ) − 6 
+
+> 2:
+
+Ei, adjust = SF fp8 − SF i 
+
+> 3:
+
+sign i = ( Xi>> 3) & 1  
+
+> 4:
+
+Ei, fp4 = ( Xi>> 1) & 3  
+
+> 5:
+
+Mi = Xi & 1  
+
+> 6:
+
+Ei, fp8 = Ei, fp4 − Bias fp4 + Bias fp8  
+
+> 7:
+
+Ei = Ei, fp8 − Ei, adjust  
+
+> 8:
+
+Xi, fp8 = ( sign i<< 7) | (Ei<< 3) | (Mi<< 2)  
+
+> 9:
+
+Xfp8 = {X0,fp8 ∼ X3,fp8 } 
+
+> 10:
+
+return Xfp8 , SF fp8 
+
+3.4. High-Performance Kernel Implementation 
+
+We implement a suite of highly optimized CUDA kernels for the FP4-enabled training pipeline. In particular, for weight gradient computation (Wgrad), which requires a transposed view of the activation tensor, we design a fused 
+
+FP4RowToFP8Col kernel that integrates multiple opti-mizations to minimize memory traffic and conversion over-head. 
+
+Operator fusion and layout transformation. Conven-tional implementations perform format conversion and mem-ory layout transformation (i.e., transposition) as separate steps, incurring multiple global memory reads and writes. Our kernel instead fuses de-quantization, matrix transposi-tion, and re-quantization into a single execution unit. By car-rying out the layout transformation entirely within on-chip shared memory, we eliminate intermediate global memory accesses and reduce overall global memory bandwidth con-sumption by approximately 3× compared to BF16-based baselines. 
+
+Conflict-free shared memory access. To convert row-major FP4 storage into column-major FP8 output, we use shared memory as a transposition buffer. To avoid bank con-flicts during column-wise accesses, we introduce padding in the shared memory tile, allocating it with a stride of 
+
+[TILE DIM][TILE DIM + 1] . This skewed layout en-sures that column-wise accesses map to distinct memory banks, enabling full utilization of the shared memory band-width. 
+
+Bit-level arithmetic optimization. We exploit the bit-level structure of the MXFP4 and FP8 formats to avoid costly floating-point operations whenever possible: (i) Scale de-coding. MXFP4 scaling factors stored in UE8M0 format are decoded directly into BF16 by bit shifting (e.g., val << 7), avoiding floating-point multiplication. (ii) Power-of-two alignment. To conform with the scaling conventions used in Transformer Engine, we implement a bit-wise scaling proce-dure. Instead of computing 2⌈log 2(x)⌉ via math library calls, we directly manipulate the exponent field of the IEEE 754 representation, significantly reducing instruction latency. 
+
+Format-compatible expert parallel communication. To support MXFP4 scales stored in compact integer repre-sentations (e.g., UE8M0), we generalize scale handling in the expert dispatch path to be byte-addressable and precision-agnostic. Specifically, we propagate the scale element size across intranode and internode communication, RDMA/NVL buffer layout, and kernel copy logic, so that scale payloads are treated as variable-sized byte regions rather than implicitly assumed FP32 tensors. This gener-alization is reflected in per-token communication footprint computation, clean-metadata derivation, and symmetric buffer offset calculation, eliminating buffer over-allocation and misalignment when integer-encoded scales are used. At the kernel level, scale transfers dynamically select between FP32 and byte-wise copy paths based on the propagated ele-ment size, while preserving alignment constraints required by TMA and warp-level copy mechanisms. 
+
+Native support for ragged MoE tensors. In Mixture-of-Experts architectures, the number of tokens routed to each expert varies dynamically, resulting in ragged tensors. Our kernel natively supports variable-length splits through precomputed offsets ( split lens , split offsets ), dynamically computing output addresses for contiguous storage without padding. Vectorized stores are employed even on misaligned boundaries, with edge cases handled entirely within registers. See Appendix A for implementation details and code inte-gration instructions. 6Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+## 4. Experiments 
+
+In this section, we evaluate the system performance of the proposed MXFP4 training framework, focusing on train-ing throughput, memory footprint, and recomputation effi-ciency. 
+
+4.1. Experimental setup Hardware & Environment . We conduct all experiments on a cluster of 32 nodes, equipped with a total of 256 NVIDIA Hopper GPUs (80GB HBM3). The GPUs are intercon-nected via NVSwitch within nodes and InfiniBand across nodes. 
+
+Model Configuration . We train a 671B-parameter Mixture-of-Experts (MoE) model featuring the Multi-Head Latent Attention (MLA) architecture. The model configuration fol-lows the public DeepSeek-V3 settings, including the Multi-Head Latent Attention (MLA) architecture, with identical MoE expert and projection-layer dimensions. 
+
+Baselines . We compare our system against two strong base-lines implemented in Megatron-LM: 1. BF16: Standard bfloat16 mixed-precision training. 2. FP8: Transformer engine blockwise FP8 recipe training optimized for Hopper architecture. We report the training throughput in Tokens per GPU per Second (TGS) and peak memory usage. 
+
+4.2. End-to-End Training Performance 
+
+Table 1 summarizes the performance comparison. Our pri-mary observation is that memory constraints on the 671B model force standard baselines into aggressive recomputa-tion (rematerialization) regimes, limiting their performance. Under the standard setting (checkpointing Attention, Lay-erNorm, and MoE Experts), our MXFP4 method achieves parity with the FP8 baseline in throughput ( ≈ 1156 TGS) but reduces memory footprint by 14.8% . Crucially, this memory headroom allows us to reduce the recomputation scope. When we relax the recomputation strategy to only checkpoint the MLA Up-Projection, both BF16 and FP8 baselines encounter Out-of-Memory (OOM) errors. In con-trast, our system operates efficiently within the memory limit (70.11%), achieving a peak throughput of 1302 TGS. This represents a 12.5% speedup over the best feasible FP8 configuration and a 16.0% speedup over the BF16 baseline. 
+
+Impact of Recomputation Granularity. As shown in Ta-ble 1, the 671B model is primarily constrained by the mem-ory wall. Under FP8, fitting the model requires full recom-putation of expert layers, introducing substantial redundant computation. By quantizing activations in the MLP and shared MoE expert layers to MXFP4, we reduce peak mem-ory usage by approximately 15%, which allows us to skip recomputation for these layers. Despite a small quantization overhead, eliminating backward-pass recomputation yields a net throughput gain of 146 TGS (from 1156 to 1302).                           
+
+> Recomputation Scope Baseline (BF16) Baseline (FP8) Ours (MXFP4)
+> TGS Mem TGS Mem TGS Mem
+> Attn + LN + MoE Experts 1122 68.29% 1157 74.20% 1156 59.40%
+> Attn + LN + MLP OOM -OOM -1248 60.62%
+> MLA Up Proj Only OOM -OOM -1302 70.11%
+
+Table 1. Performance on 671B MoE Model. 
+
+We conduct additional experiments on a 236B model in table 2 to enable a controlled comparison across numerical precisions under identical recomputation policies, which is not feasible at the 671B scale due to frequent OOM failures of BF16 and FP8. By fixing the recomputation strategy and varying only precision, we show that MXFP4 reduces peak memory usage by 6.9% compared to blockwise FP8 when FP4 is applied to the MLP and shared experts, and by 7.2% when FP4 is extended to the entire MoE, corresponding to an 11% reduction relative to BF16. Under the most aggressive recomputation regime, MXFP4 consistently outperforms FP8 with an average 7.5% memory reduction, while BF16 still fails to fit into device memory. Together with the 671B results, these findings confirm that applying FP4 to both MLP and MoE components yields substantial and scalable memory benefits.                           
+
+> Recomputation Scope Baseline (BF16) Baseline (FP8) Ours (MXFP4)
+> TGS Mem TGS Mem TGS Mem
+> Attn + LN + MoE Experts 1725.16 53.22% 1621.96 56.81% 1608.68 49.96%
+> Attn + LN + MLP 1838.56 60.80% 1746.20 57.03% 1616.90 49.85%
+> MLP Up Proj Only OOM -1831.20 66.13% 1722.98 58.62%
+
+Table 2. Performance on 236B MoE Model. 
+
+4.3. Analysis and Ablation Studies 
+
+To understand the source of our performance gains, we benchmark our custom quantization kernels against the stan-dard Transformer Engine (TE) FP8 baselines. 
+
+Fusion Efficiency First, we validate our kernel fusion strat-egy in Figure 3. Evaluated across tensor shapes repre-sentative of 236B and 671B training configurations, our approach—which fuses dequantization, data type casting, and layout transformation into a single kernel—achieves a 1.6x–1.9x speedup compared to a naive sequence of separate operations. 
+
+End-to-End Kernel Performance When comparing our to-tal operator latency (Quantization + Fused Dequantization) against the TE FP8 baseline in Figure 4, we observe two distinct behaviors: • Standard Linear Layers: For standard dense projec-tions (e.g., in Attention blocks), the additional over-7Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+head of on-the-fly quantization results in a 0.33x rel-ative speedup (i.e., higher latency) compared to the highly optimized TE baseline. • MoE Expert Layers (Group Linear Layers): Crucially, for the computation-heavy MoE expert layers, our specialized msplit kernel significantly outperforms the Transformer Engine FP8 split quantize baseline, achieving a 1.43x–1.53x speedup. This suggests that our custom implementation handles the grouped mem-ory access patterns of MoE experts more efficiently than the generic library calls. Since the MoE expert computation dominates the total FLOPs of the 671B model, this acceleration in the critical path, combined with the reduced recomputation, success-fully amortizes the overhead incurred in the standard linear layers, leading to the overall system throughput improve-ment. MoE Experts  
+
+> (Group Linear)
+> Standard Linear
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> Speedup (vs. Unfused Sequence)
+> Baseline: Unfused = 1.0x
+> 1.93x 1.95x 1.90x
+> 1.60x
+> Activation Shape Source
+> 200B
+> 600B
+
+Figure 3. Fusion Efficiency (Fused Kernel vs. Dequant + TE Quant). Our fused approach achieves consistent speedups (1.6x– 1.9x) by eliminating intermediate memory writes. MoE Experts 
+
+> (Group Linear)
+> Standard Linear
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> 1.50
+> 1.75
+> 2.00
+> Speedup (vs. Standard TE FP8 Cast)
+> TE Baseline (1.0x)
+> Overhead
+> (Speedup < 1.0)
+> Acceleration
+> (Speedup > 1.0)
+> 1.57x
+> 0.36x
+> 1.51x
+> 0.34x
+> Activation Shape Source
+> 200B
+> 600B
+
+Figure 4. Total Quantization Overhead (Ours Full Pipeline vs. TE Baseline). While standard linear layers incur over-head ( <1.0x), specialized MoE kernels achieve net acceleration (>1.5x). 
+
+4.4. Convergence Verification 
+
+To evaluate the training stability of our MXFP4 quantization scheme, we reproduce a configuration consistent with recent large-scale LLM training recipes and the official MXFP4 training methodology. All models are trained using AdamW with a cosine learning rate decay on a 16B-parameter model. We fix the global batch size to 4800 sequences and a con-text length of 4096 tokens, matching the conditions used in our primary comparisons. The optimizer uses β1 = 0 .9,
+
+β2 = 0 .95 , and weight decay of 1.0 × 10 −1; gradients are clipped to a global norm of 1.0. We apply the same weight initialization, dropout, and tokenizer settings across BF16 and MXFP4 runs to prevent confounding factors. Both BF16 and MXFP4 experiments are run on identical hard-ware clusters using the same mixed-precision and tensor-parallel infrastructure. As illustrated in Figure 5, the loss trajectory of our method strictly follows the BF16 baseline, with no observed instabil-ity or divergence. Loss trajectories and quantization-induced deviations are evaluated after consuming 160B training to-kens. Quantitatively, FP8 and MXFP4 incur relative loss deviations of +0 .29% and +0 .61% with respect to BF16, respectively, indicating that MXFP4 maintains stable opti-mization despite more aggressive quantization. 
+
+Figure 5. LM Loss Comparison. 
+
+## 5. Conclusion 
+
+We present a software-emulated MXFP4 training framework that enables FP4-level activation and communication effi-ciency on Hopper GPUs without native 4-bit Tensor Core support. Key enablers include direct FP4-to-FP8 bitwise conversion, scaling-aware layout transformations, and fused CUDA kernels that minimize casting overhead and mem-ory traffic. On a 671B MoE model, our method reduces peak memory usage, increases training throughput, and achieves convergence comparable to FP8. Overall, these results demonstrate that FP4 efficiency can be practically realized on widely deployed Hopper hardware. 8Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+## References 
+
+Chmiel, B., Fishman, M., Banner, R., and Soudry, D. Fp4 all the way: Fully quantized training of llms, 2025. URL 
+
+https://arxiv.org/abs/2505.19115 .DeepSeek-AI Team. Deepgemm: clean and efficient fp8 gemm kernels with fine-grained scaling. https:// github.com/deepseek-ai/DeepGEMM , 2025. KimiTeam. Kimi k2: Open agentic intelligence, 2025. URL 
+
+https://arxiv.org/abs/2507.20534 .Lepikhin, D., Lee, H., Xu, Y., Chen, D., Firat, O., Huang, Y., Krikun, M., Shazeer, N., and Chen, Z. {GS }hard: Scal-ing giant models with conditional computation and auto-matic sharding. In International Conference on Learning Representations , 2021. URL https://openreview. net/forum?id=qrwe7XHTmYb .Mishra, A., Stosic, D., Layton, S., and Micikevicius, P. Recipes for pre-training llms with mxfp8, 2025. URL 
+
+https://arxiv.org/abs/2506.08027 .Mixtral.AI. Mixtral of experts, 2024. URL https:// arxiv.org/abs/2401.04088 .NVIDIA. Nvidia gb200 nvl72. https://www.nvidia. com/en-us/data-center/gb200-nvl72/ ,2025a. Accessed January 2026. NVIDIA. Pretraining large language models with nvfp4, 2025b. URL https://arxiv.org/abs/2509. 25149 .Open Compute Project. Ocp microscaling formats (mx) specification version 1.0, 2023. OpenAI. gpt-oss-120b & gpt-oss-20b model card, 2025. URL https://arxiv.org/abs/2508.10925 .Peng, H., Wu, K., Wei, Y., Zhao, G., Yang, Y., Liu, Z., Xiong, Y., Yang, Z., Ni, B., Hu, J., et al. Fp8-lm: Training fp8 large language models. arXiv preprint arXiv:2310.18313 , 2023. Rouhani, B. D. et al. Microscaling data formats for deep learning, 2023. URL https://arxiv.org/abs/ 2310.10537 .Tseng, A., Yu, T., and Park, Y. Training LLMs with MXFP4. In The 28th International Conference on Ar-tificial Intelligence and Statistics , 2025. URL https: //openreview.net/forum?id=a8z5Q0WSPL .Wang, F., Su, Z., Hu, X., Wang, C., and Sun, M. Fp8-flow-moe: A casting-free fp8 recipe without double quantiza-tion error, 2025. URL https://arxiv.org/abs/ 2511.02302 .Wikipedia contributors. Floating-point arith-metic. https://en.wikipedia.org/wiki/ Floating-point_arithmetic , 2026. Zhao, C., Deng, C., Ruan, C., Dai, D., Gao, H., Li, J., Zhang, L., Huang, P., Zhou, S., Ma, S., Liang, W., He, Y., Wang, Y., Liu, Y., and Wei, Y. Insights into deepseek-v3: Scaling challenges and reflections on hard-ware for ai architectures. In Proceedings of the 52nd Annual International Symposium on Computer Archi-tecture , SIGARCH ’25, pp. 1731–1745. ACM, June 2025a. doi: 10.1145/3695053.3731412. URL http: //dx.doi.org/10.1145/3695053.3731412 .Zhao, C., Zhou, S., Zhang, L., Deng, C., Xu, Z., Liu, Y., Yu, K., Li, J., and Zhao, L. Deepep: an efficient expert-parallel communication library. https://github. com/deepseek-ai/DeepEP , 2025b. 9Practical FP4 Training for Large-Scale MoE Models on Hopper GPUs 
+
+## A. Appendix: Code and Implementation Notes 
+
+We provide the full implementation and system integration instructions at github. The codebase enables MXFP4-based training on Hopper-class GPUs and includes: • Custom Kernels : Low-level CUDA implementations for MXFP4 quantization, dequantization, and format conver-sion. • Framework Modifications : Patches for Megatron-LM (v0.15.0rc7), NVIDIA Transformer Engine (v2.8), and DeepEP (v1.2.1) to support FP4-aware training and communication. • Usage Guide : Build and integration instructions to reproduce the results in the main paper. Please refer to the supplementary README file for a detailed breakdown of repository structure and usage. 10
