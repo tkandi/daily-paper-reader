@@ -1,0 +1,568 @@
+Title: NCCL EP: Towards a Unified Expert Parallel Communication API for NCCL
+
+URL Source: https://arxiv.org/pdf/2603.13606v1
+
+Published Time: Tue, 17 Mar 2026 01:35:57 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# NCCL EP: Towards a Unified Expert Parallel Communication API for NCCL 
+
+Amos Goldman, Nimrod Boker, Maayan Sheraizin, Nimrod Admoni, Artem Polyakov, Subhadeep Bhattacharya, Fan Yu, Kai Sun, Georgios Theodorakis, Hsin-Chun Yin, Peter-Jan Gootzen, Aamir Shafi, Assaf Ravid, Salvatore Di Girolamo, Manjunath Gorentla Venkata, Gil Bloch 
+
+NVIDIA Corporation 
+
+{amgoldman, nboker, msheraizin, nadmoni, artemp, subhadeepb, fayu, kais, gtheodorakis, hsinchuny, pgootzen, ashafi, aravid, sdigirolamo, manjunath, gil }@nvidia.com 
+
+Abstract —Mixture-of-Experts (MoE) architectures have be-come essential for scaling large language models, driving the development of specialized device-initiated communication li-braries such as DeepEP, Hybrid-EP, and others. These libraries demonstrate the performance benefits of GPU-initiated RDMA for MoE dispatch and combine operations. This paper presents NCCL EP (Expert Parallelism), a ground-up MoE communication library built entirely on NCCL’s De-vice API. NCCL EP provides unified ncclEpDispatch and 
+
+ncclEpCombine primitives with both C and Python interfaces, supporting Low-Latency (LL) mode for inference decoding and High-Throughput (HT) mode for training and inference prefill. LL targets small batch sizes (1–128 tokens) using direct all-to-all RDMA+NVLink mesh connectivity with double-buffered commu-nication for overlapping dispatch and combine phases. HT targets large batches (4096+ tokens) using hierarchical communication that aggregates tokens within NVLink domains before inter-node RDMA transmission. Both modes leverage Device API for both intra- and inter-node communications, taking advantage of its topology awareness and optimized GPU-initiated implementation. We evaluate NCCL EP on an H100-based cluster across multi-node configurations, demonstrating competitive LL kernel perfor-mance and presenting end-to-end results with vLLM integration. By building MoE communication natively within NCCL, NCCL EP provides a supported path for expert parallelism on current and emerging NVIDIA platforms. 
+
+Index Terms —NCCL EP, Mixture-of-Experts, Expert Paral-lelism, GPU-Initiated Networking, Device-Initiated Communica-tion, RDMA, DeepEP, Large Language Models 
+
+I. I NTRODUCTION 
+
+Mixture-of-Experts (MoE) architectures have become essen-tial for scaling Large Language Models (LLMs) beyond the computational limits of dense transformers [1], [2]. By indi-vidually routing tokens to specialized subsets of experts, MoE models like DeepSeek-V3 [3] and Mixtral [4] achieve superior parameter efficiency and computational capacity. However, expert parallelism (EP) introduces communication patterns fundamentally different from conventional collectives: fine-grained, dynamic all-to-all exchanges where each token is routed to a unique subset of experts, selected based on learned gating decisions. The corresponding dispatch (sending tokens 
+
+NCCL GitHub Repository: https://github.com/NVIDIA/nccl 
+
+to experts) and combine (gathering results back) operations account for a significant fraction of end-to-end latency and require specialized optimization [5], [6]. One common approach to MoE communication uses NCCL’s AllToAll collective within a CPU-orchestrated pipeline: tokens are permuted according to routing decisions, communicated via AllToAll, and unpermuted after expert computation. This AllToAll dispatcher pattern, supported in frameworks like Megatron-Core [7] and Tutel [6], integrates naturally with existing communication collectives but adds overhead compared to fused device-initiated approaches. Recent work on device-initiated MoE communication [8]– [10] demonstrated that fusing these discrete steps into unified dispatch and combine kernels—where GPUs invoke RDMA primitives directly without returning control to the host—can significantly reduce latency by enabling in-kernel quantization, overlapped data movement, and optimized output layouts. Despite these advances, existing device-initiated MoE li-braries face deployment challenges due to ecosystem fragmen-tation and API complexity. DeepEP uses NVSHMEM [11] with direct InfiniBand Global Data Access (IBGDA) prim-itives, exposing separate Python APIs for low-latency and high-throughput modes. DeepEP derivatives (i.e. Perplexity’s pplx-kernels [9]) introduce their custom modifications of the MoE interfaces, incompatible with each other. While these libraries achieve exceptional performance through fine-grained RDMA control, they require separate communication stacks distinct from NCCL—the de facto standard for GPU col-lective communication—and expose mode-specific APIs that complicate application development. This fragmentation forces customers to maintain multiple runtime environments, learn different interfaces for each mode, and forgo NCCL’s topology awareness, elasticity, and fault-tolerance mechanisms. MoE workloads have different performance requirements depending on the use case. During training , large batches of tokens (4096+) flow through the network, making band-width utilization the primary concern. During inference , the workload splits into two phases: prefilling processes the input prompt with many tokens in parallel (similar to training), while 
+
+decoding generates tokens autoregressively one at a time per sequence, making latency the critical metric. In this scenario, © 2026 NVIDIA. All rights reserved. 
+
+> arXiv:2603.13606v1 [cs.DC] 13 Mar 2026 Fig. 1. NCCL EP architecture: low-latency kernels adapted from DeepEP [8] and high-throughput kernels adapted from Hybrid-EP [10] use NCCL GIN (GPU-Initiated Networking) for inter-node RDMA, while retaining their native NVLink implementations for intra-node communication.
+
+the batch sizes are small (1–128 tokens per GPU) and the latency becomes the primary focus. This paper presents NCCL EP , a ground-up MoE communi-cation library built entirely on NCCL’s Device API [12], [13]. Inspired by modern device-initiated MoE libraries, NCCL EP brings their performance benefits into the NCCL ecosystem with a cleaner interface. Unlike existing solutions that expose separate APIs for different operational modes, NCCL EP provides unified ncclEpDispatch and ncclEpCombine 
+
+primitives that transparently select the appropriate algorithm based on workload characteristics. The library offers both C and Python interfaces, providing flexibility for framework integration while abstracting hardware complexity. Internally, NCCL EP adapts proven kernel designs replacing their communication backend with NCCL Device API (Fig-ure 1). To support existing MoE configurations, it provides two algorithm modes, selected at group creation time: 
+
+Low-latency (LL) Mode for inference decoding. The design is derived from DeepEP [8] low-latency kernel with memory footprint optimizations. The implementation employs full all-to-all mesh connectivity with double-buffered communication. 
+
+High-throughput (HT) Mode for training and inference prefilling. The HT implementation uses hierarchical commu-nication where intra-node NVLink aggregates tokens before inter-node RDMA transmission. The kernel design is adapted from Hybrid-EP [10]. 
+
+A. Contributions 
+
+Our main contribution is the NCCL EP design and imple-mentation that addresses both API usability and kernel-level performance through the following key design elements .i) Unified API with Algorithm Modes. NCCL EP pro-vides a unified ncclEpDispatch /ncclEpCombine 
+
+interface for both training and inference applications. The algorithm mode is specified or (in the fu-ture) automatically detected at group creation time (ncclEpCreateGroup ), allowing applications to switch modes without code changes. ii) Two-Tier Resource Management. NCCL EP separates long-lived resources from per-operation state through a group/handle architecture. The ncclEpGroup_t man-ages communication buffers and network connections shared across operations, while ncclEpHandle_t cap-tures per-forward-pass routing decisions. This design amortizes setup costs while accommodating the dynamic routing patterns inherent to MoE architectures. iii) Device-Initiated Communication. Both LL and HT rely on GPU-initiated communication implemented via NCCL Device API. Excluding the CPU from the data path enables asynchronous RDMA communication. iv) Hybrid Communication Paths. NCCL EP automatically selects optimal transport: NVLink for intra-node commu-nication and RDMA for inter-node, with graceful fallback to PCIe when NVLink is unavailable. v) Optimized LL design. We propose a memory-optimized version of the LL kernels that achieves an order-of-magnitude reduction in memory footprint. To evaluate NCCL EP in a production inference serving system, we provide its integration with vLLM and Megatron-LM frameworks. Building on top of that, we conduct compre-hensive evaluation against DeepEP across 1–8 node configu-rations on an H100-based cluster, demonstrating competitive LL kernel performance and presenting end-to-end results with vLLM integration. The remainder of this paper is organized as follows. Sec-tion II provides background on MoE architectures, GPU com-munication, and the NCCL Device API. Section III presents NCCL EP’s architecture and API design. Section IV details the low-latency kernel implementation. Section V describes the high-throughput kernel design. Section VI discusses in-tegration with ML frameworks (vLLM, Megatron-LM) and deployment considerations. Section VII evaluates NCCL EP’s performance against DeepEP across multi-node GPU clusters. Section VIII reviews related work in MoE communication and GPU-initiated networking. Section IX concludes with lessons learned and future directions. II. B ACKGROUND 
+
+This section provides the foundational concepts required to understand NCCL EP’s design: MoE communication patterns, the NCCL Device API that serves as our implementation foundation, and the current landscape of specialized MoE communication libraries. 
+
+A. Transformer architecture 
+
+Modern LLMs are based on the Transformer architec-ture [14]. A Transformer processes a sequence of tokens using a stack of layers composed of self-attention and feed-forward network (FFN) blocks. Self-attention captures long-range de-pendencies and contextual relationships between tokens. The FFN applies nonlinear transformations independently to each token representation, increasing the expressive capacity of the model. 2During the forward pass (training and inference), token em-beddings propagate through the Transformer layers to produce output logits representing predicted token probabilities. During the backward pass (in training), the gradients of the training loss are computed via backpropagation and used to update the model parameters. Repeating this process over large datasets allows LLMs to learn statistical patterns of natural language. 
+
+B. MoE Communication Patterns 
+
+The MoE models extend the Transformer architecture, im-plementing the FFN as a network of experts, distributed among available GPUs [1], [2]. During forward propagation, token embeddings are routed to a subset of assigned experts, and expert responses are gathered back. On the backward pass, the loss gradients are routed to the experts, who provided answers, to update their parameters. In addition, the MoE router parameters are updated. 
+
+Dispatch routes tokens from source GPUs to the GPUs hosting their assigned experts. A gating network selects top-
+
+k experts per token, producing routing indices that define a dynamic, irregular communication pattern. Each GPU sends a unique subset of tokens to each destination. 
+
+Combine aggregates the expert outputs back to the original token locations. When tokens visit multiple experts (top-k > 
+
+1), combine performs a weighted summation of expert outputs according to gating weights. These operations differ fundamentally from standard collec-tive communication. Unlike AllReduce or AllGather where all participants exchange the same data volumes, MoE dispatch and combine exhibit:  
+
+> •
+
+Dynamic routing : Communication patterns change every forward pass based on learned gating decisions.  
+
+> •
+
+Irregular message sizes : Each GPU pair exchanges different amounts of data depending on routing.  
+
+> •
+
+Load imbalance : Popular “hot” experts receive more tokens, creating asymmetric communication volumes.  
+
+> •
+
+MoE-specific compute component : Fusion requirements like dispatch quantizing tokens and combine doing cus-tom reduce. Standard NCCL AllToAll treats all ranks uniformly and cannot efficiently handle these irregular patterns, motivating specialized MoE communication libraries. 
+
+C. NCCL Device API 
+
+NCCL 2.28 introduces the Device API [12], [13], enabling GPU kernels to initiate communication directly without CPU involvement. The Device API comprises three modules: 
+
+Load/Store Accessible (LSA) provides direct memory ac-cess to remote GPU memory over NVLink. Applica-tions can identify that a peer GPU memory is locally accessible and obtain the corresponding pointer through 
+
+ncclCommGetLocalSymm . Such a pointer can be subse-quently used in standard CUDA load/store operations. LSA delivers the full NVLink bandwidth (900 GB/s bidirectional on H100) with minimal latency, making it ideal for intra-node token transfers. 
+
+GPU-Initiated Networking (GIN) enables GPU kernels to perform RDMA operations to remote nodes. GIN exposes device-callable primitives including:  
+
+> •
+
+ncclGin_Put : Write data to remote GPU memory  
+
+> •
+
+ncclGin_Get : Read data from remote GPU memory  
+
+> •
+
+ncclGin_SignalAdd : Atomically increment a remote signal for synchronization  
+
+> •
+
+ncclGin_WaitOnSignal : Block until a signal reaches a threshold GIN operations execute entirely on the GPU, eliminating CPU proxy thread overhead and enabling fine-grained inter-leaving of computation and communication within a single kernel. This is essential for MoE workloads where per-token communication decisions benefit from device-side control. 
+
+Multimem provides collective load/store operations across multiple GPUs, useful for broadcast and reduction patterns within NVLink domains. By building on NCCL’s Device API rather than standalone libraries like NVSHMEM or DOCA GPUNetIO, NCCL EP inherits NCCL’s topology detection, network plugin archi-tecture, and ecosystem compatibility while gaining device-initiated communication capabilities. 
+
+D. The MoE Communication Landscape 
+
+The demand for efficient MoE communication has produced a diverse ecosystem of specialized libraries, each optimized for specific hardware configurations or use cases (also see Section VIII). Table I compares key features across major solutions. These libraries differ in API style, transport mechanisms, and target workloads, and no single solution covers all use cases within one framework. This diversity introduces several considerations for production deployments:  
+
+> •
+
+Ecosystem isolation : Most libraries operate outside NCCL, requiring separate initialization, memory manage-ment, and debugging infrastructure  
+
+> •
+
+Hardware coupling : Some solutions require specific transport backends (e.g., NVSHMEM, IBGDA), tying deployments to particular NIC configurations  
+
+> •
+
+API complexity : Libraries expose separate interfaces for low-latency and high-throughput modes, complicating framework integration In contrast, NCCL EP provides a unified MoE communica-tion API built entirely on the standard NCCL ecosystem. III. NCCL EP: D ESIGN AND API This section presents the design and API of NCCL EP. We describe the resource management model, tensor abstraction, core operations, and algorithm modes that enable efficient dispatch and combine operations for MoE workloads. 
+
+A. Design Philosophy 
+
+NCCL EP design reflects several key principles drawn from NCCL programming model: 
+
+Native C API with Python Bindings. Unlike existing MoE libraries that expose Python/PyTorch interfaces over C++ 3Library Unified API LL Mode HT Mode C API Python Inter-node Target Workload                                                    
+
+> DeepEP [8] No (separate) Yes Yes No Yes NVSHMEM/IBGDA Training + Inference Hybrid-EP [10] No (HT only) No Yes Yes Yes IBGDA Training (Megatron) pplx-kernels [9] No (separate) Yes Yes Rust/C++ Yes RDMA (CX7, EFA) Inference UCCL-EP [15] No (separate) Yes Yes Yes Yes CPU proxy Multi-vendor portable NCCLX [16] Yes Yes Yes Yes Yes CTran (IB/RoCE) Meta-scale (100k+ GPUs) MORI [17] Modular Yes Yes Yes Yes rocSHMEM AMD GPUs
+> NCCL EP Yes Yes Yes Yes Yes NCCL GIN Training + Inference
+> TABLE I MOE C OMMUNICATION LIBRARIES : F EATURE COMPARISON
+
+internals, NCCL EP offers a first-class C API aligned with NCCL syntax and conventions. This supports direct integra-tion into C++ runtimes (e.g., TensorRT-LLM, native vLLM backends) while still enabling Python workflows via a ctypes-based wrapper. The C API ensures that NCCL EP can serve as a foundational library for framework developers without requiring PyTorch dependencies. 
+
+User-Controlled Resource Lifecycle. Following the NCCL design, users explicitly control when resources are allocated and destroyed. All resources are created explicitly and persist until destroyed. This model provides predictable memory usage and enables integration with custom memory allocators, which are critical for inference serving systems that manage memory pools across multiple models. 
+
+Stream-Based Asynchronous Execution. All NCCL EP op-erations execute asynchronously on CUDA streams, consistent with NCCL execution model, avoiding implicit synchroniza-tion points that harm performance. 
+
+Hardware Abstraction. NCCL EP abstracts both the commu-nication and computation components of dispatch and combine operations, enabling seamless support for future features (like extended NVLink domains) or alternative network backends. 
+
+GPU-Accelerated Communication. NCCL EP takes advan-tage of massive parallelism offered by NVIDIA GPUs ac-celerating both communication and computation components in a form of fused CUDA kernels. The kernels are mapped into GPU architecture, distributing token processing between available Streaming Multiprocessors (SMs). 
+
+B. Core Operations 
+
+Table II summarizes the NCCL EP API, organized by functional category. NCCL EP provides four core operations that implement the MoE communication pattern; Figure 2 illustrates the typical execution flow. 
+
+Dispatch (ncclEpDispatch ) sends tokens to their assigned experts. It accepts three tensor lists: inputs (tokens and meta-data to route), outputs (pre-allocated receive buffers), and local tensors (optional per-rank metadata such as token counts). The send_only flag enables staged execution, where dispatch initiates data transfers and releases GPU resources without waiting for the operation to complete, allowing computation-communication overlap. 
+
+Combine (ncclEpCombine ) gathers expert outputs and re-duces them back to the original token order. It uses the routing state stored in the handle to reverse the dispatch permutation.  
+
+> Fig. 2. NCCL EP execution flow: Group creation (once), followed by repeated Handle →Dispatch →Expert FFN →Combine cycles. Staged mode splits dispatch and combine into send and receive phases for overlap.
+
+When top-k weights are provided via local tensors, combine applies weighted reduction before returning tokens to source ranks. Similarly to dispatch, combine supports staged execu-tion via the send_only flag. 
+
+Complete (ncclEpComplete ) finalizes staged operations, waiting for all incoming data transfers initiated by a preceding operation with send_only=1 .
+
+Query (ncclEpHandleGetNumRecvTokens ) returns the actual number of tokens to be received in HT mode, enabling precise output buffer allocation when 
+
+max_tokens_per_rank is set to auto. 
+
+C. Resource Management 
+
+NCCL EP employs a two-tier resource hierarchy that separates long-lived configuration from per-operation state, enabling efficient resource reuse across training iterations or inference requests. 
+
+1) MoE Group: The ncclEpGroup_t represents the top-level resource container, created via ncclEpCreateGroup() 
+
+from an existing NCCL communicator. The group config-uration is determined by the algorithm mode (LL or HT), number of experts, maximum tokens per rank, and buffer-sizing parameters. The group encapsulates:  
+
+> •
+
+Communication algorithm : The selected mode and as-sociated parameters.  
+
+> •
+
+Communication buffers : Pre-allocated send/receive buffers sized according to the configuration.  
+
+> •
+
+Network resources : Connections (i.e., Queue pairs (QPs)) to all peers in the communicator. Group creation is a collective operation : all ranks must call 
+
+ncclEpCreateGroup with compatible configurations. The group typically persists for the model’s lifetime, created during initialization and destroyed at shutdown. 4Category Function Description 
+
+> Resource Management
+
+ncclEpCreateGroup(group, comm, config, stream, alloc_fn, free_fn) Create MoE group from NCCL communicator; con-figures algorithm mode (LL/HT), expert count, buffer sizes. Collective call. 
+
+ncclEpGroupDestroy(group, stream) Release group resources including buffers and net-work connections. 
+
+ncclEpCreateHandle(handle, group, topk_idx, ...) Create per-forward-pass handle with routing info. 
+
+ncclEpHandleDestroy(handle) Release handle after dispatch/combine sequence completes. 
+
+> Communication
+
+ncclEpDispatch(handle, inputs, outputs, send_only, ...) Send tokens to assigned experts. send_only=1 
+
+> enables staged execution.
+
+ncclEpCombine(handle, inputs, outputs, send_only, ...) Gather expert outputs and reduce to original token order. 
+
+ncclEpComplete(handle, config, stream) Finalize staged operation (LL mode). Blocks until receives complete.  
+
+> Query
+
+ncclEpHandleGetNumRecvTokens(handle, &num) Query received token count (HT mode) for buffer allocation. TABLE II NCCL EP C API: R ESOURCE MANAGEMENT FUNCTIONS CREATE AND DESTROY GROUPS (LONG -LIVED ) AND HANDLES (PER -FORWARD -PASS ). COMMUNICATION FUNCTIONS PERFORM DISPATCH AND COMBINE OPERATIONS WITH OPTIONAL STAGED EXECUTION FOR OVERLAP .
+
+The optional allocator callbacks (alloc_fn , free_fn )enable integration with custom memory pools. When provided, NCCL EP uses these callbacks for all internal allocations, allowing systems to manage memory across multiple models. 
+
+2) MoE Handle: The ncclEpHandle_t maintains per-pass state, created via ncclEpCreateHandle() with the routing information ( topk_idx ) that specifies which experts each token should be dispatched to. In HT mode, handle creation triggers metadata exchange across ranks to compute token distribution; in LL mode, this exchange occurs implicitly during dispatch. The handle is shared between matching dispatch and com-bine operations of the forward and (for training) backward passes. This stateful design enables the efficient reuse of the routing information. Handles are typically created before each forward pass and retained as long as the routing remains unchanged. 
+
+D. Algorithm Modes 
+
+NCCL EP supports two algorithm modes optimized for different workloads. The mode is determined at group creation, either explicitly (via ncclEpGroupConfig_t.algorithm )or (in the future) automatically. 
+
+LL Mode is optimized for low latency. It takes token data as input and produces a three-dimensional, expert-major output tensor ready to be consumed by subsequent expert-defined GEMM operations (Figure 3). LL execution can be staged (send_only=1 ) enabling expert computation to overlap with data transfer. Additionally, LL supports overlapping consecu-tive dispatch and combine phases through double buffering. 
+
+HT Mode is optimized for high throughput and takes ad-vantage of aggregation and network hierarchy. For precise buffer sizing, the metadata exchange is initiated across all ranks during Handle creation. The 2D output format (Figure 4) with per-expert token counts ensures deterministic ordering for reproducible training.               
+
+> Aspect Low-Latency High-Throughput
+> Target workload Decode (1–128 tokens) Train/Prefill (4096+) Communication All-to-all mesh Hierarchical NVLink+RDMA Output layout 3D expert-major 2D with token counts Reduction Per-token at receiver Hierarchical TABLE III COMPARISON OF HT AND LL KERNEL MODES
+
+E. Tensor Abstraction 
+
+Traditional NCCL collectives operate on linear buffers with explicit counts and data types. MoE operations require richer tensor semantics to describe multi-dimensional layouts and distinguish between different tensor roles. 
+
+1) N-Dimensional Tensor Descriptor: NCCL EP introduces 
+
+ncclNDTensor_t , a tensor descriptor that encodes layout, data type, and semantic role. It captures N-dimensional shape and strides (supporting non-contiguous tensors), NCCL data type (FP32, BF16, FP16, FP8), a semantic tag indicating the tensor’s role, and a pointer to GPU memory. This design al-lows NCCL EP to validate tensor shapes, apply mode-specific transformations, and handle type conversions automatically. 
+
+2) Tensor Tags: Tensor tags are assigned at creation time via ncclEpTensorCreate and identify each tensor’s role when passed to dispatch and combine operations. See Table IV for the complete set of supported tags. Tags serve multiple purposes: they identify input versus out-put tensors, distinguish between token data and metadata, and enable NCCL EP to validate tensor shapes. For example, when dispatching FP8 tokens, the library expects a corresponding scales tensor tagged appropriately. 
+
+3) Tensor Layouts: Input and output tensor layouts differ between algorithm modes (Figures 3 and 4): 
+
+Dispatch inputs : Always 2D with shape [num_tokens ×
+
+hidden] for tokens and [num_tokens × top_k] for rout-ing metadata. All input tensors share the same dimension. 
+
+Dispatch outputs : 
+
+> •
+
+LL mode (Figure 3): 3D with shape 
+
+[num_local_experts × tokens_per_expert 
+
+5// token data (input or output) 
+
+> NCCL_EP_TENSOR_TAG_TOKENS
+> // top-k expert indices
+> NCCL_EP_TENSOR_TAG_TOPK_IDX
+> // top-k router weights
+> NCCL_EP_TENSOR_TAG_TOPK_WEIGHTS
+> // FP8 quantization scales
+> NCCL_EP_TENSOR_TAG_SCALES
+> // per-expert token counts (device)
+> NCCL_EP_TENSOR_TAG_RECV_EXPERT_COUNTER_DEVICE
+> // per-expert token counts (host)
+> NCCL_EP_TENSOR_TAG_RECV_EXPERT_COUNTER_HOST
+> // default/unused
+> NCCL_EP_TENSOR_TAG_NONE
+> // per-expert token counts
+> NCCL_EP_TENSOR_TAG_TOKENS_PER_EXPERTS
+
+TABLE IV TENSOR TAGS IDENTIFYING THE ROLE OF EACH N C C L NDT E N S O R _T IN 
+
+> N C C L
+
+EPTE N S O R CR E A T E , N C C L EPDI S P A T C H , AND N C C L EPCO M B I N E .
+
+Fig. 3. LL mode: 2D input to 3D expert-major output. 
+
+Fig. 4. HT mode: 2D input to 2D concatenated output. 
+
+× hidden] , where tokens are groupped by receiving expert. This expert-major layout enables direct input to grouped GEMM operations.  
+
+> •
+
+HT mode (Figure 4): 2D with shape 
+
+[total_recv_tokens × hidden] , where tokens from all experts are concatenated. A separate per-expert token count tensor indicates boundaries. 
+
+Combine : Input shapes match the corresponding dispatch outputs (3D for LL mode as in Figure 3, 2D for HT mode as in Figure 4); output shapes match dispatch inputs, restoring tokens to their original order. 
+
+Fig. 5. MoE training flow: handles are created before dispatch and shared between forward and backward passes to maintain routing state. 
+
+F. Usage Patterns: LL and HT in Training and Inference 1) Training with HT Mode: MoE handles are shared be-tween forward and backward passes to maintain routing state: 
+
+// Once per model ncclEpCreateGroup(&group, comm, &config, stream); // Forward pass: creating one handle/layer in ep[] 
+
+for (int l = 0; l < L; ++l) {topk = route(tokens); ncclEpCreateHandle(&ep[l], group, topk); ncclEpDispatch(ep[l], tokens, exp_in, ...); expert_ffn_forward(exp_in, exp_out); ncclEpCombine(ep[l], exp_out, tok_upd, ...); tokens = normalize(tokens, tok_upd); }// Backward pass: reusing handles from ep[] loss = calc_loss(ideal, tokens); 
+
+for (int l = L - 1; l >= 0; --l) {ncclEpDispatch(ep[l], loss, exp_in, ...); expert_ffn_backward(exp_in, exp_out); ncclEpCombine(ep[l], exp_out, loss_upd, ...); loss = update_loss(loss, loss_upd); ncclEpHandleDestroy(ep[l]); }
+
+Figure 5 illustrates this pattern across multiple MoE layers, showing how handles persist through the complete forward-backward cycle before destruction. 
+
+2) Inference with LL Mode: For decoding, LL mode with staged execution enables overlapping multiple micro-batches: 
+
+// Micro-batch 0: dispatch (send only) ncclEpDispatch(ep[0], tokens[0], exp_in[0], ..., /*send_only=*/1, stream); // Micro-batch 1: dispatch while 0 transfers ncclEpDispatch(ep[1], tokens[1], exp_in[1], ..., /*send_only=*/1, stream); // Complete micro-batch 0 receives and run experts ncclEpComplete(ep[0], NULL, stream); expert_ffn_forward(exp_in[0], exp_out[0]); ncclEpCombine(ep[0], exp_out[0]], tok_upd[0], ...); // Continue pipeline... 
+
+This pattern is particularly effective for inference decode, where multiple requests can be batched and pipelined. 
+
+G. Python API 
+
+NCCL EP provides Python bindings through a ctypes-based wrapper that requires no compilation, enabling rapid prototyping and framework integration. The wrapper mirrors 6the C API: NCCLLibrary loads the shared library, and methods like ncclEpCreateGroup() , ncclEpDispatch() ,and ncclEpCombine() map directly to their C counter-parts. The wrapper automatically converts PyTorch tensors to ncclNDTensor_t descriptors, handling data type mapping and pointer extraction. This enables seamless integration with PyTorch-based frameworks like vLLM and SGLang while maintaining the performance benefits of the native C. IV. L OW -L ATENCY KERNELS 
+
+NCCL EP LL mode targets the decode stage of infer-ence, where small batches (typically 1–128 tokens) make end-to-end latency the primary concern. DeepEP [8] is the state of the art implementation, that leverages device-initiated communication, emphasizing dispatch-combine time reduction and computation-communication overlap. NCCL EP adopts DeepEP design, replacing the the communication backend with NCCL Device API, and applying memory footprint and communication optimizations. 
+
+A. MoE Model 
+
+NCCL EP assumes an block-wise distribution of E experts by N application ranks, with L = ⌈E/N ⌉ experts per rank. On each rank r, the attention sub-layer produces a batch of 
+
+B fixed size tokens. For a token index t ∈ [0 , B ) on rank r,the MoE router defines a vector R(r, t ) of K expert indices to which t is routed. The logical communication occurs between two sides: data-parallel ranks (superscript DP ) and experts ( E). Every data-parallel rank r communicates with all experts forming E
+
+valid expert-rank pairs ΓDP r = {(e, r )|e ∈ [0 , E )}, where 
+
+rem DP (e, r ) = ⌊e/N ⌋ is the remote rank. Each expert e
+
+communicates with all ranks. Thus, rank r that hosts L
+
+experts also forms N · L = E valid expert-rank pairs ΓEr =
+
+{(e, r ′)|r′ ∈ [0 , N ), ⌊e/N ⌋ = r}, with remote peer defined as rem E (e, r ) = r. The number of tokens communicated between pair (e, r ) is denoted as ms(e, r ), s ∈ {R, E }.
+
+B. DeepEP Communication Model a) Topology: LL kernels employ full N -to-N mesh connectivity. Every GPU (represented by a rank) directly communicates with any other GPU through the most efficient available channel, enabling the high routing flexibility required for dynamic expert distribution in MoE models. 
+
+b) Communication buffer: LL mode allocates two in-ternal buffers used in double-buffering scheme to overlap dispatch and combine operations. Each buffer is organized into three regions: (a) coordination –per-(e, r ) pair signals, (b) send –a bounce buffer to assemble message payload , and (c) receive –for messages from remote ranks. To avoid synchronization overhead, each valid expert-rank pair has a dedicated sub-region in the coordination and receive 
+
+regions. The mapping of a valid pair (e, r ) is side-specific. For data-parallel rank r, it is a source rank-based offset inside a local expert area: idx DP (e, r ) = ( e mod N )·N +r. On expert, the index is equal to expert: idx E (e, r ) = e.Each sub-region is divided into B payload slots . The slot size P is determined by the operation’s per-token payload message. The LL dispatch payload includes (a) a header containing the source token index, (b) token data, and (c) op-tional FP8 quantization scales when precision reduction is enabled. The combine payload includes only token data. For DeepSeek v3 model, the token data size is 7168 B for FP8 data type and 14336 B for BF16; FP8 quantization scales contain 56 floats (224 B). 
+
+c) Communication pattern: The dispatch and combine kernels have a similar structure. They are split into send and 
+
+recv phases, coordinated via fine-grained counter update-and-flush operations. Dispatch/send and combine/recv are invoked on data-parallel side, and dispatch/recv and combine/send - on expert side. We generalize the calling side via s ∈ { DP, E }.
+
+Send phase. In its send region, rank r prepares payload messages for each input token. Tokens are mapped to a set of expert-rank pairs in the operation-specific way. For dispatch, it is defined by the MoE router: {(e, r )|e ∈ R(r, t )}; for combine - via the expert e and rank r dimensions of a token in the input tensor. Messages are written directly into peer’s r′ =
+
+rem s(e, r ) receive sub-region idx s(e, r ) and slot α ∈ [0 , B ).On dispatch, α is computed locally as the next unused index for (e, r ). On combine, it is the token source index t.After all ms(e, r ) tokens corresponding to a pair (e, r )
+
+were enqueued, an update-and-flush operation on idx s(e, r )’th counter of rank r′ with operation-specific value V is issued. For dispatch, V = ( ms(r, e ) + 1) , communicating the number of valid slots in the respective sub-region (the additive of 1
+
+allows non-zero updates when ms(e, r ) = 0 ). For combine, 
+
+V = 1 to flush tokens and signal DP side. In the Receive phase , rank r monitors the counters of all valid expert-rank pairs. Once a counter is updated for (e, r ′) ∈
+
+ΓsR, the data is extracted to the output tensors from sub-region 
+
+idx s(e, r ′). In dispatch, the output tensor layout is identical to the receive region and is defined by the sub-range index 
+
+idx E (e, r ′). The mapping of the sub-region slot α to the token index t extracted from the message is cached on EP handle (for subsequent combine/send). The combine performs a weighted sum of K expert outcomes for token t, that are located in experts sub-regions in slots with token index t.
+
+C. DeepEP Parallelization model 
+
+The LL kernels are executed on a set of S SMs, each SM i
+
+is sub-divided on W = 32 warps {ωij , i ∈ [0 , S ), j ∈ [0 , W )}.A common parallelization strategy found in multiple phases relies on a split based on expert-rank pairs. Each SM is assigned ESM = ⌊E/S ⌋ pairs, with each pair allocated with a group ϵe of G = ⌊W/E SM ⌋ warps: 
+
+ϵe = {ωij |(i, j ) : e = ( i · ESM + ⌊j/G ⌋ · G)} (1) 
+
+a) Dispatch/send: The send phase of the dispatch ker-nel consists of 3 major steps: (a) Count Tokens –count the number of tokens per expert, (b) Send Tokens –communicate 7payload messages to the target ranks, (c) Update Counters –coordination via counter update-and-flush operation. Count Tokens and Send Tokens steps are independent and executed in parallel. The Update Counters step depends on the completion of the previous two. 
+
+Token Count. A set of warps σ = {ωi(W −1) , i ∈ [0 , S )}
+
+(one per SM) collaborates to compute the numbers mDP (e, r l)
+
+of tokens routed from local rank rl to each expert e ∈ [0 , E ),with experts evenly distributed across σ.
+
+Send Tokens. B tokens in the batch are evenly distributed among S SMs. For each token assigned to SM i, its payload is collectively packed in the send region warps δi = {ωij } \ σ.Next, messages are sent to K experts according to the routing table. Each top-K direction is assigned a dedicated warp in δi.
+
+Update Counters. Finally, the coordination with each re-mote expert e ∈ [0 , E ) is performed. For a pair (e, r l) a warp group ϵe (1) is allocated. It waits for Count Tokens and Send Tokens steps for expert e to complete and issues an update-and-flush for (e, r l).
+
+b) Dispatch/recv and Combine/send: These steps are symmetric and utilize the same parallelization strategy, dis-tributing the work based on expert-rank pairs. Each pair 
+
+(e, r ) ∈ ΓEr , is assigned a warp group ϵ′ = ϵidx E (e,r ) (1). In dispatch, a warp atomically reserves a contiguous set of 
+
+mE (e, r ) slots in the output tensor corresponding to expert e.The reservation is cached in the EP handle along with token source indices. This information is used during combine to identify tokens in the input tensor. Unpacking of tokens from the receive region during dis-patch, and packing them to the send region during combine are performed cooperatively by all threads of ϵ′. The combine payload is homogeneous, allowing the use of NVIDIA Tensor Memory Accelerator (TMA) for data transfers. 
+
+c) Combine/recv: At this step, available warps are split into reduction groups ρ, each containing R warps; each SM hosts G′ groups (typically G′ = 2 ): 
+
+ρ = {ρm = {wij : ⌊j/R ⌋ < G ′, m = i · G′ + ⌊j/R ⌋}} (2) The set of all received tokens is evenly distributed across ρ.Within each group ρm, a single warp ω′ ∈ ρm uses TMA to load chunks of K expert responses into the SM’s shared memory and notifies the remaining warps ρ′ = ρm \ω′. Warps of ρ′ cooperatively perform weighted reduction of K chunks into a single chunk, storing it in the output tensor using TMA. The data flow between ω′ and ρ′ is organized as a pipeline. 
+
+D. NCCL EP implementation 
+
+NCCL EP implementation is based on DeepEP design presented above, adopting it for the NCCL infrastructure. It also uses an optimized communication buffer layout that allows to significantly reduce memory footprint. 
+
+a) Device-initiated communication: NCCL EP imple-ments communication channels through NCCL Device API (Section II-C). When the destination is in the same NVLink domain (same LSA team), LL kernels leverage NVLink net-work using load/store instructions. Otherwise, the RDMA network is used via NCCL GIN API. The updat-and-flush operation is based on updates of coun-ters associated with expert-rank pairs. For NVLink domain, a counter for (e, r ) pair is implemented via store-release/load-acquire operations on idx s(e, r )’th integer in the coordination 
+
+region. For RDMA, a zero-byte NCCL GIN put operation with increment ( ncclGin_SignalAdd ) modifier is used with  
+
+> signalId
+
+= idx s(e, r ), s ∈ { DP, E }.
+
+b) Communication buffer layout optimization: In the DeepEP (Section IV-B), the size of the communication buffer for both dispatch and combine operations scales as O(E·B·P ),requiring twice the amount for double buffering. Each atten-tion rank provides up to batch size B tokens, thus, B slots are reserved for each expert in the receive region. Such design leads to a wasted communication resources, as all B payload slots are never be occupied for all experts. To address the issue in the dispatch, we extend the message header with routing information R(r, t ), avoiding layout-based routing. In the Send Tokens step (Section IV-C0a), a token is sent once per destination rank, as opposed to once per expert. The sub-region indexing is unified for dispatch idx D (e, r ) = 
+
+r, not depending on the calling side. The dispatch buffer is reduced by a factor of number of local experts L, scaling as 
+
+O(N · B · P ).The combine benefits from the routing information even further. For each token t or rank r, the index k of the routing entry that corresponds to expert e: Rk(r, t ) = e is cached during dispatch. This allows to implement highly efficient combine sub-region indexing idx C (t, k ) = t · K + k, packing responses with no wasted slots and scaling as O(B · K · P )
+
+The new scheme requires minimal changes in the LL im-plementation. As the coordination region footprint is low, the coordination logic was not changed. The footprint reduction is described by (3), and for N = 64 ranks, E = 512 experts, and top-k K = 8 yields ≈ 14 times improvement. 
+
+2 · E · B · PN · B · P + B · K · P = 2 · E
+
+(N + K) (3) V. H IGH -T HROUGHPUT KERNELS 
+
+NCCL EP’s HT mode targets training and inference prefill-ing workloads where large batch sizes (thousands of tokens) make bandwidth utilization the primary concern. The HT kernels are adapted from Hybrid-EP [10], which implements efficient hierarchical communication using TMA for intra-node NVLink transfers and IBGDA for inter-node RDMA. Our contribution is replacing the IBGDA backend with NCCL GIN, enabling these kernels to benefit from NCCL’s portable networking abstraction while preserving Hybrid-EP’s algorith-mic efficiency. 
+
+A. Kernel Architecture 
+
+Hybrid-EP uses warp-specialized persistent kernels where each CUDA block exclusively occupies a single SM and runs a complete data pipeline. Within each block, different warp 8groups handle different pipeline stages: loading data from global memory to shared memory, transferring across the net-work, and writing results back. Blocks operate independently on different data chunks with no inter-block synchronization. For dispatch, the pipeline consists of three warp groups. One group reads tokens from local GPU memory into shared memory FIFOs using TMA. Another group handles inter-node communication, originally using IBGDA to send data to same-rail GPUs on remote nodes. A third group writes tokens from shared memory to destination buffers on all GPUs within the local node via NVLink. The combine operator uses a more complex pipeline with additional warp groups for hierarchical reduction: partial results are first accumulated within the node, then transferred across nodes, and finally globally reduced. This design achieves near-peak bandwidth while using only a small number of SMs, leaving the majority available for overlapping computation with communication. 
+
+B. NCCL GIN Adaptation 
+
+The key adaptation in NCCL EP replaces Hybrid-EP’s IBGDA calls with NCCL GIN primitives. IBGDA provides direct GPU-initiated RDMA through a low-level interface that requires explicit NIC topology configuration and memory reg-istration. NCCL GIN offers similar GPU-initiated networking but through NCCL’s portable abstraction layer, automatically handling topology discovery and providing consistent seman-tics across different network fabrics. The translation is straightforward: IBGDA’s RDMA write operations become ncclGin.put() calls using window-based addressing. Flow control, which Hybrid-EP implements through atomic flags in registered memory, translates to NCCL GIN signal operations for managing head and tail pointers in the circular buffer protocol. The TMA-based intra-node paths remain unchanged since they operate independently of the inter-node backend. One practical benefit of this adaptation is simplified deploy-ment. Hybrid-EP requires IBGDA to be available and properly configured, with explicit GPU-to-NIC mappings provided by the user. With NCCL GIN, topology detection is handled by NCCL, and the kernels work across InfiniBand, RoCE, and other networks that NCCL supports. 
+
+C. Buffer Management 
+
+HT kernels require registered buffers for cross-rank access. For inter-node communication, memory is registered with NCCL GIN windows; for intra-node, CUDA IPC handles allow access by other GPUs. Because buffer registration is expensive, these buffers are allocated once during initialization using worst-case sizing that assumes all tokens could route to a single rank. The dispatch output and combine input reside in registered buffers. An additional device-to-device copy moves data be-tween these registered buffers and standard PyTorch tensors. In practice, this copy can be fused with the permute operation required before expert MLPs, hiding the overhead.            
+
+> Operation Call signature in Python notation
+> Dispatch recv_x, recv_i, recv_w, h, ev = buf.dispatch(x, topk_i, topk_w, handle)
+> Combine out, out_w, ev = buf.combine(x, h, topk_w)
+> Tokens per expert tokens_per_expert = buf.get_tokens_per_expert_list()
+> Stream stream = buf.get_comm_stream()
+> Capture event = buf.capture()
+> Destroy buf.destroy_handle(h)
+> TABLE V BUFFER OPERATIONS :FRAMEWORK -FACING API MAPPING TO NCCL EP
+> PRIMITIVES .
+
+D. Comparison with Low-Latency Mode 
+
+Table III summarizes the key differences between HT and LL modes. The HT output is a 2D tensor with shape 
+
+[num_recv_tokens × hidden] , along with per-expert to-ken counts indicating boundaries. This format suits grouped GEMM operations that process variable-sized expert batches. In contrast, LL mode produces a 3D expert-major layout optimized for the small batch sizes typical of decode. VI. F RAMEWORK INTEGRATION 
+
+This section describes NCCL EP integration as a drop-in MoE communication backend in two production systems: 
+
+Megatron-LM [18] (v0.12) for training and vLLM [19] (v0.10) for inference. Both frameworks share a common substrate – a buffer abstraction over the NCCL EP Python bindings – that enables adoption through configuration alone, without application-level code changes. This section serves as an integration guide for adopting NCCL EP in other systems. 
+
+A. Common Backend Architecture 
+
+The integration stack comprises three layers: the NCCL EP C API (Section III), the nccl_ep Python package (ctypes bindings described in Section III-G), and a buffer abstraction that adapts framework tensors to NCCL EP and manages handles, memory, and stream synchronization. The buffer de-couples MoE layers from low-level NCCL device operations. 
+
+Buffer interface. The buffer exposes dispatch and 
+
+combine as the primary MoE API, mapping directly to 
+
+ncclEpDispatch and ncclEpCombine (Section III-B). 
+
+NDTensorWrapper converts framework tensors to 
+
+ncclNDTensor_t descriptors; communicators come from the framework’s process group. For training backward passes, cached dispatch reuses an existing handle. The buffer also exposes get_tokens_per_expert_list ,
+
+get_comm_stream , and capture for event synchronization; handles must be destroyed via destroy_handle when no longer needed. Table V summarizes the interface. 
+
+Memory and streams. MoE layers invoke dispatch and 
+
+combine dozens of times per forward pass; naive allocation would trigger frequent CUDA allocations, degrading perfor-mance. The buffer connects NCCL EP’s allocator callbacks (Section III-C) to PyTorch’s CUDA caching allocator via 
+
+torch.empty(..., device=’cuda’) , with pointers stored in a global map for reuse. Handle destruction releases memory 9immediately after combine (inference) or after the backward pass (training). A dedicated communication stream isolates communication from compute, enabling profiling and future overlap. The current implementation is synchronous: com-munication waits for compute via previous_event , and compute waits for communication. This ensures correctness while maintaining infrastructure for asynchronous execution. 
+
+Expert counts. In HT mode, expert computation requires per-expert token counts computed during 
+
+dispatch . The buffer allocates pinned, GPU-mapped host memory (recv_expert_counter ) so NCCL EP can write counts visible after stream synchronization; 
+
+get_tokens_per_expert_list retrieves them without explicit device-to-host copies. 
+
+B. Megatron-LM Integration 
+
+Megatron-LM is a framework used for LLM training. It offers three MoE communication strategies: AllGather, All-ToAll (standard NCCL collectives), and Flex (device-initiated backends). Flex has a plugin architecture and supports DeepEP and Hybrid-EP. We extend Flex with NCCL EP support, integrating HT mode in its architecture as shown on Figure 6. 
+
+> Fig. 6. NCCL EP in Megatron-LM. The Flex dispatcher supports three device-initiated backends; NCCL EP (green) is a drop-in alternative to DeepEP (gray) via compatible APIs at each layer.
+
+Dispatcher Manager. _NCCLEPManager adapts Mega-tron’s MoE layer to NCCL EP. It converts Flex’s multi-hot routing (sparse [num tokens , num experts ]) to NCCL EP’s compact top-k format ( [num tokens , k ]), casts routing probabilities to FP32, and otherwise follows the Flex interface for drop-in compatibility. 
+
+Autograd. NCCLEPDispatch and NCCLEPCombine wrap buffer operations for automatic differentiation (autograd). In the forward pass, dispatch creates a handle and redistributes tokens; combine aggregates outputs. In the backward pass, 
+
+cached dispatch redistributes gradients to experts and combine 
+
+aggregates them; the handle is destroyed after the latter. Handle destruction is deferred until communication completes to avoid blocking. The buffer records a CUDA event, queues the handle, and defers destruction until the event signals. 
+
+Buffer. NCCLEPBuffer implements the common interface with API compatibility to DeepEP’s buffer. A global singleton stores metadata (process group, expert count, hidden dimen-sion, max_tokens_per_rank ) for shape inference during cached operations.              
+
+> Specification EOS
+> Number of Nodes 576 GPU Model H100 80GB HBM3 GPUs per Node 8 (640 GB total) GPU Memory BW 3.35 TB/s NVLink 4th Gen, 900 GB/s, 18 links/GPU CPU Model Xeon 8480CL CPU Cores 112 (56 ×2) CPU Clock 2.0 / 3.8 GHz System Memory 2 TB InfiniBand 8×400 Gbit/s TABLE VI HARDWARE SPECIFICATIONS OF THE EOS EVALUATION CLUSTER .
+
+C. vLLM Integration 
+
+vLLM implements expert-parallel MoE inference with pluggable All2All backends (naive, pplx, DeepEP’s HT/LL). NCCL EP integrates as an additional backend (nccl_high_throughput or nccl_low_latency ). Unlike Megatron, vLLM supports both algorithm modes; tensor layouts follow the mode-specific formats described in Section III-E. 
+
+All2All Manager. NCCLAll2AllManager acts as a factory and cache for buffer instances, keyed by (process group, expert count, hidden dimension, max_tokens_per_rank , al-gorithm). A single NCCLEPBuffer class handles both modes, with the algorithm selected at construction. 
+
+FusedMoE Layer. The FusedMoE layer orchestrates rout-ing, dispatch , expert computation, and combine . It integrates NCCL EP through vLLM’s prepare /finalize abstraction: the prepare phase obtains a buffer from all2all_manager ,calls dispatch , and receives a handle; the finalize phase invokes combine . NCCLHTPrepareAndFinalize and 
+
+NCCLLLPrepareAndFinalize wrap NCCLEPBuffer for each mode. Handles are double-buffered for pipelined infer-ence and explicitly released after use. 
+
+Buffer and activation formats. The buffer provides per-expert token counts (device or host) to guide GEMM and 
+
+combine , avoiding wasted work on padding. In LL mode, the batched-per-expert layout enables buffer preallocation for lower latency. In HT mode, the 2D concatenated layout with per-expert counts supports deterministic ordering. VII. P ERFORMANCE EVALUATION 
+
+This section evaluates NCCL EP performance against DeepEP, the widely-adopted MoE communication library. We present Low-Latency (LL) kernel results for inference-decode (Section VII-A) and vLLM integration benchmarks (Section VII-B). High-Throughput (HT) kernel evaluation and optimization is ongoing; HT results and Megatron-LM inte-gration benchmarks will be released after these optimizations are complete. All experiments are conducted on NVIDIA EOS, an H100-based cluster. Table VI summarizes the hardware specifica-tions. 10 Fig. 7. LL dispatch throughput: NCCL EP vs DeepEP. 
+
+A. Low-Latency Kernels 
+
+LL kernels optimize for MoE inference-decode with small token batches, using full all-to-all RDMA mesh connectivity with per-expert signals and hybrid NVLink-RDMA paths. NCCL EP currently only supports the hybrid NVLink-RDMA path. We evaluate with 256 experts, hidden dimension 7168, 128 tokens, top-k 8 routing, and BF16 precision for both dispatch and combine operations. Figures 7 and 8 show dispatch and combine throughput comparisons between NCCL EP and DeepEP across 1 to 8 nodes. In this evaluation, DeepEP is configured to use NCCL (version 2.29) as its network backend 1 (rather than NVSHMEM/IBGDA), providing an apples-to-apples compar-ison of the two EP implementations over the same underlying transport [13]. For dispatch, NCCL EP matches or exceeds DeepEP at multi-node scales (2–8 nodes), with a notable throughput advantage at 8 nodes (64 GPUs), while trailing by 
+
+∼4% at single-node. For combine, NCCL EP trails DeepEP by 5–12% at 1–4 nodes and converges at 8 nodes. An important methodological note: NCCL EP reports host-side C API time, which includes kernel launch overhead, whereas DeepEP reports GPU kernel execution time measured via PyTorch’s Kineto profiler. Because NCCL EP’s measure-ments include this additional overhead, its effective kernel-level throughput is higher than the reported values—meaning the dispatch advantages are understated and the combine gaps are smaller than shown. We chose host-side timing because our benchmark operates at the C layer without a depen-dency on PyTorch. Additionally, at larger scales, system-level variance—including network contention, topology-dependent routing, and OS scheduling—can introduce up to 5% variation across runs. 
+
+B. vLLM Integration 
+
+Table VII compares end-to-end serving metrics for NCCL EP and DeepEP integrated with vLLM on the EOS cluster. Unlike the LL kernel evaluation in Section VII-A, which com-pared both implementations over the same NCCL transport, this evaluation runs DeepEP v1.2.1 with its default NVSH-MEM 3.2.5/IBGDA backend—reflecting the configuration                                                           
+
+> 1https://github.com/deepseek-ai/DeepEP/pull/521
+> Fig. 8. LL combine throughput: NCCL EP vs DeepEP.
+> Scale Metric NCCL EP DeepEP
+> 1 node (8 GPUs) Output throughput (tok/s) 755.1 811.2 Total throughput (tok/s) 1,509.7 1,621.8 TTFT mean (ms) 258.5 255.6 TTFT p99 (ms) 326.5 325.5 ITL mean (ms) 39.7 36.8 ITL p99 (ms) 42.6 40.6 TPOT mean (ms) 39.7 36.8 2 nodes (16 GPUs) Output throughput (tok/s) 586.1 634.0 Total throughput (tok/s) 1,171.8 1,267.6 TTFT mean (ms) 253.9 237.4 TTFT p99 (ms) 668.7 691.5 ITL mean (ms) 51.7 47.8 ITL p99 (ms) 56.6 52.8 TPOT mean (ms) 51.7 47.8 4 nodes (32 GPUs) Output throughput (tok/s) 563.3 617.0 Total throughput (tok/s) 1,126.3 1,233.6 TTFT mean (ms) 226.5 209.5 TTFT p99 (ms) 769.1 809.9 ITL mean (ms) 54.1 49.3 ITL p99 (ms) 60.3 53.6 TPOT mean (ms) 54.1 49.3 TABLE VII
+> VLLM 0.10 SERVING METRICS : NCCL EP VS DEEP EP V1.2.1 WITH
+> NVSHMEM 3.2.5/IBGDA (TP=1, EP=DP= {8, 16, 32 }(EQUAL TO TOTAL NUMBER OF GPU S), 1000 REQUESTS ,MAX CONCURRENCY 32). TTFT = TIME TO FIRST TOKEN , ITL = INTER -TOKEN LATENCY , TPOT =
+> TIME PER OUTPUT TOKEN .
+
+users deploy in production. Both backends use vLLM 0.10. We use 1-node (8 GPU), 2-node (16 GPU), and 4-node (32 GPU) configurations with the Qwen3-30B-A3B model [20], a 30B-parameter MoE LLM, serving 1000 requests with a maximum concurrency of 32. All configurations use TP=1 with DP=8, 16, and 32 (equal to EP) respectively. Each configuration was run 4 times per backend; reported values are means after removing statistical outliers via IQR filtering. NCCL EP trails DeepEP by 7–10% in throughput and 7–9% in ITL/TPOT across all scales. Prior work on NCCL GIN [13] showed that DeepEP over NCCL GIN and DeepEP over NVSHMEM achieve broadly comparable transport-level per-formance, with each favoring different operations and scales. The consistent ITL/TPOT gap is therefore not explained by the transport difference; the LL combine overhead observed in Section VII-A is a contributing factor. Investigating and optimizing this gap is ongoing for future NCCL EP releases. 11 VIII. R ELATED WORK 
+
+This section surveys MoE communication libraries and po-sitions NCCL EP within the landscape. Table I in Section II-D summarizes key features; we elaborate on design choices and trade-offs below. 
+
+A. Device-Initiated MoE Libraries 
+
+DeepEP [8] pioneered device-initiated MoE communication with NVSHMEM and IBGDA. It provides FP8 quantization, hook-based overlap, and optimizations for DeepSeek-V3’s group-limited gating. DeepEP exposes separate Python APIs for LL and HT modes. NCCL EP’s LL kernels adapt DeepEP’s design to NCCL GIN. 
+
+Perplexity pplx-kernels [9] provides device-initiated MoE communication using NVSHMEM with IBGDA, targeting low-latency inference. Like DeepEP, it operates outside NCCL and is integrated into vLLM as the “pplx” backend. 
+
+NIXL EP [21] is NVIDIA’s Expert Parallelism module within the Inference Xfer Library, derived from DeepEP and inte-grated with NVIDIA Dynamo for disaggregated inference. It uses its GPUDirect RDMA backend for zero-copy transfers. 
+
+AMD MORI [17] provides ROCm RDMA primitives for MI-series GPUs and is integrated into SGLang as the “mori” back-end, illustrating the need for vendor-specific MoE solutions. 
+
+B. Hierarchical and Portable Approaches 
+
+HybridEP [10] is NVIDIA’s MoE communication library integrated into Megatron Core v0.15. It uses warp-specialized pipelines (G2S, S2G, RDMA stages) with TMA for NVLink and IBGDA for inter-node RDMA, requiring only 4–16 SMs to saturate bandwidth. It supports DGX Hopper and Grace Blackwell. NCCL EP’s HT kernels adapt HybridEP’s hierar-chical design to NCCL GIN. 
+
+UCCL-EP [15] addresses IBGDA portability by replacing GPU-initiated RDMA with a GPU-CPU control channel: compact routing commands are sent to CPU proxies that issue GPUDirect RDMA. This enables deployment on EFA and Broadcom NICs. The proxy approach trades latency for portability; NCCL EP targets IBGDA-capable hardware with NCCL ecosystem integration. 
+
+Meta NCCLX AllToAllvDynamic [16] supports GPU-resident routing metadata for dynamic token dispatch without CPU involvement. It powers Meta’s services at 100,000+ GPU scale but is a full NCCL replacement rather than an extension, limiting availability outside Meta’s infrastructure. 
+
+C. Inference and Serving Platforms 
+
+Mooncake [22] is Moonshot AI’s KVCache-centric plat-form for Kimi, with a Transfer Engine for RDMA zero-copy transfers. Its primitives have been extended for MoE dispatch/combine and integrated into vLLM and SGLang as the “mooncake” backend. 
+
+Inference frameworks such as vLLM [19] and SGLang [23] support multiple AllToAll backends (pplx , deepep ,
+
+mooncake , mori , flashinfer ). The AllGather/Re-duceScatter fallback works for small EP sizes within NVLink domains but does not scale to multi-node. These frameworks motivate drop-in MoE backends that integrate with existing infrastructure. 
+
+D. NCCL EP’s Positioning 
+
+NCCL EP differs from existing solutions in three key ways: 1) NCCL Integration : Unlike standalone libraries (DeepEP, pplx-kernels, Mooncake) that operate outside NCCL, or proprietary replacements (NCCLX), NCCL EP extends NCCL with native MoE primitives via the Device API, thereby preserving ecosystem compatibility and unified resource management. 2) Unified API : DeepEP, HybridEP, and pplx-kernels re-quire separate interfaces for LL and HT modes; NCCL EP offers unified ncclEpDispatch /ncclEpCombine 
+
+primitives with the algorithm mode selected at group creation time. 3) C and Python Interfaces : NCCL EP offers both a C API for framework developers and Python bindings for rapid prototyping, providing greater flexibility than Python-only (DeepEP) or C++-only (HybridEP) alternatives. By combining proven kernel techniques from DeepEP (LL) and HybridEP (HT) with NCCL’s production infrastructure, NCCL EP delivers high-performance MoE communication within the standard GPU communication ecosystem. IX. C ONCLUSIONS AND FUTURE WORK 
+
+This paper presents NCCL EP, a ground-up MoE communi-cation library built entirely on NCCL infrastructure. NCCL EP provides unified ncclEpDispatch and ncclEpCombine 
+
+primitives with both C and Python interfaces, addressing the ecosystem fragmentation of existing MoE libraries. Rather than separate communication stacks and mode-specific APIs, it offers a single interface that supports both low-latency mode (for inference decoding) and high-throughput mode (for training and prefilling), with the algorithm selected at group creation. From the implementation perspective, NCCL EP adopts best industry practices. For low-latency, an optimized version of DeepEP design is proposed, which demonstrates on-par perfor-mance while requiring an order of magnitude less memory. For high-throughput scenario, NCCL EP integrates NVIDIA Hy-bridEP solution. The GPU-initiated communication is leverag-ing NCCL Device API that offers Load/Store Accessible mode for NVLink communication, and GPU-Initiated Networking (GIN) for inter-node RDMA. Our evaluation shows that NCCL EP achieves compara-ble low-latency kernel performance to DeepEP over NCCL across multi-node configurations. End-to-end vLLM inte-gration demonstrates equivalent serving performance, with throughput and latency on par with DeepEP. These results demonstrate that building MoE communication natively within NCCL preserves performance while delivering ecosystem ben-efits: topology awareness, fault tolerance, and integration with NCCL’s production infrastructure. 12 NCCL EP is currently an experimental API. Megatron-LM integration is complete; training performance remains limited by ongoing high-throughput kernel optimization for multi-node setups. Community engagement and feedback will be essential to refine the API, identify performance opportunities, and ensure NCCL EP meets the diverse requirements of MoE workloads across training and inference deployments. ACKNOWLEDGMENTS 
+
+The authors acknowledge the use of Cursor AI to assist in the writing and editing of this manuscript. The authors re-viewed and approved all content for accuracy and originality. REFERENCES [1] N. Shazeer, A. Mirhoseini, K. Maziarz, A. Davis, Q. V. Le, G. E. Hinton, and J. Dean, “Outrageously large neural networks: The sparsely-gated mixture-of-experts layer,” in International Conference on Learning Representations (ICLR) , 2017. [Online]. Available: https://openreview.net/forum?id=B1ckMDqlg [2] D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N. Shazeer, and Z. Chen, “GShard: Scaling giant models with conditional computation and automatic sharding,” in International Conference on Learning Representations (ICLR) , 2021. [Online]. Available: https://openreview.net/forum?id=qrwe7XHTmYb [3] DeepSeek-AI, “DeepSeek-V3 Technical Report,” arXiv preprint arXiv:2412.19437 , 2024. [4] A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bam-ford, D. S. Chaplot, D. de las Casas, E. B. Hanna, F. Bressand, G. Lengyel, G. Bour, G. Lample, L. Renard Lavaud, L. Saulnier, M.-A. Lachaux, P. Stock, S. Subramanian, S. Yang, S. Antoniak, T. Le Scao, T. Gervet, T. Lavril, T. Wang, T. Lacroix, and W. El Sayed, “Mixtral of Experts,” arXiv preprint arXiv:2401.04088 , 2024. [5] S. Rajbhandari, C. Li, Z. Yao, M. Zhang, R. Y. Aminabadi, A. A. Awan, J. Rasley, and Y. He, “DeepSpeed-MoE: Advancing Mixture-of-Experts Inference and Training to Power Next-Generation AI Scale,” in 
+
+Proceedings of the 39th International Conference on Machine Learning (ICML) , 2022, pp. 18 332–18 346. [6] C. Hwang, W. Cui, Y. Xiong, Z. Yang, Z. Liu, H. Hu, Z. Wang, R. Salas, J. Jose, P. Ram, J. Chau, P. Cheng, F. Yang, M. Yang, and Y. Xiong, “Tutel: Adaptive mixture-of-experts at scale,” Proceedings of Machine Learning and Systems (MLSys) , vol. 5, 2023. [7] NVIDIA, “Mixture of Experts Package — Megatron Core,” 2025, available at: https://docs.nvidia.com/megatron-core/developer-guide/latest/api-guide/moe.html. [8] DeepSeek-AI, “DeepEP: Efficient Mixture-of-Experts Communication Library,” https://github.com/deepseek-ai/DeepEP, 2025, accessed: 2026. [9] Perplexity AI, “pplx-kernels: Perplexity GPU Kernels for MoE Com-munication,” https://github.com/perplexityai/pplx-kernels, 2025. [10] F. Yu, T. Liu, and K. Sun, “Optimizing Communication for Mixture-of-Experts Training with Hybrid Expert Parallel,” https://developer.nvidia. com/blog/optimizing- communication- for- mixture- of- experts- training-with-hybrid-expert-parallel/, Feb. 2026, nVIDIA Technical Blog. [11] NVIDIA Corporation, “NVSHMEM: Scalable Communication Library for NVIDIA GPU Clusters,” https://developer.nvidia.com/nvshmem, 2020, accessed: 2026. [12] S. Jeaugey, J. Bachan, P. Markthub, Z. He, S. Das, and F. Ghodsian, “Fusing Communication and Compute with New Device API and Copy Engine Collectives in NVIDIA NCCL 2.28,” https://developer.nvidia. com/blog/fusing- communication- and- compute- with- new- device- api-and-copy-engine-collectives-in-nvidia-nccl-2-28/, Nov. 2025, accessed: 2026. [13] K. Hamidouche, J. Bachan, P. Markthub, P.-J. Gootzen, E. Agostini, S. Jeaugey, A. Shafi, G. Theodorakis, and M. G. Venkata, “GPU-Initiated Networking for NCCL,” arXiv preprint arXiv:2511.15076 , 2025. [14] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, L. Kaiser, and I. Polosukhin, “Attention is all you need,” in Proceedings of the 31st International Conference on Neural Information Processing Systems , ser. NIPS’17. Red Hook, NY, USA: Curran Associates Inc., 2017, p. 6000–6010. [15] Z. Mao, Y. Zhang, C. Cui, Z. Huang, K. You, Z. Chen, Z. Xu, Z. Gu, S. Shenker, C. Raiciu, Y. Zhou, and I. Stoica, “UCCL-EP: Portable Expert-Parallel Communication,” arXiv preprint arXiv:2512.19849 ,2025. [16] M. Si, P. Balaji, Y. Chen, C.-H. Chu, A. Gangidi, S. Hasan, S. Iyengar, D. Johnson, B. Liu, R. Ren, D. Shah, A. J. Shetty, G. Steinbrecher, Y. Wang, B. Wu, X. Xie, J. Yang, M. Yang, K. Yu, M. Yu, C. Zhao, W. Bland, D. Boyda, S. Gumudavelli, P. Kannan, C. Lumezanu, R. Miao, Z. Qu, V. Ramesh, M. Samoylov, J. Seidel, S. Sundaresan, F. Tian, Q. Tan, S. Zhang, Y. Zhao, S. Zheng, A. Zhu, and H. Zeng, “Collective communication for 100k+ gpus,” arXiv preprint arXiv:2510.20171 , 2025. [Online]. Available: https://arxiv.org/abs/2510.20171 [17] AMD, “MORI: Modular RDMA interface,” https://github.com/ROCm/ mori, 2026, accessed: 2026-03-12. [18] D. Narayanan, M. Shoeybi, J. Casper, P. LeGresley, M. Patwary, V. Korthikanti, D. Vainbrand, P. Kashinkunti, J. Bernauer, B. Catanzaro, A. Phanishayee, and M. Zaharia, “Efficient large-scale language model training on GPU clusters using Megatron-LM,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC ’21) . Association for Computing Machinery, 2021. [Online]. Available: https://doi.org/10.1145/3458817.3476209 [19] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the 29th Symposium on Operating Systems Principles (SOSP ’23) .Association for Computing Machinery, 2023, pp. 611–626. [Online]. Available: https://doi.org/10.1145/3600006.3613165 [20] A. Yang, A. Li, B. Yang, B. Zhang, B. Hui, B. Zheng, B. Yu, C. Gao, C. Huang, C. Lv, C. Zheng, D. Liu, F. Zhou, F. Huang, F. Hu, H. Ge, H. Wei, H. Lin, J. Tang, J. Yang, J. Tu, J. Zhang, J. Yang, J. Yang, J. Zhou, J. Zhou, J. Lin, K. Dang, K. Bao, K. Yang, L. Yu, L. Deng, M. Li, M. Xue, M. Li, P. Zhang, P. Wang, Q. Zhu, R. Men, R. Gao, S. Liu, S. Luo, T. Li, T. Tang, W. Yin, X. Ren, X. Wang, X. Zhang, X. Ren, Y. Fan, Y. Su, Y. Zhang, Y. Zhang, Y. Wan, Y. Liu, Z. Wang, Z. Cui, Z. Zhang, Z. Zhou, and Z. Qiu, “Qwen3 technical report,” arXiv preprint arXiv:2505.09388 , 2025. [Online]. Available: https://arxiv.org/abs/2505.09388 [21] NVIDIA Corporation, “NIXL: NVIDIA Inference Xfer Library,” https: //github.com/ai-dynamo/nixl, 2025, gitHub Repository. [22] R. Qin, Z. Li, W. He, J. Cui, F. Ren, M. Zhang, Y. Wu, W. Zheng, and X. Xu, “Mooncake: Trading more storage for less computation — a KVCache-Centric architecture for serving LLM chatbot,” in 23rd USENIX Conference on File and Storage Technologies (FAST ’25) .USENIX Association, Feb. 2025, pp. 155–170. [Online]. Available: https://www.usenix.org/conference/fast25/presentation/qin [23] L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng, “SGLang: Efficient execution of structured language model programs,” in Proceedings of the 38th International Conference on Neural Information Processing Systems (NeurIPS ’24) . Curran Associates Inc., 2024. [Online]. Available: https://github.com/sgl-project/sglang 
+
+13

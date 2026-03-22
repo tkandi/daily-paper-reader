@@ -6,73 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-21
-- 运行时间：2026-03-21 19:36:34 UTC
+- 最新运行日期：2026-03-22
+- 运行时间：2026-03-22 19:30:39 UTC
 - 运行状态：成功
 - 本次总论文数：17
 - 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度解析 17 篇论文，聚焦 VLA 具身智能框架与异构 GPU 推理效率的突破。
-重点推荐 AcceRL 分布式异步强化学习框架，以及利用跨层 GPU 异构性大幅降低多模态 LLM 推理成本的方案。
-建议开发者关注 MoE 动态激活与 Flash 增强向量检索技术，以应对大规模模型部署的性能瓶颈。
-- 详情：[/202603/21/README](/202603/21/README)
+今日深度解析 17 篇前沿论文，聚焦 NCCL 专家并行通信优化与 LLM 推理集群的科学规划。
+重点推荐统一专家并行 API (NCCL EP) 及基于排队论的推理容量规划工具，大幅提升大规模模型训练与部署效率。
+建议关注边缘端硬件加速微调与去中心化 AI 架构，探索模型在极致资源受限环境下的落地可能。
+- 详情：[/202603/22/README](/202603/22/README)
 
 ### 精读区论文标签
-1. [AcceRL: A Distributed Asynchronous Reinforcement Learning and World Model Framework for Vision-Language-Action Models](/202603/21/2603.18464v1-accerl-a-distributed-asynchronous-reinforcement-learning-and-world-model-framework-for-vision-language-action-models)  
+1. [NCCL EP: Towards a Unified Expert Parallel Communication API for NCCL](/202603/22/2603.13606v1-nccl-ep-towards-a-unified-expert-parallel-communication-api-for-nccl)  
    标签：评分：10.0/10、query:mlsys
-   evidence：用于大规模模型的分布式异步强化学习框架
-2. [Cost-Efficient Multimodal LLM Inference via Cross-Tier GPU Heterogeneity](/202603/21/2603.12707v1-cost-efficient-multimodal-llm-inference-via-cross-tier-gpu-heterogeneity)  
+   evidence：针对MoE扩展的专家并行通信库
+2. [inference-fleet-sim: A Queueing-Theory-Grounded Fleet Capacity Planner for LLM Inference](/202603/22/2603.16054v1-inference-fleet-sim-a-queueing-theory-grounded-fleet-capacity-planner-for-llm-inference)  
    标签：评分：9.0/10、query:mlsys
-   evidence：通过跨层 GPU 异构性优化多模态大模型推理
-3. [Efficient LLM Serving for Agentic Workflows: A Data Systems Perspective](/202603/21/2603.16104v1-efficient-llm-serving-for-agentic-workflows-a-data-systems-perspective)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：工作流感知推理框架与缓存感知调度
-4. [ZipServ: Fast and Memory-Efficient LLM Inference with Hardware-Aware Lossless Compression](/202603/21/2603.17435v1-zipserv-fast-and-memory-efficient-llm-inference-with-hardware-aware-lossless-compression)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对LLM服务的硬件感知无损压缩
-5. [SOL-ExecBench: Speed-of-Light Benchmarking for Real-World GPU Kernels Against Hardware Limits](/202603/21/2603.19173v1-sol-execbench-speed-of-light-benchmarking-for-real-world-gpu-kernels-against-hardware-limits)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对AI模型硬件限制的GPU算子基准测试
-6. [CALF: Communication-Aware Learning Framework for Distributed Reinforcement Learning](/202603/21/2603.12543v1-calf-communication-aware-learning-framework-for-distributed-reinforcement-learning)  
+   evidence：LLM推理的GPU集群容量规划与资源管理
+3. [AI+HW 2035: Shaping the Next Decade](/202603/22/2603.05225v1-aihw-2035-shaping-the-next-decade)  
    标签：评分：8.0/10、query:mlsys
-   evidence：解决网络延迟和通信限制的分布式强化学习框架
+   evidence：AI与硬件协同设计及计算栈重构路线图
+4. [LycheeCluster: Efficient Long-Context Inference with Structure-Aware Chunking and Hierarchical KV Indexing](/202603/22/2603.08453v1-lycheecluster-efficient-long-context-inference-with-structure-aware-chunking-and-hierarchical-kv-indexing)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：长文本LLM推理中的高效KV缓存管理和分层索引
+5. [SVD Contextual Sparsity Predictors for Fast LLM Inference](/202603/22/2603.14110v1-svd-contextual-sparsity-predictors-for-fast-llm-inference)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：支持CUDA和CANN设备的推理执行器
+6. [Parallel In-context Learning for Large Vision Language Models](/202603/22/2603.16092v1-parallel-in-context-learning-for-large-vision-language-models)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：长上下文视觉语言模型的并行推理算法
 
 ### 速读区论文标签
-1. [Data Driven Optimization of GPU efficiency for Distributed LLM Adapter Serving](/202603/21/2602.24044v1-data-driven-optimization-of-gpu-efficiency-for-distributed-llm-adapter-serving)  
+1. [Split Federated Learning Architectures for High-Accuracy and Low-Delay Model Training](/202603/22/2603.08687v1-split-federated-learning-architectures-for-high-accuracy-and-low-delay-model-training)  
    标签：评分：8.0/10、query:mlsys
-   evidence：分布式推理系统中的GPU效率与适配器放置优化
-2. [HAVEN: High-Bandwidth Flash Augmented Vector Engine for Large-Scale Approximate Nearest-Neighbor Search Acceleration](/202603/21/2603.01175v1-haven-high-bandwidth-flash-augmented-vector-engine-for-large-scale-approximate-nearest-neighbor-search-acceleration)  
+   evidence：用于模型训练的拆分联邦学习架构
+2. [A Decentralized Frontier AI Architecture Based on Personal Instances, Synthetic Data, and Collective Context Synchronization](/202603/22/2603.08893v1-a-decentralized-frontier-ai-architecture-based-on-personal-instances-synthetic-data-and-collective-context-synchronization)  
    标签：评分：8.0/10、query:mlsys
-   evidence：增强高带宽闪存的GPU架构用于向量搜索
-3. [DynaMoE: Dynamic Token-Level Expert Activation with Layer-Wise Adaptive Capacity for Mixture-of-Experts Neural Networks](/202603/21/2603.01697v1-dynamoe-dynamic-token-level-expert-activation-with-layer-wise-adaptive-capacity-for-mixture-of-experts-neural-networks)  
+   evidence：去中心化分布式 AI 框架架构
+3. [TrainDeeploy: Hardware-Accelerated Parameter-Efficient Fine-Tuning of Small Transformer Models at the Extreme Edge](/202603/22/2603.09511v1-traindeeploy-hardware-accelerated-parameter-efficient-fine-tuning-of-small-transformer-models-at-the-extreme-edge)  
    标签：评分：8.0/10、query:mlsys
-   evidence：MoE架构的动态专家激活与调度框架
-4. [EdgeFLow: Serverless Federated Learning via Sequential Model Migration in Edge Networks](/202603/21/2603.02562v1-edgeflow-serverless-federated-learning-via-sequential-model-migration-in-edge-networks)  
+   evidence：极端边缘SoC上的设备端训练流水线
+4. [CA-HFP: Curvature-Aware Heterogeneous Federated Pruning with Model Reconstruction](/202603/22/2603.12591v1-ca-hfp-curvature-aware-heterogeneous-federated-pruning-with-model-reconstruction)  
    标签：评分：8.0/10、query:mlsys
-   evidence：重新设计系统拓扑的分布式学习框架
-5. [Federated Few-Shot Learning on Neuromorphic Hardware: An Empirical Study Across Physical Edge Nodes](/202603/21/2603.13037v1-federated-few-shot-learning-on-neuromorphic-hardware-an-empirical-study-across-physical-edge-nodes)  
+   evidence：异构边缘设备上的联邦学习与剪枝
+5. [Privacy-Preserving Machine Learning for IoT: A Cross-Paradigm Survey and Future Roadmap](/202603/22/2603.13570v1-privacy-preserving-machine-learning-for-iot-a-cross-paradigm-survey-and-future-roadmap)  
    标签：评分：7.0/10、query:mlsys
-   evidence：基于类脑硬件的联邦学习系统及权重交换策略
-6. [Privacy-Preserving Machine Learning for IoT: A Cross-Paradigm Survey and Future Roadmap](/202603/21/2603.13570v2-privacy-preserving-machine-learning-for-iot-a-cross-paradigm-survey-and-future-roadmap)  
+   evidence：分布式训练流水线与系统架构综述
+6. [FedPBS: Proximal-Balanced Scaling Federated Learning Model for Robust Personalized Training for Non-IID Data](/202603/22/2603.13909v1-fedpbs-proximal-balanced-scaling-federated-learning-model-for-robust-personalized-training-for-non-iid-data)  
    标签：评分：7.0/10、query:mlsys
-   evidence：物联网生态系统中分布式训练流水线的综述
-7. [Computation and Communication Efficient Federated Unlearning via On-server Gradient Conflict Mitigation and Expression](/202603/21/2603.13795v1-computation-and-communication-efficient-federated-unlearning-via-on-server-gradient-conflict-mitigation-and-expression)  
+   evidence：根据分布式客户端资源调整批处理大小的联邦学习算法
+7. [True 4-Bit Quantized Convolutional Neural Network Training on CPU: Achieving Full-Precision Parity](/202603/22/2603.13931v1-true-4-bit-quantized-convolutional-neural-network-training-on-cpu-achieving-full-precision-parity)  
    标签：评分：7.0/10、query:mlsys
-   evidence：通信高效的联邦学习框架
-8. [GradMem: Learning to Write Context into Memory with Test-Time Gradient Descent](/202603/21/2603.13875v1-gradmem-learning-to-write-context-into-memory-with-test-time-gradient-descent)  
+   evidence：在CPU上使用标准PyTorch操作训练CNN的实用方法
+8. [Self-Indexing KVCache: Predicting Sparse Attention from Compressed Keys](/202603/22/2603.14224v1-self-indexing-kvcache-predicting-sparse-attention-from-compressed-keys)  
    标签：评分：7.0/10、query:mlsys
-   evidence：优化大语言模型中的KV缓存内存开销
-9. [Exact Federated Continual Unlearning for Ridge Heads on Frozen Foundation Models](/202603/21/2603.12977v2-exact-federated-continual-unlearning-for-ridge-heads-on-frozen-foundation-models)  
+   evidence：硬件友好的KV缓存压缩与检索
+9. [StatePlane: A Cognitive State Plane for Long-Horizon AI Systems Under Bounded Context](/202603/22/2603.13644v1-stateplane-a-cognitive-state-plane-for-long-horizon-ai-systems-under-bounded-context)  
    标签：评分：6.0/10、query:mlsys
-   evidence：分布式环境下精确联邦取消学习的通信协议
-10. [Dependency-Aware Parallel Decoding via Attention for Diffusion LLMs](/202603/21/2603.12996v1-dependency-aware-parallel-decoding-via-attention-for-diffusion-llms)  
+   evidence：用于管理AI系统KV缓存和上下文的认知状态平面
+10. [Knowledge Distillation for Large Language Models](/202603/22/2603.13765v1-knowledge-distillation-for-large-language-models)  
    标签：评分：6.0/10、query:mlsys
-   evidence：通过依赖图实现扩散大语言模型的并行解码
-11. [From Gradients to Riccati Geometry: Kalman World Models for Single-Pass Learning](/202603/21/2603.13423v1-from-gradients-to-riccati-geometry-kalman-world-models-for-single-pass-learning)  
+   evidence：通过知识蒸馏压缩大语言模型的资源高效型框架
+11. [Greedy Information Projection for LLM Data Selection](/202603/22/2603.13790v1-greedy-information-projection-for-llm-data-selection)  
    标签：评分：6.0/10、query:mlsys
-   evidence：大语言模型的无梯度训练与自适应范式
+   evidence：大规模模型训练的数据选择优化
 
 
 <div class="dpr-home-promo-card">
