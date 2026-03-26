@@ -6,85 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-03-25
-- 运行时间：2026-03-25 19:36:18 UTC
+- 最新运行日期：2026-03-26
+- 运行时间：2026-03-26 20:33:54 UTC
 - 运行状态：成功
-- 本次总论文数：21
-- 精读区：10
+- 本次总论文数：17
+- 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-今日精选 21 篇前沿论文，重点聚焦 GPU 加速的渗透测试框架与大模型推理效率优化。
-推荐关注 NASimJax 在网络安全策略学习中的性能突破，以及 KV Cache 优化对提升 LLM 推理规模的关键作用。
-建议开发者深入研究大模型推理加速方案，并关注视觉语言模型（VLM）的轻量化实践。
-- 详情：[/202603/25/README](/202603/25/README)
+今日深挖 17 篇前沿论文，聚焦从 TinyML 到大模型的软硬件协同能效巅峰设计。
+重点推荐全栈协同优化框架及利用多 SSD 联动的 KV Cache 卸载技术，直击大规模模型推理的效率瓶颈。
+建议关注底层架构与算法的深度融合，这是实现大模型在多样化硬件上高效部署的关键路径。
+- 详情：[/202603/26/README](/202603/26/README)
 
 ### 精读区论文标签
-1. [NASimJax: GPU-Accelerated Policy Learning Framework for Penetration Testing](/202603/25/2603.19864v1-nasimjax-gpu-accelerated-policy-learning-framework-for-penetration-testing)  
+1. [Energy Efficient Software Hardware CoDesign for Machine Learning: From TinyML to Large Language Models](/202603/26/2603.23668v1-energy-efficient-software-hardware-codesign-for-machine-learning-from-tinyml-to-large-language-models)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：从边缘到数据中心的AI基础设施软硬件协同设计
+2. [Swarm: Co-Activation Aware KVCache Offloading Across Multiple SSDs](/202603/26/2603.17803v1-swarm-co-activation-aware-kvcache-offloading-across-multiple-ssds)  
    标签：评分：9.0/10、query:mlsys
-   evidence：基于 JAX 的 GPU 加速训练框架
-2. [KV Cache Optimization Strategies for Scalable and Efficient LLM Inference](/202603/25/2603.20397v1-kv-cache-optimization-strategies-for-scalable-and-efficient-llm-inference)  
+   evidence：大模型跨多SSD的KVCache卸载系统
+3. [AutoKernel: Autonomous GPU Kernel Optimization via Iterative Agent-Driven Search](/202603/26/2603.21331v1-autokernel-autonomous-gpu-kernel-optimization-via-iterative-agent-driven-search)  
    标签：评分：9.0/10、query:mlsys
-   evidence：LLM推理中KV缓存优化策略的系统综述
-3. [Optimal low-rank stochastic gradient estimation for LLM training](/202603/25/2603.20632v1-optimal-low-rank-stochastic-gradient-estimation-for-llm-training)  
+   evidence：针对PyTorch模型的自动GPU算子优化
+4. [Sparser, Faster, Lighter Transformer Language Models](/202603/26/2603.23198v1-sparser-faster-lighter-transformer-language-models)  
    标签：评分：9.0/10、query:mlsys
-   evidence：针对LLM训练的显存高效低秩随机梯度估计
-4. [Modernizing Amdahl's Law: How AI Scaling Laws Shape Computer Architecture](/202603/25/2603.20654v1-modernizing-amdahls-law-how-ai-scaling-laws-shape-computer-architecture)  
+   evidence：针对优化GPU执行流水线的CUDA内核与稀疏打包格式
+5. [DVM: Real-Time Kernel Generation for Dynamic AI Models](/202603/26/2603.24239v1-dvm-real-time-kernel-generation-for-dynamic-ai-models)  
    标签：评分：9.0/10、query:mlsys
-   evidence：针对现代AI硬件和缩放定律重构阿姆达尔定律
-5. [Democratizing AI: A Comparative Study in Deep Learning Efficiency and Future Trends in Computational Processing](/202603/25/2603.20920v1-democratizing-ai-a-comparative-study-in-deep-learning-efficiency-and-future-trends-in-computational-processing)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：在GPU和CPU基础设施上进行深度学习效率基准测试
-6. [StreamTGN: A GPU-Efficient Serving System for Streaming Temporal Graph Neural Networks](/202603/25/2603.21090v1-streamtgn-a-gpu-efficient-serving-system-for-streaming-temporal-graph-neural-networks)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对图神经网络的高效GPU推理系统架构
-7. [CALVO: Improve Serving Efficiency for LLM Inferences with Intense Network Demands](/202603/25/2603.21257v1-calvo-improve-serving-efficiency-for-llm-inferences-with-intense-network-demands)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：优化 KVCache 网络需求的 LLM 推理引擎
-8. [IMMSched: Interruptible Multi-DNN Scheduling via Parallel Multi-Particle Optimizing Subgraph Isomorphism](/202603/25/2603.21659v1-immsched-interruptible-multi-dnn-scheduling-via-parallel-multi-particle-optimizing-subgraph-isomorphism)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：边缘加速器上的可中断多DNN任务调度
-9. [Communication-Efficient Approximate Gradient Coding](/202603/25/2603.22514v1-communication-efficient-approximate-gradient-coding)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：分布式学习中高效通信的梯度编码
-10. [Characterizing CPU-Induced Slowdowns in Multi-GPU LLM Inference](/202603/25/2603.22774v1-characterizing-cpu-induced-slowdowns-in-multi-gpu-llm-inference)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：多GPU LLM推理基础设施的性能分析
+   evidence：动态AI模型的实时算子编译器
+6. [From Servers to Sites: Compositional Power Trace Generation of LLM Inference for Infrastructure Planning](/202603/26/2603.18383v1-from-servers-to-sites-compositional-power-trace-generation-of-llm-inference-for-infrastructure-planning)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：大模型推理基础设施规划的功耗追踪生成
 
 ### 速读区论文标签
-1. [SpecSteer: Synergizing Local Context and Global Reasoning for Efficient Personalized Generation](/202603/25/2603.16219v1-specsteer-synergizing-local-context-and-global-reasoning-for-efficient-personalized-generation)  
+1. [Optimal Splitting of Language Models from Mixtures to Specialized Domains](/202603/26/2603.19149v1-optimal-splitting-of-language-models-from-mixtures-to-specialized-domains)  
    标签：评分：8.0/10、query:mlsys
-   evidence：云端协作推理的分布式对齐协议
-2. [Implementation of tangent linear and adjoint models for neural networks based on a compiler library tool](/202603/25/2603.16976v1-implementation-of-tangent-linear-and-adjoint-models-for-neural-networks-based-on-a-compiler-library-tool)  
+   evidence：大规模模型训练中的最优计算资源分配
+2. [kRAIG: A Natural Language-Driven Agent for Automated DataOps Pipeline Generation](/202603/26/2603.20311v1-kraig-a-natural-language-driven-agent-for-automated-dataops-pipeline-generation)  
    标签：评分：8.0/10、query:mlsys
-   evidence：基于LibTorch的编译器库工具，用于AI与数值模型的耦合
-3. [Empirical Recipes for Efficient and Compact Vision-Language Models](/202603/25/2603.16987v1-empirical-recipes-for-efficient-and-compact-vision-language-models)  
+   evidence：自动生成Kubeflow流水线
+3. [AE-LLM: Adaptive Efficiency Optimization for Large Language Models](/202603/26/2603.20492v1-ae-llm-adaptive-efficiency-optimization-for-large-language-models)  
    标签：评分：8.0/10、query:mlsys
-   evidence：针对VLM推理框架和推理加速的优化方案
-4. [The 1/W Law: An Analytical Study of Context-Length Routing Topology and GPU Generation Gains for LLM Inference Energy Efficiency](/202603/25/2603.17280v1-the-1w-law-an-analytical-study-of-context-length-routing-topology-and-gpu-generation-gains-for-llm-inference-energy-efficiency)  
+   evidence：LLM效率优化的统一框架
+4. [MKA: Memory-Keyed Attention for Efficient Long-Context Reasoning](/202603/26/2603.20586v1-mka-memory-keyed-attention-for-efficient-long-context-reasoning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：GPU推理集群能效与路由拓扑研究
-5. [Deriving Hyperparameter Scaling Laws via Modern Optimization Theory](/202603/25/2603.15958v1-deriving-hyperparameter-scaling-laws-via-modern-optimization-theory)  
+   evidence：长文本训练与推理中的KV缓存内存优化
+5. [RAMP: Reinforcement Adaptive Mixed Precision Quantization for Efficient On Device LLM Inference](/202603/26/2603.17891v1-ramp-reinforcement-adaptive-mixed-precision-quantization-for-efficient-on-device-llm-inference)  
    标签：评分：7.0/10、query:mlsys
-   evidence：大规模训练配方的超参数缩放法则
-6. [FederatedFactory: Generative One-Shot Learning for Extremely Non-IID Distributed Scenarios](/202603/25/2603.16370v1-federatedfactory-generative-one-shot-learning-for-extremely-non-iid-distributed-scenarios)  
+   evidence：用于高效LLM推理的混合精度量化
+6. [A Synthesizable RTL Implementation of Predictive Coding Networks](/202603/26/2603.18066v1-a-synthesizable-rtl-implementation-of-predictive-coding-networks)  
    标签：评分：7.0/10、query:mlsys
-   evidence：联邦学习场景下的分布式优化
-7. [Dynamic Meta-Layer Aggregation for Byzantine-Robust Federated Learning](/202603/25/2603.16846v1-dynamic-meta-layer-aggregation-for-byzantine-robust-federated-learning)  
+   evidence：分布式学习系统的硬件架构
+7. [A Survey of Neural Network Variational Monte Carlo from a Computing Workload Characterization Perspective](/202603/26/2603.18126v2-a-survey-of-neural-network-variational-monte-carlo-from-a-computing-workload-characterization-perspective)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于鲁棒联邦学习的自适应聚合框架
-8. [Learning When to Attend: Conditional Memory Access for Long-Context LLMs](/202603/25/2603.17484v1-learning-when-to-attend-conditional-memory-access-for-long-context-llms)  
+   evidence：神经网络工作负载在GPU上的特性分析
+8. [Communication-Efficient and Robust Multi-Modal Federated Learning via Latent-Space Consensus](/202603/26/2603.19067v1-communication-efficient-and-robust-multi-modal-federated-learning-via-latent-space-consensus)  
    标签：评分：7.0/10、query:mlsys
-   evidence：长文本LLM训练效率的条件内存访问
-9. [NeuronSpark: A Spiking Neural Network Language Model with Selective State Space Dynamics](/202603/25/2603.16148v1-neuronspark-a-spiking-neural-network-language-model-with-selective-state-space-dynamics)  
+   evidence：通信高效的多模态联邦学习
+9. [QuantFL: Sustainable Federated Learning for Edge IoT via Pre-Trained Model Quantisation](/202603/26/2603.17507v1-quantfl-sustainable-federated-learning-for-edge-iot-via-pre-trained-model-quantisation)  
    标签：评分：6.0/10、query:mlsys
-   evidence：融合Triton算子与SNN语言模型训练
-10. [FEAT: A Linear-Complexity Foundation Model for Extremely Large Structured Data](/202603/25/2603.16513v1-feat-a-linear-complexity-foundation-model-for-extremely-large-structured-data)  
+   evidence：边缘物联网的可持续联邦学习框架
+10. [Noise-Aware Misclassification Attack Detection in Collaborative DNN Inference](/202603/26/2603.17914v1-noise-aware-misclassification-attack-detection-in-collaborative-dnn-inference)  
    标签：评分：6.0/10、query:mlsys
-   evidence：针对大规模结构化数据的线性复杂度架构
-11. [OPERA: Online Data Pruning for Efficient Retrieval Model Adaptation](/202603/25/2603.17205v1-opera-online-data-pruning-for-efficient-retrieval-model-adaptation)  
+   evidence：协作式DNN推理与边缘卸载架构
+11. [Path-Constrained Mixture-of-Experts](/202603/26/2603.18297v1-path-constrained-mixture-of-experts)  
    标签：评分：6.0/10、query:mlsys
-   evidence：高效模型适配的数据剪枝框架
+   evidence：MoE架构的高效扩展
 
 
 <div class="dpr-home-promo-card">
