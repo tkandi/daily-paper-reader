@@ -1,0 +1,937 @@
+Title: Rank-Aware Resource Scheduling for Tightly-Coupled MPI Workloads on Kubernetes
+
+URL Source: https://arxiv.org/pdf/2603.22691v1
+
+Published Time: Wed, 25 Mar 2026 00:27:33 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Rank-Aware Resource Scheduling for Tightly-Coupled MPI Workloads on Kubernetes 
+
+Tianfang Xie ∗
+
+Purdue University School of Aeronautics and Astronautics 
+
+# Abstract 
+
+Fully provisioned Message Passing Interface (MPI) par-allelism already achieves near-optimal wall-clock time for Computational Fluid Dynamics (CFD) solvers such as OpenFOAM. The present work does not seek to outper-form this established mode; instead, it addresses a differ-ent and complementary question that arises in shared, cloud-managed cluster environments: can fine-grained CPU provisioning reduce the guaranteed resource reser-vation of low-load subdomains, thereby improving cluster packing efficiency and scheduling flexibility, without un-acceptably degrading solver convergence? 
+
+We present a Kubernetes-based framework built on two mechanisms. First, resource-proportional allocation maps each MPI rank to a Kubernetes pod whose CPU request is proportional to its subdomain cell count, distributing the same 4.0 vCPU budget with a weight vector (1 , 1, 5, 15) so that sparse subdomains receive lower scheduling weight, freeing scheduling headroom for co-resident workloads during the MPI barrier idle periods. Second, In-Place Pod Vertical Scaling (Kubernetes v1.35, December 2025 GA) enables CPU adjustments mid-simulation without pod restart, supporting dynamic reallocation as compu-tational load shifts across subdomains over time. Three key empirical findings emerge. First, imposing hard CPU limits via the Linux CFS bandwidth controller introduces severe throttling: hard limits inflate wall-clock time by 78 × through cascading stalls at MPI_Allreduce 
+
+barriers; removing limits (requests-only) eliminates throt-tling entirely. Second, a controlled comparison on non-burstable c5.xlarge instances disentangles the contribu-tions of decomposition topology and CPU allocation: concentric decomposition with equal CPU is 19% faster than the Scotch equal baseline, while adding proportional CPU scheduling yields a further 3% improvement (21% total). Third, the framework scales to 16 MPI ranks on 101 K-cell meshes, where proportional allocation is 20% faster than the equal baseline while reducing the provi-sioned CPU of sparse-subdomain pods by 82%, freeing 6.5 vCPU of scheduling headroom. Experiments are conducted on AWS EC2 c5.xlarge clusters (4–16 ranks) running k3s v1.35. The framework 
+
+> ∗Corresponding author. E-mail: tianfangxie@purdue.edu
+
+and all benchmark scripts are released as open source. 
+
+Keywords: Kubernetes, container orchestration, re-source scheduling, MPI, cloud-native HPC, in-place pod scaling, cgroups, CFS throttling, computational fluid dy-namics 
+
+# 1 Introduction 
+
+Computational Fluid Dynamics (CFD) remains one of the most resource-intensive workloads in scientific and engineering computing. Industrial-grade simulations of turbulent flows around complex geometries routinely re-quire meshes comprising tens of millions to billions of cells, solved over thousands of time steps with implicit pressure–velocity coupling algorithms [1,2]. To make such problems tractable, practitioners employ spatial domain decomposition: the mesh is partitioned into subdomains, each assigned to a separate MPI rank that advances the local solution while exchanging boundary data with its neighbours at every outer iteration [3, 4]. The standard deployment model maps one MPI pro-cess to one physical CPU core, a one-to-one binding that delivers near-optimal wall-clock time when resources are fully provisioned. This paper does not challenge that conclusion: in a fully dedicated cluster with all CPUs reserved for a single simulation, standard MPI remains the fastest option, and our own experiments confirm this (Section 5.2). The motivation for this work arises instead from a different and increasingly common deployment context: 
+
+shared, cloud-managed clusters in which multiple CFD jobs compete for a fixed pool of resources, or cloud envi-ronments where resource consumption directly translates to monetary cost. In these settings, the one-core-per-rank model imposes a rigid “provisioned CPU” that may significantly exceed the actual demand of sparse subdo-mains, reducing cluster packing efficiency and limiting scheduling flexibility. Specifically, in meshes with strong density variation— boundary-layer prism layers, adaptive refinement near bodies, or multi-region setups—cell density varies by an order of magnitude across the domain [5, 6]. Under equal CPU allocation, sparse-subdomain ranks complete each iteration far ahead of their dense-subdomain peers and 1
+
+> arXiv:2603.22691v1 [cs.DC] 24 Mar 2026
+
+spend the remainder of each time step waiting at MPI collective barriers. Their reserved CPU is wasted: it can-not be reclaimed by co-resident workloads because it has been provisioned exclusively for the simulation. The container orchestration platform Kubernetes (K8s) [7] offers a principled mechanism to address this. Its resource model exposes the Linux Completely Fair Scheduler (CFS) bandwidth controller [8, 9] at milli-core granularity through cgroups v2 [10], enabling per-pod CPU allocations that can be made proportional to the subdomain computational load. Reducing the CPU re-quest of sparse-subdomain pods frees scheduling head-room for co-resident workloads, improving cluster-level resource utilisation. The trade-off is a potential increase in wall-clock time for the individual simulation—a trade-off that is explicitly characterised in this work and shown to be manageable when hard CPU limits are avoided. A second, equally significant capability is In-Place Pod Vertical Scaling , tracked as Kubernetes Enhancement Proposal KEP-1287 [11]. The approach is straightfor-ward in principle: assign minimal CPU to far-field sub-domains at simulation start, then patch their resource limits upward as the flow field develops into those re-gions. However, prior to Kubernetes v1.35, patching a pod’s resource fields triggered a container restart, which terminates the MPI process and destroys all in-memory solver state. This made runtime CPU adjustment im-practical for long-running parallel simulations despite the underlying idea being sound. The barrier was removed when In-Place Pod Vertical Scaling (KEP-1287) reached General Availability in Ku-bernetes v1.35 (December 2025) [12], enabling kubectl patch to update CPU resources without restarting the container . The present work is the first to implement and validate this capability for a running MPI-based CFD solver, realising the resource-adaptive workflow that was previously infeasible. A natural question is why Kubernetes rather than tra-ditional batch schedulers such as Slurm. The answer lies in four capabilities that are unavailable or impractical in the MPI/Slurm model: (i) fractional CPU granular-ity at milli-core precision, (ii) runtime CPU adjustment 
+
+without process restart (In-Place scaling), (iii) per-rank resource heterogeneity enforced by cgroup isolation, and (iv) bin-packing co-location of multiple jobs on shared nodes with guaranteed resource isolation. Traditional MPI assumes one rank per core with no resource differ-entiation; Slurm allocates whole nodes or core-sets but cannot adjust allocations for a running job. Kubernetes’ container-native resource model enables what we term 
+
+rank-aware resource scheduling : matching CPU provi-sioning to per-rank computational load at a granularity impossible with conventional HPC tooling. This work targets throughput-optimal scheduling , not latency-optimal execution. In shared clusters, minimis-ing per-job runtime is suboptimal for global resource effi-ciency; the relevant objective is maximising the number of concurrent jobs the cluster can sustain at an acceptable per-job performance. Our 16-rank experiments demon-strate that this framing is not merely theoretical: pro-portional allocation is 20% faster than equal allocation at scale (Section 5.5), achieving both better performance and lower provisioned cost simultaneously. Existing approaches to elastic HPC on Kubernetes ei-ther assume static, uniform resource allocation across all MPI ranks [13, 14] or adjust resources only through disruptive checkpoint-restart cycles [15, 16], lacking fine-grained, runtime-adjustable control over per-rank CPU distribution. We propose rank-aware resource scheduling ,a paradigm for tightly-coupled HPC workloads in cloud-native environments that bridges domain-decomposition load information with container-level CPU provisioning. Although demonstrated here with OpenFOAM, the ap-proach is solver-agnostic: any MPI application that uses weighted domain decomposition can exploit the same Ku-bernetes resource mapping. This paper makes three methodological contributions: 1. Identification of a Fundamental CFS–MPI Incompatibility. We reveal and quantify asynchronisation-amplification pathway in which Linux CFS bandwidth control, when applied via Ku-bernetes hard CPU limits, causes a 4 × per-rank quota deficit to cascade through MPI_Allreduce bar-riers into a 78 × global slowdown. This is not merely a misconfiguration artefact: it demonstrates a funda-mental incompatibility between CFS quota enforce-ment and tightly-coupled MPI, where any rank’s throttle event becomes a system-wide stall. We show that requests-only allocation eliminates the in-compatibility entirely, providing directly actionable guidance for practitioners deploying parallel scien-tific workloads on Kubernetes. 2. Rank-Aware Resource Scheduling. We de-sign and implement a mapping from OpenFOAM’s 
+
+processorWeights directive to Kubernetes CPU re-quests, provisioning each MPI rank with CPU pro-portional to its subdomain cell count rather than the traditional uniform one-core-per-rank. At 16 ranks this yields a 20% wall-clock speedup over equal allo-cation while reducing the provisioned CPU of sparse-subdomain pods by up to 82%, freeing scheduling headroom for co-resident workloads. 3. In-Place Dynamic CPU Adjustment. We demonstrate, for the first time in an MPI CFD con-text, the use of Kubernetes In-Place Pod Vertical Scaling (GA since v1.35) to adjust per-rank CPU re-quests mid-simulation without pod restart, enabling a pseudo-dynamic resource policy that can respond to shifting computational load across subdomains over time. The remainder of this paper is organised as follows. Section 2 reviews the relevant background in OpenFOAM 2domain decomposition, MPI parallelism, and Kuber-netes resource management. Section 3 details our three methodological contributions. Section 4 describes the ex-perimental setup and test cases. Section 5 presents re-sults and analysis, and Section 6 offers conclusions and directions for future work. 
+
+# 2 Background and Related Work 
+
+2.1 OpenFOAM Domain Decomposition 
+
+OpenFOAM [1, 2, 17] is an open-source finite-volume framework widely used for incompressible and compress-ible flow, combustion, multiphase, and solid-mechanics problems. Parallel execution follows a spatial decompo-sition approach: the utility decomposePar partitions the computational mesh into N subdomains, each written to a separate directory ( processor0 , processor1 , . . . ). At runtime, N MPI ranks are launched, each loading its local subdomain and communicating face-interpolated bound-ary values through MPI point-to-point and collective op-erations. The partitioning algorithm is specified in the 
+
+decomposeParDict dictionary. Among the available methods, scotch [6] and metis [5] employ graph-based multilevel k-way partitioning to minimise inter-processor communication while balancing cell counts. Both meth-ods accept an optional processorWeights list, a vector of 
+
+N floating-point values that biases the partitioner to as-sign proportionally more cells to subdomains with higher weights. For example, a weight vector (1 , 1, 5, 15) nor-malised to unit sum instructs Scotch to place approxi-mately 1/22 , 1/22 , 5/22 , and 15 /22 of the total cells in the four respective subdomains. This feature is normally used to compensate for hetero-geneous hardware (e.g., giving more cells to faster proces-sors), but in our framework, we repurpose it in the oppo-site direction: we intentionally create imbalanced subdo-mains and then compensate by allocating CPU resources proportionally. 
+
+2.2 MPI Parallelisation and Oversub-scription 
+
+The Message Passing Interface (MPI) [3] is a stan-dardised API for distributed-memory parallel program-ming. OpenFOAM uses MPI for all inter-process com-munication, relying on both point-to-point exchanges (MPI_Send /MPI_Recv ) across processor boundaries and collective operations ( MPI_Allreduce , MPI_Allgather )for global residual norms and convergence checks. MPI implementations such as Open MPI [18] permit 
+
+oversubscription : launching more ranks than physical cores via the --oversubscribe flag. In this mode, the op-erating system time-slices ranks onto cores through pre-emptive scheduling. While this removes the hard con-straint of one rank per core, it introduces several prob-lems for tightly-coupled iterative solvers: 
+
+• Uncontrolled sharing. The OS scheduler treats all ranks equally regardless of their computational load, so a rank with a large subdomain receives no preferential CPU time. 
+
+• Context-switch overhead. Frequent preemption pollutes caches and TLB entries, degrading memory-bound finite-volume stencil operations. 
+
+• Synchronisation amplification. Because MPI collectives block until all ranks arrive, any rank de-layed by time-sharing stalls the entire communicator. This noise amplification effect is well documented in large-scale HPC [19]. 
+
+• No isolation. Oversubscribed ranks share a core’s resources (cache, memory bandwidth) without any bandwidth guarantee. These limitations motivate a container-based approach in which CPU bandwidth is explicitly partitioned among ranks rather than left to the discretion of the general-purpose OS scheduler. 
+
+2.3 Kubernetes Resource Model 
+
+Kubernetes [7] is a container orchestration platform that manages workloads across a cluster of nodes. Each con-tainer in a pod declares resource requests and resource limits for CPU and memory. These two quantities serve different purposes: 
+
+Requests inform the scheduler’s bin-packing algorithm. A pod is placed on a node only if the node has suf-ficient unrequested capacity. Requests also set the 
+
+cpu.weight parameter in the cgroup, controlling the proportional share of CPU time when the node is contended. 
+
+Limits set a hard ceiling enforced by the CFS bandwidth controller. The kernel assigns each cgroup a quota q
+
+(in microseconds) within a period P (default 100 ms ). A container with a CPU limit of L cores receives a quota 
+
+q = L × P, (1) so that a limit of 0.25 CPU yields q = 25 ms per 
+
+100 ms period. When the container exhausts its quota, the kernel throttles it; all its threads are de-scheduled until the next period begins. Kubernetes exposes CPU in units of milli-cores : 250m 
+
+represents 0.25 of a core. This granularity enables fine-grained partitioning impossible with whole-core MPI binding. Under cgroups v2 [10], the relevant control files are cpu.max (quota and period) for limits and 
+
+cpu.weight for proportional sharing. 3An important operational distinction arises from the interplay of requests and limits. Pods in the Guaranteed 
+
+Quality-of-Service (QoS) class (requests equal limits) re-ceive hard bandwidth caps but cannot burst beyond their allocation, even on an idle node. Pods in the Burstable 
+
+class (requests < limits, or no limits) can exploit spare CPU capacity, but risk noisy-neighbour effects. We eval-uate both configurations in Section 5. 
+
+2.4 In-Place Pod Vertical Scaling 
+
+Historically, modifying a pod’s resource requests or limits required deleting and recreating the pod, an unaccept-able disruption for a running MPI job that holds the in-memory solver state. Kubernetes Enhancement Proposal KEP-1287 [11] introduced In-Place Pod Vertical Scaling ,enabling the kubelet to resize a container’s resources at runtime by updating the corresponding cgroup parame-ters without container restart. The feature entered alpha in Kubernetes v1.27 (April 2023) behind the InPlacePodVerticalScaling feature gate, progressed to beta in v1.31 (August 2024), and reached General Availability in v1.35 (December 2025) [12, 20]. In GA, the feature gate is locked to true and all clusters support it by default. Notably, Medeiros et al. [15] explicitly deferred vertical CPU scaling as future work in late 2024, citing the then-alpha status of the fea-ture. The GA release thus opens a concrete opportunity that prior work identified but could not safely pursue. Each container in a pod specifies a resizePolicy 
+
+per resource. The policy NotRequired indicates that a change to that resource does not require a container restart; the kubelet applies the new cgroup settings in place. For CPU, this is the expected policy, since ad-justing CFS quota and period is a lightweight kernel operation. Memory resizing may additionally require 
+
+RestartContainer if the runtime cannot adjust memory limits live. To resize a running pod, a client patches the 
+
+spec.containers[].resources field via the Ku-bernetes API. The kubelet detects the delta be-tween desired and actual allocations, updates the cgroup parameters, and reports the new status in 
+
+status.containerStatuses[].resources . The resize is asynchronous but typically completes within a single kubelet sync period ( 1 s to 10 s ). 
+
+2.5 Related Work 
+
+Kubernetes as an HPC platform. Beltre et al. [13] provided the foundational evaluation of Kubernetes for MPI scientific workloads, benchmarking communication latency and HPCG throughput against bare metal on Chameleon Cloud. They demonstrated near-bare-metal performance over RDMA but noted 13–22% overhead for TCP/IP stacks. Critically, all MPI ranks in their ex-periments receive identical CPU allocations; no per-rank resource differentiation is explored. Liu and Guitart [14] extended this direction with Scanflow-MPI, a two-layer scheduling framework that selects the number of contain-ers per job, but still allocates uniform CPU resources across all containers. Sochat et al. [21] conducted the most comprehensive cloud-HPC benchmark to date (up to 28,672 CPUs on AWS/Azure/GCP), but none of the 11 evaluated applications include CFD or OpenFOAM, and no per-rank weighting is studied. 
+
+Elastic MPI on Kubernetes. Medeiros et al. [15] in-troduced Kub, which adds horizontal elasticity to MPI jobs on Kubernetes: at user-defined checkpoints, the run-ning job is suspended, ranks are added or removed, data is reshuffled, and execution resumes. They explicitly de-fer vertical CPU scaling, adjusting CPU resources for already-running pods, as future work, citing the then-alpha status of the InPlacePodVerticalScaling feature. In a follow-on study, Medeiros et al. [22] introduced ARC-V, which is, to the best of our knowledge, the only prior work to apply In-Place Pod Vertical Scaling to HPC. How-ever, ARC-V focuses exclusively on memory provisioning across nine proxy applications; CPU vertical scaling is outside the scope of that work, and no CFD workload is considered. 
+
+Elastic resources in CFD. Houzeaux et al. [16] pro-posed a runtime framework that measures MPI commu-nication efficiency via the TALP profiling library and au-tomatically expands or contracts the SLURM core allo-cation to maintain a target parallel efficiency. This is the closest existing work to our dynamic-scaling contribution in terms of CFD applicability. However, it operates on traditional supercomputer batch schedulers (SLURM), uses the Alya solver (not OpenFOAM), and adjusts re-sources by adding or removing whole MPI ranks, adisruptive operation requiring checkpoint-restart. It does not exploit Kubernetes, fractional CPU quotas, or subdomain-load-aware proportional allocation. 
+
+Gap addressed by this work. Table 1 summarises the positioning of existing work. Three capabili-ties are absent from the literature in combination: (i) resource-proportional fractional CPU allocation per MPI rank, driven by domain-decomposition load in-formation ( processorWeights ); (ii) Kubernetes-native In-Place CPU scaling for a running MPI job with-out checkpoint-restart; and (iii) validation on an aero-sciences CFD solver (OpenFOAM) with an aerospace-representative benchmark (NACA 0012 aerofoil). The present work addresses all three. Table 2 highlights the scheduling capabilities that dis-tinguish Kubernetes from the traditional MPI/Slurm model and motivate the rank-aware approach pursued in this work. 4Table 1: Positioning relative to key prior work. ✓= yes; 
+
+◦ = partially; – = no.                                    
+
+> Work Year K8s CFD Prop. CPU In-Place CPU
+> Beltre et al. [13] 2019 ✓–––Houzeaux et al. [16] 2022 –✓––Liu & Guitart [14] 2022 ✓–––Medeiros et al. [15] 2024 ✓–––Medeiros et al. [22] 2025 ✓––mem. only
+> This work 2026 ✓✓✓✓
+
+Table 2: Scheduling capabilities: MPI/Slurm vs. Kuber-netes.               
+
+> Capability MPI/Slurm Kubernetes
+> Fractional CPU (milli-core) –✓
+> Per-rank CPU heterogeneity –✓
+> Runtime CPU adjustment –✓
+> No-restart scaling –✓
+> Multi-job bin-packing ◦✓
+> cgroup resource isolation –✓
+
+# 3 Methodology 
+
+This section describes the three core methodological con-tributions of our framework. The core scheduling con-cept, contrasting equal and proportional CPU allocation across MPI ranks, is illustrated in Fig. 4. 
+
+3.1 Resource-Proportional CPU Alloca-tion 
+
+3.1.1 Intentional Subdomain Imbalance 
+
+Traditional domain decomposition aims for equal cell counts across ranks to balance load under the one-core-per-rank model. We depart from this convention by using the processorWeights directive in OpenFOAM’s 
+
+decomposeParDict to create deliberately imbalanced par-titions. The weight vector w = ( w0, w 1, . . . , w N −1) in-structs the graph partitioner to assign rank i a fraction 
+
+fi = wi
+
+∑N −1 
+
+> j=0
+
+wj
+
+(2) of the total cells M , so that rank i receives approximately 
+
+fi · M cells. 
+
+3.1.2 CPU Mapping Function 
+
+Given a total CPU budget C (in cores), we allocate to rank i:
+
+ci = fi · C = wi
+
+∑N −1 
+
+> j=0
+
+wj
+
+· C. (3) This ensures that the CPU-to-cell ratio ci/(fiM ) = C/M 
+
+is uniform across all ranks, eliminating the load imbalance that would otherwise arise from unequal subdomains. 
+
+Example. Consider four MPI ranks with weights 
+
+w = (1 , 1, 5, 15) . The normalised fractions are 
+
+(1 /22 , 1/22 , 5/22 , 15 /22) . With a total budget of C = 4 .0
+
+cores: 
+
+c0 = 122 × 4.0 ≈ 0.182 CPU 
+
+c1 = 122 × 4.0 ≈ 0.182 CPU 
+
+c2 = 522 × 4.0 ≈ 0.909 CPU 
+
+c3 = 15 22 × 4.0 ≈ 2.727 CPU (4) In Kubernetes milli-core notation these become 182m ,
+
+182m , 909m , and 2727m , summing to the 4.0-core budget. Rounding to Kubernetes-supported precision is handled by a helper script that ensures ∑ ci = C exactly after adjustment. 
+
+3.1.3 Cell Count as a Proxy for Computational Cost 
+
+Equation (3) assumes that cell count is proportional to per-rank computational cost. This is a first-order approx-imation that holds when (i) the solver performs the same number of operations per cell at every iteration, (ii) cell quality is approximately uniform across all subdomains, and (iii) no rank-local features (contact surfaces, dynamic meshing, or localised turbulence activation) dispropor-tionately increase the cost in a subset of cells. For the test cases in this study, the pitzDaily backward-facing step uses a structured mesh with a k-ε model ap-plied uniformly, and the NACA 0012 aerofoil uses a struc-tured C-mesh with k-ω SST also applied uniformly. Un-der these conditions, the cell-count proxy is expected to be a reasonable estimate of relative subdomain cost. In general, a more accurate weight vector could be derived from per-rank profiling (e.g., measuring ExecutionTime 
+
+per iteration per rank); we identify this as future work (Section 6). The present study evaluates the scheduling mechanism independently of weight accuracy: even an approximate weight vector demonstrates the CFS throt-tling effect (Section 5.3) and the In-Place scaling capabil-ity (Section 5.6), both of which are insensitive to whether weights precisely reflect computational cost. 
+
+3.1.4 Hard Limits vs. Requests-Only 
+
+We evaluate two allocation strategies: 
+
+Hard limits (Guaranteed QoS). 
+
+Both resources.requests.cpu and 
+
+resources.limits.cpu are set to ci. The CFS bandwidth controller enforces a hard quota: 
+
+qi = ci × P, P = 100 ms . (5) Rank i can never exceed ci cores of CPU time per period, regardless of node utilisation. This prevents burst behaviour but guarantees deterministic perfor-mance isolation. 
+
+Requests-only (Burstable QoS). Only 
+
+resources.requests.cpu is set to ci; no limit is 5specified. The CFS proportional share ( cpu.weight )ensures that under contention each rank receives at least ci cores, but on an underloaded node any rank may burst to consume idle capacity. This strategy trades strict isolation for opportunistic performance gains. 
+
+3.1.5 CFS Bandwidth Control Mechanics 
+
+Under Linux CFS bandwidth control, each cgroup is as-signed a tuple (q, P ). The runtime tracks consumed CPU time per period. When a thread’s cgroup has exhausted its quota q, the thread is placed on a throttle list and removed from the run queue until the period timer fires and replenishes the quota. The kernel exposes throttle statistics via cpu.stat :
+
+• nr_throttled : number of times the cgroup was throttled. 
+
+• throttled_usec : total wall-clock time spent throt-tled. These metrics are directly observable via the Kuber-netes Metrics API and through /sys/fs/cgroup within the container, providing a fine-grained view of whether a rank’s allocation is sufficient or overly restrictive. We col-lect these statistics as part of our evaluation (Section 5). 
+
+3.2 In-Place Dynamic Scaling 
+
+3.2.1 Motivation 
+
+Many CFD simulations exhibit time-varying computa-tional load. A Large Eddy Simulation (LES) initialised from a quiescent field undergoes three broad phases: (i) an impulsive start with large residuals and many inner iterations, (ii) a transitional phase as turbulent structures develop, and (iii) a statistically stationary phase with pre-dictable iteration counts. Allocating resources for the peak load throughout the entire simulation wastes CPU during the lighter phases. 
+
+3.2.2 Architecture 
+
+We exploit Kubernetes In-Place Pod Vertical Scaling to adjust CPU allocations at phase boundaries without in-terrupting the MPI communicator. The architecture con-sists of three components: 1. Simulation monitor. A sidecar container or ex-ternal controller watches OpenFOAM’s log output (e.g., the simpleFoam residual log) and detects phase transitions based on residual magnitude or elapsed simulation time. 2. Scaling controller. Upon detecting a phase tran-sition, the controller issues a kubectl patch com-mand (or equivalent API call) to modify the target pod’s spec.containers[].resources.requests 
+
+and spec.containers[].resources.limits .3. Kubelet enforcement. The kubelet detects the resource delta, updates the cgroup parameters (cpu.max for limits, cpu.weight for requests), and reports the new effective resources in the pod status. The pod specification must include a resizePolicy for CPU:            
+
+> 1resizePolicy :
+> 2-resourceName : cpu
+> 3restartPolicy : NotRequired
+> 4-resourceName : memory
+> 5restartPolicy : RestartContainer
+
+Listing 1: Pod spec with resize policy. The NotRequired policy for CPU ensures that the con-tainer process (the MPI rank) continues executing with-out interruption when the cgroup quota changes. 
+
+3.2.3 Three-Phase Scaling Strategy 
+
+We define a concrete scaling protocol for a developing flow field: 
+
+Phase 1: Start-up ( t < t 1). High CPU allocation (cmax  
+
+> i
+
+) to accommodate the large number of inner iterations required to resolve the impulsive transient. 
+
+Phase 2: Development ( t1 ≤ t < t 2). Moderate allo-cation ( cmid  
+
+> i
+
+) as the flow field develops and residuals decrease. 
+
+Phase 3: Steady state ( t ≥ t2). Reduced allocation (cmin  
+
+> i
+
+) sufficient for the statistically stationary regime. The phase boundaries t1 and t2 can be specified man-ually or detected automatically from the convergence history. At each transition, the controller patches all 
+
+N worker pods simultaneously. Formally, the time-dependent allocation for rank i is: 
+
+ci(t) = 
+
+
+
+cmax  
+
+> i
+
+if t < t 1,cmid  
+
+> i
+
+if t1 ≤ t < t 2,cmin  
+
+> i
+
+if t ≥ t2.
+
+(6) The total cluster CPU consumption is thus reduced over the simulation lifetime, freeing resources for co-scheduled workloads. 
+
+3.2.4 Overhead Analysis 
+
+The in-place resize operation modifies cgroup parameters via the sysfs interface, which involves a single kernel sys-tem call per container. We measured the resize latency (Section 5) and found it consistently below 2 s , dominated by the kubelet sync period rather than the cgroup write itself. During the resize, the MPI process continues exe-cuting; no messages are lost, and no synchronisation bar-riers are affected. 63.3 Multi-Simulation Resource Sharing 
+
+3.3.1 Problem Statement 
+
+In production environments, multiple CFD analysts of-ten share a finite compute cluster. Traditional MPI de-ployments reserve entire nodes for each job, leading to fragmentation: a four-rank job on a 64-core node leaves 60 cores idle if no backfill scheduling is available. 
+
+3.3.2 Kubernetes-Native Isolation 
+
+Kubernetes’ bin-packing scheduler can place pods from independent simulations on the same node, subject to resource availability. Each pod’s cgroup enforces CPU and memory isolation: 
+
+• CPU isolation. CFS bandwidth control ensures that each pod receives at least its requested CPU share, even when co-located with other workloads. 
+
+• Memory isolation. Memory limits trigger OOM (Out of Memory) kills if a container exceeds its allo-cation, preventing one simulation from evicting an-other’s pages. 
+
+• I/O isolation. Block I/O cgroup controllers (avail-able under cgroups v2) can further limit disk band-width if needed, though CFD workloads are typically CPU-bound during the solve phase. 
+
+3.3.3 Resource Reclamation 
+
+Our resource-proportional scheme inherently frees CPU capacity. If a four-rank simulation with weights 
+
+(1 , 1, 5, 15) uses only 4.0 out of 4.0 available cores under proportional allocation (versus 4.0 cores under the tra-ditional model where each rank claims exactly 1.0), the savings arise when the total budget C is set below N , for instance, C = 3 .0 cores for N = 4 ranks. The remain-ing 1.0 core of node capacity is immediately available for other pods. More significantly, under the Burstable QoS class (requests-only), the freed capacity is automatically avail-able to any pod on the node. A second simulation scheduled on the same node can burst into the unused CPU bandwidth during periods when the first simula-tion’s lightweight ranks are idle. Kubernetes’ propor-tional share mechanism ( cpu.weight ) ensures fair allo-cation under contention, while the absence of hard limits permits full utilisation of physical resources. Figure 1 illustrates the packing advantage con-cretely. Under traditional MPI (top), each rank reserves 1.0 vCPU regardless of subdomain load, leaving 4.0 vCPU idle across two nodes. Under rank-aware scheduling (bot-tom), sparse-subdomain ranks reserve only 0.25 vCPU, freeing 3.5 vCPU that the Kubernetes scheduler immedi-ately fills with co-resident workloads. 0 1 2 3 4         
+
+> Node 2
+> Node 1 R0
+> 1.0
+> R1
+> 1.0
+> idle
+> 2.0 vCPU
+> R2
+> 1.0
+> R3
+> 1.0
+> idle
+> 2.0 vCPU
+> (a) Traditional MPI: 1.0 vCPU per rank, rigid allocation
+> 01234
+> vCPU
+> Node 2
+> Node 1 R0
+> R1
+> Job B
+> 2.0 vCPU
+> Job C
+> 1.5
+> R2
+> 1.0
+> R3
+> 2.5 vCPU
+> B
+> 0.5
+> (b) K8s rank-aware: proportional CPU frees headroom for co-resident jobs
+> CFD simulation (ranks 0-3) Co-resident Job B Co-resident Job C Idle (wasted)
+
+Figure 1: Cluster packing comparison. (a) Traditional MPI: each rank reserves 1.0 vCPU, leaving 4.0 vCPU idle across two nodes. (b) Rank-aware K8s scheduling: pro-portional CPU frees headroom for co-resident jobs (or-ange, green), eliminating idle waste. 
+
+3.3.4 Namespace and Priority Isolation 
+
+Kubernetes namespaces and ResourceQuota objects pro-vide an additional layer of administrative isolation. Each simulation (or project) can be assigned a namespace with CPU and memory quotas, preventing any single workload from monopolising cluster resources. PriorityClass ob-jects enable preemption-based scheduling, where high-priority simulations can evict lower-priority ones if re-sources become scarce. These mechanisms naturally com-pose with our per-pod proportional allocation. 
+
+# 4 Experimental Setup 
+
+4.1 Hardware and Software Environment 
+
+All experiments were conducted on clusters deployed on Amazon Web Services (AWS) EC2, provisioned with k3s v1.35, a lightweight, CNCF-certified Kubernetes dis-tribution. The pitzDaily validation experiments (C0– C5, Section 5.2–5.6) were conducted on a two-worker-node cluster with t3.xlarge instances (4 vCPU each, burstable). All NACA 0012 experiments were subse-quently repeated on non-burstable c5.xlarge compute-optimised instances to ensure reproducible performance (standard deviations below 2% of the mean across three repetitions per configuration): a 4-rank cluster (2 worker nodes) for the decomposition study, and a 16-rank clus-ter (4 worker nodes) for scaling experiments. Table 3 summarises the c5 environment used for all quantitative results reported in this paper. 
+
+Cluster configuration. Worker nodes host the Open-FOAM solver pods; the control-plane node runs the K3s API server, scheduler, and MPI launcher pod only. For 4-rank experiments, two worker nodes each host two pods (4 MPI ranks total, 1 rank per vCPU). For 16-7Table 3: Hardware and software environment.                        
+
+> Component Specification
+> Control-plane node ( ×1)
+> Instance type AWS EC2 c5.large
+> CPU / Memory 2 vCPU / 4 GB
+> Worker nodes ( ×2 or ×4)
+> Instance type AWS EC2 c5.xlarge
+> Processor Xeon Platinum 8000-series @ 3.0 GHz CPU / Memory 4 vCPU / 8 GB each
+> Software
+> OS Ubuntu 22.04, kernel 6.8.0-1050-aws Kubernetes k3s v1.35.0 (cgroups v2) Container runtime containerd 1.7.x Shared storage AWS EFS (NFS,
+> ReadWriteMany )OpenFOAM v10 (native x86-64) MPI Open MPI 4.1.x
+
+Table 4: Test case summary.                   
+
+> Case Solver Cells Turb. model Role
+> pitzDaily simpleFoam 12 K k-εValidation NACA 0012 rhoSimpleFoam 16 K k-ωSST 4-rank primary NACA 0012 rhoSimpleFoam 101 K k-ωSST 16-rank scaling
+
+rank experiments, four worker nodes each host four pods (16 MPI ranks total, 1 rank per vCPU, no oversub-scription). Shared case data are stored on AWS EFS mounted at /data/openfoam via NFS ( ReadWriteMany ). The InPlacePodVerticalScaling feature gate is en-abled cluster-wide. 
+
+4.2 Test Cases 
+
+We evaluate two OpenFOAM cases that span different flow physics and solvers. Table 4 summarises their key parameters. 
+
+4.2.1 pitzDaily (Validation) 
+
+The pitzDaily case is a two-dimensional backward-facing step (Fig. 2), a canonical incompressible flow benchmark with well-documented reattachment behaviour. Table 5 summarises the numerical setup. With Scotch decomposition and weight vector 
+
+(1 , 1, 5, 15) , the four subdomains contain 556, 556, 2 778, and 8 335 cells respectively, as illustrated in Fig. 2. 
+
+Physical motivation for proportional allocation. 
+
+Fig. 2 reveals a key feature of this decomposition: the spa-tial structure of the four subdomains corresponds natu-rally to the flow physics of the backward-facing step. The two smallest subdomains (Proc 0 and Proc 1, 556 cells each) occupy the near-step recirculation region, where Table 5: pitzDaily case setup.                                              
+
+> Parameter Value
+> Mesh cells 12 225 (structured blockMesh )Domain ( x,y)[−0.021 ,0.29] ×
+> [−0.025 ,0.025] mStep height h= 0 .0254 m, expansion ratio =2.0
+> Solver simpleFoam (steady SIMPLE) Turbulence k-ε, standard wall functions
+> ν1×10 −5m2/s
+> U∞10 m/s; Re h= 25 400
+> Inlet k0.375 m2/s 2(I= 5% )Inlet ε14 .855 m2/s 3
+> Pressure BCs Outlet p= 0 ; inlet zero-gradient Walls No-slip; k/εwall functions Relaxation p: 0.3; U,k,ε: 0.7 Convergence Residuals <10 −5
+
+mesh cells are finest. Proc 2 (2 778 cells) covers the mid-field reattachment zone, while Proc 3 (8 335 cells) spans the bulk of the downstream fully-developed channel. A potential concern is that cells in high-gradient re-gions may carry higher per-cell computational cost. For the simpleFoam solver with k-ε and standard wall func-tions, however, each cell undergoes identical operations per SIMPLE iteration: one pressure–velocity coupling sweep and one turbulence-model update. Wall func-tions are applied as boundary conditions at wall-adjacent faces, not as additional per-cell volume operations, and the iterative linear solvers (PCG for p, PBiCGStab for 
+
+U ) perform the same work per matrix row regardless of local gradient magnitude. The per-iteration cost is therefore approximately proportional to cell count. Un-der this model, Proc 3 (68% of cells) performs 68% of the total computational work per iteration. Assigning it 
+
+c3 = 2 .5 vCPU while the lightweight subdomains receive 
+
+c0 = c1 = 0 .25 vCPU brings the per-iteration CPU times into closer alignment across ranks, reducing the barrier stall time at MPI_Allreduce .This physical correspondence—larger subdomains cov-ering the lower-gradient far-field region—makes pitz-Daily the primary vehicle for validating the proportional-allocation strategy. The case spans typical wall-clock times of 27–101 s depending on configuration. 
+
+4.2.2 NACA 0012 Airfoil (Primary) 
+
+The NACA 0012 case uses the standard OpenFOAM tutorial (compressible/rhoSimpleFoam/aerofoilNACA0012 ), which solves two-dimensional steady compressible RANS with the rhoSimpleFoam solver. The flow conditions place this firmly in the compressible regime, directly relevant to transonic aerodynamics. Table 6 summarises the setup. The baseline equal decomposition (C2) produces four sectors of approximately equal cell count (≈4 050 each), as shown in the supplementary mesh 80.00 0.05 0.10 0.15 0.20 0.25 0.30          
+
+> x (m)
+> 0.02
+> 0.01
+> 0.00
+> 0.01
+> 0.02
+> y (m)
+> Equal: processorWeights (1,1,1,1)
+> C2 baseline
+> 0.00 0.05 0.10 0.15 0.20 0.25 0.30
+> x (m)
+> 0.02
+> 0.01
+> 0.00
+> 0.01
+> 0.02
+> y (m)
+> Proportional: processorWeights (1,1,5,15)
+> C4/C4b
+> Proc 0 Proc 1 Proc 2 Proc 3
+
+Figure 2: pitzDaily mesh coloured by Scotch subdo-main. Top : equal decomposition (C2 baseline), all four subdomains ≈3 056 cells each. Bottom : propor-tional decomposition, processorWeights (1 , 1, 5, 15) gives 556 / 556 / 2 778 / 8 335 cells. The downstream channel (Proc 3, red) receives the most cells and the highest CPU budget; the near-step region (Proc 0–1, blue/green) re-ceives the fewest. figure; the proportional decomposition assigns cells by radial distance (see Fig. 3). The mesh is generated by blockMesh using the stan-dard OpenFOAM tutorial configuration, which projects block vertices onto a triSurfaceMesh representation of the NACA 0012 profile. The 2-D domain is one cell thick in the spanwise direction. The resulting 16 200-cell mesh has maximum non-orthogonality below 40 ◦ and maxi-mum skewness below 0.65 , well within OpenFOAM’s rec-ommended bounds. This case is the primary benchmark for two reasons. First, the structured mesh naturally exhibits a strong density gradient: the near-wall cells required for k-ω SST resolution are orders of magnitude finer than the far-field cells, creating the heterogeneous subdomain work-load that motivates proportional CPU allocation. Sec-ond, the transonic compressible regime ( M a ≈ 0.72 ) is directly representative of cruise-condition aerodynamics and squarely within the scope of aerospace HPC work-loads. 
+
+Refined mesh for 16-rank scaling experiments. 
+
+To evaluate proportional allocation at a larger scale, we generate a refined variant of the same NACA 0012 case by increasing the blockMeshDict cell counts by a fac-tor of ≈2.5 in each mesh direction: zCells 60 → 150 ,
+
+xUCells 60 → 150 , xMCells 25 → 62 , xDCells 50 → 125 .The resulting mesh contains 101 100 cells with maximum non-orthogonality 36 .5◦ and maximum skewness 0.64 ,both well within acceptable bounds. All flow conditions, boundary conditions, turbulence model, and convergence Table 6: NACA 0012 case setup. 
+
+Parameter Value 
+
+Mesh cells 16 200 (blockMesh + extrudeMesh )Solver rhoSimpleFoam (steady com-pressible) Thermodynamics hePsiThermo , perfect gas, cp
+
+const Turbulence k-ω SST 
+
+U∞ 250 m/s; M a ≈ 0.72 (T∞ =298 K) AoA α = 0 ◦
+
+p∞ 1 × 10 5 Pa 
+
+T∞ 298 K Freestream BC freestreamVelocity /
+
+freestreamPressure 
+
+Wall BC No-slip; k/ω wall functions Pressure limits [0 .1 p∞, 2 p∞]
+
+Convergence p: 10 −6; U, k, ω, h : 10 −5
+
+Iterations 5 000 
+
+criteria are identical to the 16 K-cell case described above; only the mesh resolution and the number of MPI ranks (16 instead of 4) differ, ensuring that any performance differences are attributable to rank count and allocation strategy rather than problem formulation. 
+
+Physical motivation for the NACA 0012 decom-position. The structured C-mesh around the aero-foil naturally produces a strong radial density gradient: boundary-layer cells adjacent to the aerofoil surface must resolve the viscous sublayer, and are orders of magni-tude finer than the uniform far-field cells. For a steady compressible RANS solver such as rhoSimpleFoam , the per-iteration solve cost is approximately proportional to cell count, so a subdomain that contains more cells takes proportionally longer to complete each iteration and thus becomes the bottleneck at MPI_Allreduce barriers if it is under-provisioned in CPU. For the proportional-allocation experiments (C4, C4b), cells are assigned to the four subdomains using a distance-based manual decomposition : each cell is ranked by its Euclidean distance from the aerofoil midchord (0 .5c, 0) ,then partitioned into four concentric zones with a 4:3:2:1 cell-count ratio. This produces the ring-structured sub-domains shown in Fig. 3, where Proc 0 (innermost, 6 480 cells) spans the fine near-wall and BL region, and Proc 3 (outermost, 1 620 cells) covers the coarse far-field. In contrast to Scotch graph partitioning, which min-imises inter-subdomain communication boundaries but produces geometrically mixed sectors, the distance-based assignment yields a clear physical correspon-dence between zone i and the computational cost density at that radial distance. Scotch with 
+
+processorWeights (4 , 3, 2, 1) is used for the experi-mental runs because it minimises communication over-920 10 0 10 20                  
+
+> x / c
+> 20
+> 15
+> 10
+> 5
+> 0
+> 5
+> 10
+> 15
+> 20
+> z / c
+> (a) Equal: Scotch (1,1,1,1), C2 baseline (full)
+> 210123
+> x / c
+> 3
+> 2
+> 1
+> 0
+> 1
+> 2
+> 3
+> z / c
+> (b) Near-field zoom
+> 20 10 010 20
+> x / c
+> 20
+> 15
+> 10
+> 5
+> 0
+> 5
+> 10
+> 15
+> 20
+> z / c
+> (c) Proportional: distance-based (4,3,2,1), C4 (full)
+> 210123
+> x / c
+> 3
+> 2
+> 1
+> 0
+> 1
+> 2
+> 3
+> z / c
+> (d) Near-field zoom
+> Proc 0 Proc 1 Proc 2 Proc 3
+
+Figure 3: NACA 0012 mesh coloured by subdomain as-signment. Top row (a, b): equal Scotch decomposition (C2 baseline), ≈4 050 cells per subdomain in four angu-lar sectors. Bottom row (c, d): distance-based propor-tional decomposition (4:3:2:1), forming concentric rings around the aerofoil. Left column: full domain ( ±20 c); right column: near-field zoom showing the subdomain structure around the aerofoil surface. The concentric de-composition aligns subdomain boundaries with the radial cost gradient: Proc 0 (innermost, 6 480 cells) covers the boundary layer; Proc 3 (outermost, 1 620 cells) covers the far-field. head; the distance-based decomposition is used for vi-sualisation only, to illustrate the physical motivation in Fig. 3. Both methods produce identical cell-count ratios (6 480 : 4 860 : 3 240 : 1 620). For the 4-rank NACA experiments (C4, C4b), the pod CPU allocations (c0, c 1, c 2, c 3) =(0 .25 , 0.25 , 1.0, 2.5) vCPU are derived from the pitz-Daily weight vector (1 , 1, 5, 15) , not from the NACA cell-count ratio (4 , 3, 2, 1) . This means the CPU-to-cell mapping is not proportionally matched for this case: Proc 0 (6 480 cells) receives only 250 m, while Proc 3 (1 620 cells) receives 2 500 m. This deliberate mismatch serves the controlled comparison in Section 5.4: the C2-manual configuration (concentric decomposition with equal CPU) isolates the decomposition effect, while C4-manual adds the mismatched proportional CPU, enabling quantification of both factors independently. The 16-rank scaling experiment (Section 5.5) uses properly aligned grouped weights (1 , 1, 5, 15) × 4 ranks, where CPU and cell count are matched by construction. Table 7: Experimental configurations. 
+
+ID Name Description 
+
+C0 hostNetwork K8s pods, EC2 native network (no overlay) C1 Single-pod 4 MPI procs on one pod, shared memory C2 K8s equal 4 pods, 1.0 vCPU each, equal decomp. C3 Prop. + lim-its Weights (1 , 1, 5, 15) ,hard CPU limits C4 Prop. req-only Weights (1 , 1, 5, 15) , re-quests only C4b 4vCPU prop. Weights (1 , 1, 5, 15) , 4.0 vCPU total, req. only C5 Dynamic Prop., In-Place resize at phase transitions 
+
+4.3 Configurations 
+
+Seven configurations are compared, as summarised in Ta-ble 7: The seven configurations serve two distinct experimen-tal purposes, which we make explicit to avoid conflating incommensurable baselines. 
+
+Network baseline (C0 vs C2). These two configura-tions isolate the contribution of the Kubernetes CNI over-lay to inter-pod latency. Configuration C0 runs four MPI processes in two pods (two processes per worker node) with hostNetwork: true , bypassing the Flannel overlay and communicating over the native EC2 VPC network. Configuration C2 uses the same process count and equal CPU allocation but routes all MPI traffic through the Ku-bernetes pod network (Flannel CNI). Comparing C0 and C2 answers the question: does the K8s overlay network introduce meaningful overhead for tightly-coupled MPI? 
+
+Note that C1 (all four processes in one pod, shared-memory self/vader transport) serves as a theoretical single-node lower bound; it uses a fundamentally different communication topology and is not a direct comparator for the cross-node configurations. 
+
+Scheduling baseline (C2 vs C3, C4, C4b, C5). 
+
+These configurations share the same three-node cluster and cross-node MPI topology as C2, differing only in how CPU resources are allocated to pods. C2 (equal allocation, equal decomposition) is the scheduling base-line throughout this comparison. Configuration C3 uses weight vector w = (1 , 1, 5, 15) with hard CPU limits 
+
+matching the cell-count fractions (0.25 / 0.25 / 1.0 / 2.5 vCPU). Configuration C4 uses the same weights and CPU requests but omits limits, allowing pods to burst above their scheduled share. Configuration C4b uses weights (1 , 1, 5, 15) with requests-only allocation scaled to a 4.0 vCPU total budget, matching the absolute CPU of C2 while still proportioning the weight. Configura-10 tion C5 extends C4 (requests-only, no hard limits) with In-Place dynamic resizing: the scaler applies Phase 1 al-locations (500m / 500m / 1200m / 1800m) at simulation start, then transitions to Phase 2 (1000m each) at itera-tion 100 via kubectl patch –subresource resize , all without pod restart. 
+
+4.4 Metrics 
+
+We collect the following metrics for each configuration: 1. Wall-clock time (T ): elapsed real time from solver start to convergence, measured via time or Open-FOAM’s functionObjects .2. CPU utilisation (U ): time-series CPU usage per pod, collected via kubectl top pod at 5 s intervals and from cgroup cpu.stat .3. CFS throttling statistics : nr_throttled 
+
+and throttled_usec per pod, read from 
+
+/sys/fs/cgroup/cpu.stat .4. Total CPU-hours (H): the integral of CPU usage over wall-clock time, 
+
+H = 
+
+> N−1
+
+∑
+
+> i=0
+
+∫ T
+
+> 0
+
+Ui(t) d t, (7) approximated by the trapezoidal rule on the sampled data. 5. Resource efficiency (η): 
+
+η = Hbaseline 
+
+Hconfig 
+
+, (8) where Hbaseline is the CPU-hours for C2 (the cross-node K8s baseline). Values η > 1 indicate that the configuration uses fewer CPU-hours than C2 for the same converged result. 6. Parallel speedup (S): 
+
+S = Tserial 
+
+Tconfig 
+
+, (9) and parallel efficiency 
+
+E = SNeffective 
+
+, (10) where Neffective is the total CPU allocation in cores. Each NACA 0012 configuration is executed three times on c5.xlarge instances, and we report the mean execution time with standard deviation. The pitzDaily validation experiments (t3.xlarge) are single-run measurements used to characterise qualitative effects (CFS throttling, net-work overhead) rather than precise timing. Proc 0 
+
+> (w=1)
+> Proc 1
+> (w=1)
+> Proc 2
+> (w=5)
+> Proc 3
+> (w=15)
+> 0.0
+> 0.1
+> 0.2
+> 0.3
+> 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> Fraction of total
+> (a) Traditional MPI
+> 1.0 vCPU per rank
+> Cell fraction (workload)
+> CPU fraction (allocation)
+> Proc 0
+> (w=1)
+> Proc 1
+> (w=1)
+> Proc 2
+> (w=5)
+> Proc 3
+> (w=15)
+> Fraction of total
+> (b) K8s Proportional
+> 0.25 / 0.25 / 1.0 / 2.5 vCPU
+
+Figure 4: Architectural comparison using processor-Weights (1 , 1, 5, 15) . (a) Traditional MPI assigns equal CPU (0.25 of total) per rank regardless of subdomain size; red arrows mark the mismatch between workload and allocation for Proc 3. (b) K8s proportional alloca-tion aligns CPU fraction with cell fraction, eliminating idle capacity in the sparse subdomains. 
+
+# 5 Results and Discussion 
+
+5.1 Experimental Structure and Baseline Roles 
+
+The results are organised around two independent com-parisons, each with a dedicated baseline, to avoid conflat-ing communication overhead with scheduling overhead. 
+
+Network baseline (C0 vs C2). Both configura-tions use cross-node MPI with four processes and equal CPU allocation. C0 uses hostNetwork: true (native EC2 VPC networking); C2 uses Flannel CNI. Their com-parison answers whether the K8s overlay network is a significant overhead for tightly-coupled MPI. 
+
+Scheduling baseline (C2 vs C3/C4/C4b/C5). C2 provides the reference for all resource-allocation experi-ments: same topology, same CPU budget, equal decom-position. All scheduling variants use the same three-node cluster as C2, differing only in how CPU is distributed across pods. 
+
+Theoretical lower bound (C1). C1 runs all four MPI processes in a single pod using shared-memory communication ( btl=self,vader ), bypassing cross-node TCP entirely. It represents the best achievable perfor-mance on this hardware, but is not a direct comparator for any distributed configuration; it is included to con-textualise the irreducible latency penalty of cross-node MPI. Figure 4 illustrates the core scheduling contrast: un-der equal allocation (C2), each rank receives 0.25 of the total CPU budget regardless of subdomain size, leaving the sparse-subdomain ranks largely idle at MPI barri-ers. Under proportional allocation (C4), the CPU frac-tion matches the cell fraction, eliminating this structural waste. 
+
+5.2 Kubernetes Overhead: C2 versus C1 
+
+Before evaluating proportional allocation, we quantify the cost of the Kubernetes and container layer itself. Config-11 C0   
+
+> hostNetwork
+> C1
+> Single-pod
+> C2
+> K8s equal
+> C3
+> Prop+limits
+> C4
+> Prop req-only
+> C4b
+> 4vCPU prop
+> C5
+> Dynamic
+> 10
+> 30
+> 100
+> 300
+> 1000
+> 3000
+> Wall-clock time (s)
+> 35s
+> 27s
+> 35s
+> 2738s
+> 101s 86s 80s
+> C2 baseline (35 s)
+
+Figure 5: Wall-clock time for all seven configurations on pitzDaily (291–293 iterations to convergence). The dashed blue line marks the C2 cross-node K8s baseline (35 s). Note the logarithmic scale: C3 (proportional with hard limits) requires 2738 s, a 78 × increase over C2 caused by CFS bandwidth throttling. uration C2 runs four pods each with 1.0 CPU request and limit on the same three-node cluster under equal Scotch decomposition, matching C1 in every resource dimension. Figure 5 shows that C2 wall-clock time exceeds C1 by 
+
+30 % on pitzDaily (35 s vs. 27 s). This overhead arises primarily from MPI communication traversing the pod network rather than shared memory: all four processes in C1 run on the same node and communicate via zero-copy shared memory ( btl=self,vader ), whereas C2 dis-tributes two processes per worker node and communicates over the inter-node network. To decouple the Kubernetes network-layer overhead from the inherent cross-node TCP/IP latency, we add configuration C0, which runs the same four MPI processes in two pods (one per worker node) with hostNetwork: true , bypassing the Flannel CNI overlay and using the native EC2 VPC network directly. C0 achieves 35 s ,identical to C2, confirming that the Flannel overlay con-tributes 0% additional overhead for this workload. The 8 s gap between C1 and C2/C0 therefore reflects cross-node TCP/IP latency alone, not Kubernetes network-ing. The Flannel overlay overhead (0%) is well below the 13–22% TCP/IP overhead reported by [13] and the thresholds considered acceptable in cloud-HPC bench-marks [21]. 
+
+5.3 CFS Throttling: Hard Limits versus Requests-Only 
+
+That CFS hard limits can throttle bursty workloads is well known in the Kubernetes community. The value of this experiment is not the existence of throttling but the quantification of its cascading effect through MPI collective synchronisation , which determines whether hard limits are ever acceptable for tightly-coupled par-allel solvers. Configuration C3 deliberately represents Proc 0     
+
+> (250m limit)
+> Proc 1
+> (250m limit)
+> Proc 2
+> (1000m limit)
+> Proc 3
+> (2500m limit)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> 10000
+> Cumulative throttle events
+> 9,467 9,450
+> 545
+> 0
+> C4: 0
+> events
+> (all pods)
+> (a) nr_throttled C3 (hard limits)
+> Proc 0
+> (250m limit)
+> Proc 1
+> (250m limit)
+> Proc 2
+> (1000m limit)
+> Proc 3
+> (2500m limit)
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> % of wall-clock time throttled
+> 8.8%
+> 21.8%
+> 0.1% 0.0%
+> (b) Throttle time fraction C3
+
+Figure 6: CFS throttling statistics under hard limits (C3). Left: cumulative nr_throttled events per rank (C4 = 0 events for all ranks, shown as annotation). Right: fraction of total wall-clock time spent suspended. Ranks 0 and 1 (250 m limit) accumulate ∼9 450 events each; ranks 2 (1000 m) and 3 (2500 m) are essentially un-throttled. a worst-case Guaranteed QoS scenario in which limits equal requests: both C3 and C4 use the proportional weight vector (1 , 1, 5, 15) with per-pod CPU requests 
+
+(0 .25 , 0.25 , 1.0, 2.5) vCPU (4.0 vCPU total), but C3 ad-ditionally sets identical limits , while C4 omits limits en-tirely. Figure 6 reports per-rank CFS statistics collected via 
+
+/sys/fs/cgroup/cpu.stat sampled every 5 s through-out the C3 run. The results are unambiguous. Ranks 0 and 1, both limited to 250 m CPU, accumulate 9 467 and 
+
+9 450 throttling events respectively, spending 8.8% and 
+
+21.8% of total wall-clock time suspended by the CFS bandwidth controller. Rank 2 (1000 m limit) incurs only 545 events (0.1%), and rank 3 (2500 m limit) is never throttled. The mechanism is as follows: each MPI rank is a single-threaded process whose instantaneous CPU de-mand peaks at approximately 1 000 m during solver sweeps. For ranks 0 and 1, the 250 m quota (25 ms per 100 ms CFS period) is exhausted within the first ∼25 ms of each period, and the process is suspended for the re-maining 75 ms. Because all ranks must synchronise at each MPI_Allreduce barrier, every suspension of ranks 0 or 1 stalls the entire simulation. The cumulative effect inflates wall-clock time for C3 to 78 × above C2 (2 738 s vs. 35 s). Under C4 (requests-only), the throttle counters read zero for all four ranks. CFS weight-based scheduling al-lows each rank to burst above its request value when peer ranks are idle at barriers. C4 wall-clock time is 2.9 × that of C2 (101 s vs. 35 s); this slowdown is caused entirely by the imbalanced decomposition, not by CPU throttling. The practical implication is clear: for tightly-coupled MPI, CFS hard limits create a synchronisation-amplification pathway in which a single throttled rank propagates its stall through every collective barrier to the entire communicator. The 78 × amplification factor, from a 4 × per-rank quota deficit to a global slowdown two or-12 0 20 40 60 80          
+
+> Wall-clock time (s)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> CPU utilisation (% of 1 vCPU)
+> (a) C2 equal allocation
+> (1000m each)
+> Proc 0 (1000m)
+> Proc 1 (1000m)
+> Proc 2 (1000m)
+> Proc 3 (1000m)
+> 010 20 30 40 50 60 70
+> Wall-clock time (s)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> CPU utilisation (% of 1 vCPU)
+> (b) C4 proportional requests-only
+> (250m/250m/1000m/2500m)
+> Proc 0 (250m)
+> Proc 1 (250m)
+> Proc 2 (1000m)
+> Proc 3 (2500m)
+
+Figure 7: Per-rank CPU utilisation over wall-clock time. Left: C2 (equal allocation, 1000 m each), all four ranks at roughly equal utilisation. Right: C4 (proportional requests-only), ranks with higher requests (Proc 2/3) sustain higher utilisation; ranks with lower requests (Proc 0/1) operate at proportionally lower utilisation but can burst when peers are idle at barriers. ders of magnitude larger, quantifies the cost of Guaran-teed QoS for MPI workloads and provides practitioners with a concrete reason to prefer requests-only provision-ing. A systematic study of the limit-to-request ratio (e.g. 
+
+L/R = 0 .5, 1.0, 1.5, 2.0) and its effect on throttling sever-ity is left to future work. 
+
+5.4 CPU Utilisation and Resource Effi-ciency 
+
+Figure 7 plots the per-rank CPU utilisation sam-pled via kubectl top at 5 s intervals for C2 (equal, 1000 m each) and C4 (proportional requests-only, 250/250/1000/2500 m). Under C2, all four ranks oper-ate at roughly equal CPU utilisation throughout the solve (dotted lines at 100% of 1 vCPU), consistent with the bal-anced Scotch decomposition. Under C4, ranks 2 and 3 utilise their higher request budgets fully, while ranks 0 and 1 (250 m requests, sparse subdomains) operate at lower utilisation. The requests-only configuration allows bursting: rank 3 occasionally exceeds its 2500 m request, absorbing spare capacity from the cluster while ranks 0 and 1 are idle at barriers. Figure 9 summarises total CPU-hours H and the re-source efficiency η = HC2 /H config (Eq. 8; η > 1 means fewer CPU-hours than the C2 baseline). The propor-tional configurations (C3, C4) consume H = ∑ 
+
+> i
+
+ci · Ti
+
+per unit wall-clock time. Configuration C4 redistributes the same 4.0 vCPU proportionally, assigning a lower scheduling weight to sparse subdomains (c0, c 1, c 2, c 3) = (0 .25 , 0.25 , 1.0, 2.5) vCPU. This gives sparse-subdomain pods a lower CFS scheduling priority, freeing scheduling headroom for co-resident workloads during the MPI bar-rier idle periods without reducing the total provisioned CPU. The trade-off is a 2.9 × increase in wall-clock time (101 s vs. 35 s for C2) due to the imbalanced decom-position bottleneck, acceptable in batch-style workflows, where throughput rather than latency is the primary met-ric. Configuration C3, despite matching C4’s CPU allo-cation, consumes 78 × more wall-clock time due to CFS throttling, making it strictly inferior: it wastes both time and CPU simultaneously. Configuration C4b (4.0 vCPU proportional, requests-only) achieves 86 s, 2.5 × C2, sug-gesting that even at equal total CPU budget, propor-tional allocation with imbalanced decomposition incurs synchronisation overhead when dense-subdomain ranks wait for communication rounds with sparse-subdomain partners. 
+
+Validation on NACA 0012 (rhoSimpleFoam, com-pressible). To obtain reproducible results free of burstable-instance variability, all NACA 0012 experi-ments were repeated on non-burstable c5.xlarge in-stances (4 vCPU, fixed performance) with three runs per configuration. Table 8 reports the mean execution time and standard deviation. A critical addition is configura-tion C2-manual , which isolates the effect of decomposi-tion topology from CPU allocation by combining concen-tric decomposition with equal CPU. Table 8: NACA 0012 wall-clock times (c5.xlarge, 3 runs each). “Manual” uses the distance-based concentric de-composition. Mean ± std. dev. reported. 
+
+Config Decomp ExecTime (s) vs C2 
+
+C2 equal Scotch equal 
+
+200 .9 ± 4.0 baseline C2-manual Concentric 163 .4 ± 1.1 −19% 
+
+C4 manual Concentric 158 .6 ± 1.2 −21 %
+
+Three observations emerge from the controlled com-parison. First, concentric decomposition with equal CPU (C2-manual, 163.4 s) is 19% faster than Scotch equal decomposition (C2, 200.9 s), demonstrating that decom-position topology is the dominant factor in the observed speedup. Second, adding proportional CPU allocation on top of concentric decomposition (C4 manual, 158.6 s) yields a further 3% improvement over C2-manual, con-firming that proportional scheduling weight provides a small but consistent additional benefit once the decom-position structure is favourable. Third, the standard de-viations are below 2% of the mean for all configurations on c5.xlarge, validating the use of non-burstable instances for reproducible HPC benchmarking on cloud infrastruc-ture. Figure 8 visualises these results alongside the 16-rank scaling data (Section 5.5). 
+
+5.5 Scaling to 16 MPI Ranks (101 K Cells) 
+
+To address whether the proportional-allocation benefit persists at larger scale, we repeat the core comparison on a refined NACA 0012 mesh (101 100 cells, obtained by scaling the tutorial blockMeshDict parameters by 13 C2  
+
+> (Scotch,
+> equal CPU)
+> C2-manual
+> (Concentric,
+> equal CPU)
+> C4-manual
+> (Concentric,
+> prop. CPU)
+> 0
+> 50
+> 100
+> 150
+> 200
+> Execution time (s)
+> 201.0s
+> 163.4s 158.6s
+> -19%
+> -21%
+> (a) 4 ranks, 16K cells
+> C2-16
+> (Scotch equal,
+> 1000m × 16)
+> C4-16
+> (Scotch prop.,
+> grouped CPU)
+> 0
+> 500
+> 1000
+> 1500
+> 2000
+> 2500
+> Execution time (s)
+> 2187s
+> 1759s
+> -20%
+> (b) 16 ranks, 101K cells
+
+Figure 8: NACA 0012 execution times on c5.xlarge (mean 
+
+± std, 3 runs each). (a) 4 ranks, 16 K cells: decom-position topology ( −19% ) is the dominant factor; pro-portional CPU adds −3% (total −21% ). (b) 16 ranks, 101 K cells: proportional allocation with grouped weights achieves −20% vs. equal baseline. 
+
+≈2.5 × in each direction) with 16 MPI ranks distributed across four c5.xlarge worker nodes (one rank per vCPU, no oversubscription). Two configurations are compared, each repeated three times: 
+
+C2-16: Scotch equal decomposition, 1000 m CPU per rank (16.0 vCPU total, Guaranteed QoS). 
+
+C4-16: Scotch proportional decomposition with grouped weights (1 , 1, 1, 1, 1, 1, 1, 1, 5, 5, 5, 5, 15 , 15 , 15 , 15) ,corresponding to four radial zones of four ranks each. CPU requests follow the same grouping: 182 m (far-field, 8 ranks), 909 m (mid, 4 ranks), and 2727 m (near-wall, 4 ranks), totalling 16.0 vCPU (Burstable QoS). Table 9 reports the results. Table 9: NACA 0012 wall-clock times at 16 ranks (101 K cells, c5.xlarge, 3 runs each). 
+
+Config CPU per rank ExecTime (s) vs C2-16 
+
+C2-16 1000 m × 16 2187 ± 6 baseline 
+
+C4-16 grouped (1,1,5,15) 
+
+1759 ± 27 −20 %
+
+The proportional configuration C4-16 is 20% faster 
+
+than the equal baseline despite using the same total CPU budget. This contrasts with the modest 3% improvement at 4 ranks (Table 8), indicating that proportional allo-cation becomes more effective as rank count increases: with 16 ranks, the Scotch partitioner can better exploit the weight vector to align subdomain sizes with the phys-ical cost gradient, reducing MPI barrier stall time more effectively than at 4 ranks. Notably, C4-16 provisions only 182 m for each of the eight far-field ranks, an 82% reduction from the 1000 m equal baseline. This frees 8 × 818 m =C0 
+
+> hostNetwork
+> C1
+> Single-pod
+> C2
+> K8s equal
+> C3
+> Prop+limits
+> C4
+> Prop req-only
+> C4b
+> 4vCPU prop
+> C5
+> Dynamic
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> 10000
+> Total CPU-seconds
+> ** shared
+> memory
+> = H_C2 / H_config
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> = H_C2 / H_config
+
+Figure 9: Total CPU-seconds consumed (bars, left axis) and resource efficiency η = HC2 /H config (line, right axis) for all configurations on pitzDaily. C1 is marked with an asterisk because it uses shared-memory communica-tion (single node) and is not directly comparable for cross-node CPU accounting. C3 consumes over 10 000 CPU-seconds despite completing the same work as C2 (140 CPU-s), demonstrating that hard limits are strictly wasteful. 
+
+6.5 vCPU of scheduling headroom for co-resident work-loads, while simultaneously reducing wall-clock time. The performance–efficiency trade-off is thus unambigu-ously favourable at this scale. We note that C2-16 uses Guaranteed QoS (limits equal requests) while C4-16 uses Burstable QoS (requests-only), so part of the 20% speedup may reflect C4-16’s ability to burst above its re-quest values on underloaded cores. However, Section 5.3 shows that Guaranteed QoS with 1000 m limits causes zero throttling when demand matches the limit (as in C2-16), so the QoS difference is unlikely to be the domi-nant factor; the proportional weight vector, which aligns subdomain sizes with CPU, is the primary driver. 
+
+5.6 In-Place Dynamic Scaling (C5) 
+
+Configuration C5 demonstrates In-Place Pod Vertical Scaling applied to a running MPI CFD solver. The scaler monitors simulation progress via kubectl exec polling of 
+
+processor0/ time directories and patches pod CPU re-quests at a pre-defined phase boundaries using kubectl patch –subresource resize –type=json .
+
+Mechanism verification. On pitzDaily (80 s total), the Phase 1 →2 transition fired at iteration 100 (34.4% progress), successfully patching all four pods within 
+
+∆tpatch < 1 s . Each individual kubectl patch call com-pleted in < 250 ms and the kubelet propagated the cgroup update within ∼5 s, well below the cost of one solver itera-tion. The solver residuals continued decreasing monoton-ically through the transition with no stall or divergence artefact, confirming that In-Place CPU resizing leaves the MPI process, its in-memory field data, and inter-pod communication channels intact. 14 On the longer NACA 0012 case (run on the earlier t3.xlarge cluster; 475 s total, concentric decomposition), the Phase 1 →2 transition fired late (at ∼98% completion) due to NFS directory-cache delays on AWS EFS that caused the progress monitor to return stale listings. Addi-tionally, two of the four Phase 1 patch calls targeted CPU values exceeding the pods’ existing hard limits, causing those calls to fail. These are known limitations of the current prototype implementation: the phase-detection mechanism relies on directory listing rather than solver-log parsing, and the initial pod specifications contained residual hard limits that conflicted with the resize targets. Despite incomplete phase triggering, C5 completed with-out solver disruption, confirming that the resize mecha-nism itself is non-disruptive to the compressible RANS solver. 
+
+Feasibility assessment. The pitzDaily result vali-dates the core mechanism: In-Place CPU resizing is non-disruptive to a running MPI CFD solver. The NACA 0012 result exposes two prototype limitations that must be resolved before production use: (i) pods should use requests-only allocation (no hard limits) to prevent limit-conflict failures during resize; (ii) phase de-tection should parse the solver log file directly (e.g. watch-ing for “ ExecutionTime ” lines) rather than relying on NFS directory listings, which suffer from cache staleness. Full validation of the dynamic scaling benefit requires a longer-running simulation (tens of minutes or more) with phase transitions triggering within the 20%–80% progress window; we identify this as future work. 
+
+5.7 Discussion 
+
+Scope: performance–efficiency trade-off, not raw speedup. A reviewer might ask: if fully provisioned MPI is already fast, why use proportional allocation? We address this directly. Fully provisioned MPI, one phys-ical core per rank, no container overhead, shared mem-ory transport, does deliver the shortest wall-clock time for a single isolated simulation, and our results confirm this (C1: 27 s, shared memory; C2: 35 s, cross-node K8s equal allocation). The proposed framework does not seek to outperform this configuration. Its target metric is not raw wall-clock time but the performance–efficiency trade-off relevant to shared, cloud-managed clusters and batch scheduling environments. In those environments, the relevant questions are dif-ferent: 
+
+• Can the same cluster run more concurrent simula-tions by reducing the provisioned (guaranteed) CPU of low-load subdomains? 
+
+• Can proportional provisioning lower the cost of a simulation in cloud deployments billed by reserved vCPU? 
+
+• Can dynamic CPU reallocation redirect freed head-room to a co-resident high-priority simulation as load shifts? Proportional allocation helps when cluster utilisation is high and idle provisioned CPUs represent real opportu-nity cost, the mesh exhibits strong density variation (high 
+
+wmax /w min ), and allocation is configured in requests-only mode. It adds no benefit for a single simulation running on a dedicated cluster, and the paper does not claim oth-erwise. 
+
+When does resource-proportional allocation help? 
+
+Beyond the conditions above, the packing efficiency ar-gument is strongest for transient simulations where the dominant subdomain shifts over time (motivating C5), and for batch workflows where many independent cases share a fixed resource pool. For uniform meshes or single dedicated-cluster runs, equal allocation (C2) remains the preferred choice. 
+
+Hard limits versus requests: a practical guide. 
+
+The CFS throttling results in Section 5.3 provide clear, quantitative guidance. Hard limits are appropriate when 
+
+strict isolation is required (e.g. co-scheduling multiple in-dependent jobs on shared infrastructure) and the limit is set with headroom above the burst demand of the heav-iest computation. For single-job deployments, requests-only allocation is unambiguously preferable: it provides the scheduler with accurate weighting information while permitting burst behaviour that smooths over periodic computational spikes. 
+
+Comparison with related work. Houzeaux et al. [16] achieve elastic CFD on Slurm by adjusting the number of MPI ranks at checkpoints. Our approach is complemen-tary: we target within-job CPU weighting rather than rank-count changes, avoid checkpoint overhead, and op-erate on cloud-native infrastructure. Medeiros et al. [22] demonstrated In-Place scaling for HPC memory on Ku-bernetes; the present work extends the same mechanism to CPU and applies it to a running CFD solver, which is the gap their paper identifies as future work. 
+
+Limitations. Several limitations constrain the gener-alisability of the present results. Scale. The 4-rank experiments use 16 K-cell meshes; the 16-rank experi-ments extend to 101 K cells. Production aerospace CFD routinely involves O(10 7)–O(10 9) cells and hundreds to thousands of ranks, where MPI collective synchronisa-tion overhead grows super-linearly with rank count [19]. Whether the proportional-allocation benefit persists at 
+
+≥64 ranks remains an open question. Dimensionality. 
+
+Both test cases are two-dimensional; industrial 3-D cases with structured–unstructured hybrid meshes may exhibit different decomposition characteristics and per-cell cost variation. Instance selection. Initial experiments on 15 burstable t3.xlarge instances showed significant run-to-run variability (up to 2 ×); all results reported in this pa-per use non-burstable c5.xlarge instances with standard deviations below 2% of the mean. 
+
+# 6 Conclusions and Future Work 
+
+6.1 Conclusions 
+
+This paper demonstrated five practical contributions for deploying OpenFOAM parallel CFD workloads on Ku-bernetes: 1. K8s overlay network is not the bottleneck. 
+
+Comparing C0 (hostNetwork, EC2 native) and C2 (Flannel CNI), both achieve 35 s wall-clock time on pitzDaily. The 30% gap between single-node shared-memory execution (C1, 27 s) and cross-node execu-tion (C2/C0, 35 s) is attributable entirely to cross-node TCP/IP latency, not Kubernetes overhead. 2. Hard CPU limits are catastrophic for tightly-coupled MPI. Configuration C3 (proportional weights + CFS hard limits) requires 78 × more wall-clock time than the equal-CPU baseline (2738 s vs. 35 s). CFS bandwidth throttling on sparse-subdomain ranks propagates to all ranks via 
+
+MPI_Allreduce barriers. Practitioners deploying MPI CFD workloads on Kubernetes must use 
+
+requests-only (Burstable QoS), never hard limits. 3. In-Place Pod Vertical Scaling is feasible for live MPI CFD. Configuration C5 demon-strated that kubectl patch –subresource resize 
+
+can modify per-pod CPU allocations mid-simulation without disrupting the MPI process, its in-memory state, or inter-pod communication. On pitzDaily, the phase transition fired at the intended iteration with patch latency below one SIMPLE iteration and no solver disruption. On NACA 0012, prototype limi-tations (NFS cache delay, residual hard limits) pre-vented timely phase triggering, but the resize mech-anism itself operated correctly. Full validation on longer-running simulations remains future work. 4. At 4 ranks, decomposition topology is the dominant factor; proportional CPU adds an incremental benefit. A controlled comparison on c5.xlarge (non-burstable) instances disentangles the two effects on the 16 K-cell NACA 0012 mesh. Con-centric decomposition with equal CPU (C2-manual, 163.4 s) is 19% faster than Scotch equal decomposi-tion (C2, 200.9 s). Adding proportional CPU allo-cation (C4 manual, 158.6 s) yields a further 3% im-provement. 5. Proportional allocation scales favourably: 20% faster at 16 ranks on 101 K cells. On a refined 101 K-cell NACA 0012 mesh with 16 MPI ranks across four c5.xlarge nodes, Scotch propor-tional decomposition with grouped weights and pro-portional CPU (C4-16, 1759 s) is 20% faster than the equal baseline (C2-16, 2187 s), while provision-ing only 182 m for each of the eight far-field ranks (82% below the 1000 m baseline), freeing 6.5 vCPU of scheduling headroom. The benefit of proportional allocation thus increases with rank count: 3% at 4 ranks, 20% at 16 ranks. 
+
+6.2 Future Work 
+
+Planned extensions include: 
+
+• CFS limit/request ratio study: Systematically vary the L/R ratio (0.5, 1.0, 1.5, 2.0 × request) to identify the throttling threshold for MPI CFD work-loads. 
+
+• 3-D and larger-scale validation: Extend to 64+ ranks with 3-D cases (e.g. motorBike , ∼350 K cells) to quantify how synchronisation amplification inter-acts with proportional allocation at production scale. 
+
+• Dynamic scaling on long simulations: Validate C5 on simulations lasting ≥10 minutes with phase transitions triggering within the 20%–80% progress window. 
+
+• Automated weight estimation: Develop a pre-processing tool that estimates computational cost per cell type and automatically generates optimal processor weights. 
+
+• Integration with VPA: Connect the monitor-ing component to the Kubernetes Vertical Pod Au-toscaler for fully autonomous resource management. 
+
+# References 
+
+[1] H. Jasak, “OpenFOAM: Open source CFD in re-search and industry,” International Journal of Naval Architecture and Ocean Engineering , vol. 1, no. 2, pp. 89–94, 2009. [2] H. G. Weller, G. Tabor, H. Jasak, and C. Fureby, “A tensorial approach to computational continuum mechanics using object-oriented techniques,” Com-puters in Physics , vol. 12, no. 6, pp. 620–631, 1998. [3] Message Passing Interface Forum, “MPI: A message-passing interface standard, version 3.1,” University of Tennessee, Tech. Rep., 2015. [Online]. Avail-able: https://www.mpi-forum.org/docs/mpi-3.1/ mpi31-report.pdf [4] W. Gropp, E. Lusk, and A. Skjellum, Using MPI: Portable Parallel Programming with the Message-Passing Interface , 2nd ed. MIT Press, 1999. 16 [5] G. Karypis and V. Kumar, “A fast and high quality multilevel scheme for partitioning irregular graphs,” 
+
+SIAM Journal on Scientific Computing , vol. 20, no. 1, pp. 359–392, 1998. [6] F. Pellegrini and J. Roman, “Scotch: A software package for static mapping by dual recursive biparti-tioning of process and architecture graphs,” Lecture Notes in Computer Science , vol. 1067, pp. 493–498, 1996. [7] The Kubernetes Authors, “Kubernetes documenta-tion,” https://kubernetes.io/docs/, 2024, accessed: 2025-12-01. [8] J.-P. Lozi, B. Lepers, J. Funston, F. Gaud, V. Quéma, and A. Fedorova, “The Linux sched-uler: A decade of wasted cores,” in Proceedings of the 11th European Conference on Computer Systems (EuroSys) . ACM, 2016, pp. 1:1–1:16. [9] P. Turner, “CFS bandwidth control,” https: //www.kernel.org/doc/Documentation/scheduler/ sched-bwc.txt, 2010, linux kernel documentation. [10] T. Heo, “Control group v2 documentation,” https://www.kernel.org/doc/Documentation/ admin-guide/cgroup-v2.rst, 2023, linux kernel documentation. [11] V. Vinaykumar, M. Tosi, and P. Chen, “KEP-1287: In-place update of pod resources,” https://github. com/kubernetes/enhancements/tree/master/keps/ sig-node/1287-in-place-update-pod-resources, 2023, kubernetes Enhancement Proposal. [12] Kubernetes Release Team, “Kubernetes v1.35 re-lease notes,” https://kubernetes.io/blog/2025/12/ 10/kubernetes-v1-35-release/, 2025, accessed: 2025-12-15. [13] A. M. Beltre, P. Saha, M. Govindaraju, A. Younge, and R. E. Grant, “Enabling HPC workloads on cloud infrastructure using Kubernetes container orchestra-tion mechanisms,” in Proceedings of the IEEE/ACM International Workshop on Containers and New Or-chestration Paradigms for Isolated Environments in HPC (CANOPIE-HPC) . IEEE, 2019, pp. 11–20. [14] P. Liu and J. Guitart, “Fine-grained scheduling for containerized HPC workloads in Kubernetes clus-ters,” in Proceedings of the 24th IEEE International Conference on High Performance Computing and Communications (HPCC) . IEEE, 2022, scanflow-MPI: two-layer MPI job scheduling on K8s; equal CPU per rank; no runtime adaptation; no CFD. [15] D. Medeiros, J. Wahlgren, G. Schieffer, and I. Peng, “Kub: Enabling elastic HPC workloads on con-tainerized environments,” in Proceedings of the 36th IEEE International Symposium on Computer Archi-tecture and High Performance Computing (SBAC-PAD) . IEEE, 2024, horizontal elastic scaling of MPI pods on K8s via checkpoint-restart; defers vertical CPU scaling as future work; no CFD workloads. [16] G. Houzeaux, R. M. Badia, R. Borrell, D. Dosi-mont, J. Ejarque, M. Garcia-Gasulla, and V. López, “Dynamic resource allocation for efficient parallel CFD simulations,” Computers & Fluids , vol. 243, p. 105577, 2022, elastic CFD resource allocation on Slurm/supercomputer (Alya solver); no Kubernetes, no per-rank proportional CPU weighting. [17] The OpenFOAM Foundation, “OpenFOAM user guide, version 10,” https://openfoam.org/version/ 10/, 2024, accessed: 2025-12-01. [18] E. Gabriel, G. E. Fagg, G. Bosilca, T. Angskun, J. J. Dongarra, J. M. Squyres, V. Sahay, P. Kam-badur, B. Barrett, A. Lumsdaine, R. H. Castain, D. J. Daniel, R. L. Graham, and T. S. Woodall, “Open MPI: Goals, concept, and design of a next generation MPI implementation,” in Proceedings of the 11th European PVM/MPI Users’ Group Meeting ,ser. Lecture Notes in Computer Science, vol. 3241. Springer, 2004, pp. 97–104. [19] T. Hoefler, T. Schneider, and A. Lumsdaine, “Char-acterizing the influence of system noise on large-scale applications by simulation,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC) .IEEE, 2010, pp. 1–11. [20] Kubernetes Blog, “Scalable and safe in-place pod resize in Kubernetes,” https://kubernetes.io/blog/ 2025/04/14/scalable-and-safe-in-place-pod-resize/, 2025, accessed: 2025-12-01. [21] V. Sochat, D. Milroy, A. Sarkar, A. Marathe, and T. Patki, “Usability evaluation of cloud for HPC ap-plications,” in Workshops of the International Con-ference for High Performance Computing, Network-ing, Storage and Analysis (SC’25) . ACM, 2025, large-scale cloud K8s benchmarking (up to 28,672 CPUs across AWS/Azure/GCP); 11 proxy apps, none using OpenFOAM; no per-rank CPU weight-ing. [22] D. Medeiros, J. J. Williams, J. Wahlgren, L. S. M. Leite, and I. Peng, “ARC-V: Vertical resource adap-tivity for HPC workloads in containerized environ-ments,” in Proceedings of the 31st International Eu-ropean Conference on Parallel and Distributed Com-puting (Euro-Par 2025) . Springer, 2025, in-Place Pod Vertical Scaling for HPC on K8s; focuses on 
+
+memory only, not CPU; no CFD workloads; explic-itly identifies CPU vertical scaling as open future work. 17
