@@ -1,0 +1,1340 @@
+Title: GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface
+
+URL Source: https://arxiv.org/pdf/2604.05982v1
+
+Published Time: Wed, 08 Apr 2026 01:26:50 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface 
+
+## Yuki Maeda 
+
+maeda@eidos.ic.i.u-tokyo.ac.jp The University of Tokyo Department of Information and Communication Tokyo, Japan 
+
+## Kenjiro Taura 
+
+tau@eidos.ic.i.u-tokyo.ac.jp The University of Tokyo Department of Information and Communication Tokyo, Japan 
+
+Abstract 
+
+Graphics Processing Units (GPUs) excel at regular data-parallel workloads where massive hardware parallelism can be readily ex-ploited. In contrast, many important irregular applications are natu-rally expressed as task parallelism with a fork-join control structure. While CPU runtimes for fork-join task parallelism are mature, it remains challenging to efficiently support it on GPUs. We propose GTaP , a GPU-resident runtime that supports fork-join task parallelism. GTaP is based on the persistent kernel model, and supports two worker granularities: thread blocks and individual threads. To realize fork-join on GPUs, GTaP represents joins as con-tinuations and executes each task as a state machine that can be split into multiple execution segments. We also extend Clang’s frontend with a pragma-based programming model that enables program-mers to express fork-join without exposing low-level mechanisms. GTaP employs work stealing for load balancing, providing better scalability than a global-queue approach. For thread-level workers, we further introduce Execution-Path-Aware Queueing (EPAQ) , which allows programmers to partition task queues using user-defined criteria, reducing warp divergence caused by mixing heterogeneous control flows within a warp. Across representative irregular applications, GTaP outperforms OpenMP task-parallel execution on a 72-core CPU in many cases, especially for large problem sizes with compute-intensive tasks. We also show that GTaP’s design choices outperform naive GPU alternatives. The benefit of EPAQ is workload-dependent: it can improve performance for some benchmarks while having little effect on others; on Fibonacci, EPAQ achieves up to a 1.8 × speedup. 
+
+CCS Concepts 
+
+• Software and its engineering → Runtime environments ; •
+
+Computing methodologies → Massively parallel algorithms .
+
+Keywords 
+
+GPU, fork-join, task parallelism, irregular applications, work steal-ing, runtime system, compiler support 
+
+1 Introduction 
+
+Graphics Processing Units (GPUs) are widely used as accelerators across a broad range of domains (e.g., scientific computing and machine learning), and excel at regular data-parallel workloads by exploiting massive hardware parallelism. Such computations are typically expressed via low-level APIs (e.g., CUDA [ 18 ] and HIP [ 1]) or vendor-agnostic programming models (e.g., OpenCL [ 13 ] and SYCL [ 28 ]). Higher-level approaches include directive-based frame-works (e.g., OpenMP target [ 20 ] and OpenACC [ 31 ]) and productivity-oriented libraries/languages (e.g., CuPy [19] and Chapel [5]). In contrast, many important applications exhibit irregular parallelism (e.g., search, recursive decomposition, and computa-tions with dynamic dependencies) that is difficult to express effi-ciently with simple data-parallel structures. Task parallelism is a natural fit for such workloads. Fork-join is a common task-parallel control structure in which a parent spawns child tasks ( fork ) and later resumes after waiting for them to complete ( join ). While CPU runtimes are mature, GPU execution could also benefit if tasks are mapped efficiently to GPU resources and scheduled with low overhead. However, achieving fork-join efficiently on GPUs is challeng-ing. Kernel-per-task scheduling is impractical due to launch and synchronization overheads, so prior work often relies on persistent kernels that repeatedly fetch tasks on the device [ 9 , 25 , 26 ]. More-over, join requires a task to suspend and later resume at the same point, which GPUs lack direct support for. Finally, SIMT (Single Instruction, Multiple Threads) execution can amplify control-flow divergence within a warp, reducing effective throughput. Existing GPU task-parallel runtimes [ 7, 9 , 14 , 25 , 26 ] often have design constraints in programmability and efficiency. In particular, a design that simultaneously satisfies (i) support for fork-join, (ii) a directive-based programming model to annotate fork and join constructs, (iii) the ability to choose worker granularity down to the thread level, and (iv) the application of highly scalable load balancing via work stealing [4] has yet to be fully explored. To address this gap, we design and implement GTaP (GPU-resident Ta sk Parallelism), a GPU-resident fork-join task-parallel runtime, and evaluate its performance. GTaP realizes fork-join on top of a persistent kernel by representing join as continuations and executing tasks as switch-statement-based state machines split into multiple segments. We also provide a user-friendly directive-based API for expressing fork-join that hides the low-level mechanisms from programmers. GTaP targets NVIDIA GPUs and is implemented in CUDA C++. The contributions of this study are as follows: 
+
+• We design and implement GTaP, a GPU-resident fork-join runtime that implements join using switch-statement-based state-machine tasks. 
+
+• We provide an OpenMP-inspired pragma-based program-ming model by extending Clang, an open-source C/C++ compiler. The compiler extension automatically generates state-machine tasks and manages task-data storage across 
+
+> arXiv:2604.05982v1 [cs.DC] 7 Apr 2026 Yuki Maeda and Kenjiro Taura
+
+join points. Programmers can express fork-join using #pragma gtap task and #pragma gtap taskwait .
+
+• We integrate two worker granularities—thread block and individual thread—into the runtime, enabling granularity selection by task characteristics. 
+
+• We integrate work stealing for scalable load balancing on GPUs, outperforming a global-queue baseline. 
+
+• We introduce Execution-Path-Aware Queueing (EPAQ) to mitigate warp divergence for thread-level workers by rout-ing tasks to separate queues at spawn time or upon re-entry after a join. EPAQ achieves up to 1.8 × speedup on Fibonacci, although its effectiveness is workload-dependent. 
+
+• We conduct a comprehensive evaluation on representative irregular workloads and microbenchmarks. Compared to OpenMP task-parallel execution on a 72-core CPU, GTaP achieves up to 14 .6× speedup on N-Queens and up to 15 .2×
+
+speedup on a compute-intensive fork-join synthetic tree workload. We release GTaP (including the runtime and compiler extension) as open-source software at https://github.com/yukim0359/GTaP. 
+
+2 Background 2.1 Task Parallelism and Fork-Join 
+
+Task parallelism is a parallelization approach in which program-mers define units of work (tasks) at an appropriate granularity, and these tasks are executed in parallel by many workers. This enables programmers to express irregular parallelism, which is often hard to represent with regular data-parallel constructs. However, spawn-ing tasks alone is often insufficient: many irregular applications require expressing dependencies among dynamically generated tasks. Fork-join is a common control structure for this purpose, where a parent task spawns child tasks ( fork ) and later waits at a join point until they complete ( join ). On CPUs, many task-parallel systems supporting fork-join have been developed. Examples include language-/compiler-supported systems such as Cilk [ 3], and runtime systems such as Intel TBB [ 22 ], MassiveThreads [ 17 ], and Itoyori [ 24 ]. OpenMP, which is widely used as an API for shared-memory parallel programming, also has a task-parallel model that supports fork-join [2]. 
+
+2.2 Dynamic Load Balancing and Work Stealing 
+
+Task-parallel workloads often exhibit input-dependent and irreg-ular task costs, making static pre-assignment of tasks to workers ineffective. Thus, dynamic load balancing is essential. A widely used approach is work stealing [ 4 ], where each worker maintains a private task deque (double-ended queue). A worker pushes newly created tasks to its own deque and primarily pops from it, but steals 
+
+from another worker only when it becomes idle. This design reduces contention compared to a centralized global queue and typically preserves locality, since a worker tends to execute tasks it recently created unless stealing occurs. As a simple alternative, the global-queue approach uses a single shared queue that all workers concurrently push to and pop from. Figure 1 summarizes the two approaches. We evaluate their GPU performance in Section 6.1.1. 
+
+2.3 GPU Architecture and Parallelization Hierarchy 
+
+Since GTaP targets NVIDIA GPUs, this section and the following sections focus on NVIDIA GPU architectures. 
+
+2.3.1 Hierarchy of Computing Resources. A GPU is a massively parallel processor that can execute a large number of lightweight threads concurrently. NVIDIA GPUs expose a hierarchical pro-gramming model: a kernel launch defines a grid of thread blocks (CTAs) , each block contains multiple warps , and each warp consists of 32 threads [18 ]. A warp is the fundamental unit of execution and scheduling: threads in a warp follow the SIMT model and typically execute the same instruction stream. When control-flow divergence occurs within a warp, the paths are serialized, reducing effective throughput. Thread blocks are scheduled onto Streaming Multiprocessors (SMs) . Threads within a block can cooperate via fast shared mem-ory and synchronization (e.g., __syncthreads() ). Each SM keeps many warps resident and hides latency by quickly switching to another ready warp when one stalls (e.g., on memory accesses). The number of resident warps is limited by per-block resource us-age (registers and shared memory), which determines occupancy; higher occupancy generally improves latency hiding. 
+
+2.3.2 Hierarchy of Memory. NVIDIA GPUs provide a hierarchical memory system (Figure 2). Registers are private to each thread and offer the lowest-latency storage; however, high register usage can reduce occupancy and thus limit latency hiding. Each SM provides on-chip storage in the form of shared memory and an L1 cache. Shared memory is explicitly managed by program-mers and accessible by threads within the same block, enabling fast inter-thread cooperation. In contrast, the L1 cache is hardware-managed and primarily serves memory accesses within an SM; it is 
+
+not coherent across SMs. The L2 cache is shared across the entire GPU and serves as a common coherence point across SMs. Global memory is also shared across the entire GPU and provides the largest capacity but also the highest latency. 
+
+3 Related Work 
+
+This section reviews GPU task-parallel runtimes and fork-join exe-cution mechanisms from four perspectives: (i) fork-join resumption semantics, (ii) programmability, (iii) worker granularity, and (iv) GPU residency and load balancing. Throughout, we use fork-join 
+
+to include in-place resumption : after children complete, the parent resumes from the same logical context with its live state preserved. 
+
+GPU-Resident Task Runtimes (Not Focused on Fork-Join). Many GPU-resident frameworks are built on the persistent-kernel model, where a long-lived kernel repeatedly fetches and executes tasks on the device [ 30 ]. Representative systems include Softshell [ 25 ], Whippletree [ 26 ], and Atos [ 9, 10 ]. They demonstrate autonomous GPU-side scheduling and, in some cases, multiple execution granu-larities (e.g., block/warp/thread) and queue structuring for hetero-geneous work. However, these systems are not designed around in-place resumption at join points. 
+
+GPU Execution Mechanisms for Fork-Join. Kiuchi et al. [ 14 ] im-plement fine-grained fork-join by treating program continuations GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface : push & pop  : steal  : tasks    
+
+> worker
+> deque
+> deque deque
+> head tail
+> ……
+> ……
+> worker worker
+
+(a) Work stealing: the owner pushes/pops at one end of a deque (often LIFO), while thieves steal from the other end to reduce interference [4]. : push  : pop    
+
+> worker worker worker
+> single global deque
+> head tail
+> ……
+> : tasks
+
+(b) Global-queue approach: all workers concurrently push/pop tasks through a single shared queue. 
+
+Figure 1: Overview of work stealing and global-queue approach. L1 Cache / Shared Memory     
+
+> (256 KB)
+> SM
+> Register
+> (64 KB)
+> warp scheduler
+> Register
+> (64 KB)
+> warp scheduler
+> warp scheduler warp scheduler ……
+> L2 Cache (50 MB)
+> Global Memory (80 GB)
+> Register
+> (64 KB)
+> Register
+> (64 KB)
+> L1 Cache / Shared Memory
+> (256 KB)
+> SM
+> Register
+> (64 KB)
+> warp scheduler
+> Register
+> (64 KB)
+> warp scheduler
+> warp scheduler warp scheduler
+> Register
+> (64 KB)
+> Register
+> (64 KB)
+> L1 Cache / Shared Memory
+> (256 KB)
+> SM
+> Register
+> (64 KB)
+> warp scheduler
+> Register
+> (64 KB)
+> warp scheduler
+> warp scheduler warp scheduler
+> Register
+> (64 KB)
+> Register
+> (64 KB)
+
+Figure 2: Memory hierarchy on H100 (SXM). 
+
+as objects and repeatedly launching kernels while selecting the continuation type. While effective for expressing resumption, the approach remains host-involved and faces kernel-launch and allo-cation overheads; it also places substantial burden on programmers to manually decompose control flow and manage runtime objects. Chatterjee et al. [ 7 ] describe a GPU work-stealing runtime with finish-async style synchronization, providing an important prece-dent for GPU-side load balancing. However, their design targets block-level workers and does not explore granularity down to in-dividual threads. Tzeng et al. [ 29 ] propose explicit dependency resolution, which can represent fork-join by modeling post-join work as dependent tasks, but it does not provide in-place resump-tion of the suspended parent task under our definition. 
+
+Fork-Join APIs and Continuations. Fork-join APIs (e.g., Cilk 
+
+spawn/sync and OpenMP task/taskwait ) require marking task creation and join points, while the runtime provides scheduling and synchronization semantics. Implementing join generally re-quires a continuation , i.e., preserving live state across the wait and resuming at the appropriate program point. Coroutines offer a gen-eral language mechanism for suspension and resumption [ 15 ], and modern languages provide standardized support [ 11 , 12 , 21 ]. On GPUs, however, examples remain limited; Zheng et al. [ 32 ] enable coroutine-style suspension inside kernels for mega-kernel partition-ing in rendering, sharing the motivation of in-kernel resumption but targeting a different application domain and scope. 
+
+Summary. In summary, prior work has proposed mechanisms for executing dynamic tasks on GPUs and for addressing dynamic load balancing. However, to the best of our knowledge, we are not aware of any system that simultaneously satisfies the four requirements described at the beginning of this section. 
+
+4 Runtime Design and Implementation 4.1 Overview of Runtime 
+
+GTaP is based on the persistent-kernel model and supports two execution modes for task execution: thread-executed (also called 
+
+thread-level workers ) and block-cooperative (also called block-level workers ). In the thread-executed mode, a task function is executed by a single CUDA thread and is read like ordinary sequential code. In the block-cooperative mode, a task function is executed coopera-tively by all threads in one thread block; thus, programmers write it in a GPU-style data-parallel manner using threadIdx /blockIdx .Supporting both modes allows GTaP to cover tasks that are nat-urally sequential (e.g., Fibonacci, mergesort) as well as tasks that benefit from intra-task parallelism (e.g., SpMV, frontier expansion). We use a task ID to index into fixed-size task-management stor-age on the GPU. Each task has a persistent task record that holds (i) a payload (e.g., arguments and spilled live values) and (ii) metadata needed for scheduling and synchronization (e.g., the task function, parent/child IDs, and a resumption state). In addition, each worker owns a local work-stealing deque of runnable task IDs. We bulk-allocate these task-management regions in GPU memory on the host before any tasks are spawned, because device-side dynamic allocation inside kernels is limited and often expensive. 
+
+4.2 Implementation of Fork-Join 
+
+Implementing fork-join requires (i) preserving live state across the join, (ii) recording the resumption point, and (iii) re-enqueuing and resuming the parent once children complete. GTaP stores join-crossing live values and the resumption state in the per-task record. We execute each task function as a state machine: the pre-join and post-join code paths are executed as separate invocations of the same function, selected by a switch on state . At the join point, the parent updates state and returns to the runtime; once all children finish, the runtime re-enqueues the parent, which resumes from the post-join case. Program 1 shows the resulting transformation for mergesort. Yuki Maeda and Kenjiro Taura 
+
+Program 1: Pseudocode of mergesort transformed into a state machine.                 
+
+> 1mergesort(mergesort_taskdata *t, int tid, ...) {
+> 2switch ( load_state(tid) ) {
+> 3case 0:
+> 4if (t->left >= t->right) return;
+> 5t->mid = (t->left + t->right) / 2;
+> 6spawn two child tasks (left..mid, mid+1..right);
+> 7store_state(tid, 1);
+> 8return; // wait for join
+> 9case 1:
+> 10 merge(t->data, t->left, t->mid, t->right);
+> 11 return;
+> 12 default:
+> 13 return;
+> 14 }
+> 15 }
+
+This design requires programmers to write task code with ex-plicit awareness of the state-machine transformation. To reduce this burden, GTaP provides language extensions and compiler support that automatically perform the transformation (Section 5). 
+
+4.3 Work Stealing and Task Queue 
+
+GTaP uses GPU-resident random work stealing for load balancing, enabling a fully GPU-side scheduler without host involvement. Each worker maintains a local deque of runnable task IDs; the owner pops from the tail (LIFO) and thieves steal from the head (FIFO). We implement each deque as a fixed-size ring buffer. 
+
+4.3.1 Block-Level Workers. For block-level workers, we place one deque per block. A designated leader thread performs queue oper-ations, and each pop/steal retrieves at most one task. The design is based on the Chase–Lev work-stealing deque [ 6], which pro-vides a fast lock-free path for owner operations (push/pop) and supports concurrent steals via atomic synchronization; however, in our implementation the deque has a fixed capacity. 
+
+4.3.2 Thread-Level Workers. For thread-level workers, we place one (or multiple) deque(s) per warp. Without EPAQ (Section 4.4), each warp has a single deque; with EPAQ, each warp maintains mul-tiple deques (one per queue index). Each persistent-kernel iteration, a warp acquires up to 32 runnable tasks via a warp-cooperative batched pop/steal, executes them (one task per lane), and batches pushes: it keeps up to 32 newly generated tasks for immediate execution and enqueues the rest. 
+
+Data structure. Program 2 shows that each deque is a fixed-size ring buffer queue[QUEUE_SIZE] with logical pointers (ℎ𝑒𝑎𝑑, 𝑡𝑎𝑖𝑙 ).
+
+ℎ𝑒𝑎𝑑 is the steal end and 𝑡𝑎𝑖𝑙 is the owner end. We additionally maintain count , the number of available (not-yet-claimed) tasks. For visibility, head and count reside in global memory (or L2), while tail is kept in shared memory because only the owner warp updates it. A per-queue lock serializes steals so that at most one thief steals from a victim at a time. We use L1-bypass loads for shared metadata to avoid stale reads through non-coherent per-SM L1 caches. 
+
+Batched pop (owner fast path). Algorithm 1 shows PopBatch .Lane 0 atomically claims up to 32 tasks by decrementing count via 
+
+Program 2: Data structure of task queue.        
+
+> 1struct TaskQueue {
+> 2queue[QUEUE_SIZE];
+> 3head;
+> 4count;
+> 5lock;
+> 6};
+> 7// tail is managed in shared memory
+
+Program 3: Pseudocode of mergesort with a cutoff.             
+
+> 1mergesort(data, left, right) {
+> 2if (right - left <= CUTOFF) {
+> 3sequential_sort(data, left, right);
+> 4return;
+> 5}
+> 6mid = (left + right) / 2;
+> 7fork mergesort(data, left, mid);
+> 8fork mergesort(data, mid, right);
+> 9join;
+> 10 merge(data, left, mid, right);
+> 11 return;
+> 12 }
+
+CAS, broadcasts the claimed size, and lanes load the corresponding task IDs from the tail end in parallel; the owner then advances tail 
+
+locally. 
+
+Steal and push (overview). StealBatch mirrors PopBatch on the head end: a thief acquires the victim lock, claims tasks by CAS on 
+
+count , and advances head only after loading stolen IDs. PushBatch 
+
+first stores task IDs into the ring buffer, executes __threadfence() ,and then publishes availability by incrementing count .
+
+Correctness and memory ordering (sketch). Each task ID is claimed exactly once because CAS updates to count are serialized. Owner and thieves access opposite ends, and steals are serialized by the victim lock; thus, a task ID is fetched at most once. Push stores are published by a fence before incrementing count , so any consumer that successfully claims tasks subsequently observes initialized queue entries. 
+
+4.4 Execution-Path-Aware Queueing (EPAQ) 
+
+With thread-level workers, a warp may execute up to 32 tasks in parallel, but mixing tasks that take different control-flow paths in the same warp causes divergence and warp-level serialization, reducing effective throughput. To mitigate this, programmers can 
+
+optionally enable Execution-Path-Aware Queueing (EPAQ) , which separates runnable tasks into multiple queues so that a warp is more likely to fetch tasks following the same execution path. EPAQ lets programmers choose a queue index at (i) spawn time and (ii) re-entry after a join. This enables separating tasks that are known to follow different paths before they are executed. For exam-ple, in cutoff-based mergesort (Program 3), tasks can be classified by the subproblem size ( right-left ) so that (a) cutoff cases, (b) pre-join recursive cases, and (c) post-join merge cases are placed into different queues, avoiding their intermixing within the same warp. GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface                                                                                           
+
+> 1Function PopBatch :Input: 𝑚𝑎𝑥 _𝑐𝑜𝑢𝑛𝑡 _𝑡𝑜 _𝑝𝑜𝑝 : maximum number of tasks to pop (default: WARP_SIZE =32 )
+> Input: 𝑞𝑢𝑒𝑢𝑒 _𝑖𝑑𝑥 : EPAQ index (default: 0)
+> Input/Output :𝑡𝑎𝑖𝑙 : logical tail pointer of the queue (placed in shared memory)
+> Output: 𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡 : number of tasks popped
+> Output: 𝑒𝑥𝑒𝑐 _𝑡𝑖𝑑 : popped task ID for lanes that satisfy the range condition below
+> 2𝑄 ←&TaskQueue[ 𝑞𝑢𝑒𝑢𝑒 _𝑖𝑑𝑥 ][ GetGlobalWarpId() ]
+> 3if lane == 0then
+> 4while true do
+> 5𝑜𝑙𝑑 _𝑞 _𝑐𝑛𝑡 ←LoadL2( 𝑄.𝑐𝑜𝑢𝑛𝑡 )
+> 6if 𝑜𝑙𝑑 _𝑞 _𝑐𝑛𝑡 ≤0then
+> 7𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡 ←0
+> 8break
+> 9𝑐𝑙𝑎𝑖𝑚 ←min( 𝑚𝑎𝑥 _𝑐𝑜𝑢𝑛𝑡 _𝑡𝑜 _𝑝𝑜𝑝 ,𝑜𝑙𝑑 _𝑞 _𝑐𝑛𝑡 )
+> 10 if atomicCAS( 𝑄.𝑐𝑜𝑢𝑛𝑡 ,𝑜𝑙𝑑 _𝑞 _𝑐𝑛𝑡 ,
+> 𝑜𝑙𝑑 _𝑞 _𝑐𝑛𝑡 −𝑐𝑙𝑎𝑖𝑚 )== 𝑜𝑙𝑑 _𝑞 _𝑐𝑛𝑡 then
+> 11 𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡 ←𝑐𝑙𝑎𝑖𝑚
+> 12 𝑡𝑎𝑖𝑙 ←𝑡𝑎𝑖𝑙 −𝑐𝑙𝑎𝑖𝑚
+> 13 break
+> 14 𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡 ←WarpShfl( 𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡 ,0)
+> 15 𝑠𝑡𝑎𝑟𝑡 _𝑙𝑎𝑛𝑒 ←WARP_SIZE −𝑚𝑎𝑥 _𝑐𝑜𝑢𝑛𝑡 _𝑡𝑜 _𝑝𝑜𝑝
+> 16 𝑒𝑛𝑑 _𝑙𝑎𝑛𝑒 ←𝑠𝑡𝑎𝑟𝑡 _𝑙𝑎𝑛𝑒 +𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡
+> 17 if lane ∈ [ 𝑠𝑡𝑎𝑟𝑡 _𝑙𝑎𝑛𝑒, 𝑒𝑛𝑑 _𝑙𝑎𝑛𝑒 )then
+> 18 𝑜 𝑓 𝑓 𝑠𝑒𝑡 ←lane −𝑠𝑡𝑎𝑟𝑡 _𝑙𝑎𝑛𝑒
+> 19 𝑖𝑑𝑥 ← ( 𝑡𝑎𝑖𝑙 +𝑜 𝑓 𝑓 𝑠𝑒𝑡 )mod QUEUE _SIZE
+> 20 𝑒𝑥𝑒𝑐 _𝑡𝑖𝑑 ←LoadL2( 𝑄.𝑞𝑢𝑒𝑢𝑒 [𝑖𝑑𝑥 ])
+> 21 return 𝑝𝑜𝑝 _𝑐𝑜𝑢𝑛𝑡
+
+Algorithm 1: PopBatch : Pop up to 𝑚𝑎𝑥 _𝑐𝑜𝑢𝑛𝑡 _𝑡𝑜 _𝑝𝑜𝑝 (≤ 32 )
+
+tasks from the local warp queue tail in parallel. Only lanes in the active range write 𝑒𝑥𝑒𝑐 _𝑡𝑖𝑑 ; other lanes leave it undefined. Note that EPAQ does not eliminate warp divergence completely .EPAQ performs queue selection only at spawn/re-entry time and does not attempt to detect divergence dynamically during task exe-cution. This makes it most effective when the classification criterion is available at spawn time (e.g., problem size), whereas criteria de-pending on branch outcomes discovered only after execution are harder to separate. 1
+
+With EPAQ enabled, each warp maintains multiple deques. In each persistent-kernel cycle, we select a queue in round-robin order starting from the previously used one and pop/steal from it. 
+
+4.5 Memory Consistency and Synchronization 
+
+On NVIDIA GPUs, the per-SM L1 cache is not coherent across SMs. Consequently, ordinary global loads may observe stale val-ues that were cached in the local L1, rather than the most recent updates performed by another SM and residing in L2. To ensure inter-SM visibility, we use L1-bypassing accesses for shared meta-data. 2 Likewise, programmer-written code should access shared data either via L1-bypassing accesses or via appropriate atomic op-erations. Because CUDA adopts a weakly ordered memory model,   
+
+> 1EPAQ allows not only constant indices but also expressions as arguments.
+> 2In our CUDA implementation, we realize this using PTX cache operators such as
+> ld.global.cg and st.global.cg , which bypass L1 and access memory via L2.
+
+GTaP also uses synchronization and fences (e.g., __syncwarp() ,
+
+__syncthreads() , and __threadfence() ) where required to order publication and consumption of shared data. 
+
+5 Programming Model 
+
+As described in Section 4.2, we hide the state-machine transfor-mation of task functions from programmers through a compiler extension. We first describe the programmer-visible API in Sec-tion 5.1, and then present the compiler extension we implemented in Section 5.2. 
+
+5.1 API 
+
+5.1.1 Overview of API. GTaP provides a pragma-based interface for task-parallel execution, together with a small set of runtime functions (details are described later with examples). At compile time, programmers are recommended to define the parameters in Table 1 as preprocessor macros. If omitted, default values are used; however, these parameters affect both feasibility (e.g., pool capacity) and performance, and we therefore expose them explic-itly. The runtime functions are provided by gtap_thread.cuh and 
+
+gtap_block.cuh .
+
+5.1.2 API for Thread-Level Worker. Program 4 shows the pseu-docode of Fibonacci written in GTaP with thread-level workers. Using this example, we explain the semantics of each pragma and runtime function. 
+
+#pragma gtap function . A __device__ function annotated with #pragma gtap function is treated as a task function and is subject to the compiler’s state-machine transformation. Unlike ordinary __device__ functions, a task function with thread-level workers is not guaranteed to be executed uniformly by all 32 threads in a warp, because the task is executed independently by each thread. 
+
+#pragma gtap task [queue(expr)] . A child task is spawned by placing #pragma gtap task immediately before a call to a task function, optionally written as an assignment to capture its return value (e.g., a = fib(n - 1); ). Unlike OpenMP tasks, the directive accepts only this restricted form. The parent continues executing, while the spawned child is enqueued by the runtime. If the call is written as an assignment, the parent must not use the return value until the corresponding taskwait has completed. By specifying the optional queue(expr) , programmers can enable EPAQ described in Section 4.4; it does not change the semantics and affects performance only. If queue is omitted, it is treated as 
+
+queue(0) , and the argument expr is evaluated at runtime. GTaP currently does not provide OpenMP task data-sharing clauses such as shared , private , or firstprivate . The arguments of task functions are copied at spawn time, which corresponds to 
+
+firstprivate -like behavior. 
+
+#pragma gtap taskwait [queue(expr)] . taskwait waits for the completion of all direct child tasks spawned since the previ-ous taskwait in the same task function. The continuation after 
+
+taskwait is implemented by re-entry, and queue(expr) can be used to select the queue for the re-enqueued continuation. Yuki Maeda and Kenjiro Taura 
+
+Table 1: Preprocessor macros to be defined at compile time. 
+
+Constant Description 
+
+GTAP_GRID_SIZE The number of thread blocks used to launch the kernel ( grid size ). Specified as a one-dimensional value. 
+
+GTAP_BLOCK_SIZE The number of threads per block ( block size ). Specified as a one-dimensional value. 
+
+GTAP_MAX_TASKS_PER_WARP The maximum number of pending tasks that can be held per warp (effective only for thread-level workers). This parameter affects the sizes of task-record memory pools. 
+
+GTAP_MAX_TASKS_PER_BLOCK The maximum number of pending tasks that can be held per block (effective only for block-level workers). 
+
+GTAP_MAX_CHILD_TASKS The maximum number of child tasks a task may spawn within the same task function. 
+
+GTAP_NUM_QUEUES The number of queues used by EPAQ (effective only for thread-level workers). The default is 1. 
+
+GTAP_MAX_TASK_DATA_SIZE The maximum size of task data structure. Compilation fails if the compiler-generated task data structure exceeds this limit. This restriction exists to simplify the current compiler implementation. 
+
+GTAP_ASSUME_NO_TASKWAIT When defined, enables an optimization that omits storing join-related metadata (e.g., child task IDs). This is safe only for programs that never execute taskwait . This is beneficial when a large number of tasks may be spawned. 
+
+Program 4: Fibonacci program written in GTaP’s API with EPAQ enabled (thread-level workers).                             
+
+> 1#include "gtap_thread.cuh"
+> 2__device__ int d_result;
+> 34#pragma gtap function
+> 5__device__ int fib(int n) {
+> 6if (n < 2) return n;
+> 7int a, b;
+> 8#pragma gtap task queue((n - 1) < 2 ? 1 : 0)
+> 9a = fib(n - 1);
+> 10 #pragma gtap task queue((n - 2) < 2 ? 1 : 0)
+> 11 b = fib(n - 2);
+> 12 #pragma gtap taskwait queue(2)
+> 13 return a + b;
+> 14 }
+> 15 __global__ void exec_kernel() {
+> 16 #pragma gtap entry
+> 17 d_result = fib(40);
+> 18 }
+> 19 int main() {
+> 20 gtap_initialize() ;
+> 21 exec_kernel<<< GTAP_GRID_SIZE ,GTAP_BLOCK_SIZE >>>();
+> 22 cudaDeviceSynchronize();
+> 23 int h_result;
+> 24 cudaMemcpyFromSymbol(&h_result, d_result, sizeof(int));
+> 25 printf("result: %d\n", h_result);
+> 26 gtap_finalize() ;
+> 27 return 0;
+> 28 }
+
+#pragma gtap entry . entry enqueues the initial (root) task and starts task-parallel execution inside the persistent kernel. As with 
+
+task directive, the statement immediately following entry must be a call to a task function annotated with #pragma gtap function 
+
+(optionally with an assignment of its return value). It must be used inside a kernel launched with the configuration specified by GTAP_GRID_SIZE and GTAP_BLOCK_SIZE .
+
+gtap_initialize() / gtap_finalize() . GTaP pre-allocates the memory regions required for task management on the host side. 
+
+gtap_initialize() performs this allocation and initializes the runtime. gtap_finalize() releases the memory regions allocated by gtap_initialize() .
+
+Program 5: Parallel graph traversal program written in GTaP’s API (block-level workers).                  
+
+> 1// Assume the graph is stored in CSR (Compressed Sparse Row) format.
+> 2#pragma gtap function
+> 3__device__ void bfs(int v) {
+> 4int dv = g_depth[v];
+> 5int row_start = g_row_offsets[v];
+> 6int row_end = g_row_offsets[v + 1];
+> 7for (int e = row_start + threadIdx.x ; e < row_end; e +=
+> blockDim.x ) {
+> 8int u = g_col_indices[e];
+> 9int old = atomicMin(&g_depth[u], dv + 1);
+> 10 if (old > dv + 1) {
+> 11 #pragma gtap task
+> 12 bfs(u);
+> 13 }
+> 14 }
+> 15 }
+
+5.1.3 API for Block-Level Worker. Program 5 shows the pseudocode of parallel BFS written in GTaP. Here, we focus on aspects that differ from the thread-level worker API. 
+
+#pragma gtap function . With block-level workers, each task is assigned to one thread block, and threads within the block co-operatively execute the task function. Accordingly, a task func-tion may use threadIdx and blockDim for data-parallel execu-tion, __syncthreads() for intra-block synchronization, and shared memory. 
+
+#pragma gtap task . The spawn operation itself is performed by the thread that reaches the pragma, while the spawned task is executed at the granularity of a thread block. For block-level work-ers, the queue option is not supported, because EPAQ is intended to mitigate warp divergence. 
+
+#pragma gtap taskwait . For block-level workers, #pragma gtap taskwait must be reached by all threads in the block along the same control flow. Therefore, programs in which only a subset of threads reaches taskwait due to control-flow divergence are not supported. 
+
+5.1.4 Restrictions on API. GTaP currently imposes the following restrictions. GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface 
+
+Language/Compiler restrictions. To simplify the compiler, GTaP restricts directive syntax: task and entry must be immediately followed by a call to a task function annotated with #pragma gtap function (optionally with an assignment). Statement blocks are not supported; code to be executed as a task must be factored into a standalone task function. These restrictions keep the current com-piler simple and could be relaxed with additional transformations. 
+
+Semantic restrictions. GTaP’s re-entry mechanism imposes the following restrictions. 
+
+• No reliance on stack lifetime/address across taskwait :
+
+values that cross taskwait must be safely spillable/restorable (i.e., trivially copyable). 
+
+• (Block-level) No shared-memory dependence across 
+
+taskwait : a continuation may resume on a different block due to work stealing. 
+
+Configuration restrictions. Programmers are recommended to define the parameters listed in Table 1 before running the program, because GTaP pre-allocates memory regions. 
+
+5.2 Compiler Support for GTaP 
+
+5.2.1 Overview of Compiler Support. We extend Clang to accept GTaP pragmas and to convert CUDA device task functions into switch-based state machines. Our implementation is built on LLVM 21.1.8 and rewrites the CUDA device AST (not source-to-source). For each #pragma gtap function , the compiler (i) partitions con-trol flow at taskwait continuation points and (ii) spills required local state into a compiler-generated task-data record. We refer to this transformation as state-machine conversion .
+
+5.2.2 Control-Flow Partitioning. The compiler assigns a unique resumption state to each taskwait and rewrites the task body into a switch on that state. At a taskwait , the compiler replaces the directive with a call to __gtap_prepare_for_join(next_state) 
+
+followed by return , thereby suspending the current invocation. When the join condition is satisfied, the runtime re-enqueues the task, and the task function re-enters at case next_state: , contin-uing from the post-join code. We also normalize task termination by rewriting each return into __gtap_finish_task(...); return; 
+
+(and appending it to the end if needed). Nested taskwait s are handled by assigning each taskwait a unique resumption state and rewriting the function into a single switch , ensuring correct re-entry at the matching post-join point. 
+
+5.2.3 Spilling into Task Data. State-machine conversion requires preserving values that must survive across taskwait . The compiler generates a task-data record that stores (i) the original arguments, (ii) selected locals, and (iii) the original return value (if any). For locals, we use two conservative criteria: values that are live imme-diately after each taskwait , and values declared before taskwait 
+
+that may be referenced after it. The latter avoids ill-formed control flow in the generated switch (e.g., jumping to a case that bypasses initialization), and keeps subsequent compilation well-defined. We compute these sets on the CFG (control-flow graph) using standard backward data-flow analysis, and rewrite accesses to spilled vari-ables as loads/stores to the task-data record. For non-void tasks, 
+
+Program 6: Pseudocode of the compiler-transformed version of Program 4. Note that the transformation is applied at the AST level for CUDA device code.                                     
+
+> 1struct fib_task_data{
+> 2int __cap_n; // original argument n
+> 3int __cap_a; // spill variable for a
+> 4int __cap_b; // spill variable for b
+> 5int __cap_result; // result field
+> 6};
+> 78__device__ void fib_state_machine_func(void* ptr, ...) {
+> 9fib_task_data* t = (fib_task_data*)ptr; // cast to task data specific to this function
+> 10 switch (__gtap_load_state(...)) {
+> 11 case 0: {
+> 12 if (t->__cap_n < 2) {
+> 13 t->__cap_result = t->__cap_n;
+> 14 __gtap_finish_task(...);
+> 15 return;
+> 16 }
+> 17 spawn two child tasks here;
+> 18 __gtap_prepare_for_join(/* next_state = */ 1, ...);
+> 19 return;
+> 20 }
+> 21 case 1: {
+> 22 t->__cap_a = __gtap_load_result(0, ...); // load the result field of the 1st child task
+> 23 t->__cap_b = __gtap_load_result(1, ...); // load the result field of the 2nd child task
+> 24 t->__cap_result = t->__cap_a + t->__cap_b;
+> 25 __gtap_finish_task(...);
+> 26 return;
+> 27 }
+> 28 default: { __trap(); }
+> 29 }
+> 30 }
+
+the compiler materializes a result field in task data so that the state-machine function itself always returns void . Program 6 shows the compiler-transformed result for the non-void task function in Program 4. 
+
+6 Performance Evaluation 
+
+We evaluate GTaP on a single Miyabi-G [ 27 ] node equipped with one GH200 GPU; Table 2 summarizes the hardware. We use Clang 21.1.8 (LLVM 21.1.8) with our compiler extension, and compile GTaP with -O3 -x cuda –cuda-gpu-arch=sm_90 (CUDA Toolkit 12.9, -lcudart ). CPU baselines are compiled with -O3 -fopenmp 
+
+(LLVM OpenMP libomp ). We report the median over 20 runs with IQR error bars. For GTaP, we measure kernel execution time only, excluding one-time host-side initialization and result retrieval. For OpenMP, we warm up the runtime with a dummy #pragma omp parallel before timing. To the best of our knowledge, there is no widely available open-source GPU runtime that supports general fork-join task parallelism and can be evaluated on GH200 in a directly comparable setting. We therefore compare GTaP against hand-written persistent-kernel baselines via controlled ablations (load balancing and queue man-agement) in Section 6.1, and then use microbenchmarks and case studies to characterize the strengths and limitations of GPU task parallelism relative to CPU OpenMP tasks in Section 6.2. We finally discuss our choice of runtime design in Sections 6.3 and 6.4. Yuki Maeda and Kenjiro Taura 
+
+Table 2: Miyabi-G GH200 node specification (based on [ 27 ]). 
+
+CPU (Grace) 72 cores; 3.0 GHz; 120 GB; 512 GB/s; peak 3.46 TFLOPS 
+
+GPU (H100) 96 GB; 4.02 TB/s; peak 66.9 TFLOPS 
+
+6.1 GPU-Side Baselines and Ablations 
+
+We evaluate GPU-side baselines and controlled ablations under a persistent-kernel setting. We focus on (i) load balancing (work steal-ing vs. global queue) and (ii) queue-management cost, sweeping the number of workers to expose contention. 
+
+6.1.1 Work Stealing vs. Global-Queue Approach. We compare two GPU-resident schedulers: work stealing and a global-queue sched-uler. We evaluate both block-level and thread-level workers. For block-level workers, we use Full Binary Tree workloads (compute-heavy and memory-heavy); for thread-level workers, we use Fi-bonacci, N-Queens, and Cilksort (see Section 6.2 for benchmark details). We vary the worker count by fixing the block size and sweeping the grid size; we report results for two block sizes (32 and 256). Figure 3 summarizes the results. Overall, work stealing scales better than the global-queue ap-proach for both granularities. This is consistent with the classic bound 𝑇 1/𝑃 +O( 𝑇 ∞) for work stealing [ 4]: the curves approximately follow 1/𝑃 scaling at small 𝑃 and then saturate as 𝑃 increases. No-tably, the same trend holds for thread-level workers, suggesting that our warp-cooperative batched queue operations mitigate con-tention and keep queue management from dominating. 
+
+6.1.2 Warp-Cooperative Batched Pop/Steal vs. Sequential Chase– Lev Deque Operations. We next ablate the queue-management algo-rithm for thread-level workers. We compare our warp-cooperative batched pop/steal (Section 4.3) against a baseline that performs Chase–Lev pop/steal one element at a time, repeated up to 32 times per operation (i.e., sequentialized within a warp) [ 6]. We sweep the worker count as in Section 6.1.1. Figure 4 summarizes the results. Our batched algorithm is faster across all benchmarks except for N-Queens at very high parallelism (approximately 𝑃 ≥ 216 ), where the Chase–Lev baseline becomes faster. We attribute the crossover to contention on our shared count metadata at large 𝑃 , whereas Chase–Lev often completes local pops without CAS. Nevertheless, the best (minimum) execution time over the sweep is lower with our algorithm for every benchmark. We leave as future work the design of a work-stealing queue that better scales at very high parallelism by reducing contention on queue metadata, while still enabling warp-cooperative bulk pop/steal. 
+
+6.2 Characterizing GPU vs. CPU Task Parallelism via Case Studies 
+
+We characterize the strengths and limitations of GPU-resident fork-join relative to CPU task parallelism. 
+
+Benchmark. We use four case studies that stress different as-pects of GPU-resident fork-join execution. Fibonacci represents extremely fine-grained recursion: we disable the cutoff and spawn a task at every recursive call, primarily stressing task management overheads [ 14 , 23 ]. In Fibonacci, to ensure stable execution up 25 27 29 211 213     
+
+> Number of Blocks (Workers)
+> 10 1
+> 10 2
+> 10 3
+> Execution Time (ms)
+> vs. Global Queue:
+> Full Binary Tree (D = 20, Compute Iters = 1024, Mem Ops = 64)
+> WS (t/b=32)
+> GQ (t/b=32)
+> Ideal Scaling
+> WS (t/b=256)
+> GQ (t/b=256) 252729211 213
+> Number of Blocks (Workers)
+> 10 1
+> 10 2
+> 10 3
+> Execution Time (ms)
+> vs. Global Queue:
+> Full Binary Tree (D = 20, Compute Iters = 64, Mem Ops = 1024)
+> WS (t/b=32)
+> GQ (t/b=32)
+> Ideal Scaling
+> WS (t/b=256)
+> GQ (t/b=256)
+
+(a) Block-level workers: Full Binary Tree (compute-heavy and memory-heavy). 210 211 212 213 214 215 216 217 218                 
+
+> Number of Threads (Workers)
+> 10 1
+> 10 2
+> 10 3
+> Execution Time (ms)
+> vs. Global Queue: Fibonacci (n = 35)
+> WS (t/b=32)
+> GQ (t/b=32)
+> Ideal Scaling
+> WS (t/b=256)
+> GQ (t/b=256) 210 211 212 213 214 215 216 217 218
+> Number of Threads (Workers)
+> 10 1
+> 10 2
+> 10 3
+> Execution Time (ms)
+> vs. Global Queue: N-Queens (n = 16)
+> WS (t/b=32)
+> GQ (t/b=32)
+> Ideal Scaling
+> WS (t/b=256)
+> GQ (t/b=256) 210 211 212 213 214 215 216 217 218
+> Number of Threads (Workers)
+> 10 1
+> 10 2
+> Execution Time (ms)
+> vs. Global Queue: Cilksort (Array Size = 20,000,000)
+> WS (t/b=32)
+> GQ (t/b=32)
+> Ideal Scaling
+> WS (t/b=256)
+> GQ (t/b=256)
+
+(b) Thread-level workers: Fibonacci, N-Queens, Cilksort. 
+
+Figure 3: Work stealing vs. global queue (log–log plot). We sweep the number of workers by varying grid size; block size is fixed (32 or 256). Dashed gray lines indicate ideal 1/𝑃 
+
+scaling extrapolated from the smallest worker count. 212 213 214 215 216 217 218             
+
+> Number of Threads (Workers)
+> 0
+> 25
+> 50
+> 75
+> 100
+> 125
+> 150
+> 175
+> Execution Time (ms)
+> vs. Sequential Chase-Lev: Fibonacci (n = 35)
+> Ours (t/b=32)
+> CL (t/b=32)
+> Ideal Scaling
+> Ours (t/b=256)
+> CL (t/b=256) 212 213 214 215 216 217 218
+> Number of Threads (Workers)
+> 0
+> 200
+> 400
+> 600
+> 800
+> Execution Time (ms)
+> vs. Sequential Chase-Lev: N-Queens (n = 16)
+> Ours (t/b=32)
+> CL (t/b=32)
+> Ideal Scaling
+> Ours (t/b=256)
+> CL (t/b=256) 212 213 214 215 216 217 218
+> Number of Threads (Workers)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> 140
+> 160
+> Execution Time (ms)
+> vs. Sequential Chase-Lev: Cilksort (Array Size = 20,000,000)
+> Ours (t/b=32)
+> CL (t/b=32)
+> Ideal Scaling
+> Ours (t/b=256)
+> CL (t/b=256)
+
+Figure 4: Warp-cooperative batched operations vs. sequential Chase–Lev operations. The worker count is swept to expose contention on shared queue metadata (x-axis is log-scale). Dashed gray lines indicate ideal 1/𝑃 scaling. From left to right: Fibonacci, N-Queens, and Cilksort. 
+
+to 𝑛 = 40 , we set OMP_STACKSIZE to 500 MB to avoid stack over-flows. N-Queens represents highly irregular task generation due to pruning: we count solutions via bitmask-based backtracking with a fixed cutoff depth (7). Mergesort represents a memory-bound workload with a low-parallelism tail: we sort random 4-byte inte-ger arrays with cutoffs 128 (GTaP) and 4096 (OpenMP). Cilksort 
+
+parallelizes merge to mitigate mergesort’s sequential tail; we tune cutoffs to minimize median time at an array size of 𝑛 = 10 8 (GTaP: GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface 
+
+Table 3: Evaluation settings for GTaP on each benchmark. Grid/block sizes are chosen via a simple heuristic tuning procedure. When compiling N-Queens, we enable the opti-mization option -DGTAP_ASSUME_NO_TASKWAIT .Benchmark Grid Size Block Size Granularity 
+
+Fibonacci 4000 32 thread N-Queens 2000 32 thread Mergesort 1000 32 thread Cilksort 2000 32 thread Synthetic Tree 1000 64 block/thread 10 3           
+
+> 10 2
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> Execution Time (ms)  GTaP (Thread-level worker)
+> CPU OpenMP task-parallel
+> CPU Sequential
+> 510 15 20 25 30 35 40
+> Fibonacci Number (n)
+> 26
+> 23
+> 20
+> Normalized time
+> (Tmethod /TGTaP )
+> CPU OpenMP / GTaP
+> CPU Seq / GTaP
+> Parity
+
+(a) Fibonacci 10 3           
+
+> 10 2
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> Execution Time (ms)  GTaP (Thread-level worker)
+> CPU OpenMP task-parallel
+> CPU Sequential
+> 246810 12 14 16
+> N-Queens Board Size (n)
+> 24
+> 20
+> 24
+> Normalized time
+> (Tmethod /TGTaP )
+> CPU OpenMP / GTaP
+> CPU Seq / GTaP
+> Parity
+
+(b) N-Queens 10 2         
+
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> 10 4
+> Execution Time (ms)  GTaP (Thread-level worker)
+> CPU OpenMP task-parallel
+> CPU Sequential
+> 10 210 310 410 510 610 7
+> Array Size (n)
+> 26
+> 24
+> 22
+> 20
+> Normalized time
+> (Tmethod /TGTaP )
+> CPU OpenMP / GTaP
+> CPU Seq / GTaP
+> Parity
+
+(c) Mergesort 10 0    
+
+> 10 1
+> 10 2
+> 10 3
+> Execution Time (ms)  GTaP (Thread-level worker)
+> CPU OpenMP task-parallel
+> CPU Sequential
+> 10 510 610 710 8
+> Array Size (n)
+> 20
+> 23
+> 26
+> Normalized time
+> (Tmethod /TGTaP )
+> CPU OpenMP / GTaP
+> CPU Seq / GTaP
+> Parity
+
+(d) Cilksort 
+
+Figure 5: Execution time across problem sizes (top: absolute time, bottom: normalized time relative to GTaP; lower is better). 
+
+CUTOFF_SORT=64 , CUTOFF_MERGE=256 ; OpenMP: both 4096). For all benchmarks, we vary the problem size and compare execution time. For each GTaP benchmark, we select grid/block sizes via a simple heuristic tuning sweep; the chosen settings are summarized in Table 3. 
+
+Results. Fibonacci: GTaP is slower than OpenMP and CPU se-quential execution for small 𝑛 due to fixed runtime overheads (e.g., persistent-kernel initialization and task-queue operations), but over-takes the CPU baselines as 𝑛 increases and the number of spawned tasks grows exponentially. In our results, the crossover occurs at around 𝑛 ≈ 28 ; at 𝑛 = 40 , GTaP achieves a speedup of 2.4× over CPU sequential execution and 3.2× over OpenMP, showing that GPU-resident fork-join can be effective even for fine-grained tasks, 
+
+when overhead is carefully managed .
+
+N-Queens: GTaP increasingly outperforms CPU baselines as 𝑛 
+
+grows; at 𝑛 = 16 , it is 14 .6× faster than OpenMP. This gain is driven by compute-intensive leaf work beyond the cutoff (reducing the relative impact of runtime overhead) and a register/bitwise-heavy inner loop with limited memory traffic, which is well-suited to GPU execution. 
+
+Mergesort: GTaP becomes significantly slower than OpenMP as 𝑛 increases (up to 103 × at 𝑛 = 10 7). Profiling shows that the final merge dominates; in our implementation, this phase is largely sequential and executed by a single thread-level worker, making the critical path memory-latency bound on the GPU and limiting its ability to hide stalls compared to CPU baselines. 
+
+Cilksort: Unlike mergesort, cilksort parallelizes merge, miti-gating the sequential bottleneck at the final stage and improving utilization. However, cilksort remains inherently memory bound, so the achieved speedup is smaller than that of compute-heavy benchmarks such as N-Queens. We also observe relatively large error bars for OpenMP, suggesting higher sensitivity to scheduling. 
+
+6.3 Understanding GTaP’s Worker Granularity 
+
+We study how GTaP’s worker granularity affects performance using a synthetic tree benchmark that mixes global-memory loads and arithmetic operations. 
+
+Setting: Synthetic Tree Benchmark. Each node in a tree corre-sponds to one task. A task spawns child tasks (if any), performs 
+
+taskwait , and then executes do_memory_and_compute . The per-task work consists of mem_ops pseudo-random 64-bit global mem-ory loads and compute_iters FP64 FMA (fused multiply-add) oper-ations. Block-level workers execute one task cooperatively within a thread block in a data-parallel manner, whereas thread-level work-ers execute one task per thread. We use the same grid/block sizes for both granularities (Table 3) and vary one of D, mem_ops , and 
+
+compute_iters while fixing the other two. In this section, normal-ized time in figures is reported relative to OpenMP, and we set 
+
+OMP_STACKSIZE to 10 MB. 
+
+6.3.1 Full Binary Tree. We first evaluate a full binary tree of depth D
+
+(total tasks 2𝐷 +1 − 1). Internal nodes spawn two children, taskwait ,and then run do_memory_and_compute ; leaves only run 
+
+do_memory_and_compute . Figure 7 shows that GTaP increasingly outperforms OpenMP as the problem size grows (up to 9.8× at D=22 ,
+
+7.6× at mem_ops=8192 , and 15 .2× at compute_iters=32768 ). Here, we compare block-level and thread-level workers. For large 
+
+D, thread-level workers become up to 4.6× faster. In this regime, the tree provides ample parallel slackness, so execution is largely work-dominated and the difference between worker granularities is mainly determined by task-management overhead per task. Al-though both granularities execute the same logical amount of ap-plication work per node, block-level workers execute each task cooperatively, which shortens the task-function execution time. As a result, per-task runtime overheads occupy a larger fraction of time, making block-level execution more overhead-sensitive. In contrast, for small D, limited slackness makes the critical-path effects more visible, which can favor block-level workers. 
+
+6.3.2 Depth-Dependent Pruned 𝐵 -ary Tree. We next introduce ir-regularity by probabilistically pruning a 𝐵 -ary tree ( 𝐵 = 3): at depth 
+
+𝑑 , each child is generated with probability 𝑝 (𝑑 ) = 1−𝑑 /𝐷 , so the tree thins with depth. Figure 8 shows a trend similar to the full binary tree in the depth sweep, while in the mem_ops and compute_iters 
+
+sweeps block-level workers outperform thread-level workers for Yuki Maeda and Kenjiro Taura 0 1 2 3 4 5 6 7
+
+Time (ms) 
+
+Warp 0 
+
+Warp 1 
+
+Warp 2 
+
+Warp 3 
+
+Warp 4 
+
+Warp 5 
+
+Warp 6 
+
+Warp 7 
+
+Warp 8 
+
+Warp 9 
+
+Warp 10 
+
+Warp 11 
+
+Warp 12 
+
+Warp 13 
+
+Warp 14 
+
+> Warps
+
+Worker Timeline Visualization: Fibonacci (n=35) 
+
+Executing taskfn 
+
+Not executing taskfn 
+
+Avg tasks per batch: 17.71 
+
+0
+
+5
+
+10 
+
+15 
+
+20 
+
+25 
+
+30 
+
+> tasks in batch
+
+(a) Fibonacci 0 20 40 60 80 100 
+
+Time (ms) 
+
+Warp 0 
+
+Warp 1 
+
+Warp 2 
+
+Warp 3 
+
+Warp 4 
+
+Warp 5 
+
+Warp 6 
+
+Warp 7 
+
+Warp 8 
+
+Warp 9 
+
+Warp 10 
+
+Warp 11 
+
+Warp 12 
+
+Warp 13 
+
+Warp 14 
+
+> Warps
+
+Worker Timeline Visualization: N-Queens (n=16) 
+
+Executing taskfn 
+
+Not executing taskfn 
+
+Avg tasks per batch: 30.27 
+
+0
+
+5
+
+10 
+
+15 
+
+20 
+
+25 
+
+30  
+
+> tasks in batch
+
+(b) N-Queens 0 20 40 60 80 100 
+
+Time (ms) 
+
+Warp 8 
+
+Warp 17 
+
+Warp 20 
+
+Warp 30 
+
+Warp 73 
+
+Warp 78 
+
+Warp 81 
+
+Warp 85 
+
+Warp 128 
+
+Warp 142 
+
+Warp 149 
+
+Warp 185 
+
+Warp 196 
+
+Warp 212 
+
+Warp 233 
+
+> Warps
+
+Worker Timeline Visualization: MergeSort (Array Size=200,000) 
+
+Executing taskfn 
+
+Not executing taskfn 
+
+Avg tasks per batch: 28.15 
+
+0
+
+5
+
+10 
+
+15 
+
+20 
+
+25 
+
+30  
+
+> tasks in batch
+
+(c) Mergesort 
+
+Figure 6: Per-warp timeline (subset of warps shown). Although workers are individual threads, we visualize at warp granularity because synchronization occurs before/after each task function. Blue/orange indicate time with/without executing task functions; blue intensity reflects the number of threads executing task functions. Note that blue also includes the costs of spawning tasks, preparing for a join, and finishing tasks. 10 0
+
+> 10 1
+> 10 2
+> Execution Time (ms)
+
+Varying D (mem_ops=256, compute_iters=256 fixed)       
+
+> GTaP (Thread-level)
+> GTaP (Block-level)
+> CPU OpenMP
+> 10 12 14 16 18 20 22
+
+Tree Maximum Depth  
+
+> 22
+> 20
+> Normalized time
+> (Tmethod /TOMP )
+> GTaP (Thread) / CPU OpenMP
+> GTaP (Block) / CPU OpenMP
+> Parity
+
+(a) Varying maximum depth D.10 0
+
+> 10 1
+> 10 2
+> 10 3
+> Execution Time (ms)
+
+Varying mem_ops (D=20, compute_iters=256 fixed)     
+
+> GTaP (Thread-level)
+> GTaP (Block-level)
+> CPU OpenMP
+> 02000 4000 6000 8000
+
+Memory Operations    
+
+> 23
+> 21
+> Normalized time
+> (Tmethod /TOMP )
+> GTaP (Thread) / CPU OpenMP
+> GTaP (Block) / CPU OpenMP
+> Parity
+
+(b) Varying per-task memory op-erations mem_ops .10 1
+
+> 10 2
+> Execution Time (ms)
+
+Varying compute_iters (D=20, mem_ops=256 fixed)       
+
+> GTaP (Thread-level)
+> GTaP (Block-level)
+> CPU OpenMP
+> 05000 10000 15000 20000 25000 30000
+
+Compute Iterations   
+
+> 23
+> 21
+> Normalized time
+> (Tmethod /TOMP )
+> GTaP (Thread) / CPU OpenMP
+> GTaP (Block) / CPU OpenMP
+> Parity
+
+(c) Varying per-task compute it-erations compute_iters .
+
+Figure 7: Full Binary Tree: execution time across problem sizes. The normalized time is relative to OpenMP. 
+
+sufficiently large problems (up to 2.2× and 4.3×, respectively). This reversal is explained by reduced intra-warp utilization under thread-level workers: due to thinning, a warp often sees far fewer than 32 ready tasks, leaving many lanes idle (Figure 9). 
+
+Summary. Thread-level workers are advantageous when there are enough ready tasks to keep warps busy and divergence is limited, while block-level workers are preferable when available parallelism is sparse or irregular, reducing per-warp utilization. 
+
+6.4 Effect of EPAQ 
+
+We evaluate EPAQ with thread-level workers on Fibonacci, N-Queens, and Cilksort. Each benchmark is recursive and allows us to introduce a cutoff, which induces heterogeneous execution paths. In particular, tasks that reach the cutoff execute additional serial work and thus tend to run longer. We use a cutoff-based classifier to select the queue: Fibonacci uses three queues (non-cutoff, cutof-f/serial, and the post-taskwait continuation), N-Queens uses two 10 0
+
+> 10 1
+> 10 2
+> Execution Time (ms)
+
+Varying D (mem_ops=256, compute_iters=256 fixed)        
+
+> GTaP (Thread-level)
+> GTaP (Block-level)
+> CPU OpenMP
+> 20 22 24 26 28 30 32 34
+
+Tree Maximum Depth  
+
+> 21
+> 20
+> Normalized time
+> (Tmethod /TOMP )
+> GTaP (Thread) / CPU OpenMP
+> GTaP (Block) / CPU OpenMP
+> Parity
+
+(a) Varying maximum depth D.10 2
+
+> 10 3
+> Execution Time (ms)
+
+Varying mem_ops (D=32, compute_iters=256 fixed)     
+
+> GTaP (Thread-level)
+> GTaP (Block-level)
+> CPU OpenMP
+> 02000 4000 6000 8000
+
+Memory Operations   
+
+> 21
+> 21
+> Normalized time
+> (Tmethod /TOMP )
+> GTaP (Thread) / CPU OpenMP
+> GTaP (Block) / CPU OpenMP
+> Parity
+
+(b) Varying per-task memory op-erations mem_ops .10 2
+
+> 10 3
+> Execution Time (ms)
+
+Varying compute_iters (D=32, mem_ops=256 fixed)       
+
+> GTaP (Thread-level)
+> GTaP (Block-level)
+> CPU OpenMP
+> 05000 10000 15000 20000 25000 30000
+
+Compute Iterations  
+
+> 22
+> 20
+> Normalized time
+> (Tmethod /TOMP )
+> GTaP (Thread) / CPU OpenMP
+> GTaP (Block) / CPU OpenMP
+> Parity
+
+(c) Varying per-task compute it-erations compute_iters .
+
+Figure 8: Depth-Dependent Pruned 𝐵 -ary Tree: execution time across problem sizes. 0 50 100 150 200 250 300 350 400 
+
+Time (ms) 
+
+Warp 0 
+
+Warp 1 
+
+Warp 2 
+
+Warp 3 
+
+Warp 4 
+
+Warp 5 
+
+Warp 6 
+
+Warp 7 
+
+Warp 8 
+
+Warp 9 
+
+Warp 10 
+
+Warp 11 
+
+Warp 12 
+
+Warp 13 
+
+Warp 14 
+
+> Warps
+
+Worker Timeline Visualization: Pruned B-ary Tree (Thread-level workers) 
+
+Executing taskfn 
+
+Not executing taskfn 
+
+Avg tasks per batch: 14.81 
+
+0
+
+5
+
+10 
+
+15 
+
+20 
+
+25 
+
+30 
+
+> tasks in batch
+
+Figure 9: Depth-Dependent Pruned 𝐵 -ary Tree: pro-filing with thread-level workers (D=32 , mem_ops=256 ,
+
+compute_iters=8192 ). 
+
+(non-cutoff vs. cutoff states), and Cilksort uses three (non-cutoff, sort-cutoff/serial-sort, and merge-cutoff/serial-merge segments). We sweep the cutoff to vary both the number of tasks and per-task GTaP: A GPU-Resident Fork-Join Task-Parallel Runtime with a Pragma-Based Interface 0        
+
+> 20
+> 40
+> 60
+> 80
+> 100
+> Execution Time (ms)
+> EPAQ Comparison: Fibonacci (n=40)
+> 1 queue
+> 3 queues
+> 246810 12 14 16 18
+> Cutoff Depth
+> 0.0
+> 0.5
+> 1.0
+> Normalized time
+> (T3queues /T1queue )
+> 3 queues / 1 queue
+> Parity
+
+(a) Fibonacci (3 queues). 0        
+
+> 50
+> 100
+> 150
+> 200
+> Execution Time (ms)
+> EPAQ Comparison: N-Queens (n=16)
+> 1 queue
+> 2 queues
+> 345678910
+> Cutoff Depth
+> 0.0
+> 0.5
+> 1.0
+> Normalized time
+> (T2queues /T1queue )
+> 2 queues / 1 queue
+> Parity
+
+(b) N-Queens (2 queues). 0 
+
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> Execution Time (ms)
+> EPAQ Comparison: Cilksort (Array Size=50,000,000)
+> 1 queue
+> 3 queues
+> 10 210 3
+> Cutoff Depth
+> 0.0
+> 0.5
+> 1.0
+> Normalized time
+> (T3queues /T1queue )
+> 3 queues / 1 queue
+> Parity
+
+(c) Cilksort (3 queues). 
+
+Figure 10: Effect of EPAQ on execution time for different cutoff depths. We report normalized execution time relative to the 1-queue configuration (i.e., EPAQ disabled). 
+
+work, and compare EPAQ against the baseline with a single queue. Figure 10 summarizes the results. For Fibonacci, EPAQ yields an approximately 1.8× speedup com-pared to the 1-queue configuration. Profiling at cutoff 10 (Figure 11) shows that EPAQ reduces the tail of per-warp task-function time, consistent with reduced warp divergence when tasks with different execution paths are separated. More broadly, this suggests that EPAQ can be effective when long-running tasks can be scheduled into the same warp as tasks on the critical path, causing the critical-path tasks to stall due to intra-warp synchronization. In contrast, we observe no significant difference for N-Queens and Cilksort. This suggests that, in these workloads, mixing tasks of different cutoff classes within a warp is not a dominant bottleneck. 
+
+7 Conclusion and Future Work 
+
+We presented GTaP, a GPU-resident runtime for fork-join task paral-lelism. GTaP represents joins induced by taskwait as continuations under a persistent-kernel model, which requires transforming task functions into state machines and preserving live task data across 
+
+taskwait . To make this practical for programmers, we extended Clang so that fork and join points can be expressed with concise directives. GTaP supports both block-level and thread-level workers and uses work stealing for load balancing. For thread-level workers, we further introduced Execution-Path-Aware Queueing (EPAQ) to mitigate warp divergence. Across representative irregular work-loads, GTaP outperforms CPU task-parallel execution especially for compute-intensive workloads with abundant task parallelism. Over-all, this study presents a practical method for realizing fork-join task parallelism on GPUs, significantly improves programmability through compiler-supported directives, and expands the design space for executing irregular applications on GPUs. 0 1 2 3 4 5 6 7 8             
+
+> Time (ms)
+> Warp 0
+> Warp 1
+> Warp 2
+> Warp 3
+> Warp 4
+> Warp 5
+> Warp 6
+> Warp 7
+> Warp 8
+> Warp 9
+> Warp 10
+> Warp 11
+> Warp 12
+> Warp 13
+> Warp 14
+> Warps
+> Worker Timeline Visualization: Fibonacci, 1 Queue
+> Executing taskfn
+> Not executing taskfn
+> Avg tasks per batch: 16.75
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> tasks in batch 78 79 80 81 82 83 84 85
+> Task Execution Time Ratio (%)
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> 600
+> Number of Warps
+> Distribution of Task Execution Time Ratio per Warp:
+> Fibonacci, 1 Queue
+> Mean: 81.6%
+> Median: 81.6% 0.00 0.05 0.10 0.15 0.20 0.25 0.30
+> Task Execution Time (ms)
+> 0
+> 20000
+> 40000
+> 60000
+> 80000
+> 100000
+> Number of Execution Periods
+> Distribution of Task Execution Time per Loop:
+> Fibonacci, 1 Queue
+> Mean: 0.044 ms
+> Median: 0.033 ms
+
+(a) EPAQ disabled (1 queue). 0 1 2 3 4              
+
+> Time (ms)
+> Warp 0
+> Warp 1
+> Warp 2
+> Warp 3
+> Warp 4
+> Warp 5
+> Warp 6
+> Warp 7
+> Warp 8
+> Warp 9
+> Warp 10
+> Warp 11
+> Warp 12
+> Warp 13
+> Warp 14
+> Warps
+> Worker Timeline Visualization: Fibonacci, 3 Queues
+> Executing taskfn
+> Not executing taskfn
+> Avg tasks per batch: 18.05
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> 30
+> tasks in batch 58 60 62 64 66 68 70
+> Task Execution Time Ratio (%)
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> Number of Warps
+> Distribution of Task Execution Time Ratio per Warp:
+> Fibonacci, 3 Queues
+> Mean: 63.7%
+> Median: 63.7% 0.00 0.02 0.04 0.06 0.08 0.10 0.12 0.14 0.16
+> Task Execution Time (ms)
+> 0
+> 20000
+> 40000
+> 60000
+> 80000
+> 100000
+> Number of Execution Periods
+> Distribution of Task Execution Time per Loop:
+> Fibonacci, 3 Queues
+> Mean: 0.020 ms
+> Median: 0.017 ms
+
+(b) EPAQ enabled (3 queues). 
+
+Figure 11: Fibonacci profiling with and without EPAQ ( 𝑛 = 40 
+
+and cutoff = 10 ). The bottom-right figure shows the distribu-tion of per-warp task-function execution time per persistent-kernel loop. 
+
+Future work. First, programmability can be improved by relaxing current restrictions. Second, GTaP’s feature set can be extended toward mature CPU tasking models, including richer dependency constructs (e.g., taskgroup and depend ) and clearer rules for live-ness across taskwait . Third, load balancing can be improved with hierarchical and locality-aware work stealing [ 8, 16 ] that leverages GPU hardware hierarchy. Another important next step is to extend GTaP to multi-GPU systems. Finally, it would be interesting to investigate integration with established models such as OpenMP offload [ 20 ]. While OpenMP supports both CPU tasking and GPU offload, it does not support task parallelism within a target region. One promising direction is to explore whether the compilation and runtime techniques in this work could help bridge this gap, enabling GPU-resident tasking within target regions with small, incremental changes to existing OpenMP task-based programs. Yuki Maeda and Kenjiro Taura 
+
+References 
+
+[1] Advanced Micro Devices, Inc. 2026. HIP Documentation. Online documentation. https://rocm.docs.amd.com/projects/HIP/ (accessed 2026-01-23). [2] Eduard Ayguadé, Nawal Copty, Alejandro Duran, Jay Hoeflinger, Yuan Lin, Federico Massaioli, Xavier Teruel, Priya Unnikrishnan, and Guansong Zhang. 2008. The Design of OpenMP Tasks. IEEE Transactions on Parallel and Distributed Systems 20, 3 (June 2008), 404–418. [3] Robert D. Blumofe, Christopher F. Joerg, Bradley C. Kuszmaul, Charles E. Leis-erson, Keith H. Randall, and Yuli Zhou. 1995. Cilk: An Efficient Multithreaded Runtime System. In Proceedings of the Fifth ACM SIGPLAN Symposium on Prin-ciples and Practice of Parallel Programming (Santa Barbara, California, USA) 
+
+(PPOPP ’95) . Association for Computing Machinery, New York, NY, USA, 207– 216. doi:10.1145/209936.209958 [4] Robert D. Blumofe and Charles E. Leiserson. 1999. Scheduling Multithreaded Computations by Work Stealing. J. ACM 46, 5 (Sept. 1999), 720–748. [5] Bradford L. Chamberlain, David Callahan, and Hans P. Zima. 2007. Parallel Programmability and the Chapel Language. International Journal of High Perfor-mance Computing Applications 21, 3 (2007), 291–312. [6] David Chase and Yossi Lev. 2005. Dynamic circular work-stealing deque. In 
+
+Proceedings of the seventeenth annual ACM symposium on Parallelism in algorithms and architectures . ACM, Las Vegas Nevada USA, 21–28. doi:10.1145/1073970. 1073974 [7] Sanjay Chatterjee, Max Grossman, Alina Sbîrlea, and Vivek Sarkar. 2013. Dy-namic Task Parallelism with a GPU Work-Stealing Runtime System. In Languages and Compilers for Parallel Computing , David Hutchison, Takeo Kanade, Josef Kittler, Jon M. Kleinberg, Friedemann Mattern, John C. Mitchell, Moni Naor, Oscar Nierstrasz, C. Pandu Rangan, Bernhard Steffen, Madhu Sudan, Demetri Terzopoulos, Doug Tygar, Moshe Y. Vardi, Gerhard Weikum, Sanjay Rajopadhye, and Michelle Mills Strout (Eds.). Vol. 7146. Springer Berlin Heidelberg, Berlin, Heidelberg, 203–217. doi:10.1007/978-3-642-36036-7_14 Series Title: Lecture Notes in Computer Science. [8] Quan Chen, Minyi Guo, and Haibing Guan. 2014. LAWS: locality-aware work-stealing for multi-socket multi-core architectures. In Proceedings of the 28th ACM international conference on Supercomputing . ACM, Munich Germany, 3–12. doi:10.1145/2597652.2597665 [9] Yuxin Chen, Benjamin Brock, Serban Porumbescu, Aydin Buluc, Katherine Yelick, and John Owens. 2022. Atos: A Task-Parallel GPU Scheduler for Graph Analytics. In Proceedings of the 51st International Conference on Parallel Processing . ACM, Bordeaux France, 1–11. doi:10.1145/3545008.3545056 [10] Yuxin Chen, Benjamin Brock, Serban Porumbescu, Aydin Buluç, Katherine Yelick, and John D. Owens. 2022. Scalable Irregular Parallelism with GPUs: Getting CPUs Out of the Way. In SC22: International Conference for High Performance Computing, Networking, Storage and Analysis . IEEE, Dallas, TX, USA, 1–16. doi:10. 1109/SC41404.2022.00055 [11] ISO/IEC JTC1/SC22/WG21. 2019. Merge Coroutines TS into C++20 working draft. https://www.open-std.org/jtc1/sc22/wg21/docs/papers/2019/p0912r5.html (accessed 2026-01-23). [12] JetBrains. 2026. Coroutines. Online documentation. https://kotlinlang.org/docs/ coroutines-overview.html (accessed 2026-01-23). [13] Khronos OpenCL Working Group. 2026. The OpenCL ™ Specification. On-line specification. https://registry.khronos.org/OpenCL/specs/3.0-unified/pdf/ OpenCL_API.pdf (accessed 2026-01-23). [14] Kosuke Kiuchi, Yudai Tanabe, and Hidehiko Masuhara. 2025. An Efficient Ex-ecution Mechanism on a GPU for Fine-Grained Parallel Programs With the Fork-Join Model. Journal of Information Processing 33 (Nov. 2025), 840–851. doi:10.2197/ipsjjip.33.840 Presented at the 153rd IPSJ SIGPRO Workshop. Ac-cepted 2025-05-28. Also published in the IPSJ Transaction on Programming, Vol.18, No.4.. [15] Christopher D. Marlin. 1980. Coroutines: A Programming Methodology, a Language Design and an Implementation . Lecture Notes in Computer Science, Vol. 95. Springer Berlin, Heidelberg. doi:10.1007/3-540-10256-6 [16] Seung-Jai Min, Costin Iancu, and Katherine Yelick. 2011. Hierarchical work stealing on manycore clusters. In Fifth Conference on Partitioned Global Address Space Programming Models (PGAS11) , Vol. 625. [17] Jun Nakashima and Kenjiro Taura. 2014. MassiveThreads: A Thread Library for High Productivity Languages . Springer Berlin Heidelberg, 222–238. [18] NVIDIA Corporation. 2026. CUDA C++ Programming Guide. Online docu-mentation. https://docs.nvidia.com/cuda/cuda-programming-guide/ (accessed 2026-01-23). [19] Ryosuke Okuta, Yuya Unno, Daisuke Nishino, Shohei Hido, and Crissman Loomis. 2017. CuPy: A NumPy-Compatible Library for NVIDIA GPU Calculations. In 
+
+Proceedings of Workshop on Machine Learning Systems (LearningSys) in The Thirty-first Annual Conference on Neural Information Processing Systems (NIPS) . http: //learningsys.org/nips17/assets/papers/paper_16.pdf [20] OpenMP Architecture Review Board. 2024. OpenMP 6.0 Specification. Online specification. https://www.openmp.org/wp-content/uploads/OpenMP-API-Specification-6-0.pdf (accessed 2026-01-23). [21] Python Software Foundation. 2026. Coroutines and Tasks. Online documentation. https://docs.python.org/3/library/asyncio-task.html (accessed 2026-01-23). [22] James Reinders. 2007. Intel Threading Building Blocks: Outfitting C++ for Multi-Core Processor Parallelism . O’Reilly Media. [23] Shumpei Shiina and Kenjiro Taura. 2019. Almost deterministic work stealing. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis . ACM, Denver Colorado, 1–16. doi:10.1145/ 3295500.3356161 [24] Shumpei Shiina and Kenjiro Taura. 2023. Itoyori: Reconciling Global Address Space and Global Fork-Join Task Parallelism. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis .ACM, Denver CO USA, 1–15. doi:10.1145/3581784.3607049 [25] Markus Steinberger, Bernhard Kainz, Bernhard Kerbl, Stefan Hauswiesner, Michael Kenzel, and Dieter Schmalstieg. 2012. Softshell: dynamic scheduling on GPUs. ACM Transactions on Graphics 31, 6 (Nov. 2012), 1–11. doi:10.1145/ 2366145.2366180 [26] Markus Steinberger, Michael Kenzel, Pedro Boechat, Bernhard Kerbl, Mark Dok-ter, and Dieter Schmalstieg. 2014. Whippletree: task-based scheduling of dynamic workloads on the GPU. ACM Transactions on Graphics 33, 6 (Nov. 2014), 1–11. doi:10.1145/2661229.2661250 [27] Supercomputing Division, Information Technology Center, The University of Tokyo. 2026. Miyabi Supercomputer System. Online documentation. https: //www.cc.u-tokyo.ac.jp/en/supercomputer/miyabi/service/ (accessed 2026-01-23). [28] The Khronos SYCL Working Group. 2020. SYCL ™ 2020 Specification. Online specification. https://registry.khronos.org/SYCL/specs/sycl-2020/pdf/sycl-2020. pdf (accessed 2026-01-23). [29] Stanley Tzeng, Brandon Lloyd, and John D. Owens. 2012. A GPU Task-Parallel Model with Dependency Resolution. Computer 45, 8 (Aug. 2012), 34–41. doi:10. 1109/MC.2012.255 [30] Stanley Tzeng, Anjul Patney, and John D. Owens. 2010. Task Management for Irregular-Parallel Workloads on the GPU. In Proceedings of High Performance Graphics (HPG ’10) . The Eurographics Association, 29–37. doi:10.2312/EGGH/ HPG10/029-037 [31] Sandra Wienke, Paul Springer, Christian Terboven, and Dieter An Mey. 2012. OpenACC — First Experiences with Real-World Applications. In Euro-Par 2012 Parallel Processing , David Hutchison, Takeo Kanade, Josef Kittler, Jon M. Kleinberg, Friedemann Mattern, John C. Mitchell, Moni Naor, Oscar Nierstrasz, C. Pandu Rangan, Bernhard Steffen, Madhu Sudan, Demetri Terzopoulos, Doug Tygar, Moshe Y. Vardi, Gerhard Weikum, Christos Kaklamanis, Theodore Pap-atheodorou, and Paul G. Spirakis (Eds.). Vol. 7484. Springer Berlin Heidelberg, Berlin, Heidelberg, 859–870. doi:10.1007/978-3-642-32820-6_85 Series Title: Lecture Notes in Computer Science. [32] Shaokun Zheng, Xin Chen, Zhong Shi, Ling-Qi Yan, and Kun Xu. 2024. GPU Coroutines for Flexible Splitting and Scheduling of Rendering Tasks. ACM Transactions on Graphics 43, 6 (Dec. 2024), 1–24. doi:10.1145/3687766
