@@ -6,73 +6,85 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-09
-- 运行时间：2026-04-09 20:39:43 UTC
+- 最新运行日期：2026-04-10
+- 运行时间：2026-04-10 19:57:26 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：6
+- 本次总论文数：21
+- 精读区：10
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度解析 17 篇前沿论文，聚焦 1500+ 加速器规模的推荐训练与 NVL72 架构下的 LLM 推理优化。
-满分神作 NestPipe 提出嵌套流水线突破大规模训练瓶颈，DWDP 则通过分布式权重数据并行刷新推理性能。
-建议重点研读分布式并行策略与量化算子优化，这是应对超大模型集群效率挑战的核心路径。
-- 详情：[/202604/09/README](/202604/09/README)
+今日精选 21 篇前沿论文，深度聚焦 LLM 推理架构优化与多 LoRA 服务的高效部署。
+重点关注 InfiniLoRA 实现的解耦式多模型服务，以及 Blink 通过 GPU 和 SmartNIC 彻底消除 CPU 瓶颈的“零 CPU”推理方案。
+建议优先研读两篇满分论文，掌握从硬件卸载到分布式适配器管理的下一代大模型工程化思路。
+- 详情：[/202604/10/README](/202604/10/README)
 
 ### 精读区论文标签
-1. [NestPipe: Large-Scale Recommendation Training on 1,500+ Accelerators via Nested Pipelining](/202604/09/2604.06956v1-nestpipe-large-scale-recommendation-training-on-1500-accelerators-via-nested-pipelining)  
+1. [InfiniLoRA: Disaggregated Multi-LoRA Serving for Large Language Models](/202604/10/2604.07173v1-infinilora-disaggregated-multi-lora-serving-for-large-language-models)  
    标签：评分：10.0/10、query:mlsys
-   evidence：大规模推荐模型训练的嵌套流水线
-2. [DWDP: Distributed Weight Data Parallelism for High-Performance LLM Inference on NVL72](/202604/09/2604.01621v1-dwdp-distributed-weight-data-parallelism-for-high-performance-llm-inference-on-nvl72)  
+   evidence：大语言模型解耦式LoRA推理系统
+2. [Blink: CPU-Free LLM Inference by Delegating the Serving Stack to GPU and SmartNIC](/202604/10/2604.07609v1-blink-cpu-free-llm-inference-by-delegating-the-serving-stack-to-gpu-and-smartnic)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：使用SmartNIC和GPU的无CPU大模型推理架构
+3. [DWDP: Distributed Weight Data Parallelism for High-Performance LLM Inference on NVL72](/202604/10/2604.01621v1-dwdp-distributed-weight-data-parallelism-for-high-performance-llm-inference-on-nvl72)  
    标签：评分：9.0/10、query:mlsys
-   evidence：NVL72上的分布式推理并行化与权重管理
-3. [ForkKV: Scaling Multi-LoRA Agent Serving via Copy-on-Write Disaggregated KV Cache](/202604/09/2604.06370v1-forkkv-scaling-multi-lora-agent-serving-via-copy-on-write-disaggregated-kv-cache)  
+   evidence：用于高性能大模型推理的分布式权重数据并行
+4. [GENSERVE: Efficient Co-Serving of Heterogeneous Diffusion Model Workloads](/202604/10/2604.04335v2-genserve-efficient-co-serving-of-heterogeneous-diffusion-model-workloads)  
    标签：评分：9.0/10、query:mlsys
-   evidence：具有解耦 KV 缓存的多 LoRA 智能体工作流推理系统
-4. [Foundry: Template-Based CUDA Graph Context Materialization for Fast LLM Serving Cold Start](/202604/09/2604.06664v1-foundry-template-based-cuda-graph-context-materialization-for-fast-llm-serving-cold-start)  
+   evidence：在共享GPU集群上协同调度异构扩散模型工作负载
+5. [STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training](/202604/10/2604.06836v2-stquant-spatio-temporal-adaptive-framework-for-optimizer-quantization-in-large-multimodal-model-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：快速LLM推理服务与CUDA图上下文实例化
-5. [STQuant: Spatio-Temporal Adaptive Framework for Optimizer Quantization in Large Multimodal Model Training](/202604/09/2604.06836v1-stquant-spatio-temporal-adaptive-framework-for-optimizer-quantization-in-large-multimodal-model-training)  
+   evidence：带有优化器量化的分布式训练框架
+6. [SL-FAC: A Communication-Efficient Split Learning Framework with Frequency-Aware Compression](/202604/10/2604.07316v1-sl-fac-a-communication-efficient-split-learning-framework-with-frequency-aware-compression)  
    标签：评分：9.0/10、query:mlsys
-   evidence：具有动态优化器量化的分布式训练框架
-6. [AdaHOP: Fast and Accurate Low-Precision Training via Outlier-Pattern-Aware Rotation](/202604/09/2604.02525v1-adahop-fast-and-accurate-low-precision-training-via-outlier-pattern-aware-rotation)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：大模型低精度训练优化
+   evidence：用于分布式机器学习的通信高效拆分学习框架
+7. [Fast Heterogeneous Serving: Scalable Mixed-Scale LLM Allocation for SLO-Constrained Inference](/202604/10/2604.07472v1-fast-heterogeneous-serving-scalable-mixed-scale-llm-allocation-for-slo-constrained-inference)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：GPU 资源分配与并行配置
+8. [From LLM to Silicon: RL-Driven ASIC Architecture Exploration for On-Device AI Inference](/202604/10/2604.07526v1-from-llm-to-silicon-rl-driven-asic-architecture-exploration-for-on-device-ai-inference)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：用于AI推理的ASIC架构探索和工作负载划分
+9. [Improved Convergence for Decentralized Stochastic Optimization with Biased Gradients](/202604/10/2604.08236v1-improved-convergence-for-decentralized-stochastic-optimization-with-biased-gradients)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：大规模机器学习的去中心化随机优化
+10. [Taming GPU Underutilization via Static Partitioning and Fine-grained CPU Offloading](/202604/10/2604.08451v1-taming-gpu-underutilization-via-static-partitioning-and-fine-grained-cpu-offloading)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：针对AI和HPC工作负载的GPU资源分区与卸载
 
 ### 速读区论文标签
-1. [Fast NF4 Dequantization Kernels for Large Language Model Inference](/202604/09/2604.02556v1-fast-nf4-dequantization-kernels-for-large-language-model-inference)  
+1. [Minos: Systematically Classifying Performance and Power Characteristics of GPU Workloads on HPC Clusters](/202604/10/2604.03591v3-minos-systematically-classifying-performance-and-power-characteristics-of-gpu-workloads-on-hpc-clusters)  
    标签：评分：8.0/10、query:mlsys
-   evidence：通过GPU内核优化大模型推理的AI基础设施
-2. [Communication-Efficient Distributed Learning with Differential Privacy](/202604/09/2604.02558v1-communication-efficient-distributed-learning-with-differential-privacy)  
+   evidence：HPC集群上GPU工作负载的性能与功耗特征分析
+2. [DARE: Diffusion Large Language Models Alignment and Reinforcement Executor](/202604/10/2604.04215v1-dare-diffusion-large-language-models-alignment-and-reinforcement-executor)  
    标签：评分：8.0/10、query:mlsys
-   evidence：通信高效的分布式学习算法
-3. [LP-GEMM: Integrating Layout Propagation into GEMM Operations](/202604/09/2604.04599v1-lp-gemm-integrating-layout-propagation-into-gemm-operations)  
+   evidence：扩散大模型对齐与强化学习开源框架
+3. [Efficient Inference for Large Vision-Language Models: Bottlenecks, Techniques, and Prospects](/202604/10/2604.05546v1-efficient-inference-for-large-vision-language-models-bottlenecks-techniques-and-prospects)  
    标签：评分：8.0/10、query:mlsys
-   evidence：针对机器学习工作负载优化 GEMM 算子
-4. [Top-K Retrieval with Fixed-Size Linear-Attention Completion: Backbone- and KV-Format-Preserving Attention for KV-Cache Read Reduction](/202604/09/2604.05438v1-top-k-retrieval-with-fixed-size-linear-attention-completion-backbone--and-kv-format-preserving-attention-for-kv-cache-read-reduction)  
+   evidence：大视觉语言模型推理效率技术的系统分类
+4. [Attention Editing: A Versatile Framework for Cross-Architecture Attention Conversion](/202604/10/2604.05688v1-attention-editing-a-versatile-framework-for-cross-architecture-attention-conversion)  
    标签：评分：8.0/10、query:mlsys
-   evidence：长文本生成中的 KV 缓存读取优化
-5. [Streaming Model Cascades for Semantic SQL](/202604/09/2604.00660v1-streaming-model-cascades-for-semantic-sql)  
+   evidence：大模型注意力架构转换框架
+5. [MSAO: Adaptive Modality Sparsity-Aware Offloading with Edge-Cloud Collaboration for Efficient Multimodal LLM Inference](/202604/10/2604.02945v1-msao-adaptive-modality-sparsity-aware-offloading-with-edge-cloud-collaboration-for-efficient-multimodal-llm-inference)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于数据仓库中 LLM 推理的分布式系统架构
-6. [G-ICSO-NAS: Shifting Gears between Gradient and Swarm for Robust Neural Architecture Search](/202604/09/2604.00703v1-g-icso-nas-shifting-gears-between-gradient-and-swarm-for-robust-neural-architecture-search)  
+   evidence：用于高效多模态大模型推理的边云协作卸载基础设施
+6. [Enhancing Robustness of Federated Learning via Server Learning](/202604/10/2604.03226v1-enhancing-robustness-of-federated-learning-via-server-learning)  
    标签：评分：7.0/10、query:mlsys
-   evidence：鲁棒神经架构搜索的混合框架
-7. [A Hierarchical Importance-Guided Multi-objective Evolutionary Framework for Deep Neural Network Pruning](/202604/09/2604.01076v1-a-hierarchical-importance-guided-multi-objective-evolutionary-framework-for-deep-neural-network-pruning)  
+   evidence：联邦学习算法与聚合机制
+7. [RELIEF: Turning Missing Modalities into Training Acceleration for Federated Learning on Heterogeneous IoT Edge](/202604/10/2604.04243v1-relief-turning-missing-modalities-into-training-acceleration-for-federated-learning-on-heterogeneous-iot-edge)  
    标签：评分：7.0/10、query:mlsys
-   evidence：大规模神经网络剪枝优化
-8. [Universal YOCO for Efficient Depth Scaling](/202604/09/2604.01220v1-universal-yoco-for-efficient-depth-scaling)  
+   evidence：针对异构IoT边缘设备的联邦学习框架
+8. [REAM: Merging Improves Pruning of Experts in LLMs](/202604/10/2604.04356v1-ream-merging-improves-pruning-of-experts-in-llms)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于高效深度扩展的机器学习系统架构
-9. [IWP: Token Pruning as Implicit Weight Pruning in Large Vision Language Models](/202604/09/2604.00757v1-iwp-token-pruning-as-implicit-weight-pruning-in-large-vision-language-models)  
+   evidence：大语言模型中的专家剪枝与合并
+9. [Expert-Choice Routing Enables Adaptive Computation in Diffusion Language Models](/202604/10/2604.01622v1-expert-choice-routing-enables-adaptive-computation-in-diffusion-language-models)  
    标签：评分：6.0/10、query:mlsys
-   evidence：通过Token剪枝降低大型视觉语言模型的计算成本
-10. [Ontology-Aware Design Patterns for Clinical AI Systems: Translating Reification Theory into Software Architecture](/202604/09/2604.01661v1-ontology-aware-design-patterns-for-clinical-ai-systems-translating-reification-theory-into-software-architecture)  
+   evidence：MoE模型中用于负载均衡的专家选择路由
+10. [Universal Hypernetworks for Arbitrary Models](/202604/10/2604.02215v1-universal-hypernetworks-for-arbitrary-models)  
    标签：评分：6.0/10、query:mlsys
-   evidence：临床AI流水线的软件架构
-11. [LiteInception: A Lightweight and Interpretable Deep Learning Framework for General Aviation Fault Diagnosis](/202604/09/2604.01725v1-liteinception-a-lightweight-and-interpretable-deep-learning-framework-for-general-aviation-fault-diagnosis)  
+   evidence：异构模型的固定架构生成器
+11. [Combee: Scaling Prompt Learning for Self-Improving Language Model Agents](/202604/10/2604.04247v1-combee-scaling-prompt-learning-for-self-improving-language-model-agents)  
    标签：评分：6.0/10、query:mlsys
-   evidence：用于边缘部署的轻量级深度学习框架设计
+   evidence：为智能体轨迹并行扩展提示词学习
 
 
 <div class="dpr-home-promo-card">
