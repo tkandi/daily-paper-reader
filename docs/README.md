@@ -6,73 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-11
-- 运行时间：2026-04-11 20:02:42 UTC
+- 最新运行日期：2026-04-12
+- 运行时间：2026-04-12 19:29:18 UTC
 - 运行状态：成功
 - 本次总论文数：17
 - 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-今日聚焦多模态推理优化与 MoE 架构深度解析，从 17 篇前沿成果中精选 6 篇深度研读。
-重点关注 HybridKV 带来的多模态缓存压缩突破，以及小规模 MoE 路由中专家分工的演化规律。
-建议开发者优先探索大模型推理能效比优化，并关注 HPC 集群的成本与性能协同方案。
-- 详情：[/202604/11/README](/202604/11/README)
+今日深度复盘 17 篇前沿论文，聚焦 KV Cache 显存优化策略与 24/7 全自动科研智能体。
+重点推荐 KV Cache 管理策略的系统性对比研究，以及能实现零成本监控、自主进行深度学习实验的 Deep Researcher 框架。
+建议优先关注推理侧的显存压缩与 MoE 资源分配技术，这是提升长文本处理效率的核心突破点。
+- 详情：[/202604/12/README](/202604/12/README)
 
 ### 精读区论文标签
-1. [HybridKV: Hybrid KV Cache Compression for Efficient Multimodal Large Language Model Inference](/202604/11/2604.05887v1-hybridkv-hybrid-kv-cache-compression-for-efficient-multimodal-large-language-model-inference)  
+1. [Comparative Characterization of KV Cache Management Strategies for LLM Inference](/202604/12/2604.05012v1-comparative-characterization-of-kv-cache-management-strategies-for-llm-inference)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：LLM推理中的KV缓存管理策略
+2. [Deep Researcher Agent: An Autonomous Framework for 24/7 Deep Learning Experimentation with Zero-Cost Monitoring](/202604/12/2604.05854v1-deep-researcher-agent-an-autonomous-framework-for-247-deep-learning-experimentation-with-zero-cost-monitoring)  
    标签：评分：8.0/10、query:mlsys
-   evidence：针对多模态大模型推理的KV缓存压缩优化
-2. [MoE Routing Testbed: Studying Expert Specialization and Routing Behavior at Small Scale](/202604/11/2604.07030v1-moe-routing-testbed-studying-expert-specialization-and-routing-behavior-at-small-scale)  
+   evidence：深度学习实验与监控的自动化框架
+3. [Does a Global Perspective Help Prune Sparse MoEs Elegantly?](/202604/12/2604.06542v1-does-a-global-perspective-help-prune-sparse-moes-elegantly)  
    标签：评分：8.0/10、query:mlsys
-   evidence：研究MoE路由动态和专家专业化的测试平台
-3. [Measurement of Generative AI Workload Power Profiles for Whole-Facility Data Center Infrastructure Planning](/202604/11/2604.07345v1-measurement-of-generative-ai-workload-power-profiles-for-whole-facility-data-center-infrastructure-planning)  
+   evidence：稀疏MoE模型的全局剪枝策略以减少内存消耗
+4. [Multi-Agent Orchestration for High-Throughput Materials Screening on a Leadership-Class System](/202604/12/2604.07681v1-multi-agent-orchestration-for-high-throughput-materials-screening-on-a-leadership-class-system)  
    标签：评分：8.0/10、query:mlsys
-   evidence：AI工作负载的数据中心基础设施规划
-4. [Flux Attention: Context-Aware Hybrid Attention for Efficient LLMs Inference](/202604/11/2604.07394v1-flux-attention-context-aware-hybrid-attention-for-efficient-llms-inference)  
+   evidence：面向百亿亿次级资源的分层多智能体框架
+5. [Networking-Aware Energy Efficiency in Agentic AI Inference: A Survey](/202604/12/2604.07857v1-networking-aware-energy-efficiency-in-agentic-ai-inference-a-survey)  
    标签：评分：8.0/10、query:mlsys
-   evidence：优化注意力计算以解决计算负载不平衡和同步长尾问题
-5. [GRASS: Gradient-based Adaptive Layer-wise Importance Sampling for Memory-efficient Large Language Model Fine-tuning](/202604/11/2604.07808v1-grass-gradient-based-adaptive-layer-wise-importance-sampling-for-memory-efficient-large-language-model-fine-tuning)  
+   evidence：智能体AI与大模型的能效与基础设施综述
+6. [Automating aggregation strategy selection in federated learning](/202604/12/2604.08056v1-automating-aggregation-strategy-selection-in-federated-learning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：通过自适应层级采样实现显存高效的大模型微调
-6. [AsyncTLS: Efficient Generative LLM Inference with Asynchronous Two-level Sparse Attention](/202604/11/2604.07815v1-asynctls-efficient-generative-llm-inference-with-asynchronous-two-level-sparse-attention)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于LLM推理的异步卸载引擎和稀疏注意力系统
+   evidence：联邦学习中自动聚合策略选择
 
 ### 速读区论文标签
-1. [Wattlytics: A Web Platform for Co-Optimizing Performance, Energy, and TCO in HPC Clusters](/202604/11/2604.08182v1-wattlytics-a-web-platform-for-co-optimizing-performance-energy-and-tco-in-hpc-clusters)  
+1. [Alloc-MoE: Budget-Aware Expert Activation Allocation for Efficient Mixture-of-Experts Inference](/202604/12/2604.08133v1-alloc-moe-budget-aware-expert-activation-allocation-for-efficient-mixture-of-experts-inference)  
    标签：评分：8.0/10、query:mlsys
-   evidence：优化GPU集群的性能与总拥有成本
-2. [VectraFlow: Long-Horizon Semantic Processing over Data and Event Streams with LLMs](/202604/11/2604.03855v1-vectraflow-long-horizon-semantic-processing-over-data-and-event-streams-with-llms)  
+   evidence：针对高效MoE推理的预算感知专家激活分配
+2. [DHFP-PE: Dual-Precision Hybrid Floating Point Processing Element for AI Acceleration](/202604/12/2604.04507v1-dhfp-pe-dual-precision-hybrid-floating-point-processing-element-for-ai-acceleration)  
    标签：评分：7.0/10、query:mlsys
-   evidence：扩展传统算子并支持LLM执行的语义流数据流引擎
-3. [Sampling Parallelism for Fast and Efficient Bayesian Learning](/202604/11/2604.04736v1-sampling-parallelism-for-fast-and-efficient-bayesian-learning)  
+   evidence：用于AI加速的双精度浮点处理单元架构
+3. [TriAttention: Efficient Long Reasoning with Trigonometric KV Compression](/202604/12/2604.04921v1-triattention-efficient-long-reasoning-with-trigonometric-kv-compression)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于高效贝叶斯学习的采样并行技术
-4. [DAT: Dual-Aware Adaptive Transmission for Efficient Multimodal LLM Inference in Edge-Cloud Systems](/202604/11/2604.05375v1-dat-dual-aware-adaptive-transmission-for-efficient-multimodal-llm-inference-in-edge-cloud-systems)  
+   evidence：大模型中通过KV压缩实现高效长文本推理
+4. [Short Data, Long Context: Distilling Positional Knowledge in Transformers](/202604/12/2604.06070v1-short-data-long-context-distilling-positional-knowledge-in-transformers)  
    标签：评分：7.0/10、query:mlsys
-   evidence：边云系统中高效的多模态大模型推理
-5. [Efficient Inference for Large Vision-Language Models: Bottlenecks, Techniques, and Prospects](/202604/11/2604.05546v1-efficient-inference-for-large-vision-language-models-bottlenecks-techniques-and-prospects)  
+   evidence：长文本Transformer的训练效率优化
+5. [Tight Convergence Rates for Online Distributed Linear Estimation with Adversarial Measurements](/202604/12/2604.06282v1-tight-convergence-rates-for-online-distributed-linear-estimation-with-adversarial-measurements)  
    标签：评分：7.0/10、query:mlsys
-   evidence：LVLM推理效率技术的系统分类
-6. [BOSCH: Black-Box Binary Optimization for Short-Context Attention-Head Selection in LLMs](/202604/11/2604.05942v1-bosch-black-box-binary-optimization-for-short-context-attention-head-selection-in-llms)  
+   evidence：分布式参数服务器-工人架构与收敛率
+6. [Efficient Quantization of Mixture-of-Experts with Theoretical Generalization Guarantees](/202604/12/2604.06515v1-efficient-quantization-of-mixture-of-experts-with-theoretical-generalization-guarantees)  
    标签：评分：7.0/10、query:mlsys
-   evidence：优化注意力机制以改善LLM延迟和KV缓存使用
-7. [In-Place Test-Time Training](/202604/11/2604.06169v1-in-place-test-time-training)  
+   evidence：针对MoE推理优化的专家级混合精度策略
+7. [SubFLOT: Submodel Extraction for Efficient and Personalized Federated Learning via Optimal Transport](/202604/12/2604.06631v1-subflot-submodel-extraction-for-efficient-and-personalized-federated-learning-via-optimal-transport)  
    标签：评分：7.0/10、query:mlsys
-   evidence：解决LLM计算效率低下的测试时训练框架
-8. [TalkLoRA: Communication-Aware Mixture of Low-Rank Adaptation for Large Language Models](/202604/11/2604.06291v1-talklora-communication-aware-mixture-of-low-rank-adaptation-for-large-language-models)  
+   evidence：高效个性化联邦学习框架
+8. [StructKV: Preserving the Structural Skeleton for Scalable Long-Context Inference](/202604/12/2604.06746v1-structkv-preserving-the-structural-skeleton-for-scalable-long-context-inference)  
    标签：评分：7.0/10、query:mlsys
-   evidence：基于MoE的LoRA微调通信感知框架
-9. [Council Mode: Mitigating Hallucination and Bias in LLMs via Multi-Agent Consensus](/202604/11/2604.02923v1-council-mode-mitigating-hallucination-and-bias-in-llms-via-multi-agent-consensus)  
+   evidence：用于可扩展长文本推理的 KV 缓存压缩框架
+9. [Discrete Prototypical Memories for Federated Time Series Foundation Models](/202604/12/2604.04475v1-discrete-prototypical-memories-for-federated-time-series-foundation-models)  
    标签：评分：6.0/10、query:mlsys
-   evidence：基于MoE的LLM推理系统的多智能体共识框架
-10. [FedSQ: Optimized Weight Averaging via Fixed Gating](/202604/11/2604.02990v1-fedsq-optimized-weight-averaging-via-fixed-gating)  
+   evidence：时间序列基础模型的联邦学习框架
+10. [MemMachine: A Ground-Truth-Preserving Memory System for Personalized AI Agents](/202604/12/2604.04853v1-memmachine-a-ground-truth-preserving-memory-system-for-personalized-ai-agents)  
    标签：评分：6.0/10、query:mlsys
-   evidence：针对联邦学习优化的权重平均方法以处理统计异构性
-11. [ArrowFlow: Hierarchical Machine Learning in the Space of Permutations](/202604/11/2604.04087v1-arrowflow-hierarchical-machine-learning-in-the-space-of-permutations)  
+   evidence：AI智能体的存储系统架构
+11. [Prune-Quantize-Distill: An Ordered Pipeline for Efficient Neural Network Compression](/202604/12/2604.04988v1-prune-quantize-distill-an-ordered-pipeline-for-efficient-neural-network-compression)  
    标签：评分：6.0/10、query:mlsys
-   evidence：无浮点参数的机器学习架构设计
+   evidence：针对CPU和内存限制的神经网络压缩有序流水线
 
 
 <div class="dpr-home-promo-card">
