@@ -6,73 +6,70 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-16
-- 运行时间：2026-04-16 20:13:56 UTC
+- 最新运行日期：2026-04-17
+- 运行时间：2026-04-17 20:11:15 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：6
+- 本次总论文数：16
+- 精读区：5
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度解析 17 篇前沿论文，聚焦大规模全模态强化学习引擎与高性能计算（HPC）下的模型全生命周期管理。
-重点推荐 Relax 异步 RL 框架及 HPC 上的大模型全链路优化，揭示了全模态后训练与软硬件协同的新趋势。
-建议开发者关注多模态对齐与显存优化技术，探索如何利用异步架构突破大规模训练的效率瓶颈。
-- 详情：[/202604/16/README](/202604/16/README)
+今日深度解析分布式 DiT 推理优化与智能体工作流调度，涵盖 16 篇系统架构与算法前沿进展。
+核心推荐 CoCoDiff 针对序列并行的通信优化方案，以及 Scepsy 提升复杂 Agent 流水线吞吐的高效框架。
+建议开发者重点关注端侧推理与长文本建模技术，以应对资源受限场景下的生成式 AI 落地挑战。
+- 详情：[/202604/17/README](/202604/17/README)
 
 ### 精读区论文标签
-1. [Relax: An Asynchronous Reinforcement Learning Engine for Omni-Modal Post-Training at Scale](/202604/16/2604.11554v2-relax-an-asynchronous-reinforcement-learning-engine-for-omni-modal-post-training-at-scale)  
+1. [CoCoDiff: Optimizing Collective Communications for Distributed Diffusion Transformer Inference Under Ulysses Sequence Parallelism](/202604/17/2604.14561v1-cocodiff-optimizing-collective-communications-for-distributed-diffusion-transformer-inference-under-ulysses-sequence-parallelism)  
    标签：评分：9.0/10、query:mlsys
-   evidence：具有全模态原生架构和模态感知并行性的开源强化学习训练引擎
-2. [Beyond Pre-Training: The Full Lifecycle of Foundation Models on HPC Systems](/202604/16/2604.12599v1-beyond-pre-training-the-full-lifecycle-of-foundation-models-on-hpc-systems)  
+   evidence：优化序列并行下的分布式推理集合通信
+2. [Scepsy: Serving Agentic Workflows Using Aggregate LLM Pipelines](/202604/17/2604.15186v1-scepsy-serving-agentic-workflows-using-aggregate-llm-pipelines)  
    标签：评分：9.0/10、query:mlsys
-   evidence：HPC 系统和 AI 基础设施上的基础模型全生命周期
-3. [An Engineering Journey Training Large Language Models at Scale on Alps: The Apertus Experience](/202604/16/2604.12973v2-an-engineering-journey-training-large-language-models-at-scale-on-alps-the-apertus-experience)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：在超算上大规模训练 70B LLM 的工程实践
-4. [SparseBalance: Load-Balanced Long Context Training with Dynamic Sparse Attention](/202604/16/2604.13847v1-sparsebalance-load-balanced-long-context-training-with-dynamic-sparse-attention)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对负载均衡分布式长文本训练的算法系统协同设计
-5. [Aethon: A Reference-Based Replication Primitive for Constant-Time Instantiation of Stateful AI Agents](/202604/16/2604.12129v1-aethon-a-reference-based-replication-primitive-for-constant-time-instantiation-of-stateful-ai-agents)  
+   evidence：将多LLM智能体工作流调度到GPU集群上
+3. [Self-adaptive Multi-Access Edge Architectures: A Robotics Case](/202604/17/2604.13542v1-self-adaptive-multi-access-edge-architectures-a-robotics-case)  
    标签：评分：8.0/10、query:mlsys
-   evidence：用于AI基础设施和智能体运行时的引用复制原语
-6. [Evolution of Optimization Methods: Algorithms, Scenarios, and Evaluations](/202604/16/2604.12968v1-evolution-of-optimization-methods-algorithms-scenarios-and-evaluations)  
+   evidence：分布式边缘卸载系统与基础设施扩展
+4. [Nautilus: An Auto-Scheduling Tensor Compiler for Efficient Tiled GPU Kernels](/202604/17/2604.14825v1-nautilus-an-auto-scheduling-tensor-compiler-for-efficient-tiled-gpu-kernels)  
    标签：评分：8.0/10、query:mlsys
-   evidence：分布式学习范式优化方法的综述
+   evidence：用于GPU算子自动优化的张量编译器
+5. [Serving Chain-structured Jobs with Large Memory Footprints with Application to Large Foundation Model Serving](/202604/17/2604.14993v1-serving-chain-structured-jobs-with-large-memory-footprints-with-application-to-large-foundation-model-serving)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：通过块放置和缓存分配管理大模型推理服务的系统资源
 
 ### 速读区论文标签
-1. [Event Tensor: A Unified Abstraction for Compiling Dynamic Megakernel](/202604/16/2604.13327v1-event-tensor-a-unified-abstraction-for-compiling-dynamic-megakernel)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于动态大内核的统一编译器抽象，优化GPU工作负载和内核间并行性
-2. [Rethinking AI Hardware: A Three-Layer Cognitive Architecture for Autonomous Agents](/202604/16/2604.13757v1-rethinking-ai-hardware-a-three-layer-cognitive-architecture-for-autonomous-agents)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：映射到不同计算基板的三层认知架构
-3. [ZoomR: Memory Efficient Reasoning through Multi-Granularity Key Value Retrieval](/202604/16/2604.10898v1-zoomr-memory-efficient-reasoning-through-multi-granularity-key-value-retrieval)  
+1. [Technology solutions targeting the performance of gen-AI inference in resource constrained platforms](/202604/17/2604.11128v1-technology-solutions-targeting-the-performance-of-gen-ai-inference-in-resource-constrained-platforms)  
    标签：评分：7.0/10、query:mlsys
-   evidence：长序列LLM生成的内存高效KV缓存优化
-4. [Sema Code: Decoupling AI Coding Agents into Programmable, Embeddable Infrastructure](/202604/16/2604.11045v1-sema-code-decoupling-ai-coding-agents-into-programmable-embeddable-infrastructure)  
+   evidence：资源受限平台上的生成式AI推理性能
+2. [Latent-Condensed Transformer for Efficient Long Context Modeling](/202604/17/2604.12452v1-latent-condensed-transformer-for-efficient-long-context-modeling)  
    标签：评分：7.0/10、query:mlsys
-   evidence：将AI代理引擎与客户端层解耦为可编程基础设施
-5. [A Full Compression Pipeline for Green Federated Learning in Communication-Constrained Environments](/202604/16/2604.11146v2-a-full-compression-pipeline-for-green-federated-learning-in-communication-constrained-environments)  
+   evidence：Transformer架构中KV缓存与计算的联合优化
+3. [Rethinking the Personalized Relaxed Initialization in the Federated Learning: Consistency and Generalization](/202604/17/2604.12768v1-rethinking-the-personalized-relaxed-initialization-in-the-federated-learning-consistency-and-generalization)  
    标签：评分：7.0/10、query:mlsys
-   evidence：分布式联邦学习框架的全压缩流水线
-6. [Representation-Aligned Multi-Scale Personalization for Federated Learning](/202604/16/2604.11278v1-representation-aligned-multi-scale-personalization-for-federated-learning)  
+   evidence：用于分布式训练的高效联邦学习算法
+4. [KV Packet: Recomputation-Free Context-Independent KV Caching for LLMs](/202604/17/2604.13226v1-kv-packet-recomputation-free-context-independent-kv-caching-for-llms)  
    标签：评分：7.0/10、query:mlsys
-   evidence：分布式联邦学习的资源自适应框架
-7. [EdgeCIM: A Hardware-Software Co-Design for CIM-Based Acceleration of Small Language Models](/202604/16/2604.11512v1-edgecim-a-hardware-software-co-design-for-cim-based-acceleration-of-small-language-models)  
+   evidence：用于LLM推理的免重计算缓存重用框架
+5. [Hardware-Efficient Neuro-Symbolic Networks with the Exp-Minus-Log Operator](/202604/17/2604.13871v1-hardware-efficient-neuro-symbolic-networks-with-the-exp-minus-log-operator)  
    标签：评分：7.0/10、query:mlsys
-   evidence：AI模型加速与系统架构的软硬件协同设计
-8. [PubSwap: Public-Data Off-Policy Coordination for Federated RLVR](/202604/16/2604.12160v1-pubswap-public-data-off-policy-coordination-for-federated-rlvr)  
+   evidence：硬件高效的神经网络架构设计
+6. [Asynchronous Probability Ensembling for Federated Disaster Detection](/202604/17/2604.14450v1-asynchronous-probability-ensembling-for-federated-disaster-detection)  
    标签：评分：7.0/10、query:mlsys
-   evidence：具有通信效率的去中心化训练联邦RLVR框架
-9. [Decentralized Learning via Random Walk with Jumps](/202604/16/2604.12260v1-decentralized-learning-via-random-walk-with-jumps)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：通过低通信开销的随机游走实现去中心化学习
-10. [Leveraging Mathematical Reasoning of LLMs for Efficient GPU Thread Mapping](/202604/16/2604.10387v2-leveraging-mathematical-reasoning-of-llms-for-efficient-gpu-thread-mapping)  
+   evidence：降低联邦学习通信成本的去中心化集成框架
+7. [Task-Aware LLM Routing with Multi-Level Task-Profile-Guided Data Synthesis for Cold-Start Scenarios](/202604/17/2604.09377v1-task-aware-llm-routing-with-multi-level-task-profile-guided-data-synthesis-for-cold-start-scenarios)  
    标签：评分：6.0/10、query:mlsys
-   evidence：针对非盒状区域的高效GPU线程映射，以防止资源分配损失
-11. [OSC: Hardware Efficient W4A4 Quantization via Outlier Separation in Channel Dimension](/202604/16/2604.12782v1-osc-hardware-efficient-w4a4-quantization-via-outlier-separation-in-channel-dimension)  
+   evidence：平衡成本和性能的大模型路由系统架构
+8. [Task2vec Readiness: Diagnostics for Federated Learning from Pre-Training Embeddings](/202604/17/2604.10849v1-task2vec-readiness-diagnostics-for-federated-learning-from-pre-training-embeddings)  
    标签：评分：6.0/10、query:mlsys
-   evidence：大模型高吞吐部署的硬件高效量化方案
+   evidence：联邦学习性能和客户端对齐的诊断方法
+9. [Learning How Much to Think: Difficulty-Aware Dynamic MoEs for Graph Node Classification](/202604/17/2604.11473v1-learning-how-much-to-think-difficulty-aware-dynamic-moes-for-graph-node-classification)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：混合专家架构中的动态专家资源分配
+10. [Beyond LLMs, Sparse Distributed Memory, and Neuromorphics <A Hyper-Dimensional SRAM-CAM "VaCoAl" for Ultra-High Speed, Ultra-Low Power, and Low Cost>](/202604/17/2604.11665v1-beyond-llms-sparse-distributed-memory-and-neuromorphics-a-hyper-dimensional-sram-cam-vacoal-for-ultra-high-speed-ultra-low-power-and-low-cost)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：超维计算架构及其硬件实现
+11. [Latent-Condensed Transformer for Efficient Long Context Modeling](/202604/17/2604.12452v2-latent-condensed-transformer-for-efficient-long-context-modeling)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：LLM高效长文本建模的架构设计
 
 
 <div class="dpr-home-promo-card">
