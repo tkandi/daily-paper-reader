@@ -1,0 +1,686 @@
+Title: CoCoDiff: Optimizing Collective Communications for Distributed Diffusion Transformer Inference Under Ulysses Sequence Parallelism
+
+URL Source: https://arxiv.org/pdf/2604.14561v1
+
+Published Time: Fri, 17 Apr 2026 00:30:56 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# CoCoDiff: Optimizing Collective Communications for Distributed Diffusion Transformer Inference Under Ulysses Sequence Parallelism 
+
+Bin Ma ∗, Xingjian Ding ∗, Tekin Bicer †, Pengfei Su ∗, Dong Li ∗∗University of California, Merced, CA, USA 
+
+{bma6, xding4, psu7, dli35 }@ucmerced.edu 
+
+†Argonne National Laboratory, Lemont, IL, USA tbicer@anl.gov 
+
+Abstract —Diffusion Transformers (DiTs) are increasingly adopted in scientific computing, yet growing model sizes and res-olutions make distributed multi-GPU inference essential. Ulysses sequence parallelism scales DiT inference but introduces frequent all-to-all collectives that dominate latency. Overlapping these with computation is difficult due to tight data dependencies, large message volumes, and asymmetric interconnect bandwidths. We introduce CoCoDiff, a distributed DiT inference engine exploiting two observations: (1) V requires only linear pro-jection while Q/K need additional normalization and RoPE, creating opportunities to overlap V ’s communication with Q/K
+
+computation; (2) adjacent denoising steps produce similar ten-sors, yielding temporal redundancy. CoCoDiff introduces three mechanisms: Tile-Aware Parallel All-to-all (TAPA) decomposes collectives into topology-aligned phases; V-First scheduling hides 
+
+V ’s communication behind Q/K computation; and V-Major selective communication transmits only active projections on slow interconnects. On the Aurora supercomputer with four DiT models across 1–8 nodes (up to 96 Intel GPU tiles), CoCoDiff achieves an average speedup of 3.6 ×, peaking at 8.4 ×.
+
+I. I NTRODUCTION 
+
+Diffusion Transformers (DiTs) have reshaped modern gen-erative AI. Models such as Stable Diffusion 3 (SD3) [1], FLUX [2], Qwen-Image [3], and Sora [4] deliver unprece-dented image and video quality, powering creative tools used by millions. DiTs are also gaining traction in scien-tific computing: AERIS [5], for example, an 80B-parameter Swin DiT, has been deployed on the Aurora supercomputer for high-fidelity global weather and subseasonal-to-seasonal (S2S) forecasting. The computational cost of DiT inference is driven by its patch-token representation: the token count grows quadratically with image resolution, and each generation task requires tens of sequential denoising steps. Distributed infer-ence across multiple GPUs therefore becomes essential to meet the resulting computation and memory demands. Ulysses sequence parallelism [6], [7] is the prevailing method for scaling DiT inference, sharding tokens across GPUs but requiring all-to-all exchanges of Q/K/V tensors before every attention layer, which is very expensive. Profiling Qwen-Image (20B) on one node of the Aurora supercomputer (6 GPUs per node, each of which has 2 tiles) shows that all-to-all dominates performance: 64% of inference time at 5,000       
+
+> 7,500
+> 10,000
+> 12,500
+> 15,000
+> 17,500
+> 95%
+> 5,859
+> 96%
+> 9,539
+> 96%
+> 15,375
+> 1 Node (12 ranks) 2 Nodes (24 ranks)
+> Computation All-to-All
+> 768x768 1536x1536 2304x2304 768x768 1536x1536 2304x2304
+> Image Resolution
+> 0
+> 500
+> 1,000
+> 1,500
+> 64%
+> 507
+> 76%
+> 895
+> 81%
+> 1,089
+> Per-Step Latency (ms)
+
+Fig. 1: Communication overhead in Qwen-Image (20B) infer-ence on Aurora. The batch size is 1. The percentages indicate the percentage of all-to-all in overall inference time. the resolution 768 × 768 and over 80% at the resolution 
+
+2304 × 2304 as shown in Figure 1. This communication prob-lem becomes even more pronounced with a higher resolution (i.e., a longer sequence), because the communication time complexity grows quadratically with the sequence length while computation grows only linearly (§II-A). Multi-node scaling further worsens the collective communication problem: with two nodes on Aurora, all-to-all reaches 96% of inference time (shown in Figure 1), as communication traffic traverses Aurora’s Slingshot fabric. To reduce the overhead of collective communication, over-lapping communication with computation is an effective ap-proach. However, this method faces challenges in the context of DiT. In essence, the computation graph and data depen-dencies in DiT are tightly coupled so that the collective communication cannot be easily overlapped with computation. First, in the sequence parallelism (especially the most popu-lar Ulysses sequence parallelism), each transformer layer calls all-to-all to redistribute the tensors Q, K, V across P ranks before attention computation. This call blocks, even though it is a non-blocking version (e.g., MPI_Ialltoall ), until data from all ranks has arrived. Attention cannot start until the full redistribution finishes. This problem, in nature, comes 1
+
+> arXiv:2604.14561v1 [cs.DC] 16 Apr 2026
+
+from the dependency between attention and all-to-all within atransformer layer. Second, there is dependency across the layers, which limits the overlap opportunities. Diffusion transformers operate on sequential denoising steps, and each step requires the output of the previous one, which creates forward dependencies. Since the activations to a layer cannot be computed ahead of time, the communication sits directly on the critical path. Third, the communication is large and frequent, and does not decrease across denoising steps, which makes it difficult to amortize the communication costs. In particular, Ulysses-style parallelism communicates the tensors with the size O(N · d)
+
+at each layer and each denoising step where N and d are the sequence length and hidden dimension size respectively, which quickly saturates available bandwidth. The same full volume is repeated across all denoising steps, even though adjacent steps produce similar intermediate tensors. The long-communication problem becomes even worse on the Aurora supercomputer where we did this work. Each node on Aurora is equipped with six Intel GPUs, each of which is equipped with two tiles. The inter-tile within the same GPU has high communication bandwidth (185 GB/s), 12 × higher than inter-GPU communication bandwidth within the same node [8], [9]. As a result, in a collective communication, the tiles not involved into the inter-GPU communication can finish the communication much earlier than other tiles, wasting tile-compute cycles. This problem comes from the asymmetric communication topology across GPUs (or tiles on Aurora), and can be commonly found in other clusters where inter-node and intra-node have large difference in communication bandwidth. To address the above challenges, we introduce CoCoDiff, a high-performance, distributed inference engine for DiT. The design of CoCoDiff is driven by two observations: (1) V
+
+requires only linear projection while Q and K, besides linear projection, additionally need normalization and RoPE, creating a time gap between the three tensors. (2) Adjacent denoising steps can produce highly similar intermediate tensors, show-ing strong temporal coherence, hence communications across adjacent steps can be redundant. The first observation helps address the first and third challenges on the intra-layer dependency and communication volume. Instead of aiming to remove the dependency within a layer, we separate the collective communication for the three tensors ( Q, K, and V ) so that the collective communication for V occurs first, right after the projection of V is done. This early communication overlaps with the projection of Q and 
+
+K, hiding the communication overhead of V and reducing the communication volume for the original lump all-to-all for the three tensors. The second observation helps us address the second and third challenges on the inter-layer dependency and high com-munication frequency, and avoids negative impact of slow in-terconnects in asymmetric communication paths. In particular, we leverage the temporal redundancy across denoising steps such that those vectors in Q, K, and V corresponding to TABLE I: Notations.                                 
+
+> Notation Description Attention & Sequence Parallelism
+> NSequence length (number of tokens).
+> dPer-head dimension size.
+> HTotal number of attention heads.
+> PNumber of tiles (ranks).
+> hiHidden state of token i.
+> WQ, W K, W VLearned projection matrices ∈Rd×d.
+> qi, k i, v iQuery, key, value vectors of token i.
+> Q, K, V Query, key, value matrices ∈RN×d.
+> Denoising & Selective Communication
+> TTotal number of denoising steps.
+> tCurrent denoising step index.
+> rCache ratio (fraction of projections reused).
+> Vp1
+> tVafter Phase 1 exchange at time step
+> t.
+> Xp2
+> tX∈ { Q, K, V }after Phase 2 at time step t.
+
+similar tokens are not communicated, and are reused across the denoising steps. This method leads to a substantial reduction of communication volume in slow interconnects, and has ignorable impact on inference accuracy. In conclusion, we summarize our contributions as follows.  
+
+> •
+
+We identify multiple challenges in collective communi-cations that prevent scalable and high-performance dis-tributed inference of DiT across GPUs. We introduce a high-performance inference engine, CoCoDiff, to address those challenges.  
+
+> •
+
+We leverage two salient characteristics of the DiT models to drive our solution with the considerations of intercon-nect topology and computation dependency.  
+
+> •
+
+Evaluating on Aurora with four DiT models across 1–8 nodes (up to 96 Intel GPU tiles), CoCoDiff achieves an average speedup of 3.6 ×, peaking at 8.4×.II. B ACKGROUND AND MOTIVATION 
+
+We review background and motivate our work. Table I summarizes the key notation used throughout this paper. 
+
+A. Ulysses Sequence Parallelism in Transformers 
+
+The attention mechanism lies at the heart of transformer architectures. Given an input sequence of N tokens, the query matrix ( Q), key matrix ( K), and value matrix ( V ) (where 
+
+Q, K, V ∈ RN ×d) are obtained via learned linear projections 
+
+(detailed in §II-B), where d is the dimension size of an attention head. Attention then computes as follows: Attention (Q, K, V ) = softmax 
+
+ QK T
+
+√d
+
+
+
+· V (1) The result of Equation 1 leads to the attention matrix with the size of N ×N , yielding O(N 2) memory complexity, which becomes prohibitive for long sequences. 2Ulysses sequence parallelism addresses this by partitioning the input sequence along the sequence dimension across P
+
+devices. Instead of each device processing the entire sequence length, each device processes a subset of tokens (i.e., N/P 
+
+tokens), allowing for longer sequence or larger model without out-of-memory errors on devices. We call this distributed data layout across devices, the sequence-parallel layout .Ulysses [10], widely employed in DeepSpeed/Megatron [11], vLLM [12], and hugging Face Accelerate [13], is arguably the most popular sequence parallelism. With Ulysses, before attention, an all-to-all collective communication transforms the sequence-parallel layout to the head-parallel layout : each rank holds all N tokens but only H/P heads where H is total number of heads in a layer. The attention proceeds on each rank’s head subset. After the attention, a second all-to-all collective communication transforms from the head-parallel layout back to the sequence-parallel layout. 
+
+B. QKV Processing Asymmetry in Attention 
+
+The attention mechanism requires three input tensors: Q,
+
+K, and V . They are generated through token projection. In particular, each token i has a hidden state hi ∈ Rd,which is projected into a query vector qi = hiWQ, a key vector ki = hiWK , and a value vector vi = hiWV , where 
+
+WQ, W K , W V ∈ Rd×d are learned weight matrices. Stacking all N tokens yields the matrices Q, K, V ∈ RN ×d.After the above projection, Q, K, and V are reshaped to attention heads. Modern DiT architectures then apply addi-tional processing exclusively to Q and K, creating computation asymmetry across the three tensors. The asymmetry comes from two operations for Q and K, shown in Figure 2. 
+
+QK normalization. Modern DiTs, including SD3 [1], FLUX [2], and Qwen-Image [3], apply RMSNorm or Lay-erNorm to Q and K after the linear projection. The QK normalization controls the magnitude of Q and K, so that the dot-product attention logits QK T remain numerically stable. 
+
+V does not participate in the normalization, because V is built by weighted-summation of the resulting attention scores, and normalizing V is meaningless. 
+
+Rotary position embeddings (RoPE). RoPE [14] encodes positional information by rotating Q and K so that the dot product qTi kj depends on relative position i − j, where qi
+
+and kj are the query and key vectors at positions i and j
+
+respectively. Because the positional relationships are captured entirely through the product QK T , applying RoPE to V would alter the content being aggregated without contributing any positional signal. Hence, RoPE is not applied to V .The above two operations are common, and they reflect fundamental design principles of modern transformers. Most of DiT have the two operations. 
+
+C. Temporal Redundancy in Diffusion Denoising 
+
+Diffusion models generate images through iterative denois-ing over T steps. Starting from Gaussian noise xT , each step t
+
+applies a learned denoising function to produce a progressively cleaner latent xt−1. With DiT, this manifests as a sequence of Input Q/K/V Projection 
+
+> heads
+
+## × × ×      
+
+> Wq Wk Wv
+> QKV
+> RMSNorm
+> RoPE
+> Local Attention :
+> (no norm)
+> (no RoPE )
+> All -to -All
+> RMSNorm
+> RoPE
+> S𝑜𝑓𝑡𝑚𝑎𝑥 (𝑄 K!
+> 𝑑 )𝑉
+
+Fig. 2: QKV processing in the attention. attention computations whose intermediate tensors ( Qt, Kt,
+
+Vt) evolve gradually across steps. During this process, Q,
+
+K, and V can show value similarity across two neighbor steps. Hence, selectively reusing them across time steps can reduce the latency while causing minor impacts on the model accuracy. This is called the temporal redundancy, and has been leveraged to build a caching mechanism across step steps (e.g., DeepCache [15], ∆-DiT [16], and Learning-to-Cache [17]). The temporal redundancy has been exploited for compute savings on a single GPU, but not for communication reduction in distributed settings. Standard all-to-all implementations communicate all Q, K and V at full volume every step, regardless of how little individual vectors in Q, K and V
+
+have changed across consecutive steps. 
+
+D. Intel Aurora Architecture 
+
+We use the Aurora supercomputer in our study. Each node in Aurora contains six Intel Data Center GPU Max 1550 (Ponte Vecchio) accelerators. Each GPU comprises two independent compute tiles with separate execution units and 64 GB HBM2e memory, appearing as separate devices from software’s perspective—yielding 12 addressable compute units per node. In our distributed inference setup, each tile is mapped to one rank, so a single node runs 12 ranks. The communication fabric in Aurora exhibits a hierarchical structure. Within a single GPU, two tiles (Tile 0 and Tile 1) communicate through a high-bandwidth internal interconnect achieving unidirectional bandwidth of 185 GB/s (or 269 GB/s for bidirectional). Between GPUs, Intel’s Xe Links connects all six GPUs in a mesh topology at unidirectional bandwidth of 15 GB/s (or 23 GB/s for bidirectional) per link. The Xe Links in a node form two independent rings: one connecting all Tile 0 in each GPU, and the other connecting all Tile 1 in 30.0       
+
+> 5.0
+> 4.0
+> 3.0
+> 2.0
+> 1.0
+> 0.1
+> 1.1
+> 2.1
+> 3.1
+> 4.1
+> 5.1
+> GPU 0
+> GPU 1
+> GPU 2
+> GPU 3
+> GPU 4
+> GPU 5
+> Inter -GPU 15 GB/s
+> Intra -GPU 185 GB/s
+
+Fig. 3: The two-level communication hierarchy in an Aurora node. Intra-GPU bandwidth between tiles (red, solid arrows) is 12 × higher than that of inter-GPU Xe Link (dashed lines). each GPU, but there is no direct link across the two rings. For cross-node communications, each node has 8 HPE Slingshot-11 NICs providing unidirectional bandwidth of 25 GB/s per NIC (or 200 GB/s aggregated per node). The resulting three-level hierarchy (185 : 15 : 25 GB/s unidirection) exhibits up to 12 × difference in bandwidth across the hierarchy. Figure 3 illustrates this hierarchy. 
+
+E. Limitations of Existing Collective Communication 
+
+Some implementations of collective communications con-sider interconnect topologies to improve performance. For ex-ample, NCCL [18] considers the communication hierarchy by using tree- or ring-based algorithms [19], [20]. However, those implementations optimize data movement without considering data access pattern and data semantics in computation, and no existing library fully fits Aurora’s hierarchy. For example, NCCL [18] does not offer a dedicated all-to-all communication primitive. The user of NCCL to build all-to-all has to use point-to-point communications, ncclSend and ncclRecv ,without hierarchical staging. MPICH [21] uses flat algorithms (Bruck, pairwise, and scattered), and its GPU direct-transfer treats all tiles as equal peers without considering topologies. Intel’s oneCCL [22] builds a tile/card/node communicator hierarchy, but triggers intra-GPU and inter-GPU communica-tions alltogether, leaving the communication order to hardware scheduling; moreover, oneCCL does not support asynchronous all-to-all, and hence cannot overlap all-to-all with computation. We compare our approach against oneCCL’s all-to-all in §IV-F. III. D ESIGN 
+
+We present the design of CoCoDiff in this section. 
+
+A. Overview 
+
+CoCoDiff has three components, depicted in Figure 4. The first component, “TAPA decomposition”, decomposes each all-to-all communication into two phases where Phase 1 happens within each GPU using higher bandwidth and Rank 0: seq[0]           
+
+> Rank 1: seq[1]
+> Rank 11: seq[11]
+> ….
+> Rank 0: seq[0]
+> Rank 1: seq[1]
+> Rank 11: seq[11]
+> ….
+> Local
+> Attention
+> First
+> All -to -All
+> Second
+> All -to -All
+> CoCoDiff
+> Q/K/V
+> Projection
+> V-First Scheduling
+> V-Major Selective
+> Merge with
+> Cached QKV
+> TAPA Decomposition (Phase 1 + Phase 2)
+> Ulysses
+> (seq → head) (head → seq)
+> Phase 2
+> (QKV Asymmetry)
+> (Temporal Redundancy)
+> Phase1
+> Selective All -to -Al
+> Reduce Communication Volume
+
+Fig. 4: CoCoDiff overview. Phase 2 happens across GPUs using lower bandwidth. In each phase, multiple communications happen in parallel either within GPUs or across GPUs, leveraging aggregated com-munication bandwidth. The second phase especially benefits from the decomposition, because it allows two 6-rank all-to-all communications to occur in parallel, fully aligned with the interconnect topology and hence fully leveraging aggregated bandwidth across GPUs in a node. The second component, V-First schedule, is designed for the first all-to-all communication in a layer. Instead of waiting for the projections for the three tensors ( Q, K, and V ) to be done altogether and then launching the first all-to-all for the three tensors, V-First launches the all-to-all for V once the projection of V is done. Because of the computation asymmetry across the three tensors (i.e, the lack of QK 
+
+normalization and RoPE for V ), V is able to finish the projection earlier and launch Phase 1 of its all-to-all. As a result, Phase 1 overlaps with the QK normalization and RoPE. The third component, V-major schedule, is also designed for the first all-to-all communication in a layer. This component is very helpful to reduce the communication volume in the sec-ond phase of all-to-all, which happens in slower interconnect. This component caches projections in the prior time steps. In a time step, this component will compare the new projections against the cached projections, and identifies the active q, k,and v vectors and communicates only those vectors instead of entire Q, K, and V .In the rest of this section, we use a running example to make the discussion more concrete. In this example, we use Qwen-Image (20B parameters and 60 layers) at the resolution 
+
+1536 × 1536 with batch size 1 on a single Aurora node (6 GPUs with 12 tiles in total), and we launch 12 ranks (i.e., one rank per tile). All timing numbers refer to this setup unless otherwise noted. 
+
+B. Tile-Aware Parallel All-to-All 
+
+Figure 6 illustrates tile-aware parallel all-to-all (TAPA). In Phase 1, each GPU performs an intra-GPU tile-to-tile exchange. All six pairs of tiles perform internal token ex-change in parallel, leveraging high bandwidth (185 GB/s) of 4the internal links in GPUs. In our running example, this phase takes 0.3 ms to exchange messages within individual GPUs, and each message is 14 MB. After Phase 1, each tile holds a copy of all tokens distributed to the GPU where the tile resides. Hence, when Phase 2 starts, each tile just needs to exchange tokens with tiles on other GPUs. Phase 1 is based on point-to-point (p2p) communications. With the support of Intel GPU architecture and system soft-ware, those communications can occur asynchronously, allow-ing the overlap of those communications with computation (see V-First scheduling §III-C). In contrast, the original all-to-all communication cannot run asynchronously, because of the limitation of Intel system software. Hence, through the communication decomposition, TAPA provides performance optimization opportunities. Phase 2 performs inter-GPU communication as two parallel 6-rank all-to-alls, one per Xe Link ring. The two ring-based collectives execute in parallel with no cross-ring traffic, max-imizing aggregated communication bandwidth. The two-phase collective communication uses the above systematic plan to coordinate communication traffic within a node. Hence, the two-phase avoids any multi-hop routing from which a flat collective may suffer across the two rings. 
+
+Some implementation details. The asynchronous p2p com-munication in Phase 1 is implemented by a background hardware-thread per tile. In addition to the p2p communication itself, the computation thread offloads p2p initialization and tensor preparation (including reshaping, transposition, and buffer allocation) to the background thread to remove such overhead from the critical path. 
+
+C. V-First Scheduling 
+
+V-First scheduling exploits the QKV processing asymmetry (§II-B). In our running example, V ’s projection takes 0.1 ms, while Q and K each take 0.5 ms because they additionally pass through RMSNorm and RoPE, leaving a 0.9 ms gap between 
+
+V and QK .With V-First scheduling, V’s projection is first computed, immediately followed by V’s Phase 1 communication occur-ring in the background; Q and K processing are performed at the same time with V’s Phase 1 communication. While V’s Phase 1 executes in the background, the computation threads perform Q’s projection, normalization, and RoPE (0.5 ms), and then K’s projection, normalization, and RoPE (another 0.5 ms). By the time Q and K are ready, V’s Phase 1 has already completed—the 1.0 ms of Q/K processing fully overlaps with 
+
+V’s Phase 1 communication. More formally, let T (V p1) denote V ’s Phase 1 latency and 
+
+T (Q, K ) denote the total Q/K processing time (normalization + RoPE). Phase 1 is completely hidden when the following condition is met. 
+
+T (Q, K ) > T (V p1) (2) In our running example, T (Q, K ) = 1 .0 ms and T (V p1) = 0.3 ms, which satisfies this condition. Equation 2 holds across (a) Baseline: Flat All -to -All                        
+
+> QKV proj All -to -All Attn
+> (b) + TAPA
+> Compute Blocked Compute
+> Main
+> Main QKV proj Attn
+> Compute Compute (block) (block)
+> Phase 1 Phase 2
+> (c) +VFirst
+> Main
+> Background
+> VAttn
+> Compute
+> QKV Phase 2(Full) QK norm+RoPE
+> V Phase1 QK Phase1
+> submit submit
+> Wait
+> (d) + VMajor Communication
+> VtPhase1 (Full)
+> Qt
+> Kt
+> norm+RoPE Phase1
+> Phase1
+> Selective
+> Mask Phase 2
+> Phase 2
+> Phase 2
+> Attn
+> Compute
+> Vt-Vt-1
+> Selective
+> Merge with
+> Vt-1
+> Qt-1
+> Kt-1
+> Allgather
+> norm+RoPE
+> Select
+> Projection
+
+Fig. 5: Execution timeline comparison. (a) Baseline: flat all-to-all in the critical path. (b) TAPA without communication offloading. (c) V-first scheduling with async offloading, hiding Phase 1 behind Q/K norm and RoPE. (d) V-Major selective communication: reducing the communication volume in QK’s Phase 1 and Phase 2. Phase1: Intra -GPU Phase2: Inter -GPU A2A              
+
+> GPU0 GPU 1
+> R0 R1 R2 R3
+> Hidden behind Q/K computation
+> R0
+> R2
+> R4
+> R6
+> R8
+> R10
+> R1
+> R3
+> R5
+> R7
+> R9
+> R11
+> T0 T1 T0 T1
+> GPU 5
+> R10 R11
+> T0 T1 …..
+> Peer = rank XOR 1: R0 ↔R1, R2 ↔R3, R4 ↔R5,
+> R6 ↔R7, R8 ↔R9, R10 ↔R11
+> bindto 185 GB/s bindto 15 GB/s
+> (Xe Link Mesh)
+> Tile -0 Group (even ranks) Tile -1 Group (odd ranks)
+
+Fig. 6: Tile-aware parallel all-to-all. all DiT models we evaluated (i.e., FLUX, SD3.5, and Qwen-Image). However, there is a risk of violating the inequality in Equation 2 when the batch size is large. In particular, V ’s projection time scales linearly with the batch size and can grow faster than T (Q, K ), As a result, there is less time gap for V-First to tap; T (V p1) may not be completely overlapped with T (Q, K ) and hence exposed to the critical path. Even so, 
+
+T (V p1) can still be partially hidden. 
+
+D. V-Major Selective Communication 
+
+V-major reduces the amount of data exposed to inter-GPU and intra-GPU communications. The key insight is that diffusion inference exhibits significant temporal redundancy across denoising steps [15]–[17], [23]: adjacent timesteps produce similar intermediate representations (i.e., q, k, and v
+
+vectors), and this redundancy can be exploited to communicate only those q, k, and v (i.e., the token projections) whose 5corresponding tokens have changed significantly, while reusing cached ones for the remainder. 
+
+Active projection selection. To identify which tokens have changed prominently between consecutive time steps, we need an indicator per token. Any of the three projections for a given token could serve this role, since they are all derived from the hidden state of the same token. For each token, we use one of its projections (particularly the value vector v) against the cached v from previous time steps to build an active-token mask. In particular, at a time step 
+
+t, after Phase 1 of V is done, each tile in a GPU holds the projections for all tokens assigned to that GPU, and one of the tiles then compares all the v it has collected against the cached ones from the prior time steps. The comparison is based on a scalar metric, which is the L1 norm of the distance of two value vectors. A larger metric value indicates big changes, and vice versa. Among all the vectors for comparison, we choose a fraction ( r) of them with the smallest metric values to be cached, and those vectors are considered stable and are not communicated across GPUs. r is called the cache ratio. The remaining (1 − r) of them will be used for communication. 
+
+r ∈ [0 , 1] is a controllable hyperparameter, and dynamically changed at runtime (see “Time-varying cache schedule” for details). After each GPU selects its active projections, the indices of active projections are then shared across all GPUs via an all-gather collective to ensure consistent projection selection across all GPU tiles. This collective is cheap as it communi-cates only a small integer-index list. 
+
+Why using v for projection selection? We select the active projections based on v (not q or k). This method is based on the assumption that the variance of v across time steps is an indication of the variance of k and q across the same time steps. This method is effective for projection selection, because 
+
+q, k, and v are linear projections of the same hidden state of the token, hence their value variances across time steps follow the same trend. Furthermore, we use v, instead of q and k, because the projection v is finished earlier than the other two projections, hence allowing us to start the projection selection earlier and overlap it with “norm+RoPE”. We do not directly use tokens to calculate the changes across time steps, because using v after Phase 1 allows us to overlap the projection selection with “norm+RoPE”, shown in Figure 5.d, hence hiding the selection overhead. 
+
+Selective communication in TAPA. We discuss the com-munication in TAPA with V-major in place as follows. 
+
+Phase 1 (intra-GPU tile-to-tile): V ’s Phase 1 communica-tion has to be done at full size, as the per-GPU projection selection requires the L1 norm of the complete exchange output in Phase 1. For Q and K, only the active projections are extracted before the tile-to-tile exchange, reducing the Phase 1 data volume to (1 − r) of its original size. See Figure 5.d. 
+
+Phase 2 (inter-GPU all-to-all): All the three projections undergo inter-GPU all-to-all, but only the active subset is communicated. This is where the largest savings occur: the message size drops by a factor of 1/r , directly reducing traffic on the bandwidth-limited inter-GPU links. 
+
+Post-Phase 2 (Receiver-side data reconstruction): Each GPU tile caches active projections from the time steps. Those projections are in the head-parallel layout (§II-A). After re-ceiving those active projections in Phase 2, each tile goes through a reconstruction process to reconstruct Qt, Kt, and 
+
+Vt for the time step t, which include active projections in t
+
+and cached projections. The reconstruction is an indexed scatter: at the time step t,each tile uses the all-gathered indices of active projections to overwrite into Qt−1, Kt−1, and Vt−1. As a result, the inactive projections keep their cached values unchanged. The above reconstruction produces a complete Qt, Kt, and Vt, assembled with minimal data movement and ready for attention. 
+
+Time-varying cache scheduling. We exploit the cache management with three complementary mechanisms. (i) Warmup. The selective path requires a cached baseline from the previous timestep, so the first few denoising steps run full TAPA to populate the cache; selective communication begins from step warmup + 1 onward. (ii) Time-varying cache ratio. 
+
+The cache ratio r trades off communication reduction against inference accuracy: a higher r skips more projections for greater speedup but risks degrading fine details, while lower 
+
+r preserves quality at higher cost. A fixed r thus locks the system to a single point on this trade-off curve. DiT, however, exhibits stage-dependent dynamics: early steps require large global updates, whereas later steps involve smaller, localized refinements, reducing the number of projections that must be communicated over time. From the warmup boundary onward, r follows a linear schedule from 0 to 1 across time steps, communicating most projections early, and caching aggressively late. (iii) Periodic full synchronization. Because each selective step updates only the active projections, the remaining entries retain values from earlier time steps; as denoising progresses, unrefreshed cache entries may carry data from t−1, t−2, or even older steps, causing approximation error to accumulate across layers. At a configurable interval (10 by default), we therefore force a full-size update to flush these stale entries and reset the cache to the exact values at the current timestep. 
+
+Memory overhead analysis. Each transformer layer caches four tensors, namely V p1 (from the Phase 1 exchange) and 
+
+Qp2, Kp2, and V p2 (from the Phase 2 all-to-all). Two properties follow. First, total overhead grows linearly with the batch size, since each of the four tensors scales with the number of latents processed per tile. Second, per-tile overhead shrinks as the total number of tiles increases: doubling the resources halves each tile’s share of the sequence and heads, so all the four cached tensors shrink by the same factor. For example, Qwen-Image at 1536 × 1536 with B=4 
+
+on single node (12 tiles) requires 4,320 MB of cache per-tile, roughly 6.6% of the 64 GB tile memory capacity. Scaling to 8 nodes (96 tiles) with B=32 increases the batch size by 8×
+
+while distributing the cache across 8× more tiles, keeping the per-tile overhead unchanged. 6E. Multi-Node Extension 
+
+CoCoDiff’s two-phase structure can be extended to multiple nodes without modification: Phase 1 remains a strictly intra-GPU exchange, and Phase 2 is a collective that routes across Xe Link within node and across nodes. We do not split Phase 2 further into intra-node and inter-node phases on Aurora because of the following reason. On Aurora, intra-node Xe Link bandwidth (15 GB/s) and inter-node Slingshot bandwidth (25 GB/s) are comparable. The bandwidth difference (1.67 ×) between the two links are much smaller than that (12 ×) between intra-GPU and inter-GPU within a node. Moreover, in the context of DiT inference, splitting Phase 2 does not introduce any opportunity to overlap with computation, but adds synchronization overhead. IV. E VALUATION 
+
+We evaluate CoCoDiff on Intel Aurora, demonstrating significant communication speedup and end-to-end perfor-mance improvement across multiple DiT models and con-figurations. CoCoDiff is implemented as an extension to xDiT [24] and the Diffusers [25] library, contributing ap-proximately 20K lines of code. Our code is publicly avail-able at https://anonymous.4open.science/r/xDit-intel-2CB8/ and https://anonymous.4open.science/r/sp-aurora-92F3/. 
+
+A. Experimental Setup 
+
+Hardware. On Aurora, each node is equipped with six Intel Data Center GPU Max 1550 (Ponte Vecchio) accelerators, each comprising two compute tiles with 64,GB HBM2e per tile. In total, a node provides 12 addressable compute tiles interconnected via Xe Links (15 GB/s per direction between GPUs) and high-bandwidth intra-GPU fabric (185 GB/s be-tween tiles). For single-node experiments, we use all 12 tiles and for multi-node experiments, we scale to 2, 4, and 8 nodes connected via eight HPE Slingshot-11 NICs per node (25 GB/s unidirectional per NIC). 
+
+Software. We use PyTorch 2.10.0 with Intel Extension (IPEX) and Intel oneCCL 2021.17 for collective communi-cation. Unless otherwise specified, we use a Ulysses degree of 12 on a single node, 24 on two nodes, and 48 on four and eight nodes, with 50 denoising steps, 5 warmup iterations, and 10-step periodic synchronization. All results are averaged over three runs. 
+
+Models and configurations. We evaluate four DiT models: FLUX.1-dev [2] (12B parameters and 57 blocks), Qwen-Image [3] (20B parameters and 60 blocks), Stable Diffusion 3.5 (SD3.5) [1] (8B parameters and 38 blocks), and FLUX.2-dev [26] (32B parameters and 56 blocks). We vary the image resolution ( 768 × 768 , 1536 × 1536 , and 2304 × 2304 ) and batch size (1, 2, 4, 8, 16, and 32). 
+
+Baselines. We compare against three configurations: (1) 
+
+Flat , standard Ulysses all-to-all; (2) TAPA , tile-aware par-allel all-to-all; (3) CoCoDiff , TAPA augmented with V-First scheduling and V-Major selective communication. 
+
+Metrics. We measure CoCoDiff’s end-to-end speedup and inpainting quality via Peak Signal-to-Noise Ratio (PSNR) [27] and Structural Similarity Index (SSIM) [28], along with the resulting speedup–quality trade-off. 
+
+Dataset. We evaluate our approach on a scientific inpainting task using synchrotron X-ray microtomography data [29] of mouse brain tissue acquired at the Advanced Photon Source (APS) at Argonne National Laboratory (ANL). 
+
+B. End-to-End Speedups 
+
+We evaluate CoCoDiff against Flat (baseline) and TAPA across three image resolutions ( 768 × 768 , 1536 × 1536 , and 
+
+2304 × 2304 ) and four DiT models (SD3.5, Qwen-Image, FLUX.1-dev, and FLUX.2-dev). Figure 7 presents the results as side-by-side bar charts. Across all configurations, CoCoDiff delivers an average speedup of 3.6× over Flat, compared to 2.3× for TAPA, and reaches up to 8.4× on SD3.5 at 
+
+2304 × 2304 with 4 nodes. 
+
+Single-node speedups (Figure 7a). CoCoDiff and TAPA achieve comparable speedups over Flat ( 2.5× vs. 2.3× on average). The limited advantage of CoCoDiff over TAPA stems from the overhead of V-Major selective caching, including ac-tive projection selection, cache management, and an additional all-gather operation, which could offset its communication savings at this small scale. 
+
+Multi-node speedups (Figure 7b). CoCoDiff achieves substantially higher speedups than TAPA over Flat ( 5.1× vs. 
+
+2.2× on average), as inter-node all-to-all latency dominates at scale, making V-Major selective communication particularly effective. Speedup, however, does not increase monotonically with node count. Ulysses parallelism is bounded by the model’s attention head count (one head per rank); once saturated, additional ranks no longer contribute to Ulysses all-to-all and are instead mapped to the Ring dimension. Because CoCoDiff optimizes only Ulysses communication while leaving K/V circulation in the Ring dimension unchanged, further scaling increases the fraction of unoptimized communication. As a result, the marginal benefit of adding nodes diminishes beyond the Ulysses limit and can even reverse. This effect is evident in Figure 7b. Qwen-Image (24 heads) at 1536 × 1536 saturates at 2 nodes and drops sharply at 4 nodes (from 7.1× to 1.7×). In contrast, SD3.5 (48 heads) at the same resolution saturates at 4 nodes and drops at 8 nodes (from 8.4× to 3.8×). 
+
+Out-of-memory configurations. We observe two distinct out-of-memory (OOM) scenarios. First, the model alone can exhaust GPU memory even under the Flat baseline, as in-dicated by “ ×” in Figure 7. Second, for FLUX.2-dev, the 32B model weights leave limited memory headroom, causing CoCoDiff’s caching mechanism to trigger OOM at larger batch sizes, marked by “ ×”. 
+
+Absent entries in multi-node configurations. The absence of 8-node bars at 768 × 768 and 2304 × 2304 arises from a divisibility constraint in DiT sequence parallelism. An H × H
+
+image is encoded into a H/ 8×H/ 8 latent grid, and each 2×2
+
+block is grouped into a single token, yielding a H/ 16 × H/ 16 
+
+token grid [1]. The sequence parallelism partitions tokens 70
+
+2
+
+4
+
+> Speedup (times)
+> SD (B=1)
+> QW (B=1)
+> F1 (B=1)
+> F2 (B=1)
+> SD (B=2)
+> QW (B=2)
+> F1 (B=2)
+> F2 (B=2)
+> SD (B=4)
+> QW (B=4)
+> F1 (B=4)
+> F2 (B=4)
+
+768 × 768 
+
+> SD (B=1)
+> QW (B=1)
+> F1 (B=1)
+> F2 (B=1)
+> SD (B=2)
+> QW (B=2)
+> F1 (B=2)
+> F2 (B=2)
+> SD (B=4)
+> QW (B=4)
+> F1 (B=4)
+> F2 (B=4)
+
+1536 × 1536 
+
+> SD (B=1)
+> QW (B=1)
+> F1 (B=1)
+> F2 (B=1)
+> SD (B=2)
+> QW (B=2)
+> F1 (B=2)
+> F2 (B=2)
+> SD (B=4)
+> QW (B=4)
+> F1 (B=4)
+> F2 (B=4)
+
+2304 × 2304     
+
+> TAPA
+> CoCoDiff
+> SD: Stable Diffusion 3.5
+> QW: Qwen-Image
+> F1: FLUX.1-dev
+> F2: FLUX.2-dev (a) Single-node speedups (batch size B∈ { 1,2,4}).
+
+0
+
+2
+
+4
+
+6
+
+8
+
+> Speedup (times)
+
+N=2 N=4 
+
+> SD (B=16)
+> QW (B=16)
+> F1 (B=16)
+> F2 (B=2)
+> SD (B=32)
+> QW (B=32)
+> F1 (B=32)
+> F2 (B=4)
+
+768 × 768 
+
+N=2 N=4 N=8 
+
+> SD (B=8)
+> QW (B=8)
+> F1 (B=8)
+> F2 (B=2)
+> SD (B=16)
+> QW (B=16)
+> F1 (B=16)
+> F2 (B=4)
+> SD (B=32)
+> QW (B=32)
+> F1 (B=32)
+> F2 (B=4)
+
+1536 × 1536 
+
+N=2 N=4 
+
+> SD (B=4)
+> QW (B=4)
+> F1 (B=4)
+> F2 (B=2)
+> SD (B=8)
+> QW (B=8)
+> F1 (B=8)
+> F2 (B=2)
+
+2304 × 2304     
+
+> (b) Multi-node speedups (node count N∈ { 2,4,8}). Each model is evaluated with the largest batch size that fits within GPU memory.
+
+Fig. 7: End-to-end speedups of TAPA (blue) and CoCoDiff (orange) over the Flat baseline across three image resolutions and four DiT models. “ ×” denotes OOM due to model memory limits, while “ ×” denotes OOM caused by CoCoDiff’s cache mechanism. The absence of 8-node bars at 768 × 768 and 2304 × 2304 reflects a model-imposed layout constraint rather than a limitation of our communication strategy. evenly across P tiles along the sequence dimension, which requires (H/ 16) mod P = 0 to ensure balanced workloads and avoid cross-tile dependency violations. Consequently, at 8 nodes (96 tiles), this condition is not satisfied for 768 × 768 and 2304 × 2304 , which produce token grids of 48 × 48 and 144 × 144 , respectively; neither can be evenly divided across 96 tiles. In contrast, 1536 ×1536 yields a 
+
+96 ×96 token grid, which aligns with the sequence parallelism and can be evenly distributed. This limitation is inherent to the model’s tokenization and parallelization scheme, rather than a restriction of our com-munication strategy. 
+
+C. Ablation Studies 
+
+We evaluate the contribution of each CoCoDiff compo-nent—TAPA, V-First scheduling, and V-Major selective com-munication—by enabling them incrementally on SD3.5 at a resolution of 1536 × 1536 across 1, 2, 4, and 8 nodes. Figure 8 decomposes CoCoDiff ’s end-to-end speedup into these components at each scale. We make three observations. First, TAPA provides a near-constant baseline speedup (av-eraging 2.2 ×) across all configurations by decomposing the monolithic all-to-all into two phases aligned with the hardware hierarchy. Second, V-First scheduling and V-Major selective communication yield negligible gains on a single node but become dominant contributors at scale, achieving average speedups of 1.3× and 2.9× across 2-, 4-, and 8-node configu-rations. Third, from 4 to 8 nodes, these gains diminish. Ulysses parallelism is bounded by the model’s attention head count (48 heads in SD3.5), and this limit is reached at 4 nodes. Beyond this point, additional tiles at 8 nodes no longer expand Ulysses parallelism and are instead mapped to the Ring dimension. Because CoCoDiff optimizes only Ulysses communication while leaving the Ring dimension unoptimized, further scaling increases the share of unoptimized communication, thereby reducing the overall gains. 
+
+D. Quality Evaluation of Restored Medical Image 
+
+Table II reports inpainting quality metrics—PSNR in deci-bels (dB; higher is better), SSIM (higher is better), and mean 81 2 4 8
+
+Node    
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> Speedup (times)
+> 2.4 ×
+> 6.9 ×
+> 8.1 ×
+> 3.8 ×
+> 2.2 2.3 1.4 3.2 2.3 1.6 4.2 1.9 0.7 1.2
+> TAPA V-First V-Major
+
+Fig. 8: Speedup breakdown of CoCoDiff on SD3.5 at 1536 ×
+
+1536 . Each stacked bar decomposes the total speedup into contributions from TAPA, V-First, and V-Major across 1-, 2-, 4-, and 8-node configurations. TABLE II: Inpainting quality metrics evaluated under block and center mask configurations.                                                                  
+
+> Metric SD3.5 FLUX.1-dev Qwen-Image
+> Flat TAPA CoCoDiff Flat TAPA CoCoDiff Flat TAPA CoCoDiff
+> Block Masked Region
+> PSNR (dB) 23.05 23.11 22.77 26.20 27.07 25.05 29.97 29.63 29.17 SSIM 0.8036 0.8083 0.8042 0.8879 0.8928 0.8816 0.9256 0.9248 0.9229 MSE 0.0065 0.0051 0.0081 0.0026 0.0020 0.0032 0.0011 0.0012 0.0012
+> Center Masked Region
+> PSNR (dB) 23.65 22.15 21.95 24.89 24.91 24.22 29.46 28.91 28.56 SSIM 0.8390 0.8110 0.8075 0.8717 0.8838 0.8672 0.9236 0.9232 0.9233 MSE 0.0046 0.0065 0.0066 0.0039 0.0035 0.0042 0.0012 0.0014 0.0015
+
+squared error (MSE)—for FLUX.1-dev, SD3.5, and Qwen-Image 1. Results are evaluated on X-ray microtomography data [29] of mouse brain tissue using block and center masks, as visualized in Figure 9. Across all models, mask types, and metrics, Flat, TAPA, and CoCoDiff produce comparable image quality. Differences re-main small within 2 dB for PSNR, 0.03 for SSIM, and 2×10 −3
+
+for MSE, indicating that neither hierarchical communication restructuring nor selective projection caching introduces non-trivial degradation relative to Flat (serving as the reference output). Overall, these results show that CoCoDiff preserves image quality within the noise floor of the generative process. This holds even for inpainting, where comparison against Flat provides a stringent evaluation, as pixel-wise metrics such as PSNR, SSIM, and MSE directly capture any deviations introduced by communication optimizations relative to full, unapproximated execution. 
+
+E. Trade-off Between Image Quality and Speedup 
+
+Figure 10 plots inpainting quality vs. speedup for SD3.5 at 768 × 768 , which compares fixed cache ratios (marked 
+
+> 1FLUX.2-dev is excluded because the Diffusers library [25] does not yet provide an inpainting pipeline for this model.
+
+Masked (25%) Ground Truth  Restored  Error (masked) 
+
+Fig. 9: Inpainting results of FLUX.1-dev with CoCoDiff on a mouse brain tissue slice. From left to right: original images (768 × 768 ), masked inputs (block and center masks with 25% coverage), restored outputs, and pixel-wise error maps (brighter colors indicate larger errors). in •) with time-varying cache ratios (marked in ⋆). Qual-ity is measured on the restored masked regions (block and center) using PSNR and SSIM. We make two observations. First, as expected, higher cache ratios yield greater speedups but lower inpainting quality, reflecting increased reuse of cached representations. Second, the time-varying cache ratio consistently dominates the fixed-ratio baselines: for a given speedup, it achieves higher inpainting quality, and for a given quality level, it attains a greater speedup. This improvement arises from its ability to adapt communication to evolving denoising dynamics: it preserves accuracy during early stages of DiT, when updates are large, and reduces communication aggressively in later stages as representations stabilize. 
+
+F. TAPA vs. oneCCL for All-to-All 
+
+We compare TAPA with Intel oneCCL with different mes-sage sizes. In this comparison, we focus on the communication only. We measure communication latency on a single node (12 tiles), and change the message size per rank from 3 to 48 MB, the per-rank message size range commonly encountered in Ulysses sequence-parallel DiT inference. Figure 11 reports the latency for oneCCL (grey), TAPA total (orange), and the two TAPA phases. The curve for Phase 1 (light blue) stays at 0.3–0.5 ms across all message sizes, confirming that intra-GPU fabric provides high bandwidth (185 GB/s) to handle tile-to-tile exchange with negligible overhead. The curve for Phase 2 (deep blue) dominates TAPA’s total latency and accounts for the gap between Phase 2 and TAPA (total). Because Phase 2 runs the two rings in parallel rather than one 12-tile collective, it reaches only 6.0 ms at 48 MB, while oneCCL’s 12-tile all-to-all reaches 25.5 ms. In this case, TAPA reduces the latency by 
+
+3.9×.The advantage of TAPA becomes larger with larger message sizes: at 6 MB, Flat and TAPA (total) have comparable perfor-mance, but at 24 MB, TAPA outperforms by 3.0×. When the message size is 48 MB, TAPA outperforms Flat by 3.9×.95.90 5.95 6.00 6.05 6.10 6.15           
+
+> Speedup
+> 20.0
+> 20.5
+> 21.0
+> 21.5
+> 22.0
+> 22.5
+> 23.0
+> 23.5
+> Quality (dB)
+> 0.0
+> 0.1
+> 0.2 0.3 0.4 0.5
+> 0.6 0.7
+> 0.8
+> 0.9
+> 1.0
+> 0.0 0.1
+> 0.2 0.3 0.4
+> 0.5 0.6 0.7
+> 0.8
+> 0.9
+> 1.0
+> block, fixed ratio
+> block dynamic 0 1
+> center, fixed ratio
+> center dynamic 0 1
+
+(a) Trade-off between PSNR and Speedup 5.90 5.95 6.00 6.05 6.10 6.15       
+
+> Speedup
+> 0.790
+> 0.795
+> 0.800
+> 0.805
+> 0.810
+> Quality
+> 0.0
+> 0.1
+> 0.2
+> 0.3 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8 0.9
+> 1.0
+> 0.0
+> 0.1
+> 0.2 0.3 0.4
+> 0.5
+> 0.6
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> block, fixed ratio
+> block dynamic 0 1
+> center, fixed ratio
+> center dynamic 0 1
+
+(b) Trade-off between SSIM and Speedup 
+
+Fig. 10: Inpainting quality vs. speedup for SD3.5 at 768 ×768 .The time-varying cache ratio ( ⋆) consistently dominates the fixed-ratio baselines ( •): for a given speedup, it achieves higher inpainting quality, and for a given quality level, it attains a greater speedup. 3 6 10 16 24 32 40 48 
+
+Message Size per Rank (MB) 
+
+> 0
+> 5
+> 10
+> 15
+> 20
+> 25
+> Latency (ms)
+> Flat TAPA (total) TAPA Phase 2 (inter-GPU) TAPA Phase 1 (intra-GPU)
+
+Fig. 11: All-to-all communication latency on a single Aurora node (12 tiles). V. R ELATED WORK 
+
+Distributed diffusion transformer inference. Several sys-tems target distributed inference specifically for diffusion models. DistriFusion [30] introduces patch parallelism, par-titioning spatial patches across GPUs and reusing stale inter-action from the previous denoising step to avoid synchronous communication. PipeFusion [31] applies pipeline parallelism across transformer layers, exploiting temporal redundancy to overlap computation of the current step with stale activations from prior steps. AsyncDiff [32] parallelizes denoising by running consecutive steps on different GPUs asynchronously. xDiT [24] provides a hybrid engine combining Ulysses, Ring, PipeFusion, and CFG parallelism. More recently, ScaleFu-sion [33] targets video DiTs by scheduling intra-layer and inter-layer communication to hide cross-machine overhead, achieving 3.6 × strong scaling on 32 A100s. StreamFusion [34] designs a topology-aware serving engine using NVSHMEM to unify Torus, Ulysses, and Ring communication on NVIDIA GPUs. The above systems optimize parallelism strategies but treat the all-to-all as a black box. CoCoDiff is complementary: it restructures and reduces the all-to-all itself by exploiting QKV asymmetry and temporal redundancy, and is the first distributed DiT inference engine optimized for Intel GPU clusters. 
+
+Cache-Based Diffusion Inference Acceleration. There are existing efforts that use cache-based methods to exploit tempo-ral redundancy across denoising steps to skip redundant single-GPU computation [17], [35], [36]. Diffusion Transformers are especially amenable to such caching, and several DiT-specific techniques have emerged [16], [37], [38]. DeepCache [15] and ∆-DiT [16] cache intermediate features across steps, skipping computation for layers whose outputs change little. Learning-to-Cache [17] trains a policy to adaptively select which layers to cache at each step. TaylorSeer [37] goes be-yond reuse by predicting future features via Taylor expansion, achieving nearly 5 × speedup on FLUX. SpeCa [38] applies a speculative-decoding-style forecast-then-verify framework to DiTs. CacheQuant [35] co-optimizes caching schedules with quantization via dynamic programming. AdaCache [36] makes caching content-adaptive, allocating more computation to high-motion video regions. The above methods reduce compute on a single device. CoCoDiff’s V-Major targets a different bottleneck: commu-nication across devices, using temporal redundancy to reduce communication volumes. 
+
+Sequence parallelism for long-context attention. Se-quence parallelism distributes attention across devices along the sequence dimension. Ulysses uses all-to-all collectives to transform between sequence-parallel and head-parallel lay-outs (§II-A), with DeepSpeed-Ulysses [10] and Megatron-LM [11], [39] adopting similar schemes. Ring Attention [7] circulates K/V blocks in a ring, overlapping communication with computation within each round. Striped Attention [40] and LightSeq [41] refine load balance and scheduling. USP [6] and LoongTrain [42] apply Ulysses within nodes and Ring across nodes. CoCoDiff is orthogonal to the above efforts: it optimizes the all-to-all communications commonly employed in the sequence parallelism. VI. C ONCLUSIONS 
+
+We present CoCoDiff, a distributed DiT inference engine that leverages application-level knowledge, specifically QKV 10 processing asymmetry and temporal redundancy, into the collective communication layer. CoCoDiff uses three syner-gic mechanisms: TAPA creates topology-aligned communi-cations, V-First enables overlap between communication and computation, and V-Major reduces the remaining traffic by transmitting only active projections. Deployed on the Aurora supercomputer across four DiT models scaling to 96 GPU tiles, CoCoDiff averages 3.6 × speedup, peaking at 8.4×, while preserving image quality, enabling efficient large-scale DiT inference. The principle of co-designing communication with application semantics and hardware topology generalizes to any platform with hierarchical interconnects. REFERENCES [1] P. Esser, S. Kulal, A. Blattmann, R. Entezari, J. M¨ uller, H. Saini, Y. Levi, D. Lorenz, A. Sauer, F. Boesel, D. Podell, T. Dockhorn, Z. English, and R. Rombach, “Scaling rectified flow transformers for high-resolution image synthesis,” in Forty-first International Conference on Machine Learning, ICML 2024 , ser. Proceedings of Machine Learning Research. PMLR, 2024, pp. 12 606–12 633. [Online]. Available: https://proceedings.mlr.press/v235/esser24a.html [2] Black Forest Labs, “FLUX,” https://github.com/black-forest-labs/flux, 2024. [3] A. Yang, B. Li, B. Yang et al. , “Qwen2.5-VL technical report,” 
+
+arXiv preprint arXiv:2502.13923 , 2025. [Online]. Available: https: //doi.org/10.48550/arXiv.2502.13923 [4] T. Brooks, B. Peebles, C. Holmes, W. DePue, Y. Guo, L. Jing, D. Schnurr, J. Taylor, T. Luhman, E. Luhman, C. Ng, R. Wang, and A. Ramesh, “Video generation models as world simulators,” OpenAI Technical Report, 2024. [Online]. Available: https://openai.com/index/ video-generation-models-as-world-simulators/ [5] V. Hatanp¨ a¨ a, E. Ku, J. Stock, M. Emani, S. Foreman, C. Jung, S. Madireddy, T. Nguyen, V. Sastry, R. A. O. Sinurat, H. Zheng, S. Wheeler, T. Arcomano, V. Vishwanath, and R. Kotamarthi, “AERIS: Argonne earth systems model for reliable and skillful predictions,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, SC 2025 . ACM, 2025, pp. 72–85. [6] J. Fang and S. Zhao, “USP: A unified sequence parallelism approach for long context generative AI,” CoRR , vol. abs/2405.07719, 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2405.07719 [7] H. Liu, M. Zaharia, and P. Abbeel, “Ring Attention with blockwise transformers for near-infinite context,” in The Twelfth International Conference on Learning Representations, ICLR 2024 . OpenReview.net, 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2310.01889 [8] Intel Corporation, “Intel Data Center GPU Max Series product brief,” https://www.intel.com/content/www/us/en/products/sku/232873/ intel-data-center-gpu-max-1550/specifications.html, 2023. [9] Argonne Leadership Computing Facility, “Aurora system overview,” https://docs.alcf.anl.gov/aurora/getting-started-on-aurora/, 2024. [10] S. A. Jacobs, M. Tanaka, C. Zhang, M. Zhang, S. L. Song, S. Rajbhandari, and Y. He, “Deepspeed ulysses: System optimizations for enabling training of extreme long sequence transformer models,” 
+
+arXiv preprint arXiv:2309.14509 , 2023. [Online]. Available: https: //doi.org/10.48550/arXiv.2309.14509 [11] M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catanzaro, “Megatron-LM: Training multi-billion parameter language models using model parallelism,” arXiv preprint arXiv:1909.08053 ,2019. [Online]. Available: https://doi.org/10.48550/arXiv.1909.08053 [12] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the 29th Symposium on Operating Systems Principles , 2023, pp. 611–626. [Online]. Available: https://doi.org/10.1145/3600006.3613165 [13] S. Gugger, L. Debut, T. Wolf et al. , “Accelerate: Training and infer-ence at scale made simple, efficient and adaptable,” https://github.com/ huggingface/accelerate, 2022. [14] J. Su, M. Ahmed, Y. Lu, S. Pan, W. Bo, and Y. Liu, “RoFormer: En-hanced transformer with rotary position embedding,” Neurocomputing ,vol. 568, p. 127063, 2024. [15] X. Ma, G. Fang, and X. Wang, “DeepCache: Accelerating diffusion models for free,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2024, pp. 15 762– 15 772. [Online]. Available: https://doi.org/10.1109/CVPR52733.2024. 01492 [16] P. Chen, M. Shen, P. Ye, J. Cao, C. Tu, C. Bouganis, Y. Zhao, and T. Chen, “ ∆-dit: A training-free acceleration method tailored for diffusion transformers,” CoRR , vol. abs/2406.01125, 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2406.01125 [17] X. Ma, G. Fang, M. B. Mi, and X. Wang, “Learning-to-cache: Accelerating diffusion transformer via layer caching,” in Advances in Neural Information Processing Systems 37 (NeurIPS) , 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2406.01733 [18] NVIDIA, “NCCL: NVIDIA collective communications library,” https: //github.com/NVIDIA/nccl, 2025. [19] R. Thakur, R. Rabenseifner, and W. Gropp, “Optimization of collective communication operations in MPICH,” The International Journal of High Performance Computing Applications , vol. 19, no. 1, pp. 49–66, 2005. [Online]. Available: https://doi.org/10.1177/1094342005051521 [20] M. Cho, U. Finkler, D. S. Kung, and H. C. Hunter, “Blueconnect: Decomposing all-reduce for deep learning on heterogeneous network hierarchy,” in Proceedings of Machine Learning and Systems, SysML 2019 . mlsys.org, 2019. [Online]. Available: https://doi.org/10.1147/ JRD.2019.2947013 [21] MPICH Team, “MPICH: A high performance and widely portable implementation of the MPI standard,” https://www.mpich.org/, 2025. [22] Intel Corporation, “Intel oneAPI Collective Communications Library (oneCCL),” https://github.com/oneapi-src/oneCCL, 2025. [23] F. Liu, S. Zhang, X. Wang, Y. Wei, H. Qiu, Y. Zhao, Y. Zhang, Q. Ye, and F. Wan, “Timestep embedding tells: It’s time to cache for video diffusion model,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2025, pp. 7353– 7363. [Online]. Available: https://doi.org/10.48550/arXiv.2411.19108 [24] J. Fang, J. Pan, J. Wang, A. Li, and X. Sun, “xDiT: An inference engine for diffusion transformers (DiTs) with massive parallelism,” 
+
+arXiv preprint arXiv:2411.01738 , 2024. [Online]. Available: https: //doi.org/10.48550/arXiv.2411.01738 [25] P. von Platen, S. Patil, A. Lozhkov et al. , “Diffusers: State-of-the-art diffusion models,” GitHub , 2022. [26] Black Forest Labs, “FLUX.2,” https://blackforestlabs.ai/flux-2/, 2025. [27] A. Hore and D. Ziou, “Image quality metrics: PSNR vs. SSIM,” in 
+
+International Conference on Pattern Recognition (ICPR) , 2010, pp. 2366–2369. [Online]. Available: https://doi.org/10.1109/ICPR.2010.579 [28] Z. Wang, A. C. Bovik, H. R. Sheikh, and E. P. Simoncelli, “Image quality assessment: From error visibility to structural similarity,” IEEE Transactions on Image Processing , vol. 13, no. 4, pp. 600–612, 2004. [Online]. Available: https://doi.org/10.1109/TIP.2003.819861 [29] B. Ma, V. Nikitin, X. Wang, T. Bicer, and D. Li, “mlr: Scalable laminography reconstruction based on memoization,” ser. SC ’25. New York, NY, USA: Association for Computing Machinery, 2025, p. 265–280. [Online]. Available: https://doi.org/10.1145/3712285.3759805 [30] M. Li, T. Cai, J. Cao, Q. Zhang, H. Cai, J. Bai, Y. Jia, M. Liu, K. Li, and S. Han, “DistriFusion: Distributed parallel inference for high-resolution diffusion models,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2024, pp. 7183–7193. [Online]. Available: https://doi.org/10.1109/CVPR52733.2024.00686 [31] J. Wang, J. Fang, J. Pan, A. Li, and P. Yang, “PipeFusion: Displaced patch pipeline parallelism for inference of diffusion transformer models,” arXiv preprint arXiv:2405.14430 , 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2405.14430 [32] Z. Chen, X. Ma, G. Fang, Z. Tan, and X. Wang, “AsyncDiff: Parallelizing diffusion models by asynchronous denoising,” arXiv preprint arXiv:2406.06911 , 2024. [Online]. Available: https://doi.org/ 10.48550/arXiv.2406.06911 [33] H. Chen, Z. He, R. Chen, Z. Ye, J. Xue, C. Zhuo, and L. Ma, “Scale-Fusion: Scalable inference of spatial-temporal diffusion transformers for high-resolution long video generation,” in Proceedings of Machine Learning and Systems (MLSys) , 2025. [34] J. Luo, Y. Li, and C. Zhang, “StreamFusion: Scalable sequence parallelism for distributed inference of diffusion transformers on GPUs,” arXiv preprint arXiv:2601.20273 , 2026. [Online]. Available: https://doi.org/10.48550/arXiv.2601.20273 
+
+11 [35] J. Liu and Z. Wang, “CacheQuant: Comprehensively accelerated diffusion models,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2025. [Online]. Available: https://doi.org/10.48550/arXiv.2503.01323 [36] K. Kahatapitiya, H. Zheng, M. Jia, X. Zhang, M. S. Ryoo, and T. Xie, “AdaCache: Adaptive caching for faster video generation with diffusion transformers,” in Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , 2025. [Online]. Available: https://doi.org/10.48550/arXiv.2411.02397 [37] F. Liu, S. Huang, H. Liu, Y. Tang, K. Han, and Y. Wang, “From reusing to forecasting: Accelerating diffusion models with TaylorSeers,” in Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , 2025. [Online]. Available: https: //doi.org/10.48550/arXiv.2503.06923 [38] J. Zhao, J. Pan, and H. Zhu, “SpeCa: Accelerating diffusion transformers with speculative feature caching,” arXiv preprint arXiv:2509.11628 ,2025. [Online]. Available: https://doi.org/10.1145/3746027.3755331 [39] V. A. Korthikanti, J. Casper, S. Lym, L. McAfee, M. Andersch, M. Shoeybi, and B. Catanzaro, “Reducing activation recomputation in large transformer models,” in Proceedings of Machine Learning and Systems , vol. 5, 2023, pp. 341–353. [Online]. Available: https://doi.org/10.48550/arXiv.2205.05198 [40] W. Brandon, A. Nrusimha, K. Qian, Z. Ankner, T. Jin, Z. Song, and J. Ragan-Kelley, “Striped attention: Faster ring attention for causal transformers,” CoRR , vol. abs/2311.09431, 2023. [Online]. Available: https://doi.org/10.48550/arXiv.2311.09431 [41] D. Li, R. Shao, A. Xie, E. P. Xing, J. E. Gonzalez, I. Stoica, X. Ma, and H. Zhang, “Lightseq: Sequence level parallelism for distributed training of long context transformers,” arXiv preprint arXiv:2310.03294 , 2023. [Online]. Available: https://doi.org/10.48550/arXiv.2310.03294 [42] D. Gu, P. Sun, Q. Hu, T. Huang, X. Chen, Y. Xiong, G. Wang, Q. Chen, S. Zhao, J. Fang, Y. Wen, T. Zhang, X. Jin, and X. Liu, “Loongtrain: Efficient training of long-sequence LLMs with head-context parallelism,” arXiv preprint arXiv:2406.18485 , 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2406.18485 
+
+12
