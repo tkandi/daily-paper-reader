@@ -6,55 +6,70 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-19
-- 运行时间：2026-04-19 19:21:58 UTC
+- 最新运行日期：2026-04-20
+- 运行时间：2026-04-20 20:02:37 UTC
 - 运行状态：成功
-- 本次总论文数：11
-- 精读区：3
-- 速读区：8
+- 本次总论文数：16
+- 精读区：6
+- 速读区：10
 
 ### 今日简报（AI）
-今日聚焦分布式 Diffusion Transformer 推理优化，深度解析了 CoCoDiff 在序列并行下的通信加速方案。
-重点关注通过结构化稀疏提升梯度编码效率，以及超低功耗硬件对类脑计算与持续学习的支撑。
-建议优先研读分布式推理的性能
-- 详情：[/202604/19/README](/202604/19/README)
+今日深挖 16 篇前沿成果，聚焦多芯片 GPU 架构革新与十亿参数级通用原子势能模型的训练突破。
+重点关注 Fleet 提出的层级任务抽象技术，以及实现十亿级参数通用原子势能模型高效训练的科研进展。
+建议从 KV Packet 和 LoSA 等稀疏注意力方案入手，了解大模型推理与视觉模型剪枝的最新优化思路。
+- 详情：[/202604/20/README](/202604/20/README)
 
 ### 精读区论文标签
-1. [CoCoDiff: Optimizing Collective Communications for Distributed Diffusion Transformer Inference Under Ulysses Sequence Parallelism](/202604/19/2604.14561v1-cocodiff-optimizing-collective-communications-for-distributed-diffusion-transformer-inference-under-ulysses-sequence-parallelism)  
+1. [Fleet: Hierarchical Task-based Abstraction for Megakernels on Multi-Die GPUs](/202604/20/2604.15379v1-fleet-hierarchical-task-based-abstraction-for-megakernels-on-multi-die-gpus)  
    标签：评分：9.0/10、query:mlsys
-   evidence：在序列并行下优化分布式推理的集合通信
-2. [Probabilistic Gradient Coding via Structure-Preserving Sparsification](/202604/19/2604.10374v1-probabilistic-gradient-coding-via-structure-preserving-sparsification)  
+   evidence：多芯GPU的资源管理与任务抽象
+2. [Breaking the Training Barrier of Billion-Parameter Universal Machine Learning Interatomic Potentials](/202604/20/2604.15821v1-breaking-the-training-barrier-of-billion-parameter-universal-machine-learning-interatomic-potentials)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：针对十亿参数机器学习势函数的分布式训练框架
+3. [Training Time Prediction for Mixed Precision-based Distributed Training](/202604/20/2604.16145v1-training-time-prediction-for-mixed-precision-based-distributed-training)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：混合精度分布式训练的时间预测，用于资源分配与调度优化
+4. [StoSignSGD: Unbiased Structural Stochasticity Fixes SignSGD for Training Large Language Models](/202604/20/2604.15416v1-stosignsgd-unbiased-structural-stochasticity-fixes-signsgd-for-training-large-language-models)  
    标签：评分：8.0/10、query:mlsys
-   evidence：用于梯度编码和缓解掉队节点的分布式计算技术
-3. [AdaSplash-2: Faster Differentiable Sparse Attention](/202604/19/2604.15180v1-adasplash-2-faster-differentiable-sparse-attention)  
+   evidence：用于分布式学习和大基座模型训练的优化算法
+5. [NeuroMesh: A Unified Neural Inference Framework for Decentralized Multi-Robot Collaboration](/202604/20/2604.15475v1-neuromesh-a-unified-neural-inference-framework-for-decentralized-multi-robot-collaboration)  
    标签：评分：8.0/10、query:mlsys
-   evidence：长文本训练效率的稀疏注意力优化
+   evidence：具有并行架构和混合GPU/CPU支持的模块化去中心化神经推理框架
+6. [Robust Synchronisation for Federated Learning in The Face of Correlated Device Failure](/202604/20/2604.16090v1-robust-synchronisation-for-federated-learning-in-the-face-of-correlated-device-failure)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：分布式学习同步机制与设备故障处理
 
 ### 速读区论文标签
-1. [Beyond LLMs, Sparse Distributed Memory, and Neuromorphics <A Hyper-Dimensional SRAM-CAM "VaCoAl" for Ultra-High Speed, Ultra-Low Power, and Low Cost>](/202604/19/2604.11665v3-beyond-llms-sparse-distributed-memory-and-neuromorphics-a-hyper-dimensional-sram-cam-vacoal-for-ultra-high-speed-ultra-low-power-and-low-cost)  
+1. [Dispatch-Aware Ragged Attention for Pruned Vision Transformers](/202604/20/2604.15408v1-dispatch-aware-ragged-attention-for-pruned-vision-transformers)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：针对深度学习框架和硬件调度的注意力算子优化
+2. [LoSA: Locality Aware Sparse Attention for Block-Wise Diffusion Language Models](/202604/20/2604.12056v1-losa-locality-aware-sparse-attention-for-block-wise-diffusion-language-models)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于超高速、低功耗AI的高维计算架构
-2. [LIFE -- an energy efficient advanced continual learning agentic AI framework for frontier systems](/202604/19/2604.12874v1-life----an-energy-efficient-advanced-continual-learning-agentic-ai-framework-for-frontier-systems)  
+   evidence：针对内存受限解码流水线的局部感知稀疏注意力机制
+3. [KV Packet: Recomputation-Free Context-Independent KV Caching for LLMs](/202604/20/2604.13226v2-kv-packet-recomputation-free-context-independent-kv-caching-for-llms)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于前沿系统和HPC管理的AI框架
-3. [A Comparative Study of CNN Optimization Methods for Edge AI: Exploring the Role of Early Exits](/202604/19/2604.14789v1-a-comparative-study-of-cnn-optimization-methods-for-edge-ai-exploring-the-role-of-early-exits)  
+   evidence：大模型推理中免重计算的KV缓存框架
+4. [Enhancing Mixture-of-Experts Specialization via Cluster-Aware Upcycling](/202604/20/2604.13508v1-enhancing-mixture-of-experts-specialization-via-cluster-aware-upcycling)  
    标签：评分：7.0/10、query:mlsys
-   evidence：边缘AI部署和推理流水线的优化方法
-4. [Three Roles, One Model: Role Orchestration at Inference Time to Close the Performance Gap Between Small and Large Agents](/202604/19/2604.11465v1-three-roles-one-model-role-orchestration-at-inference-time-to-close-the-performance-gap-between-small-and-large-agents)  
+   evidence：混合专家模型（MoE）架构设计与初始化策略
+5. [Optimizing Stochastic Gradient Push under Broadcast Communications](/202604/20/2604.15549v1-optimizing-stochastic-gradient-push-under-broadcast-communications)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：优化去中心化联邦学习及其网络通信需求
+6. [A Faster Path to Continual Learning](/202604/20/2604.11064v2-a-faster-path-to-continual-learning)  
    标签：评分：6.0/10、query:mlsys
-   evidence：在普通硬件上部署大模型智能体的推理脚手架流水线
-5. [Incidence Constraints in Hypergraph Partitioning on GPU](/202604/19/2604.14411v1-incidence-constraints-in-hypergraph-partitioning-on-gpu)  
+   evidence：减少训练成本和梯度计算开销的优化器
+7. [Beyond LLMs, Sparse Distributed Memory, and Neuromorphics <A Hyper-Dimensional SRAM-CAM "VaCoAl" for Ultra-High Speed, Ultra-Low Power, and Low Cost>](/202604/20/2604.11665v2-beyond-llms-sparse-distributed-memory-and-neuromorphics-a-hyper-dimensional-sram-cam-vacoal-for-ultra-high-speed-ultra-low-power-and-low-cost)  
    标签：评分：6.0/10、query:mlsys
-   evidence：在 GPU 上加速超图划分以进行系统优化
-6. [AIBuildAI: An AI Agent for Automatically Building AI Models](/202604/19/2604.14455v1-aibuildai-an-ai-agent-for-automatically-building-ai-models)  
+   evidence：用于AI基础设施的高维SRAM-CAM架构
+8. [PrivEraserVerify: Efficient, Private, and Verifiable Federated Unlearning](/202604/20/2604.12348v1-priveraserverify-efficient-private-and-verifiable-federated-unlearning)  
    标签：评分：6.0/10、query:mlsys
-   evidence：自动设计AI模型架构与训练流水线
-7. [Constraint-based Pre-training: From Structured Constraints to Scalable Model Initialization](/202604/19/2604.14769v1-constraint-based-pre-training-from-structured-constraints-to-scalable-model-initialization)  
+   evidence：联邦遗忘学习统一框架
+9. [Enhancing Mixture-of-Experts Specialization via Cluster-Aware Upcycling](/202604/20/2604.13508v2-enhancing-mixture-of-experts-specialization-via-cluster-aware-upcycling)  
    标签：评分：6.0/10、query:mlsys
-   evidence：针对不同模型规模的可扩展模型初始化与预训练范式
-8. [VisPCO: Visual Token Pruning Configuration Optimization via Budget-Aware Pareto-Frontier Learning for Vision-Language Models](/202604/19/2604.15188v1-vispco-visual-token-pruning-configuration-optimization-via-budget-aware-pareto-frontier-learning-for-vision-language-models)  
+   evidence：混合专家模型（MoE）的初始化与架构优化
+10. [AdaVFM: Adaptive Vision Foundation Models for Edge Intelligence via LLM-Guided Execution](/202604/20/2604.15622v1-adavfm-adaptive-vision-foundation-models-for-edge-intelligence-via-llm-guided-execution)  
    标签：评分：6.0/10、query:mlsys
-   evidence：视觉语言模型效率的视觉Token剪枝配置优化
+   evidence：视觉基础模型在设备上高效推理的自适应框架
 
 
 <div class="dpr-home-promo-card">
