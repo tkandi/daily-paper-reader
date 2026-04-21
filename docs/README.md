@@ -6,70 +6,76 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-20
-- 运行时间：2026-04-20 20:02:37 UTC
+- 最新运行日期：2026-04-21
+- 运行时间：2026-04-21 20:31:16 UTC
 - 运行状态：成功
-- 本次总论文数：16
-- 精读区：6
-- 速读区：10
+- 本次总论文数：18
+- 精读区：7
+- 速读区：11
 
 ### 今日简报（AI）
-今日深挖 16 篇前沿成果，聚焦多芯片 GPU 架构革新与十亿参数级通用原子势能模型的训练突破。
-重点关注 Fleet 提出的层级任务抽象技术，以及实现十亿级参数通用原子势能模型高效训练的科研进展。
-建议从 KV Packet 和 LoSA 等稀疏注意力方案入手，了解大模型推理与视觉模型剪枝的最新优化思路。
-- 详情：[/202604/20/README](/202604/20/README)
+今日深度复盘 18 篇前沿论文，重点攻克大规模图 Transformer 并行训练与分布式 ML 编译优化两大满分课题。
+核心结论指出 Flint 框架可实现无集群的设计空间探索，而 POLAR 算法显著优化了边缘端 LLM 的 LoRA 缓存路由效率。
+建议普通读者关注
+- 详情：[/202604/21/README](/202604/21/README)
 
 ### 精读区论文标签
-1. [Fleet: Hierarchical Task-based Abstraction for Megakernels on Multi-Die GPUs](/202604/20/2604.15379v1-fleet-hierarchical-task-based-abstraction-for-megakernels-on-multi-die-gpus)  
+1. [Scalable and Adaptive Parallel Training of Graph Transformer on Large Graphs](/202604/21/2604.16715v1-scalable-and-adaptive-parallel-training-of-graph-transformer-on-large-graphs)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：针对大规模图的图Transformer分布式训练框架
+2. [Flint: Compiler Enabled Cluster-Free Design Space Exploration for Distributed ML](/202604/21/2604.17550v1-flint-compiler-enabled-cluster-free-design-space-exploration-for-distributed-ml)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：编译器支持的分布式机器学习系统设计空间探索
+3. [mlr3torch: A Deep Learning Framework in R based on mlr3 and torch](/202604/21/2604.18152v1-mlr3torch-a-deep-learning-framework-in-r-based-on-mlr3-and-torch)  
+   标签：评分：9.5/10、query:mlsys
+   evidence：基于torch构建的深度学习框架
+4. [Towards Energy Efficient Co-Scheduling in HPC](/202604/21/2604.17640v1-towards-energy-efficient-co-scheduling-in-hpc)  
    标签：评分：9.0/10、query:mlsys
-   evidence：多芯GPU的资源管理与任务抽象
-2. [Breaking the Training Barrier of Billion-Parameter Universal Machine Learning Interatomic Potentials](/202604/20/2604.15821v1-breaking-the-training-barrier-of-billion-parameter-universal-machine-learning-interatomic-potentials)  
+   evidence：HPC系统中的GPU资源调度与协同调度
+5. [GPUOS: A GPU Operating System Primitive for Transparent Operation Fusion](/202604/21/2604.17861v1-gpuos-a-gpu-operating-system-primitive-for-transparent-operation-fusion)  
    标签：评分：9.0/10、query:mlsys
-   evidence：针对十亿参数机器学习势函数的分布式训练框架
-3. [Training Time Prediction for Mixed Precision-based Distributed Training](/202604/20/2604.16145v1-training-time-prediction-for-mixed-precision-based-distributed-training)  
+   evidence：减少内核启动开销的GPU运行时JIT系统
+6. [M100: An Orchestrated Dataflow Architecture Powering General AI Computing](/202604/21/2604.17862v1-m100-an-orchestrated-dataflow-architecture-powering-general-ai-computing)  
    标签：评分：9.0/10、query:mlsys
-   evidence：混合精度分布式训练的时间预测，用于资源分配与调度优化
-4. [StoSignSGD: Unbiased Structural Stochasticity Fixes SignSGD for Training Large Language Models](/202604/20/2604.15416v1-stosignsgd-unbiased-structural-stochasticity-fixes-signsgd-for-training-large-language-models)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于分布式学习和大基座模型训练的优化算法
-5. [NeuroMesh: A Unified Neural Inference Framework for Decentralized Multi-Robot Collaboration](/202604/20/2604.15475v1-neuromesh-a-unified-neural-inference-framework-for-decentralized-multi-robot-collaboration)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：具有并行架构和混合GPU/CPU支持的模块化去中心化神经推理框架
-6. [Robust Synchronisation for Federated Learning in The Face of Correlated Device Failure](/202604/20/2604.16090v1-robust-synchronisation-for-federated-learning-in-the-face-of-correlated-device-failure)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：分布式学习同步机制与设备故障处理
+   evidence：通用AI计算的数据流并行架构
+7. [HybridGen: Efficient LLM Generative Inference via CPU-GPU Hybrid Computing](/202604/21/2604.18529v1-hybridgen-efficient-llm-generative-inference-via-cpu-gpu-hybrid-computing)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：用于大模型推理的CPU-GPU混合计算与分层内存基础设施
 
 ### 速读区论文标签
-1. [Dispatch-Aware Ragged Attention for Pruned Vision Transformers](/202604/20/2604.15408v1-dispatch-aware-ragged-attention-for-pruned-vision-transformers)  
+1. [EcoShift: Performance-Aware Power Management for Power-Constrained Heterogeneous Systems](/202604/21/2604.17635v1-ecoshift-performance-aware-power-management-for-power-constrained-heterogeneous-systems)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：集群范围内的功耗管理与GPU资源分配
+2. [Semantic-based Distributed Learning for Diverse and Discriminative Representations](/202604/21/2604.18237v1-semantic-based-distributed-learning-for-diverse-and-discriminative-representations)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：用于多样化表征的分布式学习框架
+3. [POLAR: Online Learning for LoRA Adapter Caching and Routing in Edge LLM Serving](/202604/21/2604.16583v1-polar-online-learning-for-lora-adapter-caching-and-routing-in-edge-llm-serving)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：边缘大模型服务中的GPU/DRAM资源管理与适配器缓存
+4. [KAIROS: Stateful, Context-Aware Power-Efficient Agentic Inference Serving](/202604/21/2604.16682v1-kairos-stateful-context-aware-power-efficient-agentic-inference-serving)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：针对智能体AI推理服务的上下文感知功耗优化系统
+5. [Reducing Peak Memory Usage for Modern Multimodal Large Language Model Pipelines](/202604/21/2604.16734v1-reducing-peak-memory-usage-for-modern-multimodal-large-language-model-pipelines)  
    标签：评分：7.5/10、query:mlsys
-   evidence：针对深度学习框架和硬件调度的注意力算子优化
-2. [LoSA: Locality Aware Sparse Attention for Block-Wise Diffusion Language Models](/202604/20/2604.12056v1-losa-locality-aware-sparse-attention-for-block-wise-diffusion-language-models)  
+   evidence：多模态大模型流水线中的内存使用优化
+6. [SafeLM: Unified Privacy-Aware Optimization for Trustworthy Federated Large Language Models](/202604/21/2604.16606v1-safelm-unified-privacy-aware-optimization-for-trustworthy-federated-large-language-models)  
    标签：评分：7.0/10、query:mlsys
-   evidence：针对内存受限解码流水线的局部感知稀疏注意力机制
-3. [KV Packet: Recomputation-Free Context-Independent KV Caching for LLMs](/202604/20/2604.13226v2-kv-packet-recomputation-free-context-independent-kv-caching-for-llms)  
+   evidence：大语言模型的联邦训练框架
+7. [TensorHub: Rethinking AI Model Hub with Tensor-Centric Compression](/202604/21/2604.17104v1-tensorhub-rethinking-ai-model-hub-with-tensor-centric-compression)  
    标签：评分：7.0/10、query:mlsys
-   evidence：大模型推理中免重计算的KV缓存框架
-4. [Enhancing Mixture-of-Experts Specialization via Cluster-Aware Upcycling](/202604/20/2604.13508v1-enhancing-mixture-of-experts-specialization-via-cluster-aware-upcycling)  
+   evidence：以张量为中心的AI模型存储与分发系统
+8. [Bit-Flip Vulnerability of Shared KV-Cache Blocks in LLM Serving Systems](/202604/21/2604.17249v1-bit-flip-vulnerability-of-shared-kv-cache-blocks-in-llm-serving-systems)  
    标签：评分：7.0/10、query:mlsys
-   evidence：混合专家模型（MoE）架构设计与初始化策略
-5. [Optimizing Stochastic Gradient Push under Broadcast Communications](/202604/20/2604.15549v1-optimizing-stochastic-gradient-push-under-broadcast-communications)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：优化去中心化联邦学习及其网络通信需求
-6. [A Faster Path to Continual Learning](/202604/20/2604.11064v2-a-faster-path-to-continual-learning)  
+   evidence：vLLM等LLM推理系统中共享KV缓存的安全漏洞分析
+9. [Adaptive Test-Time Compute Allocation for Reasoning LLMs via Constrained Policy Optimization](/202604/21/2604.14853v1-adaptive-test-time-compute-allocation-for-reasoning-llms-via-constrained-policy-optimization)  
    标签：评分：6.0/10、query:mlsys
-   evidence：减少训练成本和梯度计算开销的优化器
-7. [Beyond LLMs, Sparse Distributed Memory, and Neuromorphics <A Hyper-Dimensional SRAM-CAM "VaCoAl" for Ultra-High Speed, Ultra-Low Power, and Low Cost>](/202604/20/2604.11665v2-beyond-llms-sparse-distributed-memory-and-neuromorphics-a-hyper-dimensional-sram-cam-vacoal-for-ultra-high-speed-ultra-low-power-and-low-cost)  
+   evidence：LLM推理系统的自适应计算分配
+10. [Benchmarking Optimizers for MLPs in Tabular Deep Learning](/202604/21/2604.15297v2-benchmarking-optimizers-for-mlps-in-tabular-deep-learning)  
    标签：评分：6.0/10、query:mlsys
-   evidence：用于AI基础设施的高维SRAM-CAM架构
-8. [PrivEraserVerify: Efficient, Private, and Verifiable Federated Unlearning](/202604/20/2604.12348v1-priveraserverify-efficient-private-and-verifiable-federated-unlearning)  
+   evidence：深度学习训练效率优化器基准测试
+11. [LACE: Lattice Attention for Cross-thread Exploration](/202604/21/2604.15529v1-lace-lattice-attention-for-cross-thread-exploration)  
    标签：评分：6.0/10、query:mlsys
-   evidence：联邦遗忘学习统一框架
-9. [Enhancing Mixture-of-Experts Specialization via Cluster-Aware Upcycling](/202604/20/2604.13508v2-enhancing-mixture-of-experts-specialization-via-cluster-aware-upcycling)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：混合专家模型（MoE）的初始化与架构优化
-10. [AdaVFM: Adaptive Vision Foundation Models for Edge Intelligence via LLM-Guided Execution](/202604/20/2604.15622v1-adavfm-adaptive-vision-foundation-models-for-edge-intelligence-via-llm-guided-execution)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：视觉基础模型在设备上高效推理的自适应框架
+   evidence：模型推理的协同并行过程
 
 
 <div class="dpr-home-promo-card">
