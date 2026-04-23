@@ -6,76 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-22
-- 运行时间：2026-04-22 20:29:36 UTC
+- 最新运行日期：2026-04-23
+- 运行时间：2026-04-23 20:40:22 UTC
 - 运行状态：成功
-- 本次总论文数：18
-- 精读区：7
+- 本次总论文数：17
+- 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-聚焦分布式训练效能，今日深度解析 18 篇论文，重点突破 MoE 负载均衡与动态算子编译技术。
-满分作 FEPLB 巧妙利用拷贝引擎实现 MoE 零成本调优，Event Tensor 则为复杂动态算子编译提供了高效统一框架。
-建议开发者深入探索分布式优化与联邦 RLHF 领域，以应对超大规模模型的高效迭代需求。
-- 详情：[/202604/22/README](/202604/22/README)
+今日深度解析 17 篇前沿论文，聚焦 GPU 通信无损压缩与云原生分布式大模型架构。
+重点关注 UCCL-Zip 对 GPU 通信的性能飞跃，以及 MoE 模型在计算效率边界上的“向上回收”式突破。
+建议优先研读云原生分布式系统研究议程，为构建高效可扩展的 AI 基础设施提供顶层设计参考。
+- 详情：[/202604/23/README](/202604/23/README)
 
 ### 精读区论文标签
-1. [FEPLB: Exploiting Copy Engines for Nearly Free MoE Load Balancing in Distributed Training](/202604/22/2604.19654v1-feplb-exploiting-copy-engines-for-nearly-free-moe-load-balancing-in-distributed-training)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：利用GPU复制引擎进行分布式训练中的MoE负载均衡
-2. [Event Tensor: A Unified Abstraction for Compiling Dynamic Megakernel](/202604/22/2604.13327v2-event-tensor-a-unified-abstraction-for-compiling-dynamic-megakernel)  
+1. [UCCL-Zip: Lossless Compression Supercharged GPU Communication](/202604/23/2604.17172v2-uccl-zip-lossless-compression-supercharged-gpu-communication)  
    标签：评分：9.0/10、query:mlsys
-   evidence：LLM推理中动态GPU大内核的统一编译器抽象
-3. [CoCoDiff: Optimizing Collective Communications for Distributed Diffusion Transformer Inference Under Ulysses Sequence Parallelism](/202604/22/2604.14561v2-cocodiff-optimizing-collective-communications-for-distributed-diffusion-transformer-inference-under-ulysses-sequence-parallelism)  
+   evidence：LLM基础设施中GPU通信的无损压缩技术
+2. [Cloud-native and Distributed Systems for Efficient and Scalable Large Language Models -- A Research Agenda](/202604/23/2604.17227v1-cloud-native-and-distributed-systems-for-efficient-and-scalable-large-language-models----a-research-agenda)  
    标签：评分：9.0/10、query:mlsys
-   evidence：优化序列并行下的集合通信
-4. [A Stackelberg Game Framework with Drainability Guardrails for Pricing and Scaling in Multi-Tenant GPU Cloud Platforms](/202604/22/2604.16802v1-a-stackelberg-game-framework-with-drainability-guardrails-for-pricing-and-scaling-in-multi-tenant-gpu-cloud-platforms)  
+   evidence：探讨了用于LLM扩展和资源优化的云原生和分布式架构
+3. [ReaLB: Real-Time Load Balancing for Multimodal MoE Inference](/202604/23/2604.19503v2-realb-real-time-load-balancing-for-multimodal-moe-inference)  
    标签：评分：9.0/10、query:mlsys
-   evidence：多租户GPU云平台中的定价与扩缩容
-5. [ARGUS: Agentic GPU Optimization Guided by Data-Flow Invariants](/202604/22/2604.18616v1-argus-agentic-gpu-optimization-guided-by-data-flow-invariants)  
+   evidence：专家并行下多模态 MoE 推理的实时负载均衡
+4. [Stream-CQSA: Avoiding Out-of-Memory in Attention Computation via Flexible Workload Scheduling](/202604/23/2604.20819v1-stream-cqsa-avoiding-out-of-memory-in-attention-computation-via-flexible-workload-scheduling)  
    标签：评分：9.0/10、query:mlsys
-   evidence：用于GPU算子优化和指令调度的智能体框架
-6. [UniEP: Unified Expert-Parallel MoE MegaKernel for LLM Training](/202604/22/2604.19241v1-uniep-unified-expert-parallel-moe-megakernel-for-llm-training)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：用于扩展MoE模型训练的统一专家并行MegaKernel
-7. [ReaLB: Real-Time Load Balancing for Multimodal MoE Inference](/202604/22/2604.19503v1-realb-real-time-load-balancing-for-multimodal-moe-inference)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：MoE推理中专家并行性的实时负载均衡
+   evidence：内存自适应调度框架，避免长上下文LLM注意力计算中的内存溢出
+5. [MoE-nD: Per-Layer Mixture-of-Experts Routing for Multi-Axis KV Cache Compression](/202604/23/2604.17695v1-moe-nd-per-layer-mixture-of-experts-routing-for-multi-axis-kv-cache-compression)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：使用MoE路由优化长上下文LLM推理的KV缓存内存
+6. [Design Rules for Extreme-Edge Scientific Computing on AI Engines](/202604/23/2604.19106v1-design-rules-for-extreme-edge-scientific-computing-on-ai-engines)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：FPGA SoC上AI引擎的设计规则
 
 ### 速读区论文标签
-1. [Distributed Nesterov Flows for Multi-agent Optimization](/202604/22/2604.17311v1-distributed-nesterov-flows-for-multi-agent-optimization)  
+1. [Expert Upcycling: Shifting the Compute-Efficient Frontier of Mixture-of-Experts](/202604/23/2604.19835v1-expert-upcycling-shifting-the-compute-efficient-frontier-of-mixture-of-experts)  
    标签：评分：8.0/10、query:mlsys
-   evidence：分布式梯度下降与多智能体优化
-2. [Efficient Federated RLHF via Zeroth-Order Policy Optimization](/202604/22/2604.17747v1-efficient-federated-rlhf-via-zeroth-order-policy-optimization)  
+   evidence：提出了专家上行转换方法，在预训练期间扩展MoE容量并管理通信成本
+2. [Temporally Extended Mixture-of-Experts Models](/202604/23/2604.20156v1-temporally-extended-mixture-of-experts-models)  
    标签：评分：8.0/10、query:mlsys
-   evidence：低通信和内存复杂度的分布式联邦RLHF算法
-3. [Accelerating Optimization and Machine Learning through Decentralization](/202604/22/2604.19518v1-accelerating-optimization-and-machine-learning-through-decentralization)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：机器学习的去中心化优化
-4. [Reducing Peak Memory Usage for Modern Multimodal Large Language Model Pipelines](/202604/22/2604.16734v1-reducing-peak-memory-usage-for-modern-multimodal-large-language-model-pipelines)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：减少多模态大模型流水线的峰值显存占用
-5. [FedSEA: Achieving Benefit of Parallelization in Federated Online Learning](/202604/22/2604.19336v1-fedsea-achieving-benefit-of-parallelization-in-federated-online-learning)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：联邦在线学习算法中的并行化
-6. [Are Large Language Models Economically Viable for Industry Deployment?](/202604/22/2604.19342v1-are-large-language-models-economically-viable-for-industry-deployment)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：硬件利用率与部署效率基准测试
-7. [Universally Empowering Zeroth-Order Optimization via Adaptive Layer-wise Sampling](/202604/22/2604.18264v1-universally-empowering-zeroth-order-optimization-via-adaptive-layer-wise-sampling)  
+   evidence：优化MoE专家切换以减少GPU显存抖动
+3. [Federated Parameter-Efficient Adaptation for Interference Mitigation at the Wireless Edge](/202604/23/2604.15936v1-federated-parameter-efficient-adaptation-for-interference-mitigation-at-the-wireless-edge)  
    标签：评分：7.0/10、query:mlsys
-   evidence：识别LLM微调中零阶优化的系统瓶颈
-8. [Train Separately, Merge Together: Modular Post-Training with Mixture-of-Experts](/202604/22/2604.18473v1-train-separately-merge-together-modular-post-training-with-mixture-of-experts)  
+   evidence：针对分布式基站的联邦学习与参数高效微调
+4. [Active Inference-Based Adaptive Routing for Heterogeneous Edge AI Services](/202604/23/2604.17373v1-active-inference-based-adaptive-routing-for-heterogeneous-edge-ai-services)  
    标签：评分：7.0/10、query:mlsys
-   evidence：基于混合专家模型的模块化后训练与独立领域专家训练
-9. [Topology-Aware Layer Pruning for Large Vision-Language Models](/202604/22/2604.16502v1-topology-aware-layer-pruning-for-large-vision-language-models)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：针对资源受限部署的优化
-10. [GRASPrune: Global Gating for Budgeted Structured Pruning of Large Language Models](/202604/22/2604.19398v1-grasprune-global-gating-for-budgeted-structured-pruning-of-large-language-models)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：提升大模型推理效率的结构化剪枝框架
-11. [Adaptive Data Dropout: Towards Self-Regulated Learning in Deep Neural Networks](/202604/22/2604.12945v1-adaptive-data-dropout-towards-self-regulated-learning-in-deep-neural-networks)  
+   evidence：跨云边基础设施的AI服务编排与资源利用
+5. [LiteResearcher: A Scalable Agentic RL Training Framework for Deep Research Agent](/202604/23/2604.17931v2-literesearcher-a-scalable-agentic-rl-training-framework-for-deep-research-agent)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：使用虚拟环境的基于LLM智能体的可扩展强化学习训练框架
+6. [AQPIM: Breaking the PIM Capacity Wall for LLMs with In-Memory Activation Quantization](/202604/23/2604.18137v1-aqpim-breaking-the-pim-capacity-wall-for-llms-with-in-memory-activation-quantization)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：针对大模型内存瓶颈的存内计算架构优化
+7. [DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing](/202604/23/2604.19351v2-dash-kv-accelerating-long-context-llm-inference-via-asymmetric-kv-cache-hashing)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：通过 KV 缓存哈希加速长文本 LLM 推理的框架
+8. [Optimal Routing for Federated Learning over Dynamic Satellite Networks: Tractable or Not?](/202604/23/2604.19399v1-optimal-routing-for-federated-learning-over-dynamic-satellite-networks-tractable-or-not)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：动态网络环境下分布式模型学习的路由优化
+9. [LiteResearcher: A Scalable Agentic RL Training Framework for Deep Research Agent](/202604/23/2604.17931v1-literesearcher-a-scalable-agentic-rl-training-framework-for-deep-research-agent)  
    标签：评分：6.0/10、query:mlsys
-   evidence：训练效率优化
+   evidence：用于智能体强化学习的可扩展训练框架
+10. [Architecture Matters More Than Scale: A Comparative Study of Retrieval and Memory Augmentation for Financial QA Under SME Compute Constraints](/202604/23/2604.17979v1-architecture-matters-more-than-scale-a-comparative-study-of-retrieval-and-memory-augmentation-for-financial-qa-under-sme-compute-constraints)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：大模型推理的AI基础设施约束与架构效率
+11. [ShadowPEFT: Shadow Network for Parameter-Efficient Fine-Tuning](/202604/23/2604.19254v1-shadowpeft-shadow-network-for-parameter-efficient-fine-tuning)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：提出了一种带有深度共享影子模块的集中式参数高效微调框架
 
 
 <div class="dpr-home-promo-card">

@@ -1,0 +1,666 @@
+Title: Stream-CQSA: Avoiding Out-of-Memory in Attention Computation via Flexible Workload Scheduling
+
+URL Source: https://arxiv.org/pdf/2604.20819v1
+
+Published Time: Thu, 23 Apr 2026 01:19:58 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Stream-CQSA: Avoiding Out-of-Memory in Attention Computation via Flexible Workload Scheduling 
+
+Yiming Bian Joshua M. Akey 
+
+Lewis-Sigler Institute of Integrative Genomics Princeton University Princeton, NJ 08540 
+
+{yimingb, jakey}@princeton.edu 
+
+## Abstract 
+
+The scalability of long-context large language models is fundamentally limited by the quadratic memory cost of exact self-attention, which often leads to out-of-memory (OOM) failures on modern hardware. Existing methods improve memory efficiency to near-linear complexity, while assuming that the full query, key, and value tensors fit in device memory. In this work, we remove this assumption by introducing CQS Divide, an operation derived from cyclic quorum sets (CQS) theory that decomposes attention into a set of independent subsequence computa-tions whose recomposition yields exactly the same result as full-sequence attention. Exploiting this decomposition, we introduce Stream-CQSA, a memory-adaptive scheduling framework that partitions attention into subproblems that fit within arbitrary memory budgets. This recasts attention from a logically monolithic op-eration into a collection of schedulable tasks, enabling flexible execution across devices without inter-device communication. Experiments demonstrate predictable memory scaling and show that exact attention over billion-token sequences can be executed on a single GPU via streaming, without changing the underlying mathematical definition of attention or introducing approximation error. 
+
+## 1 Introduction 
+
+Modern large language model (LLM) capabilities depend heavily on their model size and context length [ 1]. Recent systems [ 2, 3, 4, 5] support a context window ranging from hundreds of thousands to one million tokens. Despite these advances, context length remains a fundamental practical limitation: models often exhibit degraded performance on long inputs, including inconsistencies and increased hallucination. A primary barrier to extending context length is the quadratic memory cost of exact self-attention [ 6]. Among various system bottlenecks, GPU memory has emerged as the dominant constraint for scaling long-context modeling, limiting both training and deployment. A substantial body of prior work has focused on improving the memory efficiency of attention computation. Exact attention methods with IO-awareness, such as the FlashAttention series [ 7, 8 ], improve performance by optimizing memory access patterns and avoiding materialization of large intermediate matrices. In parallel, approximate approaches including sparse [ 9, 10 , 11 ], low-rank [ 12 ], kernelized [ 13 , 14 , 15 ], block-wise [ 16 , 17 ], and global-local hybrid methods [ 18 ], reduce computational and memory complexity by relaxing exactness. However, the memory bottleneck can arise even before attention computation begins. For sufficiently long sequences, simply materializing the Q, K, and V tensors can already exceed available GPU memory, making it impossible to invoke even these optimized attention mechanisms. This reveals a more fundamental limitation: existing approaches largely assume that the full QKV tensors can reside in GPU memory, an assumption that breaks down in extreme long-context regimes. 
+
+Preprint. 
+
+> arXiv:2604.20819v1 [cs.LG] 22 Apr 2026
+
+Figure 1: CQS Divide In this work, we propose a combinatorial decomposition of attention (CQS Divide) and a framework that exploits this decomposition (Stream-CQSA). Specifically, CQS Divide (Figure 1) is an operation derived from cyclic quorum sets (CQS) theory that divides the attention computation of a sequence into mutually exclusive attention computation of multiple subsequences whose recomposition is exactly equivalent to full-sequence attention. This decomposition is recursively applicable, providing fine-grained, memory-adaptive control over computation. Building on this operation, we introduce Stream-CQSA, a flexible workload scheduling framework that transforms attention from a logically monolithic operation into a collection of schedulable tasks, trading computation time for reduced peak memory usage. This enables exact attention to scale to significantly longer contexts on memory-constrained hardware without architectural change or approximation error. 
+
+## 2 Stream cyclic quorum sets attention 
+
+Attention computation can be interpreted as all pairwise interactions among a set of tokens. The proposed CQS Divide partitions this set into multiple subsets such that the union of interactions computed within all subsets exactly covers the full set of pairwise interactions. The key challenge is the construction of these subsets, specifically, the number and composition to guarantee full coverage. Switching from a set-based to a sequence-based formulation, suppose we aim to divide a sequence into 
+
+c subsequences while preserving full coverage of token interactions. We first partition the sequence into c chunks (indexed from 0 to c − 1), yielding c(c−1) 2 distinct chunk pairs. Each subsequence is constructed by selecting l chunks, contributing l(l−1) 2 chunk pairs. To ensure full coverage without redundancy, we require c × l(l−1) 2 = c(c−1) 2 , thus c = l(l − 1) + 1 . Thus, valid values of c follow the sequence {1, 3, 7, 13 , 21 , . . . } corresponding to l = {1, 2, 3, 4, 5, . . . }. Essentially, CQS Divide decomposes a complete graph ( Kc) into c smaller complete subgraphs ( Kl) that every edge in Kc is covered exactly once, corresponding to a Steiner system S(2 , l, c ) [19] when it exists. The cases l = 1 , c = 1 and l = 2 , c = 3 are trivial; therefore, we focus on the smallest non-trivial case l = 3 , c = 7 . The sequence is partitioned into 7 chunks (C0, . . . , C 6), and each subsequence i
+
+is constructed as 
+
+Seq i = concat (C(0+ i) mod 7, C (1+ i) mod 7, C (3+ i) mod 7) (1) for 0 ≤ i ≤ 6. For notational simplicity, we denote subsequences by their chunk indices. The construction is cyclic, with the base pattern (0 , 1, 3) defining the first subsequence. We refer to this pattern as the interest set ( I) for c = 7 [ 20 ]. We visualize the full coverage under this construction in Section 2.1, and further discussion on CQS interest set is given in Appendix B. 
+
+2.1 Forward pass 
+
+For each subsequence i, we gather Qi, Ki, and Vi from the full-sequence tensors Q, K, and V .CQSA [21] then performs the following computations: 
+
+Ri = α(QiK⊤ 
+
+> i
+
+) Pi = exp (Ri) ⊙ Mi Num i = PiVi Den i = row_sum (Pi) (2) where α = 1√D (D is head dimension), Mi is the CQS binary mask (introduced in Section 2.3), and Num i and Den i correspond to the numerator and denominator of the softmax computation. When all subsequences are computed, CQSA constructs two global accumulators in full-token coordinates followed by the final normalization. Thus, Num = X
+
+> i
+
+scatter (Num i) Den = X
+
+> i
+
+scatter (Den i) O = Num ⊘ Den (3) where ⊘ denotes token-wise division with broadcast along the head dimension ( D). 2Algorithm 1 CQSA forward pass 
+
+Require: Q, K, V ∈ RB×H×N ×D , chunk count c, divide granularity itr , interest set I, scale α 
+
+> 1:
+
+subseq_entries ← BUILD SUBSEQ (N, c, itr , I) 
+
+> 2:
+
+Num ← 0B×H×N ×D 
+
+> 3:
+
+Den ← 0B×H×N 
+
+> 4:
+
+for each subsequence i ∈ subseq_entries do  
+
+> 5:
+
+idx ← token_ids [i] 
+
+> 6:
+
+Qi ← GATHER (Q, idx ), Ki ← GATHER (K, idx ), Vi ← GATHER (V, idx ) 
+
+> 7:
+
+Mi ← mask [i] 
+
+> 8:
+
+Ri ← α(QiK⊤ 
+
+> i
+
+) 
+
+> 9:
+
+Pi ← exp( Ri) ⊙ Mi 
+
+> 10:
+
+Num i ← PiVi 
+
+> 11:
+
+Den i ← ROW SUM (Pi) 
+
+> 12:
+
+Num .INDEX ADD (2 , idx , Num i) 
+
+> 13:
+
+Den .INDEX ADD (2 , idx , Den i) 
+
+> 14:
+
+end for  
+
+> 15:
+
+O ← Num /Den .UNSQUEEZE (−1)  
+
+> 16:
+
+return O
+
+The forward pass is summarized in Algorithm 1. We also provide a step-by-step illustration in Figure 2 for c = 7 and I = (0 , 1, 3) , explicitly verifying full coverage of the attention matrix P .
+
+2.2 Backward pass 
+
+The backward pass follows the same decomposition. Let dO be the upstream gradient, since 
+
+O = Num ⊘ Den, we have 
+
+dNum = dO ⊘ Den dDen = − ⟨dO, Num ⟩D
+
+Den 2 (4) where ⟨· , ·⟩ D denotes the inner product on the head dimension. Using the same (c, I) construction, we construct dNum i and dDen i for each subsequence. The gradients are computed as follows. 
+
+dVi = P ⊤ 
+
+> i
+
+dNum i dPi = dNum iV ⊤ 
+
+> i
+
++ dDen i1⊤
+
+dRi = dPi ⊙ Pi dQi = αdRiKi dKi = αdR⊤ 
+
+> i
+
+Qi
+
+(5) Finally, dQi, dKi, dVi are merged back to full-sequence coordinates, same as in the forward pass. 
+
+dQ = X
+
+> i
+
+scatter (dQi) dK = X
+
+> i
+
+scatter (dKi) dV = X
+
+> i
+
+scatter (dVi) (6) The backward pass is formally stated in Algorithm 2 and an illustration is given in Figure 7 for c = 7 
+
+and I = (0 , 1, 3) . A full derivation via the chain rule is provided in Appendix D. 
+
+2.3 CQS masking 
+
+Subsequences constructed by CQS Divide exhibit structured overlap. While this overlap is essential to ensure full coverage of all-token interactions, it introduces redundancy: since each chunk appears in l subsequences, interactions within the corresponding chunk-pair regions are computed l times. Directly aggregating these results would lead to incorrect computation results. To ensure correctness, each subsequence must be assigned a pre-defined responsibility over the whole attention matrix. Redundant contributions must be masked out and this necessitates the CQS mask. Importantly, overlap occurs only along the main diagonal at the chunk level, or intra-chunk interactions, rather than at the token level. The masking rule is simple: subsequence i is responsible only for the diagonal chunk pair (i, i ). For example, if subsequence 0 is constructed using I = (0 , 1, 3) , it contains diagonal chunk pairs (0 , 0) , (1 , 1) , and (3 , 3) . Among these, only (0 , 0) is retained, while (1 , 1) and 
+
+(3 , 3) are masked out, as they are assigned to subsequences 1 and 3, respectively. When applying CQS Divide iteratively from iteration itr to itr + 1 , subsequences at iteration 
+
+itr + 1 apply the same main-diagonal masking rule. In addition, they inherit main-diagonal masks 3Figure 2: CQSA forward pass with c = 7 and I = (0 , 1, 3) . In step 3, we highlight a chunk pair 
+
+(0 , 0) . It appears in subsequence 0, 4, and 6, but only one of them should be merged in the end and the rest should be masked out to ensure the correctness. This is why the CQS mask ( Mi) is necessary. We also provide the coverage of attention matrix from the global view to show all chunk pairs are covered exactly once. Another caveat is in step 5 that although Num i and Den i are accumulated in the same way, their dimensions are different: dim (Num ) = N × D and dim (Den ) = N × 1.4Algorithm 2 CQSA backward pass 
+
+Require: Q, K, V ∈ RB×H×N ×D , upstream dO, subseq_entries , Num , Den , scale α 
+
+> 1:
+
+dQ ← 0, dK ← 0, dV ← 0 
+
+> 2:
+
+dNum ← dO/ Den .UNSQUEEZE (−1)  
+
+> 3:
+
+dDen ← − ROW SUM D (dO ⊙ Num) /(Den ⊙ Den)  
+
+> 4:
+
+for each subsequence i ∈ subseq_entries do  
+
+> 5:
+
+idx ← token_ids [i] 
+
+> 6:
+
+dNum i ← GATHER (dNum , idx ), dDen i ← GATHER (dDen , idx ) 
+
+> 7:
+
+dVi ← P ⊤ 
+
+> i
+
+dNum i 
+
+> 8:
+
+dPi ← dNum iV ⊤ 
+
+> i
+
++ dDen i1⊤ 
+
+> 9:
+
+dRi ← dPi ⊙ Pi 
+
+> 10:
+
+dQi ← α(dRiKi) 
+
+> 11:
+
+dKi ← α(dR⊤ 
+
+> i
+
+Qi) 
+
+> 12:
+
+dQ. INDEX ADD (2 , idx , dQi) 
+
+> 13:
+
+dK. INDEX ADD (2 , idx , dKi) 
+
+> 14:
+
+dV. INDEX ADD (2 , idx , dVi) 
+
+> 15:
+
+end for  
+
+> 16:
+
+return d Q, dK, dV
+
+Figure 3: CQS masking on R = QK ⊤ with N = 49 , c = 7 , and I = (0 , 1, 3) . Iteration 1 forms subsequences of 21 tokens with masked diagonal redundancies. Iteration 2 further partitions each subsequence into smaller chunks (size 3), producing 9-token subsequences with both local and inherited masks. Only Seq 0,itr =1 is shown and other subsequences at itr=1 follow the same pattern. from the previous iteration ( itr ), resulting in structured off-diagonal masking. Figure 3 illustrates the CQS mask at iterations 1 and 2 for an example sequence with N = 49 tokens. Notably, this controlled overlap ensures that subsequence computations are non-redundant after masking and therefore fully independent. This property is central to the flexibility of workload management in Stream-CQSA, enabling subsequences to be executed in parallel, distributed across multiple devices, and scheduled on heterogeneous hardware with varying memory and compute capabilities. Furthermore, the decomposition is not restricted to a fixed choice of c. Different values of c (Table 3) can be used at each iteration, enabling finer control over subsequence length that maximizes the memory usage. 
+
+2.4 Workload scheduling 
+
+Since each subsequence defines an independent computation pipeline, attention computation can be viewed as processing a collection (or queue) of subsequence tasks. By iteratively applying CQS 5Figure 4: Workload management using uniform scheduling (left) and hybrid scheduling (right). The corresponding tree structure are in Figure 9. The dashed line indicates the memory limit ( 80 GiB). Divide, the original large-scale attention problem is decomposed into many smaller sub-computations, enabling a trade-off between memory usage and computation time. This allows attention to scale beyond the memory limits of a single device. We conduct a preliminary experiment on the forward pass to illustrate the impact of workload scheduling. Experiments are performed on an NVIDIA A100 GPU with 80 GiB memory. We set the sequence length to N = 1 M , head dimension D = 128 , batch size B = 1 , number of heads H = 64 ,and data precision to fp16 . As a baseline, we use scaled dot-product attention (SDPA) from PyTorch (v2.11.0) with the FlashAttention (FA) backend. Stream-CQSA uses a modified FA kernel. Since N = 1 M exceeds the GPU memory capacity, we estimate the memory and runtime of SDPA by measuring peak memory usage and execution time for sequence lengths ranging from 100 K to 
+
+900 K at a step of 50 K, where out-of-memory (OOM) occurs at 900 K . We then fit polynomial models using numpy.polyfit() to estimate memory ( degree = 1 ) and runtime ( degree = 2 ). A similar procedure is used to model Stream-CQSA. The results are shown in Figure 8. Stream-CQSA achieves comparable memory efficiency to SDPA, but incurs additional runtime overhead due to operations such as mask generation, subsequence gathering, result aggregation, and host-device data transfers. In contrast, SDPA performs a single data transfer followed by a fused computation on the GPU. Using the fitted models, we estimate that processing a sequence of length 1M with SDPA requires approximately 92 .53 GiB of memory and 223 .22 seconds, which exceeds the memory capacity of an A100 GPU. In comparison, applying Stream-CQSA with itr = 1 produces 7 subsequences of length 1M × 37 ≈ 428 K, each requiring 52 .65 GiB and 110 .06 seconds. With itr = 2 , there are 49 
+
+subsequences (length ≈ 183 K ), each requiring 22 .56 GiB and 19 .74 seconds. With itr = 3 , there are 343 subsequences (length ≈ 78 K), each requiring only 4.13 GiB and 4.13 seconds. Scheduling subsequences that are constructed on the same iteration level, we obtain uniform schedul-ing. However, CQS Divide does not require uniform decomposition. For example, as shown in Figure 4 (right), some subsequences at itr = 1 can be further divided to itr = 2 and itr = 3 ,while others remain unchanged. This enables hybrid scheduling, where subsequences of different sizes coexist. They can be scheduled dynamically to maximize resource utilization while reduce the overall computation time. More generally, subsequence computations can be flexibly scheduled across devices to fully utilize available memory and compute resources. 
+
+2.5 OOM guardrails 
+
+Stream-CQSA incorporates a guardrail mechanism to prevent GPU OOM failures during execution. The mechanism is governed by two parameters: itr and n_cap . The parameter itr controls the divide granularity, and consequently the subsequence length and peak memory footprint. The parameter n_cap specifies the maximum number of subsequences that can be concurrently loaded to the GPU. During execution, if a subsequence computation triggers an OOM error, the offending subsequence is evicted from GPU memory and returned to the scheduling queue. The value of 
+
+n_cap is then reduced by one to lower memory pressure for future rounds. If OOM persists even when n_cap = 1 , the divide granularity is increased to itr = itr + 1 , thereby producing shorter subsequences with reduced memory requirements. After increasing itr , n_cap is reset to 1 to perform a calibration pass, which estimates the memory footprint of the new subsequences and determines the maximum feasible n_cap under the available memory budget. If OOM occurs during this calibration step, the divide granularity is further increased until a feasible configuration is found. 6Figure 5: Performance curve of naïve kernel (left) and FA kernel (right) 
+
+## 3 Experiments 
+
+All experiments are conducted on a single NVIDIA A100 GPU with 80 GiB memory. Unless otherwise specified, we set the number of chunks c = 7 , interest set I = (0 , 1, 3) , head dimension 
+
+D = 128 , batch size B = 1 , number of heads H = 1 , and precision to fp16. Memory is reported in GiB ( ≈ 1.07 × GB) and time in seconds. We adopt uniform scheduling throughout this section. 
+
+3.1 Attention kernel 
+
+Stream-CQSA decomposes attention into independent subsequence computations but does not pre-scribe how attention is computed within each subsequence. We refer to the underlying implementation as the attention kernel (distinct from CUDA kernels unless explicitly stated). As a result, the overall performance of Stream-CQSA, particularly runtime, is largely determined by the design of attention kernel. Here we evaluate two representative kernels in the forward pass: a naïve Python implementa-tion of CQSA and a FlashAttention (FA) CUDA kernel. Since kernel optimization is not the focus of this work, we do not attempt to fully optimize the kernel design. To compare the two kernels, we vary the sequence length N and measure peak memory usage and computation time per subsequence. Results are shown in Figure 5. Both implementations exhibit quadratic time complexity, while their space complexity differs: the naïve implementation is quadratic in memory, whereas the FA kernel achieves linear memory complexity. Consequently, the FA kernel is significantly more memory-efficient. These results highlight that the time and memory complexity of Stream-CQSA are inherited from the underlying attention kernel. Generally, the kernel can be any attention variant, including approximate and distributed methods. To be compatible with Stream-CQSA, an attention kernel must accept the CQS mask and return the numerator and denominator of the softmax computation when applicable. 
+
+3.2 Forward and backward pass: from memory-bound to kernel-bound 
+
+Due to the OOM guardrail mechanism, Stream-CQSA avoids out-of-memory failures in both forward and backward passes. However, the backward pass remains more memory and compute intensive than the forward pass under the same divide granularity ( itr ). When the memory limit is reached, excess memory demand is translated into additional computation time via finer decomposition, resulting in longer execution time for the backward pass. A caveat here is that we must distinguish between the number of subsequences that can reside on the GPU ( n_cap ) and the number that are actually executed in parallel ( n_parallel ). In practice, these may differ. For example, the FA kernel used in our experiments is optimized for single-task execution to maximize throughput, so we have n_parallel = n_cap = 1 in all experiments. We profile the forward pass across the following stages: CQS mask ( Mi) generation, Qi, K i, V i
+
+gathering, host-to-device (H2D) transfer, subsequence computation producing Num i, Den i, device-to-host (D2H) transfer, and final aggregation into Num , Den followed by output ( O) computation. The backward pass includes analogous stages, with additional gradient computations. Particularly, we ignore the time of random tensor generation of {Q, K, V, dO} although they could take noticeably amount of time when N is large. 7Figure 6: Memory and wall-clock time comparison between forward and backward pass In a complete forward and backward pass, we define the communication time as tcomm = tH2D fwd +
+
+tD2H fwd +tH2D bwd +tD2H bwd , the core computation time as tcore = tMi gen fwd +tcompute fwd +tmerge fwd +
+
+tdNum dDen gen bwd +tcompute bwd +tmerge bwd and the miscellaneous time as tmis = twall-clock −tcomm −tcore .Miscellanneous time are primarily gathering time and other minor runtime overheads. We vary N from 100 K to 1M in increments of 100 K and measure peak memory usage and average per-subsequence runtime for both forward and backward passes (Figure 6). Under the current FA-based implementation, the backward pass requires approximately 2× more memory and 2.5× more computation time than the forward pass for the same sequence length. Overall, Stream-CQSA shifts attention execution from a memory-limited regime, where computation is constrained by GPU capacity, to a kernel-limited regime, where performance is governed by the efficiency of the underlying attention kernel. In this setting, kernel efficiency is defined by three factors: per-subsequence memory footprint, per-subsequence execution time, and the degree of parallel execution on the GPU. 
+
+3.3 Scaling to 1B tokens 
+
+In this experiment, we evaluate the scalability of Stream-CQSA by simulating forward and backward passes for a sequence of 1B tokens on a single A100 GPU. At divide granularity itr = 4 , each subsequence contains approximately 1B × ( 37 )4 ≈ 33 .74 M tokens, which exceeds the GPU memory capacity during the backward pass. We therefore consider finer granularities itr = {5, 6, 7, 8, 9},where the total number of subsequences is ntotal = citr .To estimate the full workload without executing all subsequences, we adopt a scaled evaluation strategy. Specifically, we set the sequence length to N ′ = 1 B × ( 37 )itr ′
+
+where itr ′ = {4, 5, 6, 7, 8},and perform a single CQS Divide, yielding 7 subsequences per configuration. We measure the wall-clock time for these subsequences ( t7 fwd/bwd ) and extrapolate to estimate the total A100 GPU hours required for the full 1B-token workload. The results are summarized in Table 1. The observed peak memory usage closely follows the fitted linear models: Mem fwd (x) = 1 .45 ×
+
+10 −6x + 8 .42 × 10 −2 and Mem bwd (x) = 2 .88 × 10 −6x + 1 .36 × 10 −2 where x denotes the (sub)sequence length. The memory scaling is highly predictable: each CQS Divide reduces the memory footprint by a factor of lc = 37 ≈ 42 .86% .Similarly, computation time aligns well with the fitted quadratic models: tseq fwd (x) = 9 .37 ×
+
+10 −12 x2+9 .92 ×10 −7x−3.51 ×10 −2 and tseq bwd (x) = 2 .38 ×10 −11 x2+4 .81 ×10 −7x+8 .84 ×10 −2.Table 2 breaks down the wall-clock time into core computation ( tcore ), host-device communication (tcomm ), and miscellaneous overhead ( tmis ). The core computation is further decomposed to identify the execution location (host or device) of each operation. We observe that GPU computation accounts for approximately 95% –99% of total runtime, justifying the use of t7 as a proxy for estimating total GPU hours, despite minor host-side overheads. Finally, we analyze the existence of an optimal subsequence length x∗ (or equivalently divide granularity itr ∗) that minimizes total computation time. Given x = N ( lc )itr and ntotal = citr , we consider the objective 
+
+x∗ = arg min 
+
+> x
+
+tseq (x)ntotal 
+
+n_parallel (7) 8Table 1: A100 GPU hour estimation of forward and backward pass for 1B tokens. t7_fwd/bwd denotes the wall-clock time of computing 7 subsequences in forward/backward pass. itr N ntotal Mem fwd t7 fwd (s) Est. tfwd (h) Mem bwd t7 bwd (s) Est. tbwd (h) 
+
+5 14 .5M 75 21 .08 14 , 260 9, 510 41 .79 35 , 103 23 , 411 6 6.20 M 76 9.09 2, 600 12 , 138 17 .93 6, 442 30 , 075 7 2.66 M 77 3.94 478 15 , 621 7.68 1, 178 38 , 497 8 1.14 M 78 1.75 91 20 , 817 3.32 221 50 , 556 9 488 K 79 0.80 18 28 , 824 1.43 42 67 , 256 
+
+Under the current kernel implementation of FA with n_parallel = 1 , and using c = l(l−1)+1 ≈ l2,we obtain the approximation ntotal ≈ N 2 
+
+> x2
+
+. In the forward pass, the only critical point ( x∗ ≈
+
+70 ,766 ) corresponds to a global maximum, implying that total runtime decreases monotonically as subsequence length decreases beyond this point. Consequently, sufficiently fine decomposition (e.g., 
+
+itr ≥ 12 ) reduces both memory usage and total runtime. In contrast, the backward pass exhibits strictly decreasing runtime with respect to subsequence length under this setting. However, under alternative configurations (i.e., n_parallel = n_cap ), a global minimum x∗ can emerge, balancing computation time and memory efficiency. A detailed analysis is provided in Appendix C. 
+
+## 4 Limitation and future work 
+
+Two key components determine the overall performance of Stream-CQSA: the attention kernel and the workload scheduler. In the current implementation, the FA based kernel only supports 
+
+n_parallel = 1 , which limits parallel execution and prevents full utilization of the available memory budget. As a result, the scheduling strategy remains relatively naïve. In addition, there is room for further optimization in computation time. At present, the FA kernel is treated as a black box that returns normalized outputs ( out ) and log-sum-exp values ( softmax_lse ), from which we reconstruct Den i = exp( softmax_lse ) and Num i = out ⊙ Den i, introducing additional overhead. A key direction for future work is the development of hardware-aware dedicated CQSA attention kernels, most likely to be built on FlashAttention, that maintains linear memory complexity while supporting maximal subsequence parallelism (i.e., n_parallel = n_cap ). Such a kernel would enable full utilization of hardware capacity and unlock more effective scheduling strategies. In particular, with true parallel execution of subsequences, a hybrid scheduler could dynamically allocate shorter subsequences to fully occupy available memory, thereby improving overall throughput. Another important direction lies in optimizing host-device communication. Since Stream-CQSA involves frequent data movement between host and device, an effective scheduler should aim to maximize communication bandwidth utilization, overlap communication with computation, and minimize pipeline idle time. This would enable a streaming execution model in which subsequence computations are continuously pipelined between host and device. Notably, in a multi-device setting, inter-device communication can be entirely avoided, as subsequence computations are independent and do not require synchronization or data exchange across devices. Beyond exact attention, extending Stream-CQSA to support approximate attention kernels is a promising avenue. Such extensions could further improve scalability in both time and memory, making Stream-CQSA a more general framework for long-sequence attention computation. Ulti-mately, this line of work aims to decouple attention computation from hardware memory constraints, enabling scalable long-context modeling across a wide range of applications such as long-document understanding, code analysis, time-series forecasting, and large-scale scientific simulation. To conclude, beyond the algorithmic contribution, this work suggests a systems-level opportunity by exposing attention as a collection of independent, potentially non-uniform, tasks whose recomposition is exactly equivalent to the original full computation. Crucially, this decomposition is memory-adaptive, in the sense that for any given memory budget, the workload can be partitioned into subsequence computations that fit within the available resources. This property naturally aligns with distributed and heterogeneous AI infrastructure, enabling dynamic scheduling across devices with tunable memory–latency trade-offs, and reframing attention execution as a task-parallel dataflow for scalable and resource-efficient long-context model deployment. 9References 
+
+[1] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language models. arXiv preprint arXiv:2001.08361 , 2020. [2] The claude 3 model family: Opus, sonnet, haiku. https://www-cdn.anthropic.com/ de8ba9b01c9ab7cbabf5c33b80b7bbc618857627/Model_Card_Claude_3.pdf .[3] Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon, Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. Gemini 2.5: Pushing the frontier with advanced reasoning, multimodality, long context, and next generation agentic capabilities. arXiv preprint arXiv:2507.06261 , 2025. [4] Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Peiyi Wang, Qihao Zhu, Runxin Xu, Ruoyu Zhang, Shirong Ma, Xiao Bi, et al. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning. arXiv preprint arXiv:2501.12948 , 2025. [5] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. [6] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems , 30, 2017. [7] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact attention with io-awareness. Advances in neural information processing systems , 35:16344–16359, 2022. [8] Tri Dao. Flashattention-2: Faster attention with better parallelism and work partitioning. arXiv preprint arXiv:2307.08691 , 2023. [9] Iz Beltagy, Matthew E Peters, and Arman Cohan. Longformer: The long-document transformer. 
+
+arXiv preprint arXiv:2004.05150 , 2020. [10] Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontanon, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, et al. Big bird: Transformers for longer sequences. Advances in neural information processing systems , 33: 17283–17297, 2020. [11] Jiayu Ding, Shuming Ma, Li Dong, Xingxing Zhang, Shaohan Huang, Wenhui Wang, Nanning Zheng, and Furu Wei. Longnet: Scaling transformers to 1,000,000,000 tokens. arXiv preprint arXiv:2307.02486 , 2023. [12] Sinong Wang, Belinda Z Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-attention with linear complexity. arXiv preprint arXiv:2006.04768 , 2020. [13] Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. 
+
+arXiv preprint arXiv:2001.04451 , 2020. [14] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and François Fleuret. Transformers are rnns: Fast autoregressive transformers with linear attention. In International conference on machine learning , pages 5156–5165. PMLR, 2020. [15] Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamas Sarlos, Peter Hawkins, Jared Davis, Afroz Mohiuddin, Lukasz Kaiser, et al. Rethinking attention with performers. arXiv preprint arXiv:2009.14794 , 2020. [16] Jiezhong Qiu, Hao Ma, Omer Levy, Wen-tau Yih, Sinong Wang, and Jie Tang. Blockwise self-attention for long document understanding. In Findings of the Association for Computational Linguistics: EMNLP 2020 , pages 2555–2565, 2020. 10 [17] Yukang Chen, Shengju Qian, Haotian Tang, Xin Lai, Zhijian Liu, Song Han, and Jiaya Jia. Longlora: Efficient fine-tuning of long-context large language models. arXiv preprint arXiv:2309.12307 , 2023. [18] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. arXiv preprint arXiv:2309.17453 , 2023. [19] Douglas R Stinson. Combinatorial designs: constructions and analysis. ACM SIGACT News ,39(4):17–21, 2008. [20] Yiming Bian and Arun K Somani. An efficient systematic approach to find all cyclic quorum sets with all-pairs property. In 2021 IEEE International Conference on Big Data (Big Data) ,pages 197–206. IEEE, 2021. [21] Yiming Bian and Arun K Somani. Cqs-attention: Scaling up the standard attention computation for infinitely long sequences. IEEE Access , 2025. [22] Jacobus Hendricus Van Lint and Richard Michael Wilson. A course in combinatorics . Cambridge university press, 2001. [23] James Singer. A theorem in finite projective geometry and some applications to number theory. 
+
+Transactions of the American Mathematical Society , 43(3):377–385, 1938. [24] F Jessie MacWilliams, Neil JA Sloane, and John G Thompson. On the existence of a projective plane of order 10. Journal of Combinatorial Theory, Series A , 14(1):66–78, 1973. [25] Clement WH Lam. The search for a finite projective plane of order 10. The American mathematical monthly , 98(4):305–318, 1991. 11 A Supplementary materials 
+
+Figure 7: CQSA backward pass. Step 5 only displays Seq 0 because it is the same for all subsequences. 
+
+dNum ∈ RN ×D , dDen ∈ RN ×1
+
+12 Algorithm 3 BUILD SUBSEQ (N, c, itr , I)
+
+Require: sequence length N , chunk count c, divide granularity itr , interest set I
+
+Ensure: subseq_entries , where each entry has token_ids and local mask Mi
+
+1: subseq_entries ← [ ] 
+
+2: for each quorum tuple i = ( q1, . . . , q itr ) ∈ { 0, . . . , c − 1}itr do 
+
+3: token_ids ← [0 , 1, . . . , N − 1] 
+
+4: label_history ← [ ] , chunks_history ← [ ] 
+
+5: for t = 1 to itr do 
+
+6: L ← | token_ids |
+
+7: (starts , ends ) ← BALANCED CHUNK LAYOUT (L, c )
+
+8: chunks ← { (qt + o) mod c | o ∈ I} (ordered by I)
+
+9: labels [ℓ] ← chunk id of local index ℓ ∈ [0 , L )
+
+10: gather_idx ← Concat  [ starts [u] : ends [u) ∀u ∈ chunks 
+
+11: for s = 1 to |label_history | do 
+
+12: label_history [s] ← label_history [s][ gather_idx ]
+
+13: end for 
+
+14: append labels [gather_idx ] to label_history 
+
+15: token_ids ← token_ids [gather_idx ]
+
+16: append (qt, chunks ) to chunks_history 
+
+17: end for 
+
+18: group_runs ← [ ] 
+
+19: for t = 1 to itr do 
+
+20: (owner , chunks ) ← chunks_history [t]
+
+21: labels ← label_history [t]
+
+22: for each chunk ∈ chunks with chunk ̸ = owner do 
+
+23: idx ← { ℓ | labels [ℓ] = chunk }
+
+24: runs ← INDICES TORUNS (idx )
+
+25: if runs ̸ = ∅ then append runs to group_runs 
+
+26: end if 
+
+27: end for 
+
+28: end for 
+
+29: group_runs ← UNIQUE (group_runs )
+
+30: Mi ← LOCAL MASK FROM GROUP RUNS (|token_ids |, group_runs )
+
+31: append {quorum_idx = i, token_ids , mask = Mi} to subseq_entries 
+
+32: end for 
+
+33: return subseq_entries 
+
+Table 2: Core-path wall-clock time breakdown. The communication time tcomm = tH2D fwd +tD2H fwd +
+
+tH2D bwd + tD2H bwd . The miscellaneous time tmis = twall-clock − tcomm − tcore . The superscript of t
+
+indicates the operation being performed on the host or device. 
+
+itr th  
+
+> Migen fwd
+
+td 
+
+> compute fwd
+
+th 
+
+> merge fwd
+
+thdNum dDen gen bwd td 
+
+> compute bwd
+
+th 
+
+> merge bwd
+
+tcomm tmis 
+
+5 0.04% 28 .80% 0.02% 0.01% 70 .93% 0.06% 0.13% 0.02% 6 0.09% 28 .53% 0.05% 0.03% 70 .81% 0.14% 0.31% 0.05% 7 0.18% 28 .50% 0.08% 0.05% 70 .52% 0.23% 0.38% 0.06% 8 0.39% 28 .15% 0.18% 0.12% 69 .53% 0.52% 0.96% 0.14% 9 0.90% 27 .35% 0.41% 0.29% 67 .34% 1.17% 2.23% 0.32% 
+
+13 Figure 8: Performance estimation of SDPA(baseline) and Stream-CQSA 
+
+Figure 9: Tree structure of uniform and hybrid scheduling schemes in Figure 4. Only leaves are computed to be equivalent to the root. Intermediate gray nodes do not need to be computed. 14 B CQS interest set 
+
+An interest set ( I) is the key to ensure full coverage of pairwise interactions. In Table 3, we list example interest sets for various values of l, and provide a visual validation of full coverage for the case c = 13 using I = (0 , 1, 3, 9) .Interest sets are not unique and they occur in pairs [ 20 ]. Given an interest set of the form 
+
+(0 , 1, a 2, a 3, . . . , a l−1), its paired interest set is (0 , 1, c + 1 − al−1, c + 1 − al−2, . . . , c + 1 − a2) For example, when c = 7 , the paired interest set of (0 , 1, 3) is (0 , 1, 5) .However, interest sets do not exist for all values of l such as l = 7 and l = 11 in Table 3. Formally, an interest set corresponds to a (v, k, λ )-difference set with λ = 1 . A (v, k, λ )-difference set is defined as a k-subset D ⊆ G, where G is an abelian group of order v, such that each nonzero element g ∈ G
+
+appears exactly λ times in the multiset of differences (x − y : x, y ∈ D) [ 22 ]. In our notation, k = l
+
+and v = c.Let q = l − 1, the existence of a cyclic (q2 + q + 1 , q + 1 , 1) -difference set is equivalent to the existence of a projective plane of order q admitting a cyclic automorphism consisting of one cycle of length q + 1 [ 22 ]. Such difference sets are known to exist when q is a prime power via the Singer construction [ 23 ]. For non-prime-power q values, existence remains largely open and, in some cases, has been proven impossible. A notable example is Lam’s problem, which asks whether a finite projective plane of order 10 exists. Building on earlier structural results [ 24 ], this is equivalent to determining whether an interest set of size l = 11 exists for c = 111 . Lam et al. [ 25 ] resolved this question with a definitive negative answer via exhaustive computational search, which involved several hundred hours of computation on a Cray-1 system in 1989. Table 3: Interest sets for more l values 
+
+c l q prime power I
+
+7 3 2 21 (0 , 1, 3) 13 4 3 31 (0 , 1, 3, 9) 21 5 4 22 (0 , 1, 4, 14 , 16) 31 6 5 51 (0 , 1, 3, 8, 12 , 18) 43 7 6 NA None 
+
+57 8 7 71 (0 , 1, 3, 13 , 32 , 36 , 43 , 52) 73 9 8 23 (0 , 1, 3, 7, 15 , 31 , 36 , 54 , 63) 91 10 9 32 (0 , 1, 3, 9, 27 , 49 , 56 , 61 , 77 , 81) 111 11 10 NA None 
+
+133 12 11 11 1 (0 , 1, 4, 12 , 21 , 26 , 45 , 68 , 84 , 96 , 98 , 126) 
+
+Figure 10: Full coverage validation for c = 13 , I = (0 , 1, 3, 9) 
+
+15 C Optimal divide granularity analysis 
+
+Our goal is to find the optimum divide granularity ( itr ∗) that minimizes the computation time for the whole sequence. Thus, 
+
+itr ∗ = arg min 
+
+> itr
+
+tseq ntotal 
+
+n_parallel (8) where tseq (x) = Ax 2 + Bx + C, ntotal =citr .When granted with the same memory budget and suppose the attention kernel supports parallel subsequence computation, we assume n_parallel = n_cap = Mem max  
+
+> Mem (x)
+
+for simplicity. We also assume the memory complexity is linear, thus Mem (x) = Dx + E. Since x = N × ( lc )itr , we have 
+
+ntotal = citr ≈ N 2 
+
+> x2
+
+and 
+
+x∗ = arg min 
+
+> x
+
+1
+
+Mem max 
+
+× (Ax 2 + Bx + C) × N 2
+
+x2 × (Dx + E) (9) Let 
+
+f (x) = (Ax 2 + Bx + C)( Dx + E)
+
+x2 (10) For the A100 GPU we experimented on, we have A = 9 .37 × 10 −12 , B = 9 .92 × 10 −7, C =
+
+−3.51 × 10 −2, D = 1 .45 × 10 −6, E = 8 .42 × 10 −2 in the forward pass so 
+
+f (x) = 1 .36 × 10 −17 x + 3.26 × 10 −8
+
+x − 2.96 × 10 −3
+
+x2 + 2 .23 × 10 −12 (11) and 
+
+f ′(x) = 1 .36 × 10 −17 − 3.26 × 10 −8
+
+x2 + 5.91 × 10 −3
+
+x3 (12) Since f ′(x) > 0 for x > 0, the overall computation time increases with the subsequence length, thus a larger divide granularity itr reduces the overall computation time under the same memory budget. For attention kernel that does not support subsequence computation parallelization, such as the current FA kernel in our experiments, we fix n_parallel = 1 and the target function reduces to 
+
+x∗ = arg min  
+
+> x
+
+(Ax 2 + Bx + C) × N 2
+
+x2 (13) and 
+
+g(x) = Ax 2 + Bx + Cx2 = 9.92 × 10 −7
+
+x − 3.51 × 10 −2
+
+x2 + 9 .37 × 10 −12 (14) Unfortunately, its only critical point x ≈ 70 , 766 is a global maximum when x > 0. The corre-sponding itr ≈ 11 .28 when N = 1 B. In other words, the overall computation time increases with 
+
+itr when 1 ≤ itr ≤ 11 as a trade-off for less memory. However, when itr ≥ 12 , the overall computation time start to decrease along with less memory consumption. The optimal divide granularity analysis for the backward pass has all formulas identical and coeficients to plug into f (x) and g(x) are A = 2 .38 × 10 −11 , B = 4 .81 × 10 −7, C = 8 .84 × 10 −2, D =2.88 × 10 −6, E = 1 .36 × 10 −2. The global minimum of f (x) is achieved when x∗ ≈ 65 , 894 and the corresponding itr ∗ ≈ 11 .36 . On the other hand, g(x) is strictly decreasing on x > 0.In conclusion, the chance to have an optimal divide granularity that maximizes the memory efficiency and minimizes the overall computation time depends on the attention kernel design and the hardware to perform the computation. 16 D Chain-rule deductions in backward pass 
+
+Given upstream gradient dO = ∂L 
+
+> ∂O
+
+where L is the loss, the goal is to compute dQ, dK and dV .For subsequence i, the forward pass generates 
+
+Ri = α(QiK⊤ 
+
+> i
+
+) Pi = exp (Ri) ⊙ Mi Num i = PiVi Den i = X
+
+> j
+
+(Pi):,j (15) where Mi is the CQS mask. The global merge generates Num = X
+
+> i∈S
+
+scatter (Oi) Den = X
+
+> i∈S
+
+scatter (Si) O = Num Den (16) So we have the following partial derivatives: 
+
+∂O ∂Num = 1
+
+Den 
+
+∂O ∂Den = − Num Den 2 (17) Below, we explicitly write the dimension with batch and head dimension omitted for simplicity. Still from the global view, we have 
+
+dO[n, d ] = ∂L
+
+∂O [n, d ] (18) Here dO[n, d ] is a scaler from dO ∈ RN ×D . Next, we have 
+
+dNum [n, d ] = ∂L
+
+∂Num [n] = ∂L
+
+∂O [n, d ] × ∂O [n, d ]
+
+∂Num [n, d ] = dO[n, d ]
+
+Den [n] (19) 
+
+dDen [n] = ∂L
+
+∂Den [n] = ∂L
+
+∂O [n, d ] × ∂O [n, d ]
+
+∂Den [n]= X
+
+> d
+
+dO[n, d ]( − Num [n, d ]
+
+Den [n]2 ) = −
+
+P 
+
+> d
+
+dO[n, d ]Num [n, d ]
+
+Den [n]2
+
+(20) A compact version of Eq. 19 and 20 are as follows. 
+
+dNum = dO
+
+Den dDen = −
+
+P 
+
+> d
+
+dOd · Num d
+
+Den 2 (21) Now we switch to the perspective of subsequence i, let its length be L, we gather L tokens from the global dNum ∈ RN ×D and dDen ∈ RN , thus dNum i ∈ RL×D , dDen i ∈ RL. Finally, we have the following computations. 
+
+dVi[m, d ] = X
+
+> l
+
+Pi[l, m ]dNum i[l, d ] (22) 
+
+dPi[l, m ] = X
+
+> d
+
+dNum i[l, d ]Vi[m, d ] + dDen i[l] (23) 
+
+dRi[l, m ] = dPi[l, m ] · Pi[l, m ] (24) 
+
+dQi[l, d ] = α X
+
+> m
+
+dRi[l, m ]Ki[m, d ] (25) 
+
+dKi[l, d ] = α X
+
+> l
+
+dRi[l, m ]Ki[l, d ] (26) A compact version of Eq. 22 to 26 are as follows. 
+
+dVi = P ⊤ 
+
+> i
+
+dNum i (27) 
+
+dPi = dNum iV ⊤ 
+
+> i
+
++ dDen i1⊤ (28) 
+
+dRi = dPi ⊙ Pi (29) 
+
+dQi = αdRiKi (30) 
+
+dKi = αdR⊤ 
+
+> i
+
+Qi (31) The last step is to merge all dQi, dKi, dVi ∈ RL×D into dQ, dK, dV ∈ RN ×D .17
