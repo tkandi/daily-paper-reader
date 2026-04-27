@@ -6,73 +6,79 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-26
-- 运行时间：2026-04-26 20:24:52 UTC
+- 最新运行日期：2026-04-27
+- 运行时间：2026-04-27 19:59:24 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：6
+- 本次总论文数：19
+- 精读区：8
 - 速读区：11
 
 ### 今日简报（AI）
-今日精选 17 篇前沿论文，深度聚焦 GPU 通信压缩与大规模分布式数据流水线的性能巅峰。
-重点推荐 CCCL 架构实现的 GPU 内压缩通信技术，以及能显著提升大规模深度学习复现效率的高吞吐数据管道优化方案。
-建议关注系统底层优化与算力能效比，通过 TLoRA 等轻量化技术平衡模型性能与资源消耗。
-- 详情：[/202604/26/README](/202604/26/README)
+今日深度研读19篇AI基建论文，重点攻克LLM训练中的芯片光互连与GPU通信瓶颈。
+满分力作《ChipLight》通过跨层光互连优化重塑Chiplet设计，结合多路径CUDA Graphs技术大幅提升了节点内数据传输性能。
+建议优先关注大模型底层硬件协同与时空冗余消除技术，以应对日益增长的算力与通信挑战。
+- 详情：[/202604/27/README](/202604/27/README)
 
 ### 精读区论文标签
-1. [CCCL: In-GPU Compression-Coupled Collective Communication](/202604/26/2604.17172v1-cccl-in-gpu-compression-coupled-collective-communication)  
+1. [ChipLight: Cross-Layer Optimization of Chiplet Design with Optical Interconnects for LLM Training](/202604/27/2604.18909v1-chiplight-cross-layer-optimization-of-chiplet-design-with-optical-interconnects-for-llm-training)  
    标签：评分：10.0/10、query:mlsys
-   evidence：针对LLM工作负载的GPU内压缩耦合集合通信库
-2. [Optimizing High-Throughput Distributed Data Pipelines for Reproducible Deep Learning at Scale](/202604/26/2604.21275v1-optimizing-high-throughput-distributed-data-pipelines-for-reproducible-deep-learning-at-scale)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：优化分布式GPU训练流水线和数据加载瓶颈
-3. [Decoupled DiLoCo for Resilient Distributed Pre-training](/202604/26/2604.21428v1-decoupled-diloco-for-resilient-distributed-pre-training)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：Decoupled DiLoCo 框架用于弹性分布式预训练和异步同步
-4. [Efficient Mixture-of-Experts LLM Inference with Apple Silicon NPUs](/202604/26/2604.18788v1-efficient-mixture-of-experts-llm-inference-with-apple-silicon-npus)  
+   evidence：LLM训练集群的芯粒与光互连优化
+2. [Accelerating Intra-Node GPU-to-GPU Communication Through Multi-Path Transfers with CUDA Graphs](/202604/27/2604.22228v1-accelerating-intra-node-gpu-to-gpu-communication-through-multi-path-transfers-with-cuda-graphs)  
+   标签：评分：9.5/10、query:mlsys
+   evidence：通过多路径传输和CUDA图加速节点内GPU间通信
+3. [DeInfer: Efficient Parallel Inferencing for Decomposed Large Language Models](/202604/27/2604.17709v1-deinfer-efficient-parallel-inferencing-for-decomposed-large-language-models)  
    标签：评分：9.0/10、query:mlsys
-   evidence：针对MoE推理的AI基础设施优化与NPU卸载
-5. [Distributed Generative Inference of LLM at Internet Scales with Multi-Dimensional Communication Optimization](/202604/26/2604.21072v1-distributed-generative-inference-of-llm-at-internet-scales-with-multi-dimensional-communication-optimization)  
+   evidence：大语言模型高性能推理系统
+4. [Distributed Generative Inference of LLM at Internet Scales with Multi-Dimensional Communication Optimization](/202604/27/2604.21072v1-distributed-generative-inference-of-llm-at-internet-scales-with-multi-dimensional-communication-optimization)  
    标签：评分：9.0/10、query:mlsys
-   evidence：具有多维通信优化的互联网规模分布式 LLM 推理框架
-6. [Nesterov Accelerated Distributed Optimization with Efficient Quantized Communication](/202604/26/2604.16906v1-nesterov-accelerated-distributed-optimization-with-efficient-quantized-communication)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：针对大规模系统的量化通信分布式优化算法
+   evidence：具有通信优化的互联网规模分布式LLM推理框架
+5. [Shard the Gradient, Scale the Model: Serverless Federated Aggregation via Gradient Partitioning](/202604/27/2604.22072v1-shard-the-gradient-scale-the-model-serverless-federated-aggregation-via-gradient-partitioning)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：通过梯度分区的无服务器联邦聚合
+6. [GICC: A High-Performance Runtime for GPU-Initiated Communication and Coordination in Modern HPC Systems](/202604/27/2604.22126v1-gicc-a-high-performance-runtime-for-gpu-initiated-communication-and-coordination-in-modern-hpc-systems)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：高性能HPC系统GPU发起通信运行时
+7. [Guess-Verify-Refine: Data-Aware Top-K for Sparse-Attention Decoding on Blackwell via Temporal Correlation](/202604/27/2604.22312v1-guess-verify-refine-data-aware-top-k-for-sparse-attention-decoding-on-blackwell-via-temporal-correlation)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：针对英伟达Blackwell架构优化稀疏注意力解码
+8. [A comprehensive evaluation of spatial co-execution on GPUs using MPS and MIG technologies](/202604/27/2604.22430v1-a-comprehensive-evaluation-of-spatial-co-execution-on-gpus-using-mps-and-mig-technologies)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：对MPS和MIG等GPU空间共享技术的评估
 
 ### 速读区论文标签
-1. [TLoRA: Task-aware Low Rank Adaptation of Large Language Models](/202604/26/2604.18124v1-tlora-task-aware-low-rank-adaptation-of-large-language-models)  
+1. [$R^2$-dLLM: Accelerating Diffusion Large Language Models via Spatio-Temporal Redundancy Reduction](/202604/27/2604.18995v1-r2-dllm-accelerating-diffusion-large-language-models-via-spatio-temporal-redundancy-reduction)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：通过减少冗余加速扩散LLM的推理和训练
+2. [A GPU-Accelerated Framework for Multi-Attribute Range Filtered Approximate Nearest Neighbor Search](/202604/27/2604.20121v1-a-gpu-accelerated-framework-for-multi-attribute-range-filtered-approximate-nearest-neighbor-search)  
    标签：评分：8.0/10、query:mlsys
-   evidence：LLM微调资源分配的联合优化
-2. [EnergAIzer: Fast and Accurate GPU Power Estimation Framework for AI Workloads](/202604/26/2604.20105v1-energaizer-fast-and-accurate-gpu-power-estimation-framework-for-ai-workloads)  
+   evidence：GPU加速框架与硬件感知执行流水线
+3. [Distributed Zeroth-Order Optimization with Rademacher Perturbations and Momentum Gradient Tracking](/202604/27/2604.21368v1-distributed-zeroth-order-optimization-with-rademacher-perturbations-and-momentum-gradient-tracking)  
    标签：评分：8.0/10、query:mlsys
-   evidence：专为数据中心AI工作负载设计的快速GPU功耗估算框架。
-3. [Decentralized Machine Learning with Centralized Performance Guarantees via Gibbs Algorithms](/202604/26/2604.20492v1-decentralized-machine-learning-with-centralized-performance-guarantees-via-gibbs-algorithms)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：具有通信协议的去中心化机器学习框架
-4. [DiP-SD: Distributed Pipelined Speculative Decoding for Efficient LLM Inference at the Edge](/202604/26/2604.20919v1-dip-sd-distributed-pipelined-speculative-decoding-for-efficient-llm-inference-at-the-edge)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：大语言模型推理的分布式流水线调度
-5. [D-QRELO: Training- and Data-Free Delta Compression for Large Language Models via Quantization and Residual Low-Rank Approximation](/202604/26/2604.16940v1-d-qrelo-training--and-data-free-delta-compression-for-large-language-models-via-quantization-and-residual-low-rank-approximation)  
+   evidence：异构网络中的分布式优化算法
+4. [SparKV: Overhead-Aware KV Cache Loading for Efficient On-Device LLM Inference](/202604/27/2604.21231v1-sparkv-overhead-aware-kv-cache-loading-for-efficient-on-device-llm-inference)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：高效端侧大语言模型推理的基础设施
+5. [DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing](/202604/27/2604.19351v1-dash-kv-accelerating-long-context-llm-inference-via-asymmetric-kv-cache-hashing)  
    标签：评分：7.0/10、query:mlsys
-   evidence：针对大语言模型微调的增量压缩技术，减少内存开销
-6. [Joint Scheduling of Multi-Band Radar Sensing and DNN Inference for Cross-Stage Parallelism](/202604/26/2604.18520v1-joint-scheduling-of-multi-band-radar-sensing-and-dnn-inference-for-cross-stage-parallelism)  
+   evidence：通过KV缓存哈希加速长文本LLM推理的框架
+6. [Continuous Semantic Caching for Low-Cost LLM Serving](/202604/27/2604.20021v1-continuous-semantic-caching-for-low-cost-llm-serving)  
    标签：评分：7.0/10、query:mlsys
-   evidence：感知与DNN推理的联合调度，支持跨阶段并行和多核执行
-7. [$R^2$-dLLM: Accelerating Diffusion Large Language Models via Spatio-Temporal Redundancy Reduction](/202604/26/2604.18995v1-r2-dllm-accelerating-diffusion-large-language-models-via-spatio-temporal-redundancy-reduction)  
+   evidence：低成本LLM推理服务的语义缓存基础设施
+7. [Decision-Focused Federated Learning Under Heterogeneous Objectives and Constraints](/202604/27/2604.20031v1-decision-focused-federated-learning-under-heterogeneous-objectives-and-constraints)  
    标签：评分：7.0/10、query:mlsys
-   evidence：通过训练和推理中的时空冗余减少来加速dLLM
-8. [Ocean: Fast Estimation-Based Sparse General Matrix-Matrix Multiplication on GPU](/202604/26/2604.19004v1-ocean-fast-estimation-based-sparse-general-matrix-matrix-multiplication-on-gpu)  
+   evidence：面向分布式智能体的决策聚焦联邦学习框架
+8. [A Delta-Aware Orchestration Framework for Scalable Multi-Agent Edge Computing](/202604/27/2604.20129v1-a-delta-aware-orchestration-framework-for-scalable-multi-agent-edge-computing)  
    标签：评分：7.0/10、query:mlsys
-   evidence：针对机器学习工作负载的GPU内核优化
-9. [SinkRouter: Sink-Aware Routing for Efficient Long-Context Decoding in Large Language and Multimodal Models](/202604/26/2604.16883v1-sinkrouter-sink-aware-routing-for-efficient-long-context-decoding-in-large-language-and-multimodal-models)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：通过 Sink 感知路由实现的高效长文本解码系统
-10. [Scalable Memristive-Friendly Reservoir Computing for Time Series Classification](/202604/26/2604.19343v1-scalable-memristive-friendly-reservoir-computing-for-time-series-classification)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：深度学习应用中可扩展并行计算的架构设计
-11. [Improved large-scale graph learning through ridge spectral sparsification](/202604/26/2604.20078v1-improved-large-scale-graph-learning-through-ridge-spectral-sparsification)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：大规模图学习的分布式流式设置
+   evidence：边缘计算编排框架与硬件调度
+9. [3DPipe: A Pipelined GPU Framework for Scalable Generalized Spatial Join over Polyhedral Objects](/202604/27/2604.19982v1-3dpipe-a-pipelined-gpu-framework-for-scalable-generalized-spatial-join-over-polyhedral-objects)  
+   标签：评分：6.5/10、query:mlsys
+   evidence：用于可扩展空间操作的流水线GPU框架
+10. [Onyx: Cost-Efficient Disk-Oblivious ANN Search](/202604/27/2604.20401v1-onyx-cost-efficient-disk-oblivious-ann-search)  
+   标签：评分：6.5/10、query:mlsys
+   evidence：在第三方基础设施上使用TEE和SSD进行成本效益高的ANN搜索
+11. [Beyond N-gram: Data-Aware X-GRAM Extraction for Efficient Embedding Parameter Scaling](/202604/27/2604.21724v2-beyond-n-gram-data-aware-x-gram-extraction-for-efficient-embedding-parameter-scaling)  
+   标签：评分：6.5/10、query:mlsys
+   evidence：针对大型令牌索引查找表的高效嵌入参数扩展
 
 
 <div class="dpr-home-promo-card">
