@@ -6,79 +6,77 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-27
-- 运行时间：2026-04-27 19:59:24 UTC
+- 最新运行日期：2026-04-28
+- 运行时间：2026-04-28 20:57:20 UTC
 - 运行状态：成功
-- 本次总论文数：19
-- 精读区：8
+- 本次总论文数：18
+- 精读区：7
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度研读19篇AI基建论文，重点攻克LLM训练中的芯片光互连与GPU通信瓶颈。
-满分力作《ChipLight》通过跨层光互连优化重塑Chiplet设计，结合多路径CUDA Graphs技术大幅提升了节点内数据传输性能。
-建议优先关注大模型底层硬件协同与时空冗余消除技术，以应对日益增长的算力与通信挑战。
-- 详情：[/202604/27/README](/202604/27/README)
+- 今日共生成 18 篇推荐（精读 7 篇，速读 11 篇）
+- 精读：《JigsawRL: Assembling RL Pipelines for Efficient LLM Post-Training》（10.0/10）, 《FlashOverlap: Minimizing Tail Latency in Communication Overlap for Distributed LLM Training》（10.0/10）
+- 速读：《Hybrid JIT-CUDA Graph Optimization for Low-Latency Large Language Model Inference》（8.5/10）, 《FreeScale: Distributed Training for Sequence Recommendation Models with Minimal Scaling Cost》（8.5/10）, 《MTServe: Efficient Serving for Generative Recommendation Models with Hierarchical Caches》（8.0/10）
+- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
+- 详情：[/202604/28/README](/202604/28/README)
 
 ### 精读区论文标签
-1. [ChipLight: Cross-Layer Optimization of Chiplet Design with Optical Interconnects for LLM Training](/202604/27/2604.18909v1-chiplight-cross-layer-optimization-of-chiplet-design-with-optical-interconnects-for-llm-training)  
+1. [JigsawRL: Assembling RL Pipelines for Efficient LLM Post-Training](/202604/28/2604.23838v1-jigsawrl-assembling-rl-pipelines-for-efficient-llm-post-training)  
    标签：评分：10.0/10、query:mlsys
-   evidence：LLM训练集群的芯粒与光互连优化
-2. [Accelerating Intra-Node GPU-to-GPU Communication Through Multi-Path Transfers with CUDA Graphs](/202604/27/2604.22228v1-accelerating-intra-node-gpu-to-gpu-communication-through-multi-path-transfers-with-cuda-graphs)  
+   evidence：大语言模型后训练中强化学习并行性的流水线复用
+2. [FlashOverlap: Minimizing Tail Latency in Communication Overlap for Distributed LLM Training](/202604/28/2604.24013v1-flashoverlap-minimizing-tail-latency-in-communication-overlap-for-distributed-llm-training)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：分布式大模型训练中的通信计算重叠优化
+3. [Scaling Multi-Node Mixture-of-Experts Inference Using Expert Activation Patterns](/202604/28/2604.23150v1-scaling-multi-node-mixture-of-experts-inference-using-expert-activation-patterns)  
    标签：评分：9.5/10、query:mlsys
-   evidence：通过多路径传输和CUDA图加速节点内GPU间通信
-3. [DeInfer: Efficient Parallel Inferencing for Decomposed Large Language Models](/202604/27/2604.17709v1-deinfer-efficient-parallel-inferencing-for-decomposed-large-language-models)  
+   evidence：优化多节点MoE推理并解决大规模AI基础设施中的节点间通信开销问题。
+4. [MatchRDMA: A Segmented and Rate-Matched Long-Haul RDMA Scheme for Geo-distributed LLM Training over OTN](/202604/28/2604.23932v1-matchrdma-a-segmented-and-rate-matched-long-haul-rdma-scheme-for-geo-distributed-llm-training-over-otn)  
+   标签：评分：9.5/10、query:mlsys
+   evidence：跨地域分布式LLM训练的长途RDMA网络优化
+5. [GreenDyGNN: Runtime-Adaptive Energy-Efficient Communication for Distributed GNN Training](/202604/28/2604.23139v1-greendygnn-runtime-adaptive-energy-efficient-communication-for-distributed-gnn-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：大语言模型高性能推理系统
-4. [Distributed Generative Inference of LLM at Internet Scales with Multi-Dimensional Communication Optimization](/202604/27/2604.21072v1-distributed-generative-inference-of-llm-at-internet-scales-with-multi-dimensional-communication-optimization)  
+   evidence：分布式GNN训练的能效通信
+6. [TACO: Efficient Communication Compression of Intermediate Tensors for Scalable Tensor-Parallel LLM Training](/202604/28/2604.24088v1-taco-efficient-communication-compression-of-intermediate-tensors-for-scalable-tensor-parallel-llm-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：具有通信优化的互联网规模分布式LLM推理框架
-5. [Shard the Gradient, Scale the Model: Serverless Federated Aggregation via Gradient Partitioning](/202604/27/2604.22072v1-shard-the-gradient-scale-the-model-serverless-federated-aggregation-via-gradient-partitioning)  
+   evidence：针对可扩展张量并行LLM训练的高效通信压缩
+7. [Scalable Hyperparameter-Divergent Ensemble Training with Automatic Learning Rate Exploration for Large Models](/202604/28/2604.24708v1-scalable-hyperparameter-divergent-ensemble-training-with-automatic-learning-rate-exploration-for-large-models)  
    标签：评分：9.0/10、query:mlsys
-   evidence：通过梯度分区的无服务器联邦聚合
-6. [GICC: A High-Performance Runtime for GPU-Initiated Communication and Coordination in Modern HPC Systems](/202604/27/2604.22126v1-gicc-a-high-performance-runtime-for-gpu-initiated-communication-and-coordination-in-modern-hpc-systems)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：高性能HPC系统GPU发起通信运行时
-7. [Guess-Verify-Refine: Data-Aware Top-K for Sparse-Attention Decoding on Blackwell via Temporal Correlation](/202604/27/2604.22312v1-guess-verify-refine-data-aware-top-k-for-sparse-attention-decoding-on-blackwell-via-temporal-correlation)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对英伟达Blackwell架构优化稀疏注意力解码
-8. [A comprehensive evaluation of spatial co-execution on GPUs using MPS and MIG technologies](/202604/27/2604.22430v1-a-comprehensive-evaluation-of-spatial-co-execution-on-gpus-using-mps-and-mig-technologies)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：对MPS和MIG等GPU空间共享技术的评估
+   evidence：重新利用GPU副本进行超参数探索的分布式训练方法
 
 ### 速读区论文标签
-1. [$R^2$-dLLM: Accelerating Diffusion Large Language Models via Spatio-Temporal Redundancy Reduction](/202604/27/2604.18995v1-r2-dllm-accelerating-diffusion-large-language-models-via-spatio-temporal-redundancy-reduction)  
+1. [Hybrid JIT-CUDA Graph Optimization for Low-Latency Large Language Model Inference](/202604/28/2604.23467v1-hybrid-jit-cuda-graph-optimization-for-low-latency-large-language-model-inference)  
    标签：评分：8.5/10、query:mlsys
-   evidence：通过减少冗余加速扩散LLM的推理和训练
-2. [A GPU-Accelerated Framework for Multi-Attribute Range Filtered Approximate Nearest Neighbor Search](/202604/27/2604.20121v1-a-gpu-accelerated-framework-for-multi-attribute-range-filtered-approximate-nearest-neighbor-search)  
+   evidence：结合JIT和CUDA Graph的LLM推理混合运行时框架
+2. [FreeScale: Distributed Training for Sequence Recommendation Models with Minimal Scaling Cost](/202604/28/2604.24073v1-freescale-distributed-training-for-sequence-recommendation-models-with-minimal-scaling-cost)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：针对推荐模型的分布式训练，包含负载均衡和通信重叠优化
+3. [MTServe: Efficient Serving for Generative Recommendation Models with Hierarchical Caches](/202604/28/2604.22881v1-mtserve-efficient-serving-for-generative-recommendation-models-with-hierarchical-caches)  
    标签：评分：8.0/10、query:mlsys
-   evidence：GPU加速框架与硬件感知执行流水线
-3. [Distributed Zeroth-Order Optimization with Rademacher Perturbations and Momentum Gradient Tracking](/202604/27/2604.21368v1-distributed-zeroth-order-optimization-with-rademacher-perturbations-and-momentum-gradient-tracking)  
+   evidence：用于GPU显存虚拟化的分级缓存管理系统
+4. [Mixture of Heterogeneous Grouped Experts for Language Modeling](/202604/28/2604.23108v1-mixture-of-heterogeneous-grouped-experts-for-language-modeling)  
    标签：评分：8.0/10、query:mlsys
-   evidence：异构网络中的分布式优化算法
-4. [SparKV: Overhead-Aware KV Cache Loading for Efficient On-Device LLM Inference](/202604/27/2604.21231v1-sparkv-overhead-aware-kv-cache-loading-for-efficient-on-device-llm-inference)  
+   evidence：异构MoE中GPU利用率不均衡的系统级挑战
+5. [Mythos and the Unverified Cage: Z3-Based Pre-Deployment Verification for Frontier-Model Sandbox Infrastructure](/202604/28/2604.20496v1-mythos-and-the-unverified-cage-z3-based-pre-deployment-verification-for-frontier-model-sandbox-infrastructure)  
    标签：评分：7.5/10、query:mlsys
-   evidence：高效端侧大语言模型推理的基础设施
-5. [DASH-KV: Accelerating Long-Context LLM Inference via Asymmetric KV Cache Hashing](/202604/27/2604.19351v1-dash-kv-accelerating-long-context-llm-inference-via-asymmetric-kv-cache-hashing)  
+   evidence：AI沙箱基础设施的形式化验证
+6. [BitRL: Reinforcement Learning with 1-bit Quantized Language Models for Resource-Constrained Edge Deployment](/202604/28/2604.24273v1-bitrl-reinforcement-learning-with-1-bit-quantized-language-models-for-resource-constrained-edge-deployment)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：针对资源受限边缘设备的量化大语言模型部署系统设计。
+7. [DepthKV: Layer-Dependent KV Cache Pruning for Long-Context LLM Inference](/202604/28/2604.24647v1-depthkv-layer-dependent-kv-cache-pruning-for-long-context-llm-inference)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：大语言模型推理系统中的内存占用优化
+8. [Nexusformer: Nonlinear Attention Expansion for Stable and Inheritable Transformer Scaling](/202604/28/2604.19147v1-nexusformer-nonlinear-attention-expansion-for-stable-and-inheritable-transformer-scaling)  
    标签：评分：7.0/10、query:mlsys
-   evidence：通过KV缓存哈希加速长文本LLM推理的框架
-6. [Continuous Semantic Caching for Low-Cost LLM Serving](/202604/27/2604.20021v1-continuous-semantic-caching-for-low-cost-llm-serving)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：低成本LLM推理服务的语义缓存基础设施
-7. [Decision-Focused Federated Learning Under Heterogeneous Objectives and Constraints](/202604/27/2604.20031v1-decision-focused-federated-learning-under-heterogeneous-objectives-and-constraints)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：面向分布式智能体的决策聚焦联邦学习框架
-8. [A Delta-Aware Orchestration Framework for Scalable Multi-Agent Edge Computing](/202604/27/2604.20129v1-a-delta-aware-orchestration-framework-for-scalable-multi-agent-edge-computing)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：边缘计算编排框架与硬件调度
-9. [3DPipe: A Pipelined GPU Framework for Scalable Generalized Spatial Join over Polyhedral Objects](/202604/27/2604.19982v1-3dpipe-a-pipelined-gpu-framework-for-scalable-generalized-spatial-join-over-polyhedral-objects)  
+   evidence：Transformer缩放与架构设计
+9. [FedSPDnet: Geometry-Aware Federated Deep Learning with SPDnet](/202604/28/2604.22494v1-fedspdnet-geometry-aware-federated-deep-learning-with-spdnet)  
    标签：评分：6.5/10、query:mlsys
-   evidence：用于可扩展空间操作的流水线GPU框架
-10. [Onyx: Cost-Efficient Disk-Oblivious ANN Search](/202604/27/2604.20401v1-onyx-cost-efficient-disk-oblivious-ann-search)  
+   evidence：针对SPD矩阵的联邦深度学习框架
+10. [Enhanced Privacy and Communication Efficiency in Non-IID Federated Learning with Adaptive Quantization and Differential Privacy](/202604/28/2604.23426v1-enhanced-privacy-and-communication-efficiency-in-non-iid-federated-learning-with-adaptive-quantization-and-differential-privacy)  
    标签：评分：6.5/10、query:mlsys
-   evidence：在第三方基础设施上使用TEE和SSD进行成本效益高的ANN搜索
-11. [Beyond N-gram: Data-Aware X-GRAM Extraction for Efficient Embedding Parameter Scaling](/202604/27/2604.21724v2-beyond-n-gram-data-aware-x-gram-extraction-for-efficient-embedding-parameter-scaling)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：针对大型令牌索引查找表的高效嵌入参数扩展
+   evidence：通过自适应量化提升分布式联邦学习的通信效率
+11. [FlashFPS: Efficient Farthest Point Sampling for Large-Scale Point Clouds via Pruning and Caching](/202604/28/2604.17720v1-flashfps-efficient-farthest-point-sampling-for-large-scale-point-clouds-via-pruning-and-caching)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：针对点云处理的CUDA和硬件级优化
 
 
 <div class="dpr-home-promo-card">
