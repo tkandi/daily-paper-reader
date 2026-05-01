@@ -6,84 +6,77 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-04-30
-- 运行时间：2026-04-30 20:15:14 UTC
+- 最新运行日期：2026-05-01
+- 运行时间：2026-05-01 20:22:15 UTC
 - 运行状态：成功
-- 本次总论文数：21
-- 精读区：10
+- 本次总论文数：18
+- 精读区：7
 - 速读区：11
 
 ### 今日简报（AI）
-今日精选 21 篇前沿论文，深度攻克分布式训练长尾延迟与大模型高效推理难题。
-核心突破在于 CommFuse 的通信分解融合机制与 Cache
-- 详情：[/202604/30/README](/202604/30/README)
+- 今日共生成 18 篇推荐（精读 7 篇，速读 11 篇）
+- 精读：《Efficient Training on Multiple Consumer GPUs with RoundPipe》（10.0/10）, 《AutoSP: Unlocking Long-Context LLM Training Via Compiler-Based Sequence Parallelism》（10.0/10）
+- 速读：《FloatSOM: GPU-Accelerated, Distributed, Topology-Flexible Self-Organizing Maps》（8.0/10）, 《DUAL-BLADE: Dual-Path NVMe-Direct KV-Cache Offloading for Edge LLM Inference》（8.0/10）, 《A Study on the Performance of Distributed Training of Data-driven CFD Simulations》（8.0/10）
+- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
+- 详情：[/202605/01/README](/202605/01/README)
 
 ### 精读区论文标签
-1. [CommFuse: Hiding Tail Latency via Communication Decomposition and Fusion for Distributed LLM Training](/202604/30/2604.24013v2-commfuse-hiding-tail-latency-via-communication-decomposition-and-fusion-for-distributed-llm-training)  
+1. [Efficient Training on Multiple Consumer GPUs with RoundPipe](/202605/01/2604.27085v1-efficient-training-on-multiple-consumer-gpus-with-roundpipe)  
    标签：评分：10.0/10、query:mlsys
-   evidence：分布式LLM训练中的通信-计算重叠
-2. [CacheFlow: Efficient LLM Serving with 3D-Parallel KV Cache Restoration](/202604/30/2604.25080v1-cacheflow-efficient-llm-serving-with-3d-parallel-kv-cache-restoration)  
+   evidence：在消费级GPU上进行LLM训练的新型流水线调度
+2. [AutoSP: Unlocking Long-Context LLM Training Via Compiler-Based Sequence Parallelism](/202605/01/2604.27089v1-autosp-unlocking-long-context-llm-training-via-compiler-based-sequence-parallelism)  
    标签：评分：10.0/10、query:mlsys
-   evidence：用于高效LLM推理服务的3D并行KV缓存恢复框架
-3. [Folding Tensor and Sequence Parallelism for Memory-Efficient Transformer Training & Inference](/202604/30/2604.26294v1-folding-tensor-and-sequence-parallelism-for-memory-efficient-transformer-training--inference)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：折叠张量与序列并行用于Transformer训练
-4. [AI Observability for Large Language Model Systems: A Multi-Layer Analysis of Monitoring Approaches from Confidence Calibration to Infrastructure Tracing](/202604/30/2604.26152v1-ai-observability-for-large-language-model-systems-a-multi-layer-analysis-of-monitoring-approaches-from-confidence-calibration-to-infrastructure-tracing)  
+   evidence：基于编译器的序列并行技术，用于长文本LLM训练
+3. [COPUS: Co-adaptive Parallelism and Batch Size Selection in Large Language Model Training](/202605/01/2604.26687v1-copus-co-adaptive-parallelism-and-batch-size-selection-in-large-language-model-training)  
    标签：评分：9.5/10、query:mlsys
-   evidence：从模型内部到GPU内核的监控方法分析
-5. [COPUS: Co-adaptive Parallelism and Batch Size Selection in Large Language Model Training](/202604/30/2604.26687v1-copus-co-adaptive-parallelism-and-batch-size-selection-in-large-language-model-training)  
-   标签：评分：9.5/10、query:mlsys
-   evidence：大模型训练中并行策略与全局批大小的协同自适应选择
-6. [A comprehensive evaluation of spatial co-execution on GPUs using MPS and MIG technologies](/202604/30/2604.22430v2-a-comprehensive-evaluation-of-spatial-co-execution-on-gpus-using-mps-and-mig-technologies)  
+   evidence：3D并行策略与全局Batch Size的协同自适应选择
+4. [Network Edge Inference for Large Language Models: Principles, Techniques, and Opportunities](/202605/01/2604.22906v1-network-edge-inference-for-large-language-models-principles-techniques-and-opportunities)  
    标签：评分：9.0/10、query:mlsys
-   evidence：使用MPS和MIG进行GPU资源共享与管理
-7. [Scaling Multi-Node Mixture-of-Experts Inference Using Expert Activation Patterns](/202604/30/2604.23150v1-scaling-multi-node-mixture-of-experts-inference-using-expert-activation-patterns)  
+   evidence：大语言模型推理的系统架构与资源管理综述
+5. [Scaling Multi-Node Mixture-of-Experts Inference Using Expert Activation Patterns](/202605/01/2604.23150v1-scaling-multi-node-mixture-of-experts-inference-using-expert-activation-patterns)  
    标签：评分：9.0/10、query:mlsys
-   evidence：多节点MoE推理扩展与通信优化
-8. [Versioned Late Materialization for Ultra-Long Sequence Training in Recommendation Systems at Scale](/202604/30/2604.24806v1-versioned-late-materialization-for-ultra-long-sequence-training-in-recommendation-systems-at-scale)  
+   evidence：MoE推理中的多节点部署与节点间通信开销
+6. [ZipCCL: Efficient Lossless Data Compression of Communication Collectives for Accelerating LLM Training](/202605/01/2604.27844v1-zipccl-efficient-lossless-data-compression-of-communication-collectives-for-accelerating-llm-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：超长序列训练的数据基础设施
-9. [DAK: Direct-Access-Enabled GPU Memory Offloading with Optimal Efficiency for LLM Inference](/202604/30/2604.26074v1-dak-direct-access-enabled-gpu-memory-offloading-with-optimal-efficiency-for-llm-inference)  
+   evidence：LLM训练中通信集合的无损数据压缩库
+7. [Strait: Perceiving Priority and Interference in ML Inference Serving](/202605/01/2604.28175v1-strait-perceiving-priority-and-interference-in-ml-inference-serving)  
    标签：评分：9.0/10、query:mlsys
-   evidence：用于LLM推理的直连访问GPU内存卸载
-10. [SplitFT: An Adaptive Federated Split Learning System For LLMs Fine-Tuning](/202604/30/2604.26388v1-splitft-an-adaptive-federated-split-learning-system-for-llms-fine-tuning)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：用于LLM微调的联邦拆分学习系统
+   evidence：GPU资源调度与优先级感知推理服务
 
 ### 速读区论文标签
-1. [FedSLoP: Memory-Efficient Federated Learning with Low-Rank Gradient Projection](/202604/30/2604.24012v1-fedslop-memory-efficient-federated-learning-with-low-rank-gradient-projection)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：具有低秩梯度投影的内存高效联邦学习
-2. [Efficient, VRAM-Constrained xLM Inference on Clients](/202604/30/2604.26334v1-efficient-vram-constrained-xlm-inference-on-clients)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：针对显存受限推理的CPU-GPU混合调度与流水线分片技术
-3. [FedSIR: Spectral Client Identification and Relabeling for Federated Learning with Noisy Labels](/202604/30/2604.20825v1-fedsir-spectral-client-identification-and-relabeling-for-federated-learning-with-noisy-labels)  
+1. [FloatSOM: GPU-Accelerated, Distributed, Topology-Flexible Self-Organizing Maps](/202605/01/2604.26555v1-floatsom-gpu-accelerated-distributed-topology-flexible-self-organizing-maps)  
    标签：评分：8.0/10、query:mlsys
-   evidence：跨分布式客户端的鲁棒联邦学习多阶段框架
-4. [Mixture of Heterogeneous Grouped Experts for Language Modeling](/202604/30/2604.23108v2-mixture-of-heterogeneous-grouped-experts-for-language-modeling)  
+   evidence：用于可扩展SOM训练的GPU加速分布式框架
+2. [DUAL-BLADE: Dual-Path NVMe-Direct KV-Cache Offloading for Edge LLM Inference](/202605/01/2604.26557v1-dual-blade-dual-path-nvme-direct-kv-cache-offloading-for-edge-llm-inference)  
    标签：评分：8.0/10、query:mlsys
-   evidence：解决MoE架构中GPU利用率不均衡的问题
-5. [AHASD: Asynchronous Heterogeneous Architecture for LLM Adaptive Drafting Speculative Decoding on Mobile Devices](/202604/30/2604.25326v1-ahasd-asynchronous-heterogeneous-architecture-for-llm-adaptive-drafting-speculative-decoding-on-mobile-devices)  
+   evidence：用于边缘AI推理基础设施的NVMe直连KV缓存卸载
+3. [A Study on the Performance of Distributed Training of Data-driven CFD Simulations](/202605/01/2604.27431v1-a-study-on-the-performance-of-distributed-training-of-data-driven-cfd-simulations)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：评估AI模拟分布式训练方案的性能
+4. [FedSLoP: Memory-Efficient Federated Learning with Low-Rank Gradient Projection](/202605/01/2604.24012v2-fedslop-memory-efficient-federated-learning-with-low-rank-gradient-projection)  
    标签：评分：7.5/10、query:mlsys
-   evidence：LLM投机解码的异构架构
-6. [CUDA Kernel Optimization and Counter-Free Performance Analysis for Depthwise Convolution in Cloud Environments](/202604/30/2604.25422v2-cuda-kernel-optimization-and-counter-free-performance-analysis-for-depthwise-convolution-in-cloud-environments)  
+   evidence：具有低秩梯度投影的联邦优化算法
+5. [DepthKV: Layer-Dependent KV Cache Pruning for Long-Context LLM Inference](/202605/01/2604.24647v1-depthkv-layer-dependent-kv-cache-pruning-for-long-context-llm-inference)  
    标签：评分：7.5/10、query:mlsys
-   evidence：云环境下深度卷积的CUDA算子优化与性能分析
-7. [Learning to Communicate: Toward End-to-End Optimization of Multi-Agent Language Systems](/202604/30/2604.21794v1-learning-to-communicate-toward-end-to-end-optimization-of-multi-agent-language-systems)  
+   evidence：LLM推理基础设施优化
+6. [Regime-Adaptive Weighted Ensemble Learning for Computing-Driven Dynamic Load Forecasting in AI Data Centers](/202605/01/2604.27207v1-regime-adaptive-weighted-ensemble-learning-for-computing-driven-dynamic-load-forecasting-in-ai-data-centers)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：预测AI数据中心中计算驱动的动态工作负载
+7. [A Retraction-Free EXTRA Method for Decentralized Optimization on the Stiefel Manifold](/202605/01/2604.23754v2-a-retraction-free-extra-method-for-decentralized-optimization-on-the-stiefel-manifold)  
    标签：评分：7.0/10、query:mlsys
-   evidence：优化多智能体系统中潜层通信的训练框架
-8. [Fed-DLoRA: Efficient Wireless Federated Learning with Dynamic Low-Rank Adaptation](/202604/30/2604.24103v1-fed-dlora-efficient-wireless-federated-learning-with-dynamic-low-rank-adaptation)  
+   evidence：用于大规模学习的去中心化优化框架
+8. [AHASD: Asynchronous Heterogeneous Architecture for LLM Adaptive Drafting Speculative Decoding on Mobile Devices](/202605/01/2604.25326v2-ahasd-asynchronous-heterogeneous-architecture-for-llm-adaptive-drafting-speculative-decoding-on-mobile-devices)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于分布式车联网应用的联邦学习算法
-9. [A Task Decomposition and Planning Framework for Efficient LLM Inference in AI-Enabled WiFi-Offload Networks](/202604/30/2604.21399v1-a-task-decomposition-and-planning-framework-for-efficient-llm-inference-in-ai-enabled-wifi-offload-networks)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：边缘网络中LLM推理的协作框架
-10. [Data-Free Contribution Estimation in Federated Learning using Gradient von Neumann Entropy](/202604/30/2604.22562v1-data-free-contribution-estimation-in-federated-learning-using-gradient-von-neumann-entropy)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：联邦学习中聚合权重的实际方案
-11. [A Layer Separation Optimization Framework for Cross-Entropy Training in Deep Learning](/202604/30/2604.23225v1-a-layer-separation-optimization-framework-for-cross-entropy-training-in-deep-learning)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：深度学习训练的层分离优化框架
+   evidence：用于移动端NPU上LLM推理的异步异构架构
+9. [Feasible-First Exploration for Constrained ML Deployment Optimization in Crash-Prone Hierarchical Search Spaces](/202605/01/2604.25073v1-feasible-first-exploration-for-constrained-ml-deployment-optimization-in-crash-prone-hierarchical-search-spaces)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：针对机器学习部署的运行时后端和提供配置的优化
+10. [TetrisG-SDK: Efficient Convolutional Layer Mapping with Adaptive Windows and Grouped Convolutions for Fast In-Memory Computing](/202605/01/2604.25377v1-tetrisg-sdk-efficient-convolutional-layer-mapping-with-adaptive-windows-and-grouped-convolutions-for-fast-in-memory-computing)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：存内计算硬件的高效卷积层映射
+11. [Design Insights into Partition Placement and Routing for DNN Inference in Multi-Hop Edge Networks](/202605/01/2604.25571v1-design-insights-into-partition-placement-and-routing-for-dnn-inference-in-multi-hop-edge-networks)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：边缘网络中DNN推理的分区放置与路由
 
 
 <div class="dpr-home-promo-card">
