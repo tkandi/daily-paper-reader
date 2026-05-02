@@ -6,77 +6,70 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-01
-- 运行时间：2026-05-01 20:22:15 UTC
+- 最新运行日期：2026-05-02
+- 运行时间：2026-05-02 19:55:54 UTC
 - 运行状态：成功
-- 本次总论文数：18
-- 精读区：7
-- 速读区：11
+- 本次总论文数：16
+- 精读区：6
+- 速读区：10
 
 ### 今日简报（AI）
-- 今日共生成 18 篇推荐（精读 7 篇，速读 11 篇）
-- 精读：《Efficient Training on Multiple Consumer GPUs with RoundPipe》（10.0/10）, 《AutoSP: Unlocking Long-Context LLM Training Via Compiler-Based Sequence Parallelism》（10.0/10）
-- 速读：《FloatSOM: GPU-Accelerated, Distributed, Topology-Flexible Self-Organizing Maps》（8.0/10）, 《DUAL-BLADE: Dual-Path NVMe-Direct KV-Cache Offloading for Edge LLM Inference》（8.0/10）, 《A Study on the Performance of Distributed Training of Data-driven CFD Simulations》（8.0/10）
-- 这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。
-- 详情：[/202605/01/README](/202605/01/README)
+今日深度解析 16 篇 AI 论文，重点攻克 Agent 原生推理架构与自动化内核合成难题。
+核心突破在于 Pythia 实现的可预测 Agent 推理服务，以及 FACT 驱动的三阶段组合内核合成新范式。
+推荐开发者关注 Agent 驱动的系统优化及联邦学习在边缘场景下的效率提升。
+- 详情：[/202605/02/README](/202605/02/README)
 
 ### 精读区论文标签
-1. [Efficient Training on Multiple Consumer GPUs with RoundPipe](/202605/01/2604.27085v1-efficient-training-on-multiple-consumer-gpus-with-roundpipe)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：在消费级GPU上进行LLM训练的新型流水线调度
-2. [AutoSP: Unlocking Long-Context LLM Training Via Compiler-Based Sequence Parallelism](/202605/01/2604.27089v1-autosp-unlocking-long-context-llm-training-via-compiler-based-sequence-parallelism)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：基于编译器的序列并行技术，用于长文本LLM训练
-3. [COPUS: Co-adaptive Parallelism and Batch Size Selection in Large Language Model Training](/202605/01/2604.26687v1-copus-co-adaptive-parallelism-and-batch-size-selection-in-large-language-model-training)  
-   标签：评分：9.5/10、query:mlsys
-   evidence：3D并行策略与全局Batch Size的协同自适应选择
-4. [Network Edge Inference for Large Language Models: Principles, Techniques, and Opportunities](/202605/01/2604.22906v1-network-edge-inference-for-large-language-models-principles-techniques-and-opportunities)  
+1. [Pythia: Toward Predictability-Driven Agent-Native LLM Serving](/202605/02/2604.25899v1-pythia-toward-predictability-driven-agent-native-llm-serving)  
    标签：评分：9.0/10、query:mlsys
-   evidence：大语言模型推理的系统架构与资源管理综述
-5. [Scaling Multi-Node Mixture-of-Experts Inference Using Expert Activation Patterns](/202605/01/2604.23150v1-scaling-multi-node-mixture-of-experts-inference-using-expert-activation-patterns)  
+   evidence：智能体原生LLM推理服务架构与系统瓶颈
+2. [FACT: Compositional Kernel Synthesis with a Three-Stage Agentic Workflow](/202605/02/2604.26666v1-fact-compositional-kernel-synthesis-with-a-three-stage-agentic-workflow)  
    标签：评分：9.0/10、query:mlsys
-   evidence：MoE推理中的多节点部署与节点间通信开销
-6. [ZipCCL: Efficient Lossless Data Compression of Communication Collectives for Accelerating LLM Training](/202605/01/2604.27844v1-zipccl-efficient-lossless-data-compression-of-communication-collectives-for-accelerating-llm-training)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：LLM训练中通信集合的无损数据压缩库
-7. [Strait: Perceiving Priority and Interference in ML Inference Serving](/202605/01/2604.28175v1-strait-perceiving-priority-and-interference-in-ml-inference-serving)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：GPU资源调度与优先级感知推理服务
+   evidence：通过算子合成优化 PyTorch 模块的框架
+3. [AHASD: Asynchronous Heterogeneous Architecture for LLM Adaptive Drafting Speculative Decoding on Mobile Devices](/202605/02/2604.25326v3-ahasd-asynchronous-heterogeneous-architecture-for-llm-adaptive-drafting-speculative-decoding-on-mobile-devices)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：移动端LLM推理的异构架构
+4. [Unifying Sparse Attention with Hierarchical Memory for Scalable Long-Context LLM Serving](/202605/02/2604.26837v1-unifying-sparse-attention-with-hierarchical-memory-for-scalable-long-context-llm-serving)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：基于分层内存的可扩展长上下文 LLM 服务系统框架
+5. [FaaSMoE: A Serverless Framework for Multi-Tenant Mixture-of-Experts Serving](/202605/02/2604.26881v1-faasmoe-a-serverless-framework-for-multi-tenant-mixture-of-experts-serving)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：用于多租户MoE推理服务的无服务器架构框架
+6. [EdgeFM: Efficient Edge Inference for Vision-Language Models](/202605/02/2604.27476v1-edgefm-efficient-edge-inference-for-vision-language-models)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：用于跨平台VLM/LLM部署的轻量级推理框架
 
 ### 速读区论文标签
-1. [FloatSOM: GPU-Accelerated, Distributed, Topology-Flexible Self-Organizing Maps](/202605/01/2604.26555v1-floatsom-gpu-accelerated-distributed-topology-flexible-self-organizing-maps)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于可扩展SOM训练的GPU加速分布式框架
-2. [DUAL-BLADE: Dual-Path NVMe-Direct KV-Cache Offloading for Edge LLM Inference](/202605/01/2604.26557v1-dual-blade-dual-path-nvme-direct-kv-cache-offloading-for-edge-llm-inference)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于边缘AI推理基础设施的NVMe直连KV缓存卸载
-3. [A Study on the Performance of Distributed Training of Data-driven CFD Simulations](/202605/01/2604.27431v1-a-study-on-the-performance-of-distributed-training-of-data-driven-cfd-simulations)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：评估AI模拟分布式训练方案的性能
-4. [FedSLoP: Memory-Efficient Federated Learning with Low-Rank Gradient Projection](/202605/01/2604.24012v2-fedslop-memory-efficient-federated-learning-with-low-rank-gradient-projection)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：具有低秩梯度投影的联邦优化算法
-5. [DepthKV: Layer-Dependent KV Cache Pruning for Long-Context LLM Inference](/202605/01/2604.24647v1-depthkv-layer-dependent-kv-cache-pruning-for-long-context-llm-inference)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：LLM推理基础设施优化
-6. [Regime-Adaptive Weighted Ensemble Learning for Computing-Driven Dynamic Load Forecasting in AI Data Centers](/202605/01/2604.27207v1-regime-adaptive-weighted-ensemble-learning-for-computing-driven-dynamic-load-forecasting-in-ai-data-centers)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：预测AI数据中心中计算驱动的动态工作负载
-7. [A Retraction-Free EXTRA Method for Decentralized Optimization on the Stiefel Manifold](/202605/01/2604.23754v2-a-retraction-free-extra-method-for-decentralized-optimization-on-the-stiefel-manifold)  
+1. [Subspace Optimization for Efficient Federated Learning under Heterogeneous Data](/202605/02/2604.25467v1-subspace-optimization-for-efficient-federated-learning-under-heterogeneous-data)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于大规模学习的去中心化优化框架
-8. [AHASD: Asynchronous Heterogeneous Architecture for LLM Adaptive Drafting Speculative Decoding on Mobile Devices](/202605/01/2604.25326v2-ahasd-asynchronous-heterogeneous-architecture-for-llm-adaptive-drafting-speculative-decoding-on-mobile-devices)  
+   evidence：通信和内存受限下的高效联邦学习
+2. [Application-Aware Twin-in-the-Loop Planning for Federated Split Learning over Wireless Edge Networks](/202605/02/2604.26105v1-application-aware-twin-in-the-loop-planning-for-federated-split-learning-over-wireless-edge-networks)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于移动端NPU上LLM推理的异步异构架构
-9. [Feasible-First Exploration for Constrained ML Deployment Optimization in Crash-Prone Hierarchical Search Spaces](/202605/01/2604.25073v1-feasible-first-exploration-for-constrained-ml-deployment-optimization-in-crash-prone-hierarchical-search-spaces)  
+   evidence：无线边缘网络上联邦拆分学习的资源分配
+3. [Adaptive and Fine-grained Module-wise Expert Pruning for Efficient LoRA-MoE Fine-Tuning](/202605/02/2604.26340v1-adaptive-and-fine-grained-module-wise-expert-pruning-for-efficient-lora-moe-fine-tuning)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：针对高效微调和参数管理的LoRA-MoE框架优化
+4. [Think it, Run it: Autonomous ML pipeline generation via self-healing multi-agent AI](/202605/02/2604.27096v1-think-it-run-it-autonomous-ml-pipeline-generation-via-self-healing-multi-agent-ai)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：自动化机器学习流水线生成架构
+5. [FMCL: Class-Aware Client Clustering with Foundation Model Representations for Heterogeneous Federated Learning](/202605/02/2604.27510v1-fmcl-class-aware-client-clustering-with-foundation-model-representations-for-heterogeneous-federated-learning)  
+   标签：评分：6.5/10、query:mlsys
+   evidence：针对分布式客户端的分簇联邦学习框架
+6. [Conditional Imputation for Within-Modality Missingness in Multi-Modal Federated Learning](/202605/02/2604.23112v1-conditional-imputation-for-within-modality-missingness-in-multi-modal-federated-learning)  
    标签：评分：6.0/10、query:mlsys
-   evidence：针对机器学习部署的运行时后端和提供配置的优化
-10. [TetrisG-SDK: Efficient Convolutional Layer Mapping with Adaptive Windows and Grouped Convolutions for Fast In-Memory Computing](/202605/01/2604.25377v1-tetrisg-sdk-efficient-convolutional-layer-mapping-with-adaptive-windows-and-grouped-convolutions-for-fast-in-memory-computing)  
+   evidence：多模态协作训练的联邦框架
+7. [AI-Native Autonomous Infrastructure (ANAI): A Formal Framework for the Next General-Purpose Technology](/202605/02/2604.24294v1-ai-native-autonomous-infrastructure-anai-a-formal-framework-for-the-next-general-purpose-technology)  
    标签：评分：6.0/10、query:mlsys
-   evidence：存内计算硬件的高效卷积层映射
-11. [Design Insights into Partition Placement and Routing for DNN Inference in Multi-Hop Edge Networks](/202605/01/2604.25571v1-design-insights-into-partition-placement-and-routing-for-dnn-inference-in-multi-hop-edge-networks)  
+   evidence：将AI视为系统性基础设施转型的正式框架
+8. [Compute Aligned Training: Optimizing for Test Time Inference](/202605/02/2604.24957v1-compute-aligned-training-optimizing-for-test-time-inference)  
    标签：评分：6.0/10、query:mlsys
-   evidence：边缘网络中DNN推理的分区放置与路由
+   evidence：针对推理侧计算扩展优化训练目标
+9. [Who Trains Matters: Federated Learning under Enrollment and Participation Selection Biases](/202605/02/2604.26604v1-who-trains-matters-federated-learning-under-enrollment-and-participation-selection-biases)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：影响分布式联邦学习中客户端参与的系统因素
+10. [AdaBFL: Multi-Layer Defensive Adaptive Aggregation for Bzantine-Robust Federated Learning](/202605/02/2604.27434v1-adabfl-multi-layer-defensive-adaptive-aggregation-for-bzantine-robust-federated-learning)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：拜占庭鲁棒联邦学习的自适应聚合
 
 
 <div class="dpr-home-promo-card">
