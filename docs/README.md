@@ -6,70 +6,64 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-04
-- 运行时间：2026-05-04 20:15:02 UTC
+- 最新运行日期：2026-05-05
+- 运行时间：2026-05-05 20:51:28 UTC
 - 运行状态：成功
-- 本次总论文数：16
-- 精读区：5
-- 速读区：11
+- 本次总论文数：14
+- 精读区：6
+- 速读区：8
 
 ### 今日简报（AI）
-今日精选 16 篇前沿论文，深度聚焦大模型分布式训练优化与 AI Agent 推理调度。
-重点关注 AGoQ 提出的激活与梯度量化方案以大幅降低显存压力，以及 SAGA 针对 AI Agent 推理的高效集群调度机制。
-建议优先研读 AGoQ 的量化策略，这对解决超大规模模型训练中的内存瓶颈具有极高参考价值。
-- 详情：[/202605/04/README](/202605/04/README)
+今日深度研读 14 篇论文，聚焦分布式训练的抗突发传输与商用 GPU 上的大模型推理极限优化。
+满分成果 PipeMax 与相位感知传输技术，为离线 LLM 推理及大规模分布式训练提供了高性能、高弹性的系统级支撑。
+推荐优先阅读针对 FlashAttention 模拟与边缘 AI 调度的最新进展，以掌握异构算力下的效率提升秘籍。
+- 详情：[/202605/05/README](/202605/05/README)
 
 ### 精读区论文标签
-1. [AGoQ: Activation and Gradient Quantization for Memory-Efficient Distributed Training of LLMs](/202605/04/2605.00539v1-agoq-activation-and-gradient-quantization-for-memory-efficient-distributed-training-of-llms)  
-   标签：评分：9.5/10、query:mlsys
-   evidence：基于量化的大语言模型显存高效分布式训练
-2. [SAGA: Workflow-Atomic Scheduling for AI Agent Inference on GPU Clusters](/202605/04/2605.00528v1-saga-workflow-atomic-scheduling-for-ai-agent-inference-on-gpu-clusters)  
+1. [DBLP: Phase-Aware Bounded-Loss Transport for Burst-Resilient Distributed ML Training](/202605/05/2605.01989v1-dblp-phase-aware-bounded-loss-transport-for-burst-resilient-distributed-ml-training)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：分布式机器学习训练的阶段感知传输协议
+2. [PipeMax: Enhancing Offline LLM Inference on Commodity GPU Servers](/202605/05/2605.02189v1-pipemax-enhancing-offline-llm-inference-on-commodity-gpu-servers)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：将流水线并行与卸载技术结合用于LLM推理
+3. [Split and Aggregation Learning for Foundation Models Over Mobile Embodied AI Network (MEAN): A Comprehensive Survey](/202605/05/2605.00970v1-split-and-aggregation-learning-for-foundation-models-over-mobile-embodied-ai-network-mean-a-comprehensive-survey)  
    标签：评分：9.0/10、query:mlsys
-   evidence：GPU集群上AI智能体推理的分布式调度器
-3. [Sim-FA: A Simulator Frontend for Asynchronous Pipelines](/202605/04/2605.00555v1-sim-fa-a-simulator-frontend-for-asynchronous-pipelines)  
+   evidence：分布式AI中拆分学习与聚合学习的综述
+4. [Cross-Layer Energy Analysis of Multimodal Training on Grace Hopper Superchips](/202605/05/2605.01938v1-cross-layer-energy-analysis-of-multimodal-training-on-grace-hopper-superchips)  
    标签：评分：9.0/10、query:mlsys
-   evidence：用于AI基础设施和计算机体系结构研究的模拟器
-4. [Intelligent Elastic Feature Fading: Enabling Model Retrain-Free Feature Efficiency Rollouts at Scale](/202605/04/2605.00324v1-intelligent-elastic-feature-fading-enabling-model-retrain-free-feature-efficiency-rollouts-at-scale)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：大规模推荐系统的生产级基础设施
-5. [LLM-Emu: Native Runtime Emulation of LLM Inference via Profile-Driven Sampling](/202605/04/2605.00616v1-llm-emu-native-runtime-emulation-of-llm-inference-via-profile-driven-sampling)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：LLM推理服务系统和调度的原生运行时仿真
+   evidence：Grace Hopper超级芯片上的AI基础设施优化与能效分析
+5. [Bringing Order to Asynchronous SGD: Towards Optimality under Data-Dependent Delays with Momentum](/202605/05/2605.02043v1-bringing-order-to-asynchronous-sgd-towards-optimality-under-data-dependent-delays-with-momentum)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：用于可扩展分布式训练的异步SGD及梯度过期缓解技术
+6. [FedQueue: Queue-Aware Federated Learning for Cross-Facility HPC Training](/202605/05/2605.02125v1-fedqueue-queue-aware-federated-learning-for-cross-facility-hpc-training)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：针对HPC训练集群的队列感知联邦学习
 
 ### 速读区论文标签
-1. [State Stream Transformer (SST) V2: Parallel Training of Nonlinear Recurrence for Latent Space Reasoning](/202605/04/2605.00206v1-state-stream-transformer-sst-v2-parallel-training-of-nonlinear-recurrence-for-latent-space-reasoning)  
+1. [Sim-FA: A GPGPU Simulator Framework for Fine-Grained FlashAttention Pipeline Analysis](/202605/05/2605.00555v2-sim-fa-a-gpgpu-simulator-framework-for-fine-grained-flashattention-pipeline-analysis)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：支持大语言模型特性的AI基础设施与GPGPU架构研究的周期精确模拟器
+2. [Tempus: A Temporally Scalable Resource-Invariant GEMM Streaming Framework for Versal AI Edge](/202605/05/2605.00536v1-tempus-a-temporally-scalable-resource-invariant-gemm-streaming-framework-for-versal-ai-edge)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：用于资源受限边缘AI基础设施的GEMM流式框架
+3. [Hierarchical Federated Learning for Networked AI: From Communication Saving to Architecture-Aware Design](/202605/05/2605.00931v1-hierarchical-federated-learning-for-networked-ai-from-communication-saving-to-architecture-aware-design)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：网络化AI中分布式优化的架构感知设计框架
+4. [AAFLOW: Scalable Patterns for Agentic AI Workflows](/202605/05/2605.02162v1-aaflow-scalable-patterns-for-agentic-ai-workflows)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：智能体AI工作流的统一分布式运行时
+5. [Stability and Generalization for Decentralized Markov SGD](/202605/05/2605.01701v1-stability-and-generalization-for-decentralized-markov-sgd)  
    标签：评分：7.0/10、query:mlsys
-   evidence：Transformer中非线性递归的两阶段并行训练程序
-2. [Federated Learning with Hypergradient-based Online Update of Aggregation Weights](/202605/04/2605.00458v1-federated-learning-with-hypergradient-based-online-update-of-aggregation-weights)  
+   evidence：分析去中心化随机梯度下降及通信影响
+6. [FedPLT: Scalable, Resource-Efficient, and Heterogeneity-Aware Federated Learning via Partial Layer Training](/202605/05/2605.02337v1-fedplt-scalable-resource-efficient-and-heterogeneity-aware-federated-learning-via-partial-layer-training)  
    标签：评分：7.0/10、query:mlsys
-   evidence：针对异构环境的聚合权重在线更新联邦学习
-3. [Make Your LVLM KV Cache More Lightweight](/202605/04/2605.00789v1-make-your-lvlm-kv-cache-more-lightweight)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：优化LVLM推理效率的KV缓存设计
-4. [Distributed Electromagnetic Neural Networks for Task-Oriented Semantic Communications](/202605/04/2604.23901v1-distributed-electromagnetic-neural-networks-for-task-oriented-semantic-communications)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：语义通信的分布式神经网络架构
-5. [Adaptive and Fine-grained Module-wise Expert Pruning for Efficient LoRA-MoE Fine-Tuning](/202605/04/2604.26340v1-adaptive-and-fine-grained-module-wise-expert-pruning-for-efficient-lora-moe-fine-tuning)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：高效LoRA-MoE微调系统优化
-6. [Scalable Learning in Structured Recurrent Spiking Neural Networks without Backpropagation](/202605/04/2605.00402v1-scalable-learning-in-structured-recurrent-spiking-neural-networks-without-backpropagation)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：面向硬件可扩展性的结构化循环脉冲神经网络架构
-7. [GradMAP: Gradient-Based Multi-Agent Proximal Learning for Grid-Edge Flexibility](/202605/04/2604.24549v1-gradmap-gradient-based-multi-agent-proximal-learning-for-grid-edge-flexibility)  
+   evidence：通过部分层训练实现可扩展且资源高效的分布式机器学习
+7. [BWLA: Breaking the Barrier of W1AX Post-Training Quantization for LLMs](/202605/05/2605.00422v1-bwla-breaking-the-barrier-of-w1ax-post-training-quantization-for-llms)  
    标签：评分：6.0/10、query:mlsys
-   evidence：大规模设备群的去中心化学习方法
-8. [ADE: Adaptive Dictionary Embeddings -- Scaling Multi-Anchor Representations to Large Language Models](/202605/04/2604.24940v1-ade-adaptive-dictionary-embeddings----scaling-multi-anchor-representations-to-large-language-models)  
+   evidence：LLM部署的训练后量化框架
+8. [The Dynamic Gist-Based Memory Model (DGMM): A Memory-Centric Architecture for Artificial Intelligence](/202605/05/2605.02106v1-the-dynamic-gist-based-memory-model-dgmm-a-memory-centric-architecture-for-artificial-intelligence)  
    标签：评分：6.0/10、query:mlsys
-   evidence：将多锚点表示扩展至大语言模型
-9. [FedHarmony: Harmonizing Heterogeneous Label Correlations in Federated Multi-Label Learning](/202605/04/2604.28024v1-fedharmony-harmonizing-heterogeneous-label-correlations-in-federated-multi-label-learning)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：异构分布下的联邦多标签学习分布式范式
-10. [Federated Distillation for Whole Slide Image via Gaussian-Mixture Feature Alignment and Curriculum Integration](/202605/04/2605.00578v1-federated-distillation-for-whole-slide-image-via-gaussian-mixture-feature-alignment-and-curriculum-integration)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：针对异构架构的联邦学习框架
-11. [Deployment-Efficient Short-Term Load Forecasting in AI Data Centers via Sequence-to-Point Knowledge Distillation](/202605/04/2605.00681v1-deployment-efficient-short-term-load-forecasting-in-ai-data-centers-via-sequence-to-point-knowledge-distillation)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：AI数据中心GPU节点级的电力需求预测
+   evidence：以存储为中心的AI架构基础
 
 
 <div class="dpr-home-promo-card">
