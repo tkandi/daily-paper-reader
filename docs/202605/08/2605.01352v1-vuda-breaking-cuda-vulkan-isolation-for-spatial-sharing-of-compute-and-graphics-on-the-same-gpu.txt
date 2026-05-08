@@ -1,0 +1,557 @@
+Title: VUDA: Breaking CUDA-Vulkan Isolation for Spatial Sharing of Compute and Graphics on the Same GPU
+
+URL Source: https://arxiv.org/pdf/2605.01352v1
+
+Published Time: Tue, 05 May 2026 00:33:33 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# VUDA: Breaking CUDA-Vulkan Isolation for Spatial Sharing of Compute and Graphics on the Same GPU 
+
+## Bin Xu, Pengfei Hu, Wenxin Zheng, Jinyu Gu*, and Haibo Chen 
+
+Shanghai Jiao Tong University Shanghai, China 
+
+## Abstract 
+
+GPU-based simulation environments for embodied AI in-terleave physics simulation (CUDA) and photorealistic ren-dering (Vulkan) on a single device. We observe that two foundational scenarios—simulation data generation and RL training—can be naturally adapted to execute their simula-tion and rendering phases concurrently, presenting a signifi-cant opportunity to improve GPU utilization through spatial multiplexing. However, a fundamental obstacle we term exe-cution isolation prevents this: CUDA and Vulkan create sep-arate GPU contexts whose channels are bound to different scheduling groups, confining compute and graphics to mutu-ally exclusive time slices. Existing spatial-sharing techniques are limited to the CUDA ecosystem, while temporal-sharing approaches underutilize available resources. This paper presents VUDA, a system that breaks execu-tion isolation to enable spatial parallelism between CUDA compute and Vulkan graphics workloads. VUDA is built on two key observations: although CUDA and Vulkan expose different programming abstractions, their execution paths converge to a common channel primitive at the driver and hardware level; meanwhile, their virtual-address spaces are inherently disjoint, making safe page-table merging feasible without remapping. VUDA exposes a thin API for developers to annotate co-schedulable CUDA streams, and realizes spa-tial sharing through channel redirection into Vulkan’s sched-uling domain and page-table grafting to unify address spaces, eliminating all data copying on the critical path. Experiments on representative embodied-AI workloads show that VUDA delivers up to 85% higher throughput than temporal-sharing baselines, while improving GPU utilization and reducing end-to-end latency. 
+
+## 1 Introduction 
+
+Embodied AI is advancing at an unprecedented pace [ 1, 19 ,38 , 53 , 54 , 71 ]. Humanoid robots are entering real-world deployment—Tesla’s Optimus performs assembly tasks on factory floors [ 55 ], Unitree’s humanoids demonstrate agile full-body control [ 57 ], and Figure’s Helix model enables long-horizon autonomous manipulation [ 1, 14 ]. Underpinning these breakthroughs is a growing consensus drawn from the success of large language models: scaling high-quality data and model capacity is the key to generalization. Just 
+
+> *Corresponding author: Jinyu Gu ( gujinyu@sjtu.edu.cn ).
+
+as LLMs achieved broad generalization in the digital world by scaling diverse corpora and model capacity, embodied AI is following a similar trajectory: constructing large-scale interaction datasets and training foundation models that couple perception, language, and action, including Vision-Language-Action (VLA) models [ 3– 5, 19 , 20 , 27 , 28 , 38 ] and world models [6, 7, 37, 46, 61, 74]. Imitation learning and reinforcement learning are the two foundational paradigms for training embodied agents [ 21 , 31 ,73 ]. Because collecting real-world interaction data is prohib-itively expensive in both time and cost [ 49 ], both paradigms increasingly rely on GPU-accelerated simulation environ-ments [ 8, 35 , 52 , 65 , 79 ], giving rise to two foundational application scenarios: (i) simulation data generation , which produces large-scale demonstrations in simulation to train VLA models via imitation learning; and (ii) RL training , which collects rollout trajectories in simulation to optimize poli-cies via reinforcement learning. Unlike LLM training, which exercises only the GPU’s general-purpose compute capa-bilities, both scenarios simultaneously engage the GPU’s 
+
+compute and graphics pipelines: physics-world simulation runs as GPU compute kernels (CUDA [ 41 ]), while photoreal-istic scene rendering executes through the graphics pipeline (Vulkan [ 26 ]). Execution is phased —simulation and rendering alternate in a tight loop, and each phase utilizes a different class of GPU resources (compute units versus fixed-function graphics hardware). This alternation leads to stage-wise un-derutilization: compute units are underutilized during ren-dering, and graphics units sit idle during simulation. This phased execution pattern raises a natural question: 
+
+can we overlap simulation and rendering to maximize resource utilization and thereby improve throughput for embodied-AI data generation and model training? 
+
+Insight 1 (GPU application perspective): Both scenar-ios can be adapted to admit concurrent simulation and rendering , though through different parallelism patterns. In simulation data generation , each episode loops through three stages: a lightweight action generator (e.g., replay-ing teleoperated actions), physics simulation, and rendering. The canonical ordering sim (𝑘 ) → render (𝑘 ) → sim (𝑘 + 1)
+
+appears necessary, but is over-constrained : sim (𝑘 + 1) de-pends only on sim (𝑘 ), not on render (𝑘 ). Therefore sim (𝑘 +1)
+
+can be pipelined to overlap with render (𝑘 )—an inter-step 
+
+> 1
+> arXiv:2605.01352v1 [cs.OS] 2 May 2026
+
+parallelism opportunity. In RL training , each rollout trajec-tory loops through model inference, simulation, and render-ing. Within a single trajectory, inference (𝑘 +1) depends on render (𝑘 ), creating a true chain dependency that precludes inter-step overlap. However, the simulator runs many tra-jectories in parallel, and different trajectories’ simulation and rendering phases are independent—simulation of one batch of trajectories can overlap with rendering of another, yielding inter-trajectory parallelism. Despite their different dependency structures, both scenarios can be tuned to sup-port concurrent execution of simulation (CUDA compute) and rendering (Vulkan graphics). 
+
+Key challenge. Although the application-level analysis reveals clear parallelism opportunities, the GPU software stack prevents their realization. CUDA and Vulkan—the two dominant GPU programming frameworks for compute and graphics, respectively—are entirely separate software stacks that coexist in the same application. They create indepen-dent GPU contexts, each with its own channels —the low-level hardware primitives through which work reaches the GPU— bound to separate Timeslice Groups (TSGs). Because the GPU time-slices among TSGs in round-robin fashion, CUDA com-pute and Vulkan graphics are confined to mutually exclusive time slices and can never occupy the GPU simultaneously. We refer to this fundamental obstacle as execution isolation .
+
+Existing solutions. No existing GPU-sharing mechanism overcomes execution isolation (§2). CUDA-only spatial tech-niques (Streams, MPS, MIG, Green Contexts) [ 39 , 42 , 43 ,63 ] cannot schedule Vulkan graphics at all; temporal ap-proaches such as API remoting [ 18 , 58 , 59 , 62 ] can multi-plex the two libraries but waste spatially idle resources; and the cross-library VK_NV_cuda_kernel_launch [25 ] exten-sion demands pervasive code rewrites and precludes closed-source CUDA libraries. None of these mechanisms were designed for scenarios where compute and graphics tightly interleave—precisely the workload pattern that embodied-AI simulation demands—leaving transparent, fine-grained cross-library spatial sharing an open problem. This paper presents VUDA (CUDA + Vulkan), a system that breaks execution isolation to enable spatial sharing be-tween CUDA compute and Vulkan graphics workloads. Its design is grounded in two system-level insights. 
+
+Insight 2 (GPU hardware perspective): Heterogeneous abstractions, homogeneous execution. Although CUDA and Vulkan expose different programming models at the user level, their execution paths converge to the same low-level primitive—the channel —at the kernel-driver and hardware level. During initialization, both runtimes create channels and bind them to a TSG; at submission time, both write GPU command buffers and push them through the chan-nel’s ring buffer. Because TSG membership is determined at channel-creation time, provisioning new channels inside the Vulkan context and redirecting CUDA streams into them places both libraries’ work in the same TSG, enabling spatial co-execution. A critical asymmetry in context initialization makes this direction feasible: A Vulkan graphics context explicitly allocates and initializes fixed-function hardware units, such as rasterizers and Render Output Units (ROPs), that remain completely unavailable within a pure CUDA compute context. This missing hardware state precludes the migration of graphics workloads to CUDA. Conversely, CUDA kernels and Vulkan compute shaders are isomorphic at the hardware level, allowing CUDA work to be redirected into a Vulkan context without loss of generality. 
+
+Insight 3 (GPU software-stack perspective): Inher-ently disjoint virtual-address layouts. When CUDA work is redirected into Vulkan’s scheduling domain, it must still access CUDA-managed memory. Because CUDA and Vulkan maintain completely independent GPU page tables, merg-ing them appears infeasible due to potential virtual-address conflicts. Yet the two runtimes’ allocation strategies produce inherently non-overlapping address ranges. CUDA relies on Unified Virtual Addressing (UVA), which mirrors the host process’s virtual-address layout onto the GPU, placing allo-cations in the high address range dictated by the OS. Vulkan, by contrast, manages GPU virtual addresses through its own internal allocator, which assigns addresses starting from a much lower range. This structural separation keeps the two address spaces disjoint by construction. As a result, CUDA’s page-directory entries can be safely grafted into Vulkan’s page table while preserving their original virtual addresses, avoiding any address migration or remapping. 
+
+Our approach. VUDA operates at two layers. At the ap-plication layer , VUDA exposes a thin API that lets devel-opers annotate which CUDA streams should be spatially co-scheduled with Vulkan rendering, expressing the paral-lelism opportunities identified in Insight 1. At the system layer , VUDA realizes cross-library spatial sharing through two complementary mechanisms. Channel redirection lever-ages internal CUDA driver interfaces to obtain the raw chan-nel structure underlying a CUstream and redirects it into the Vulkan context’s TSG through pre-allocated forwarding channels—dedicated channels within the Vulkan context, separate from Vulkan’s own channels—so that CUDA and Vulkan work execute in the same time slice without submis-sion contention. Page-table grafting merges page-directory entries at the kernel-module level, unifying the two address spaces so that redirected CUDA kernels can access their orig-inal memory at the same virtual addresses, eliminating all data copying on the critical path. On both NVIDIA GeForce RTX 4090 and NVIDIA RTX 6000 Pro, we evaluate VUDA on the ManiSkill3 [ 52 ] bench-mark suite and show throughput improvements of up to 
+
+1.80 × for data generation, 1.85 × for RL training, and 1.23 ×
+
+for VLA-based RL. This paper makes the following contributions:     
+
+> 2Act + Sim Render Act + Sim Render
+
+# ⋯
+
+> Stage
+
+Figure 1. SM utilization trace for a ManiSkill data-generation workload. The simulation phase (green, action sampling+simulation) and the rendering phase (red, render) alternate sequentially, with SM utilization below 10% during simulation and peaking near 70% during rendering. 
+
+• We identify parallelism opportunities in two foundational embodied-AI scenarios—simulation data generation and RL training—and show that both admit concurrent execu-tion of simulation and rendering despite different depen-dency structures. 
+
+• We design and implement VUDA, the first system that enables spatial sharing between GPU compute (CUDA) and graphics (Vulkan) workloads, which comprises a thin application-level API and two techniques (channel redi-rection and page-table grafting). 
+
+• We evaluate VUDA on representative embodied-AI work-loads and demonstrate up to 1.85 × throughput improve-ment over the existing temporal-sharing baselines. 
+
+## 2 Background and Motivation 
+
+2.1 Workload Characterization 
+
+Embodied-AI simulation environments couple two funda-mentally different GPU workload types in a tight loop: physics simulation running as CUDA compute kernels, and photo-realistic rendering executing through the Vulkan graphics pipeline. Figure 1 shows a real SM utilization trace for robot data generation on NVIDIA GeForce RTX 4090. 
+
+CUDA compute. Physics simulation is dispatched as CUDA compute kernels. The CUDA runtime places each kernel onto a stream —a serialized, in-order work queue—and the driver submits it to the GPU. Physics simulation kernels have strong data dependencies in collision detection and constraint solv-ing, forming a pipeline of many fine-grained stages that launch small kernels with low per-kernel Streaming Multi-processor (SM) occupancy. 
+
+Vulkan graphics. Rendering produces photorealistic ob-servations through Vulkan’s multi-stage graphics pipeline: vertex input, vertex shading, optional tessellation and ge-ometry shading, rasterization, fragment shading, and color blending—all configured through a monolithic VkPipeline 
+
+object created ahead of time. Thus, execution follows an explicit record-then-submit model: drawing commands and Vulkan TSG   
+
+> Channel Channel
+> CUDA Lib
+> User Application
+> Vulkan Lib
+> GPU Kernel Driver
+> Runlist
+> CUDA TSG
+> Channel Channel
+
+⋯
+
+> Active
+> Doorbell
+> Token
+> Round -Robin
+> GPFIFO
+> (Ring Buffer)
+> GET
+> PUT
+> UserD
+> (Ring Buffer Control) Cmd Buffer
+> GPU Cmd
+> ⋮
+> GPU
+> Cmd Fetcher
+> Backend
+> Channel
+> Address
+> Length
+> init
+> submit
+> 1
+> 2
+> 3
+> 4
+> 5
+
+Figure 2. GPU task submission and scheduling via a channel: command buffers, GPFIFO entries, UserD pointers, doorbell notification, and TSG-based scheduling on the runlist. resource barriers are recorded into a VkCommandBuffer , then submitted to a VkQueue . Note that the graphics pipeline uses both graphics-specific hardware and SMs. 
+
+Complementary utilization. We profile the data-generation workload while scaling the batch size to the largest value that fits in GPU memory. Even at this memory-saturation point, Figure 1 shows that SM utilization remains below 10% during simulation, while rendering peaks at nearly 70%. This phase-level imbalance indicates substantial idle capac-ity: overlapping simulation with rendering could use the resources left idle by each phase, improving both overall GPU utilization and end-to-end throughput. 
+
+2.2 GPU Task Submission and Scheduling 
+
+Despite their different programming models, CUDA and Vulkan runtimes share the same low-level submission mech-anism. Regardless of whether tasks originate from a CUDA stream or a Vulkan queue, submission to the GPU ultimately passes through a common abstraction called a channel . From the perspective of the kernel driver and the hardware, the channel is the only pathway through which work reaches the GPU. A channel comprises two main components: 
+
+• GPFIFO — a ring buffer mapped into both CPU and GPU address spaces, used to hold submission entries. 
+
+• UserD — a control region likewise shared between CPU and GPU, containing a GET pointer (the position up to which the GPU has consumed entries) and a PUT pointer (the position up to which the CPU has produced entries). The submission path is identical for both runtimes (Fig-ure 2). 1 The user-mode driver first constructs a GPU com-mand buffer encoding the requested operation—kernel or shader dispatch, memory copy, synchronization primitive, etc.—and writes it into a GPU-accessible memory region. 
+
+> 3
+
+2 It then formats the starting address and length of that command buffer into a GPFIFO entry and appends it to the ring buffer. 3 Next, the driver advances the PUT pointer in the UserD 4 and writes a channel-identifying token to the GPU’s doorbell memory-mapped I/O (MMIO) register. The doorbell write notifies the GPU that the specified channel has new work; 5 the GPU subsequently fetches the command buffer referenced by the fresh GPFIFO entry. Writing the doorbell, however, does not guarantee imme-diate execution. The kernel driver and the GPU cooperatively maintain a runlist , a linked list of timeslice groups (TSGs). A TSG is the fundamental unit of GPU scheduling: at any given instant, exactly one TSG is active on the GPU, and the hard-ware time-slices among TSGs in round-robin fashion. Each channel is bound to a TSG at initialization time. When a TSG becomes active, the GPU command engines concurrently fetch and process commands from all channels belonging to that TSG, enabling intra-group spatial parallelism. 
+
+2.3 Execution Isolation and GPU Spatial Sharing 
+
+From the application programmer’s perspective, CUDA and Vulkan are independent runtimes that create entirely sepa-rate GPU contexts. This separation creates a fundamental obstacle to spatial concurrency between the two runtimes: because the two runtimes’ channels are assigned to differ-ent TSGs, their work executes in mutually exclusive time slices rather than in parallel. Beyond scheduling, the iso-lation also spans memory. Each context maintains its own GPU page table, so allocations made by one runtime are in-visible to the other. Sharing a buffer requires exporting an OS file descriptor on one side and importing it on the other—a multi-step process repeated for every shared resource. We term this existing obstacle execution isolation between CUDA and Vulkan. NVIDIA provides several mechanisms for GPU resource sharing. First, Multi-Process Service (MPS) [ 43 ] and Multi-Instance GPU (MIG) [ 42 ] enable multiple CUDA processes to share SM partitions or statically partition a GPU into iso-lated instances, respectively—both are confined to the CUDA ecosystem and have no Vulkan counterpart. Second, Green Contexts [ 39 ] offer fine-grained SM partitioning within a sin-gle process, yet remain CUDA-only as well. Third, the VK_NV_ cuda_kernel_launch extension [ 25 ] is the only mechanism that can in principle achieve cross-runtime spatial concur-rency by embedding CUDA kernel launches inside Vulkan command buffers. However, it is designed for customized CUDA kernels and requires recompiling every CUDA kernel offline into PTX, loading it through vendor-specific exten-sion APIs, and manually bridging resource bindings and synchronization—ruling out closed-source libraries such as cuBLAS and cuDNN and imposing prohibitive engineering cost on mature and general CUDA applications. Therefore, 
+
+none of these mechanisms are suitable for cross-runtime spatial collocation in embodied-AI simulation workloads .1 obs,state = scenes .init ()                           
+
+> 2
+> +3CUstream_bind (sim_stream )
+> 4for iin range( total_steps ):
+> 5# async render step N -1:
+> -6obs =scenes .render ()
+> +7obs =scenes .render_async ()
+> 8# sample action for step N:
+> 9act = sample_action (state )
+> 10 # async physics step N:
+> -11 state = scenes .step (act )
+> +12 state = scenes .step_async (act )
+> +13 scenes .wait_render ()
+> +14 scenes .wait_step ()
+> 15 record()
+> +16 CUstream_unbind (sim_stream )
+
+(a) Data generation. 1 # 2 x batch size = 32                                        
+
+> 2obs0,state0 = scenes0 .init()
+> +3obs1,state1 = scenes1 .init()
+> +4CUstream_bind (sim_stream )
+> 5for iin range(steps ):
+> 6# model generate act for scene 0
+> 7act0 = policy( state0, obs0 )
+> -8state = scenes .step (act )
+> 9#scene0 sim +scene1 render:
+> +10 state0 = scenes0 .step_async( act0 )
+> -11 obs =scenes .render ()
+> 12 obs1 = scenes1 .render_async()
+> +13 scenes0. wait_step()
+> +14 scenes1. wait_render ()
+> 15 # model generate act for scene 1
+> +16 act1 = policy( state1, obs1 )
+> 17 #scene1 sim + scene0 render:
+> +18 state1 = scenes1 .step_async( act1 )
+> +19 obs0 = scenes0 .render_async()
+> +20 scenes1. wait_step()
+> +21 scenes0. wait_render()
+> +22 CUstream_unbind (sim_stream )
+> 23 Update()
+
+(b) RL training. 
+
+Figure 3. Code modifications for data generation and RL training. Changed lines are marked with + and -.
+
+## 3 VUDA Programming Interface 
+
+This section describes how application developers use VUDA. We first elaborate on the parallelism opportunities existing in embodied-AI simulation workloads (Insight 1), then present the VUDA API and show how it is integrated into each rep-resentative scenario. 
+
+3.1 Parallelism Patterns 
+
+As discussed in §2.1, both foundational embodied-AI scenarios— simulation data generation and RL training—execute simu-lation and rendering in a phased loop. Although the phases appear strictly sequential, a closer analysis of their depen-dencies reveals opportunities for spatial overlap. 
+
+> 4
+
+Table 1. VUDA programming interfaces.            
+
+> Interface Description
+> CUstream_bind(s) Bind CUDA stream sto co-schedule with Vulkan
+> CUstream_unbind(s) Unbind sand restore original state
+> step_async() Launch simulation asynchronously
+> wait_step() Block until async simulation com-pletes
+> render_async() Launch rendering asynchronously
+> wait_render() Block until async rendering com-pletes
+
+Data generation: inter-step parallelism. For generat-ing an episode of robot demonstrations, the data-producer application iterates a loop of three stages: action genera-tion (e.g., replaying teleoperated actions or planning ac-tions through rules), physics simulation (CUDA compute), and rendering (Vulkan graphics). The canonical ordering sim (𝑘 ) → render (𝑘 ) → sim (𝑘 + 1) appears necessary, but the dependency between rendering and the next simulation step is over-constrained : sim (𝑘 +1) depends only on sim (𝑘 ),not on render (𝑘 ). Thereby, sim (𝑘 + 1) can be launched as soon as sim (𝑘 ) completes, overlapping with render (𝑘 ) on the GPU. This inter-step pipelining requires running the simu-lation CUDA stream concurrently with the Vulkan rendering pipeline. 
+
+RL training: inter-trajectory parallelism. Reinforcement learning has proven transformative for LLM post-training and is also critical for embodied-AI models: it is widely adopted for both manipulation tasks [ 31 ] and locomotion tasks [ 35 ]. During the rollout phase of embodied-AI RL train-ing, each trajectory iterates through model inference (action generation), simulation, and rendering. Within a single tra-jectory, inference (𝑘 +1) depends on the result of render (𝑘 ),creating a strict chain dependency that prevents inter-step overlap. However, the simulator runs multiple trajectories in parallel, and different trajectories’ simulation and rendering are independent. Thereby, simulation of one batch can over-lap with rendering of another batch. This inter-trajectory 
+
+parallelism again requires spatial co-execution of CUDA compute and Vulkan graphics. 
+
+3.2 API Surface 
+
+Table 1 lists the VUDA programming interfaces, which allow developers to realize the parallelism opportunities identified in §3.1 with minimal code changes. The interfaces fall into two categories. 
+
+CUstream_bind and CUstream_unbind are control-plane primitives which are usually invoked at initialization and teardown time. Binding redirects a CUDA stream into the Vulkan context’s timeslice group so that subsequent ker-nel launches on that stream execute in spatial parallelism with Vulkan graphics work (§4.1 introduces the underlying mechanism); unbinding restores the original channel state. The remaining four interfaces are used within the main loop of the simulator-based application to launch simula-tion and rendering asynchronously and wait for their re-sults. Specifically, step_async and render_async are wrap-pers for the original synchronous simulation ( step() ) and rendering ( render() ) calls, respectively. They launch the corresponding work asynchronously and return immedi-ately, while wait_step and wait_render block until the corresponding phase completes. Internally, step_async and 
+
+render_async each dispatch their respective call to a dedi-cated per-phase background thread and return to the caller immediately. wait_step and wait_render block on a con-dition variable until the corresponding background thread signals completion. Most simulation engines already pro-vide asynchronous execution interfaces internally; VUDA simply exposes them to the application. By replacing the orig-inal synchronous simulation and rendering calls with these async/wait pairs, developers can overlap the two phases on the GPU. 
+
+3.3 Integration Examples 
+
+Figure 3 illustrates how VUDA is integrated into typical simulator-based applications with minimal code changes (requires only a few lines of code). 
+
+Data generation. The original loop calls render , sample_ action , and step sequentially. Three changes enable over-lap: (1) bind the simulation CUDA stream via CUstream_ bind at initialization; (2) replace synchronous render /step 
+
+with render_async /step_async ; and (3) insert wait_render 
+
+and wait_step where results are actually needed. Since sim (𝑘 + 1) depends only on sim (𝑘 ), the async simulation launch for step 𝑘 +1 is issued as soon as step 𝑘 ’s simulation completes, spatially overlapping with rendering of step 𝑘 on the bound Vulkan TSG. 
+
+RL training. The modification partitions the environment batch into two groups (e.g., 64 → 2×32 ) and interleaves their phases: step_async for group 0 is issued concurrently with 
+
+render_async for group 1, and vice versa. 
+
+## 4 System Mechanisms 
+
+When the application calls CUstream_bind(s) (§3), two things must happen at the system level: (1) GPU work submit-ted through stream s must enter the Vulkan timeslice group so that it co-schedules with graphics, and (2) the redirected kernels must be able to access CUDA-managed memory even though they now execute within the Vulkan GPU context. To this end, VUDA introduces two complementary tech-niques: channel redirection (§4.1), which places CUDA and Vulkan work into the same scheduling domain, and page-table grafting (§4.2), which unifies their address spaces so 
+
+> 5Vulkan
+> Graphic
+> Queue
+> CUDA
+> Forwarding
+> Queue
+> Forwarding
+> Queue
+> Normal
+> Stream
+> Redirected
+> Stream
+> Redirected
+> Stream
+> CUDA
+> Channel
+> CUDA
+> Channel
+> CUDA
+> Channel
+> Graphic
+> Channel
+> Forwarding
+> Channel
+> Forwarding
+> Channel
+
+⋯
+
+⋯
+
+⋯
+
+⋯                        
+
+> Channel Provisioning
+> VUDA Lib rary
+> Redirect
+> Aserial of
+> cmds
+> CUDA Cmd Buffer Original GPFIFO Forwarding GPFIFO
+> Forwarding
+> UserD
+> PUT + 1
+> GPU
+> Doorbell
+> Tok -Z
+> Tok -C
+> 12
+> Channel Data Structure
+> Addr -X
+> Field -GPFIFO
+> Addr -Y
+> Field -UserD
+> Tok -Z
+> Field -Token
+> Channel Data Structure
+> Addr -A
+> Field -GPFIFO
+> Addr -B
+> Field -UserD
+> Tok -C
+> Field -Token
+> Addr -AAddr -BTok -C
+> After redirection, CUDA Cmd Buffer will be written to the Vulkan’s GPFIFO
+> Addr -AAddr -B
+
+Figure 4. Channel redirection. In the default configura-tion (left), CUDA streams and Vulkan queues are backed by channels in separate TSGs, preventing spatial co-execution. VUDA unplugs a CUDA stream from its native channel and plugs it into a forwarding channel in the Vulkan context (right), so both submission paths share the same TSG. that redirected kernels can resolve CUDA virtual addresses without any data copying. These techniques are realized by two system components. The user-mode library exposes VUDA’s APIs without modify-ing the CUDA or Vulkan runtimes: it provisions forwarding channels at device-creation time by using a Vulkan inter-position hook, binds CUDA streams to them, and initiates page-table grafting so that redirected kernels can access CUDA memory. The patched GPU kernel module implements page-table grafting as well as continuous consistency main-tenance. 
+
+4.1 Channel Redirection 
+
+As discussed in §2.2, both CUDA and Vulkan submit work to the GPU through channels, and all channels within the same GPU context share a timeslice group (TSG). Because the two runtimes create separate GPU contexts, their channels reside in different TSGs and are therefore confined to mutually exclusive time slices—spatial co-execution is impossible. Figure 4 illustrates our solution. The key idea of channel redirection is to make CUDA and Vulkan use channels within the same TSG. Since existing channels cannot be reassigned to a different TSG, VUDA provisions new channels inside the Vulkan context and redirects CUDA streams to use them. After redirection, the CUDA driver’s submission path writes directly to a Vulkan-context channel with no interposition, and the two runtimes’ work shares a single TSG. Realizing this idea is challenging because CUDA is a closed-source runtime that provides no public API for channel ma-nipulation. Streams are opaque handles, and the driver delib-erately hides all channel state behind its user-mode abstrac-tion. Channel redirection involves three steps: provisioning dedicated channels within the Vulkan context (§4.1.1), redi-recting CUDA streams’ submission paths into those channels (§4.1.2), and initializing them for CUDA compute workloads (§4.1.3). 
+
+4.1.1 Channel Provisioning The forwarding channels must meet two requirements: (1) they must reside in the Vulkan context’s TSG so that forwarded work co-schedules with graphics, and (2) they must be dedicated to CUDA for-warding so that forwarded kernels cannot block the applica-tion’s Vulkan graphics submission. VUDA implements a Vulkan interposition layer (a hook-ing mechanism provided by Vulkan) that transparently aug-ments device initialization. When the application creates a Vulkan device, the layer intercepts the queue creation request and increases the queue count to the hardware-supported maximum. The additional queues—and the channels backing them—are invisible to the application; VUDA records their handles as a pool of forwarding channels dedicated to CUDA forwarding. Three properties make the “CUDA-to-Vulkan” direction the right design choice. First, a critical asymmetry: Vulkan’s graphics pipeline initialization is more complex than CUDA’s because of fixed-function stages (rasterization, blending, etc.), so graphics work cannot migrate to a CUDA context; however, CUDA kernels and Vulkan compute shaders are isomorphic at the hardware level, making it feasible to redi-rect CUDA work into a Vulkan context. Second, the Vulkan context’s serial graphics pipeline uses only one underlying channel, leaving all other hardware-supported queue slots available as a forwarding channel pool. Third, the Vulkan runtime provides a standard interposition-layer mechanism for transparent function extension, avoiding any intrusive modifications to the CUDA or Vulkan libraries. 
+
+4.1.2 Submission Path Redirection With forwarding channels provisioned, VUDA must direct CUDA work into them. A straightforward approach would intercept each ker-nel launch, copy the command buffer into a forwarding chan-nel, and resubmit it. However, the per-launch copy adds latency on the submission critical path. 
+
+Leveraging homogeneous channel structures. We avoid such overhead by exploiting Insight 2: despite their different APIs, CUDA and Vulkan channels share identical low-level data structures—a GPFIFO ring buffer, a UserD control region with producer/consumer pointers, and a doorbell token (§2.2). Rather than copying individual command buffers, VUDA modifies the GPFIFO and UserD fields within the CUDA stream’s corresponding kernel-level channel data structure so that subsequent commands are directed to the designated 
+
+> 6
+
+forwarding channel. The doorbell token—which tells the GPU which channel to fetch commands from—must also be replaced with the forwarding channel’s token so that doorbell writes reach the correct channel. 
+
+Locating channel key fields. Accessing these fields re-quires locating the channel data structure from a CUDA stream handle—a capability that CUDA does not expose. Yet, we find that the CUDA driver internally maintains a set of 
+
+export tables : collections of undocumented function pointers. Through reverse-engineering, we obtain the exact function pointer to return the channel data structure of a stream, and figure out the memory offsets of GPFIFO, UserD, and token (identifier of the channel for GPU doorbell) fields within the channel data structure. Similarly, the corresponding fields of the forwarding channel are obtained through reverse-engineered memory layouts of the Vulkan driver’s internal queue objects. 
+
+Modifying channel fields: snapshot-and-swap. With both sets of channel fields located, the redirection proceeds as a one-time snapshot-and-swap operation. VUDA first syn-chronizes the CUDA stream to drain all pending work, then takes a complete snapshot of the stream’s submission state— GPFIFO base address, UserD control pointers, and doorbell token—and replaces each with the corresponding value of the forwarding channel. From this point forward, the CUDA driver continues to construct command buffers, append GPFIFO entries, advance the PUT pointer, and ring the doorbell exactly as before. How-ever, because the doorbell token and GPFIFO now belong to a Vulkan-context channel, the GPU fetches and executes the work within the Vulkan TSG, achieving spatial co-execution with graphics. A critical property of this design is that it introduces zero overhead on the kernel launch path . Because the swap op-erates on the channel’s data structures rather than on the driver’s code path, the CUDA driver’s kernel launch logic is entirely unmodified—it executes the same instructions it would on an unbound stream, merely writing to a different GPFIFO and writing a different token to the GPU doorbell. The only cost is a one-time synchronization and pointer replacement at bind time; every subsequent kernel launch proceeds at native speed with no interception. 
+
+Reversibility. The redirection is fully reversible. When a stream is unbound, VUDA restores the saved snapshot, and the stream resumes dispatching through its original CUDA channel. 
+
+4.1.3 Compute Context Bootstrapping Redirecting the submission path alone is not sufficient, because Vulkan-provisioned channels differ from CUDA-provisioned ones in certain hardware configurations—notably shader local mem-ory and warp scheduler settings. Without correcting these, CUDA Page Table Vulkan Page Table         
+
+> PDE -level grafting:
+> share the same subtre e
+> L0
+> L1
+> L2
+> L3
+> Virtual
+> Space
+> 0High
+> CUDA
+> application use
+> Vulkan
+> application use
+> driver init use
+
+Figure 5. Page-table grafting. VUDA recursively merges PDEs from CUDA’s page directory into Vulkan’s. Shared sub-tree pointers (dashed arrows) ensure that PTE-level changes are visible to both contexts without additional propagation. L4 PTEs are omitted. a CUDA kernel dispatched on a Vulkan channel will fault or produce incorrect results. To close this gap, VUDA implements a one-time bootstrap-ping step per channel: it extracts the required configurations from the CUDA context and submits an initialization com-mand through the channel’s own GPFIFO before any CUDA kernel. After bootstrapping, the channel can be function-ally identical to a native CUDA channel from the GPU’s perspective. If the CUDA context later reallocates its local-memory pool (e.g., when a newly launched kernel requires more scratch space), VUDA re-submits the initialization to all corresponding channels. 
+
+4.1.4 Preservation of CUDA synchronization One more concern is whether channel redirection disrupts CUDA’s synchronization mechanisms. The CUDA driver appends a timeline semaphore write at the end of every command buffer: once all preceding GPU commands within the com-mand buffer complete, a monotonically increasing value is written to a designated memory region. After redirection, the command buffer is still constructed by the same CUDA driver logic and still contains the same trailing semaphore write to the same memory region. Even though the com-mands now execute within the Vulkan GPU context, the semaphore update reaches the original CUDA memory re-gion upon completion. The CUDA runtime’s synchronization mechanism—including stream synchronization and event queries—therefore remains fully intact. 
+
+4.2 Page-Table Grafting 
+
+Channel redirection places CUDA work into the Vulkan scheduling domain, but a redirected kernel must still access its data. Because CUDA and Vulkan maintain separate GPU page tables, a kernel executing on a Vulkan-context channel cannot resolve virtual addresses mapped by CUDA. We ad-dress this through page-table grafting : selectively merging 
+
+> 7
+
+page-directory entries (PDEs) from CUDA’s page table into Vulkan’s, so that the Vulkan context’s address space includes all CUDA-managed mappings. This approach is enabled by the inherently disjoint virtual-address layouts (Insight 3). Specifically, as illustrated by the virtual-space layout in Figure 5, the CUDA and Vulkan dri-vers’ internally used memory regions are disjoint in the lower address range; meanwhile, the CUDA and Vulkan ap-plications’ runtime memory regions occupy the high and low address ranges, respectively. To harden this guarantee, we add a lightweight check in the GPU driver’s memory allocation path. Should a conflict ever be detected, a fall-back mechanism in the kernel driver transparently resolves it by substituting the conflicting virtual address with a non-overlapping one before the allocation is committed. In all of our tests, however, we have never observed an actual conflict between CUDA and Vulkan user-space memory regions, so the fallback has never been triggered in practice. Because the two sets of mappings do not overlap, grafting CUDA’s PDEs into the Vulkan page table does not conflict with existing Vulkan mappings. Figure 5 illustrates a grafting example. 
+
+4.2.1 Recursive Directory Merge Modern NVIDIA GPUs use a multi-level radix page table with five to six levels. In-termediate levels contain page-directory entries (PDEs) that point to the next level of the hierarchy, while leaf entries (PTEs) hold the final virtual-to-physical translations. 
+
+PDE-level versus PTE-level grafting. A straightforward approach to address-space merging would replicate indi-vidual PTEs from CUDA’s page table into Vulkan’s. How-ever, this would require tracking and propagating every PTE-level change—page migrations, evictions, new allocations— incurring substantial runtime overhead proportional to the number of individual mappings. So, VUDA takes a different approach: grafting at the page-directory level. When a PDE is copied from the source into the target, the target shares the same physical page-table subtree as the source. Consequently, any subsequent PTE-level changes within that subtree—including page migrations, demand paging, and new allocations within already-mapped regions—are automatically visible to both contexts without additional page table updates, because both PDEs point to the same physical page-table subtree. This structural sharing eliminates most of the runtime overhead (for maintaining the consistency between two page tables) that PTE-level replication would introduce. 
+
+Recursive merge algorithm. The graft operates as a top-down, recursive merge of the two page directories. At each level, the algorithm reads both the source (CUDA) and tar-get (Vulkan) page-directory tables from GPU memory and compares them entry by entry. Three cases arise: 
+
+• Source valid, target empty. The source PDE is copied into the target, grafting the entire subtree rooted at that entry. This is the common case for CUDA-only address ranges. 
+
+• Both valid. Both contexts map addresses within the same range at this granularity. The algorithm descends one level and recurses, merging at finer granularity until non-overlapping entries are found. Due to the naturally disjoint address layout, conflicts are confined to the upper levels of the hierarchy and resolve within one or two additional levels of descent. 
+
+• Source empty. No action; the target’s existing entry is preserved. 
+
+Locating page directories and copy-engine operations. 
+
+First, before the merge can begin, VUDA must locate the root page-directory bases (PDB) of the Vulkan and CUDA contexts. This requires querying NVIDIA’s kernel-level re-source manager through ioctls (implementation details in §5). Second, because page tables on discrete GPUs reside in video memory, the CPU cannot access them directly. All reads and writes during the graft are therefore performed through the GPU’s copy engine via DMA bounce buffers in system memory. Third, after all modified entries are written back, a TLB invalidation is issued against the target page-directory base to ensure the GPU’s translation caches reflect the updated state. 
+
+4.2.2 Consistency Maintenance The initial graft cap-tures a point-in-time view of CUDA’s page-directory struc-ture. However, the CUDA runtime may subsequently allocate new memory regions (creating new PDEs) or restructure its page tables during operations such as defragmentation. If these structural changes are not reflected in the grafted table, redirected kernels will encounter missing or stale transla-tions. VUDA maintains consistency through two complemen-tary propagation mechanisms embedded in the kernel-level page-table manager. 
+
+Structural change propagation. When the initial graft succeeds, the target page directory is registered as a graft subscriber of the source page tree. Thereafter, whenever a new PDE is inserted or an existing PDE is removed in the source tree, the same modification is automatically applied to every subscriber via the copy engine. Because the propa-gated PDE points to the same physical subtree as the original, all PTE-level content is immediately shared, exactly as in the initial graft. This mechanism ensures that newly allocated CUDA memory regions become accessible to redirected ker-nels without requiring a full re-graft. 
+
+TLB invalidation propagation. When the source page tree issues a TLB invalidation—whether due to PTE modifications, page migration, or memory deallocation—the invalidation is replicated against each subscriber’s page-directory base. This ensures that the GPU’s translation caches for the Vulkan 
+
+> 8
+
+context are flushed whenever the underlying shared page-table content changes, preventing stale translations from being served to redirected kernels. Together, the two propagation paths maintain full con-sistency over the lifetime of the binding without periodic re-grafts or application-level synchronization. The kernel-module hooks that implement these propagation mecha-nisms are described in §5. 
+
+## 5 Implementation 
+
+VUDA’s user-mode library comprises approximately 3,700 lines of C++, packaged as libVkLayer_vuda.so (the Vulkan interposition layer) and libvuda.so . For the NVIDIA GPU kernel module [ 40 ], VUDA modifies approximately 1,900 lines across NVIDIA’s open-source UVM (Unified Virtual Memory) module and the kernel-level resource manager (RM) driver. 
+
+Vulkan layer deployment. The interposition layer is de-ployed as a standard Vulkan implicit layer, requiring no mod-ifications to the Vulkan loader or the application. A JSON manifest registers the layer with the loader. The layer inter-cepts vkCreateDevice to provision forwarding channels as described in §4.1.1, and communicates the resulting queue handles to the libvuda.so library through dynamically re-solved registration symbols ( dlsym ), avoiding a compile-time dependency between the two libraries. 
+
+Version-specific offset tables. The internal memory lay-outs of CUDA and Vulkan runtime data structures are not part of any stable ABI and change across driver releases. Thus, the field offsets of the GPFIFO base, UserD control pointers, and doorbell token may vary across different driver versions. To address this, VUDA encapsulates all version-dependent knowledge into per-version offset tables , each recording the byte offsets of every needed field. At initializa-tion, VUDA queries the running CUDA version ( cuDriver-GetVersion ) and parses the loaded NVIDIA driver version from /proc , then selects the matching table. Currently three version pairs are supported (CUDA12.4/driver 550, 12.6/560, and 12.9/575); adding a new version requires only populating a new offset table with no changes to the core logic. 
+
+UVM kernel module modifications. We modify NVIDIA’s open-source UVM kernel module as follows. First, we add a new ioctl that implements the recursive page-directory merge algorithm. The ioctl accepts a target PDB physical ad-dress and GPU UUID, locates the corresponding UVM page tree, and recursively grafts valid PDEs into the target using the GPU’s copy engine for all video-memory reads and writes via DMA bounce buffers. Second, we hook the page-tree insertion and removal paths ( uvm_page_tree_insert and 
+
+uvm_page_tree_put_ptes ) to propagate structural changes to registered graft subscribers. Third, we hook the TLB in-validation batch completion path ( uvm_tlb_batch_end ) to replicate invalidations to all subscriber page directories. 4
+
+> 8
+> 16
+> 32
+> 64
+> 128
+> 256
+> 512
+> 1024
+> 2048
+> 4096
+> 8192
+> Number of 2 MB Buffers
+> 10 0
+> 10 1
+> 10 2
+> Total Overhead (ms)
+> crossover
+> (128 bufs)
+> Export/Import
+> Graft (VUDA)
+
+Figure 6. Cost of sharing GPU memory between CUDA and Vulkan: page-table grafting vs. the standard export/import path, measured over an increasing number of 2 MB buffers (log–log scale). 
+
+RM driver modifications. Beyond the UVM module, we make two targeted modifications to the resource manager driver. First, we add a new RM control command that al-lows user-space to query the virtual address space handle associated with a GPU channel—information needed to lo-cate the target page directory for grafting. Second, we relax an access-control check in the RM client validation path to permit cross-client queries between the CUDA and Vulkan GPU contexts within the same process, which are otherwise rejected by the default security policy. 
+
+## 6 Evaluation 
+
+This section presents measurements on representative embodied-AI workloads. We first compare the overhead of page-table grafting versus the traditional export/import method for cross-runtime memory sharing (§6.2), then evaluate end-to-end data generation (§6.3) and RL training for both MLP-based and VLA-based models (§6.4). 
+
+6.1 Experimental Setup Hardware platforms. We conduct experiments on two GPU configurations: (i) NVIDIA GeForce RTX 4090 (24 GB VRAM, 128 SMs) with CUDA 12.6 and NVIDIA kernel dri-ver 560, and (ii) NVIDIA RTX 6000 Pro (96 GB VRAM, 188 SMs) with CUDA 12.9 and NVIDIA kernel driver 575. Both systems run Vulkan 1.4. 
+
+Workloads and baseline. End-to-end experiments are built on the SAPIEN [ 65 ] simulation engine (PhysX 5.3.1) and the ManiSkill3 [ 52 ] benchmark suite. The baseline is unmodified ManiSkill3, where CUDA simulation and Vulkan rendering execute in the default temporal-sharing mode. 
+
+6.2 Efficiency of Page-Table Grafting 
+
+We first evaluate the cost of VUDA’s page-table grafting by comparing it against the standard CUDA-export/Vulkan-import path. Both methods make CUDA-allocated buffers accessible to the Vulkan context; we vary the number of           
+
+> 9PushCube PickCube LiftPegUpright PokeCube PushT
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> Throughput (k steps/s)  Baseline VUDA BS 32 BS 64 BS 128 BS 256 BS 384
+
+(a) RTX 4090. PushCube PickCube LiftPegUpright PokeCube PushT       
+
+> 0
+> 2
+> 4
+> 6
+> 8
+> 10
+> 12
+> Throughput (k steps/s)  Baseline VUDA BS 32 BS 64 BS 128 BS 256 BS 384
+
+(b) RTX 6000 Pro. 
+
+Figure 7. Data-generation throughput (k steps/s) across five ManiSkill environments at 640 ×480 resolution. VUDA enables inter-step pipelining of simulation and rendering, with gains increasing as the batch size grows and the two phases become more balanced. Act+ Sim (K-1) Act+ Sim (K) Act+ Sim (K+1) ⋯  
+
+> Render (K-1)Render (K)Render (K+1)
+
+# ⋯
+
+Figure 8. SM utilization trace with VUDA enabled (same workload as Figure 1). Spatial overlap of simulation and rendering significantly improves SM utilization. shared 2 MB buffers and measure the total overhead (Fig-ure 6). The export/import path requires a per-buffer ioctl for both the CUDA export and the Vulkan import, so its cost grows linearly—from roughly 1 ms at 4 buffers to over 500 ms at 8,192 buffers. Page-table grafting pays a one-time cost of approximately 6 ms for the recursive page-directory merge (§4.2.1) and an initial TLB invalidation. Subsequent alloca-tions that fall within an already-grafted subtree require only a TLB invalidation (a cost the export/import path incurs as well), so the grafting curve stays nearly flat up to 128 buffers. Beyond this point, new PDE insertions cause a modest rise, yet at 8,192 buffers grafting remains roughly 25 × cheaper than export/import (20 ms vs. 500 ms). These results con-firm that page-table grafting scales well for the allocation-intensive workloads typical of simulation environments. 
+
+6.3 Data Generation 
+
+In the data-generation scenario, the simulator produces in-teraction episodes for imitation learning. We use a camera resolution of 640 ×480 to match real-world popular sensor configurations. Figure 7 reports throughput (thousands of simulation steps per second) across five ManiSkill environments on both plat-forms. VUDA improves throughput by up to 1.80 × on the RTX 4090 (Figure 7a) and up to 1.77 × on the RTX 6000 Pro (Figure 7b), with the largest gains occurring at mid-range batch sizes (128–256 environments) where simulation and rendering durations are most balanced. 
+
+Effect of batch size. At small batch sizes (e.g., 32), the speedup is modest (below 1.3×). With few parallel envi-ronments, the simulation phase dominates per-step latency and the rendering phase is comparatively short, leaving lit-tle room for overlap. As the batch size increases to 128– 256, the rendering workload grows with the number of environments and the two phases become comparable in duration. The inter-step pipelining that VUDA enables— launching sim (𝑘 +1) concurrently with render (𝑘 )—then ef-fectively hides the shorter phase behind the longer one, max-imizing the throughput gain. At the largest batch size (384), the speedup decreases slightly because the GPU approaches full occupancy and the marginal capacity available for spatial overlap shrinks. 
+
+SM utilization improvement. Figures 1 and 8 contrast SM utilization for the same data-generation workload before and after enabling VUDA. In the baseline (Figure 1), the two phases execute sequentially: SM utilization stays below 10% during simulation and peaks at roughly 70% during rendering, producing pronounced idle gaps. With VUDA (Figure 8), simulation and rendering overlap spatially, and SM utilization stabilizes around 70% with peaks approaching 80%, punctuated only by brief transition dips. Eliminating the low-utilization simulation windows directly accounts for the throughput improvements reported above. 
+
+6.4 RL Training 
+
+We evaluate VUDA on the rollout phase of RL training using the PPO algorithm [ 48 ] across multiple ManiSkill environ-ments. High-resolution rendering incurs substantial GPU memory pressure, so we align with the ManiSkill RL base-line and adopt a resolution of 128 × 128 . We consider two policy architectures: a lightweight MLP policy (usually for locomotion tasks) that runs on the same GPU as the simu-lation, and a Vision-Language-Action (VLA) model (usually for manipulation tasks) that requires a dedicated GPU for inference. 
+
+6.4.1 MLP-based RL In this test, the MLP policy inference, physics simulation, and rendering all share a single GPU. We evaluate two MLP configurations with hidden sizes of 256 and 4096; the reported speedup is the average of the two.           
+
+> 10 AntRun HopperHop StackCube HopperStand PushCube HumanoidRun
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> Throughput speedup (x)  BS 32 BS 64 BS 128 BS 256 BS 512 BS 1024
+
+(a) RTX 4090. AntRun HopperHop StackCube HopperStand PushCube HumanoidRun     
+
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Throughput speedup (x)  BS 128 BS 256 BS 512 BS 1024 BS 2048
+
+(b) RTX 6000 Pro. 
+
+Figure 9. MLP-based RL rollout throughput speedup across six simulation environments at 128 ×128 resolution, averaged over MLP hidden sizes 256 and 4096. Bars are grouped by environment and colored by the number of parallel environ-ments. 
+
+RTX 4090. Figure 9a shows the rollout throughput speedup across six environments. VUDA delivers consistent improve-ments, with peak speedups of 1.66 × (AntRun at 256 envi-ronments). Most environments reach their best speedup at 256–512 parallel environments. 
+
+RTX 6000 Pro. Figure 9b shows results on the RTX 6000 Pro, whose larger memory supports up to 2,048 parallel environ-ments. Peak speedups are higher: StackCube reaches 1.85 ×
+
+at 1,024 environments and AntRun reaches 1.73 × at 512. The larger memory allows more parallel environments, which in turn provides greater overlap opportunity across trajectory batches. 
+
+Speedup trends. Across both platforms, the speedup gen-erally increases with the number of parallel environments, because more concurrent trajectories provide greater oppor-tunity for inter-trajectory overlap between simulation and rendering batches. However, at the largest batch sizes the GPU approaches saturation and the marginal benefit of spa-tial sharing diminishes, causing the speedup to plateau or decline. Environments with heavier simulation workloads (e.g., HumanoidRun, which involves a complex articulated body with expensive collision detection) benefit less because simulation occupies a larger fraction of total runtime, reduc-ing the relative overlap potential with rendering. 
+
+6.4.2 VLA-based RL Unlike the MLP setting where all workloads share one GPU, the high computational and mem-ory demands of VLA models necessitate a disaggregated deployment similar to RLinf [ 73 ]: OpenVLA-oft [ 27 ] runs on a dedicated RTX 6000 Pro for inference, while the simu-lation environment runs on a separate RTX 6000 Pro with VUDA enabled. In this setup, VUDA overlaps simulation and rendering on the simulation GPU, while inference proceeds independently on the other. 8 32 64 128 256 
+
+> 1.0
+> 1.1
+> 1.2
+> Speedup (x)
+
+Figure 10. VLA-based RL rollout throughput speedup on RTX 6000 Pro with VUDA enabled across parallel-environment counts. Figure 10 reports the rollout throughput speedup. VUDA delivers a consistent 1.15 –1.23 × improvement across all eval-uated concurrency levels (8–256 environments), peaking at 
+
+1.23 × with 64 environments. 
+
+Effect of batch size. Unlike the MLP setting where speedup grows with concurrency, the VLA speedup remains relatively flat and even declines slightly at large batch sizes. At small to moderate concurrency levels (8–128 environments), the simulation GPU is the throughput bottleneck, and spatial overlap of simulation and rendering directly translates into end-to-end gains. As the number of environments grows beyond 128, VLA inference time on the dedicated GPU scales approximately linearly with batch size and gradually be-comes the dominant component of the rollout loop. Because VUDA accelerates only the simulation-side GPU, the end-to-end speedup diminishes when inference is the bottleneck, explaining the decline to 1.15 × at 256 environments. 
+
+## 7 Related Work 
+
+GPU Spatial Sharing. GPU spatial sharing techniques are used to share the same GPU between different applica-tions to maximize GPU utilization. HiveD [ 76 ] guarantees multi-tenant spatial sharing integrity by preventing strag-glers through strict resource allocation. LithOS [ 9] designs an operating system dedicated to efficient machine learning on GPUs by formalizing dynamic TPC mapping and trans-parent kernel atomization for spatial sharing. Antman [ 68 ], Gandiva [ 67 ], REEF [ 17 ], MuxFlow [ 78 ], GSlice [ 10 ], and other work [ 22 , 29 , 30 , 36 , 51 , 69 , 75 ] focus on limiting the GPU resources, adding preemption or scheduling on GPU for spatial sharing. PhoenixOS [ 60 ] and TGS [ 62 ] address GPU context management through checkpoint/restore and trans-parent container-level GPU sharing, respectively. Within spa-tial sharing, a series of works [ 72 , 77 ] provide performance isolation for parallel GPU workloads. Under LLM serving scenarios, some work [ 12 , 15 , 32 , 66 ] captures the workload characteristics and designs the spatial sharing techniques for concurrent LLM serving. All of these operate exclusively within the CUDA ecosys-tem and cannot co-schedule Vulkan graphics work; VUDA is the first system to extend spatial sharing across heteroge-neous GPU runtimes. 
+
+> 11
+
+GPU-Accelerated Embodied-AI Simulation. GPU-parallel simulation platforms—Isaac Gym [ 34 ], Isaac Lab [ 35 ], Man-iSkill [ 52 ], SAPIEN [ 65 ], Genesis [ 79 ], and Habitat [ 47 ]—run hundreds to thousands of environments on a single GPU, cou-pling physics simulation (CUDA) with photorealistic render-ing (Vulkan) in a tight loop. These platforms demonstrate the growing demand for concurrent compute and graphics exe-cution on the same device, yet none addresses the execution-isolation barrier between CUDA and Vulkan. VUDA fills this gap by enabling spatial overlap of their simulation and rendering phases. 
+
+GPU Rendering Service. To maximize the rendering speed, Spars [ 64 ], PTask [ 45 ], and PFR [ 2 ] propose parallel frame rendering for OS-level GPU rendering. gVulkan [ 16 ] pro-poses a transparent, multi-GPU acceleration rendering solu-tion. gScale [ 70 ], GPUvirt [ 11 ], gVirt [ 56 ], and GPUvm [ 50 ]provide GPU virtualization for rendering. Gdev [ 24 ] imple-ments a bandwidth-aware, non-preemptive device sched-uling algorithm to integrate graphics processors natively within the host operating system scheduler. TimeGraph [ 23 ]proposes an operating system abstraction designed specif-ically to manage GPUs as compute devices. Chopin [ 44 ]improves multi-device rendering throughput by leveraging advanced parallel image composition techniques across in-terconnected graphics units. Some works [ 13 , 33 ] provide benchmarks for GPU rendering. In contrast, VUDA focuses on maximizing GPU resource utilization in robot simulators by spatially co-executing com-pute and graphics rendering workloads on the same device. 
+
+## 8 Conclusion 
+
+This paper presented VUDA, the first system that enables fine-grained spatial sharing between CUDA compute and Vulkan graphics on the same GPU. To realize this concur-rency, VUDA introduces channel redirection and page-table grafting, two mechanisms that break execution isolation be-tween CUDA and Vulkan efficiently, improving GPU utiliza-tion and end-to-end throughput of important embodied-AI simulation scenarios. 
+
+## References 
+
+[1] Figure AI. Introducing helix 02: Full-body autonomy, January 2026. Accessed: 2026-05-01. [2] Jose-Maria Arnau, Joan-Manuel Parcerisa, and Polychronis Xekalakis. Parallel frame rendering: Trading responsiveness for energy on a mobile gpu. In Proceedings of the 22nd International Conference on Parallel Architectures and Compilation Techniques , pages 83–92, 2013. [3] Kevin Black, Noah Brown, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Lucy Xi-aoyang Shi, James Tanner, Quan Vuong, Anna Walling, Haohuan Wang, and Ury Zhilinsky. 𝜋 0: A vision-language-action flow model for general robot control, 2026. [4] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Xi Chen, Krzysztof Choromanski, Tianli Ding, Danny Driess, Avinava Dubey, Chelsea Finn, Pete Florence, Chuyuan Fu, Montse Gonza-lez Arenas, Keerthana Gopalakrishnan, Kehang Han, Karol Haus-man, Alexander Herzog, Jasmine Hsu, Brian Ichter, Alex Irpan, Nikhil Joshi, Ryan Julian, Dmitry Kalashnikov, Yuheng Kuang, Isabel Leal, Lisa Lee, Tsang-Wei Edward Lee, Sergey Levine, Yao Lu, Henryk Michalewski, Igor Mordatch, Karl Pertsch, Kanishka Rao, Krista Rey-mann, Michael Ryoo, Grecia Salazar, Pannag Sanketi, Pierre Sermanet, Jaspiar Singh, Anikait Singh, Radu Soricut, Huong Tran, Vincent Van-houcke, Quan Vuong, Ayzaan Wahid, Stefan Welker, Paul Wohlhart, Jialin Wu, Fei Xia, Ted Xiao, Peng Xu, Sichun Xu, Tianhe Yu, and Brianna Zitkovich. Rt-2: Vision-language-action models transfer web knowledge to robotic control, 2023. [5] Anthony Brohan, Noah Brown, Justice Carbajal, Yevgen Chebotar, Joseph Dabis, Chelsea Finn, Keerthana Gopalakrishnan, Karol Haus-man, Alex Herzog, Jasmine Hsu, Julian Ibarz, Brian Ichter, Alex Irpan, Tomas Jackson, Sally Jesmonth, Nikhil J Joshi, Ryan Julian, Dmitry Kalashnikov, Yuheng Kuang, Isabel Leal, Kuang-Huei Lee, Sergey Levine, Yao Lu, Utsav Malla, Deeksha Manjunath, Igor Mordatch, Ofir Nachum, Carolina Parada, Jodilyn Peralta, Emily Perez, Karl Pertsch, Jornell Quiambao, Kanishka Rao, Michael Ryoo, Grecia Salazar, Pan-nag Sanketi, Kevin Sayed, Jaspiar Singh, Sumedh Sontakke, Austin Stone, Clayton Tan, Huong Tran, Vincent Vanhoucke, Steve Vega, Quan Vuong, Fei Xia, Ted Xiao, Peng Xu, Sichun Xu, Tianhe Yu, and Brianna Zitkovich. Rt-1: Robotics transformer for real-world control at scale, 2023. [6] Jake Bruce, Michael Dennis, Ashley Edwards, Jack Parker-Holder, Yuge Shi, Edward Hughes, Matthew Lai, Aditi Mavalankar, Richie Steigerwald, Chris Apps, Yusuf Aytar, Sarah Bechtle, Feryal Behba-hani, Stephanie Chan, Nicolas Heess, Lucy Gonzalez, Simon Osindero, Sherjil Ozair, Scott Reed, Jingwei Zhang, Konrad Zolna, Jeff Clune, Nando de Freitas, Satinder Singh, and Tim Rocktäschel. Genie: Gener-ative interactive environments, 2024. [7] Jun Cen, Chaohui Yu, Hangjie Yuan, Yuming Jiang, Siteng Huang, Jiayan Guo, Xin Li, Yibing Song, Hao Luo, Fan Wang, et al. World-vla: Towards autoregressive action world model. arXiv preprint arXiv:2506.21539 , 2025. [8] Tianxing Chen, Zanxin Chen, Baijun Chen, Zijian Cai, Yibin Liu, Zixuan Li, Qiwei Liang, Xianliang Lin, Yiheng Ge, Zhenyu Gu, et al. Robotwin 2.0: A scalable data generator and benchmark with strong do-main randomization for robust bimanual robotic manipulation. arXiv preprint arXiv:2506.18088 , 2025. [9] Patrick H. Coppock, Brian Zhang, Eliot H. Solomon, Vasilis Kypriotis, Leon Yang, Bikash Sharma, Dan Schatzberg, Todd C. Mowry, and Dimitrios Skarlatos. Lithos: An operating system for efficient machine learning on gpus. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles , SOSP ’25, page 1–17, New York, NY, USA, 2025. Association for Computing Machinery. [10] Aditya Dhakal, Sameer G. Kulkarni, and K. K. Ramakrishnan. GSLICE: controlled spatial sharing of gpus for a scalable inference platform. In Rodrigo Fonseca, Christina Delimitrou, and Beng Chin Ooi, editors, 
+
+SoCC ’20: ACM Symposium on Cloud Computing, Virtual Event, USA, October 19-21, 2020 , pages 492–506. ACM, 2020. [11] Yaozu Dong, Mochi Xue, Xiao Zheng, Jiajun Wang, Zhengwei Qi, and Haibing Guan. Boosting GPU virtualization performance with hybrid shadow page tables. In Shan Lu and Erik Riedel, editors, Proceedings of the 2015 USENIX Annual Technical Conference, USENIX ATC 2015, July 8-10, Santa Clara, CA, USA , pages 517–528. USENIX Association, 2015. [12] Kuntai Du, Bowen Wang, Chen Zhang, Yiming Cheng, Qing Lan, Hejian Sang, Yihua Cheng, Jiayi Yao, Xiaoxuan Liu, Yifan Qiao, Ion Stoica, and Junchen Jiang. Prefillonly: An inference engine for prefill-only workloads in large language model applications. In Youjip Won, Youngjin Kwon, Ding Yuan, and Rebecca Isaacs, editors, Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles, 
+
+12 SOSP 2025, Lotte Hotel World, Seoul, Republic of Korea, October 13-16, 2025 , pages 399–414. ACM, 2025. [13] Oscar Ferraz, Paulo Menezes, Vítor Silva, and Gabriel Falcão. Bench-marking vulkan vs opengl rendering on low-power edge gpus. In 
+
+International Conference on Graphics and Interaction, ICGI 2021, Porto, Portugal, November 4-5, 2021 , pages 1–8. IEEE, 2021. [14] Figure AI. Helix: A vision-language-action model for humanoid robots. 
+
+https://www.figure.ai/helix , 2025. Accessed: 2026-03-22. [15] Shiwei Gao, Qing Wang, Shaoxun Zeng, Youyou Lu, and Jiwu Shu. Weaver: Efficient multi-llm serving with attention offloading. In Deniz Altinbüken and Ryan Stutsman, editors, Proceedings of the 2025 USENIX Annual Technical Conference, USENIX ATC 2025, Boston, MA, USA, July 7-9, 2025 , pages 587–595. USENIX Association, 2025. [16] Yicheng Gu, Yun Wang, Yunfan Sun, Yuxin Xiang, Xuyan Hu, Zheng-wei Qi, and Haibing Guan. gvulkan: Scalable GPU pooling for pixel-grained rendering in ray tracing. In Saurabh Bagchi and Yiying Zhang, editors, Proceedings of the 2024 USENIX Annual Technical Conference, USENIX ATC 2024, Santa Clara, CA, USA, July 10-12, 2024 , pages 1151– 1165. USENIX Association, 2024. [17] Mingcong Han, Hanze Zhang, Rong Chen, and Haibo Chen. Microsecond-scale preemption for concurrent GPU-accelerated DNN inferences. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) , pages 539–558, Carlsbad, CA, July 2022. USENIX Association. [18] Tyler Hunt, Zhipeng Jia, Vance Miller, Ariel Szekely, Yige Hu, Christo-pher J. Rossbach, and Emmett Witchel. Telekine: Secure computing with cloud GPUs. In 17th USENIX Symposium on Networked Systems Design and Implementation (NSDI 20) , pages 817–833, Santa Clara, CA, February 2020. USENIX Association. [19] Physical Intelligence, Bo Ai, Ali Amin, Raichelle Aniceto, Ashwin Balakrishna, Greg Balke, Kevin Black, George Bokinsky, Shihao Cao, Thomas Charbonnier, Vedant Choudhary, Foster Collins, Ken Conley, Grace Connors, James Darpinian, Karan Dhabalia, Maitrayee Dhaka, Jared DiCarlo, Danny Driess, Michael Equi, Adnan Esmail, Yunhao Fang, Chelsea Finn, Catherine Glossop, Thomas Godden, Ivan Gory-achev, Lachlan Groom, Haroun Habeeb, Hunter Hancock, Karol Haus-man, Gashon Hussein, Victor Hwang, Brian Ichter, Connor Jacobsen, Szymon Jakubczak, Rowan Jen, Tim Jones, Gregg Kammerer, Ben Katz, Liyiming Ke, Mairbek Khadikov, Chandra Kuchi, Marinda Lamb, Devin LeBlanc, Brendon LeCount, Sergey Levine, Xinyu Li, Adrian Li-Bell, Vladislav Lialin, Zhonglin Liang, Wallace Lim, Yao Lu, Enyu Luo, Vishnu Mano, Nandan Marwaha, Aikys Mongush, Liam Mur-phy, Suraj Nair, Tyler Patterson, Karl Pertsch, Allen Z. Ren, Gavin Schelske, Charvi Sharma, Baifeng Shi, Lucy Xiaoyang Shi, Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, Will Stoeckle, Jiaming Tang, Jimmy Tanner, Shalom Tekeste, Marcel Torne, Kyle Vedder, Quan Vuong, Anna Walling, Haohuan Wang, Jason Wang, XuDong Wang, Chris Whalen, Samuel Whitmore, Blake Williams, Charles Xu, Sukwon Yoo, Lili Yu, Wuming Zhang, Zhuoyang Zhang, and Ury Zhilinsky. 𝜋 0.7: a steerable generalist robotic foundation model with emergent capabilities, 2026. [20] Physical Intelligence, Kevin Black, Noah Brown, James Darpinian, Karan Dhabalia, Danny Driess, Adnan Esmail, Michael Equi, Chelsea Finn, Niccolo Fusai, Manuel Y. Galliker, Dibya Ghosh, Lachy Groom, Karol Hausman, Brian Ichter, Szymon Jakubczak, Tim Jones, Liyiming Ke, Devin LeBlanc, Sergey Levine, Adrian Li-Bell, Mohith Mothukuri, Suraj Nair, Karl Pertsch, Allen Z. Ren, Lucy Xiaoyang Shi, Laura Smith, Jost Tobias Springenberg, Kyle Stachowicz, James Tanner, Quan Vuong, Homer Walke, Anna Walling, Haohuan Wang, Lili Yu, and Ury Zhilinsky. 𝜋 0.5: a vision-language-action model with open-world generalization, 2025. [21] Zhennan Jiang, Shangqing Zhou, Yutong Jiang, Zefang Huang, Mingjie Wei, Yuhui Chen, Tianxing Zhou, Zhen Guo, Hao Lin, Quanlu Zhang, Yu Wang, Haoran Li, Chao Yu, and Dongbin Zhao. Wovr: World models as reliable simulators for post-training vla policies with rl. 
+
+arXiv preprint arXiv:2602.13977 , 2026. [22] Prashanthi S. K, Kunal Kumar Sahoo, Amartya Ranjan Saikia, Pranav Gupta, Atharva Vinay Joshi, Priyanshu Pansari, and Yogesh Simmhan. Pagoda: An energy and time roofline study for DNN workloads on edge accelerators. CoRR , abs/2509.20189, 2025. [23] Shinpei Kato, Karthik Lakshmanan, Ragunathan Rajkumar, and Yutaka Ishikawa. Timegraph: GPU scheduling for real-time multi-tasking environments. In Jason Nieh and Carl A. Waldspurger, editors, Pro-ceedings of the 2011 USENIX Annual Technical Conference, USENIX ATC 2011, Portland, OR, USA, June 15-17, 2011 . USENIX Association, 2011. [24] Shinpei Kato, Michael McThrow, Carlos Maltzahn, and Scott A. Brandt. Gdev: First-class GPU resource management in the operating system. In Gernot Heiser and Wilson C. Hsieh, editors, Proceedings of the 2012 USENIX Annual Technical Conference, USENIX ATC 2012, Boston, MA, USA, June 13-15, 2012 , pages 401–412. USENIX Association, 2012. [25] Khronos Group. VK_NV_cuda_kernel_launch extension. 
+
+https://docs.vulkan.org/refpages/latest/refpages/source/VK_ NV_cuda_kernel_launch.html , 2023. Vulkan API Reference. Accessed: 2026-03-22. [26] Khronos Group. The vulkan graphics and compute api. https://www. vulkan.org/ , 2026. Accessed: 2026-03-22. [27] Moo Jin Kim, Chelsea Finn, and Percy Liang. Fine-tuning vision-language-action models: Optimizing speed and success. arXiv preprint arXiv:2502.19645 , 2025. [28] Moo Jin Kim, Karl Pertsch, Siddharth Karamcheti, Ted Xiao, Ashwin Balakrishna, Suraj Nair, Rafael Rafailov, Ethan P Foster, Pannag R San-keti, Quan Vuong, Thomas Kollar, Benjamin Burchfiel, Russ Tedrake, Dorsa Sadigh, Sergey Levine, Percy Liang, and Chelsea Finn. Openvla: An open-source vision-language-action model. In Pulkit Agrawal, Oliver Kroemer, and Wolfram Burgard, editors, Proceedings of The 8th Conference on Robot Learning , volume 270 of Proceedings of Machine Learning Research , pages 2679–2713. PMLR, 06–09 Nov 2025. [29] Munkyu Lee, Sihoon Seong, Minki Kang, Jihyuk Lee, Gap-Joo Na, In-Geol Chun, Dimitrios S. Nikolopoulos, and Cheol-Ho Hong. Parvagpu: Efficient spatial GPU sharing for large-scale DNN inference in cloud environments. In Proceedings of the International Conference for High Performance Computing, Networking, Storage, and Analysis, SC 2024, Atlanta, GA, USA, November 17-22, 2024 . IEEE, 2024. [30] Baolin Li, Tirthak Patel, Siddharth Samsi, Vijay Gadepally, and Devesh Tiwari. MISO: exploiting multi-instance GPU capability on multi-tenant GPU clusters. In Ada Gavrilovska, Deniz Altinbüken, and Carsten Binnig, editors, Proceedings of the 13th Symposium on Cloud Computing, SoCC 2022, San Francisco, California, November 7-11, 2022 ,pages 173–189. ACM, 2022. [31] Haozhan Li, Yuxin Zuo, Jiale Yu, Yuhao Zhang, Yang Zhaohui, Kaiyan Zhang, Xuekai Zhu, Yuchen Zhang, Tianxing Chen, Ganqu Cui, Dehui Wang, Dingxiang Luo, Yuchen Fan, Youbang Sun, Jia Zeng, Jiangmiao Pang, Shanghang Zhang, Yu Wang, Yao Mu, Bowen Zhou, and Ning Ding. SimpleVLA-RL: Scaling VLA training via reinforcement learning. In The Fourteenth International Conference on Learning Representations ,2026. [32] Zejia Lin, Hongxin Xu, Guanyi Chen, Zhiguang Chen, Yutong Lu, and Xianwei Zhang. Bullet: Boosting GPU utilization for LLM serving via dynamic spatial-temporal orchestration. In Benjamin C. Lee, Harry Xu, Mark Silberstein, and Bingyao Li, editors, Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2, ASPLOS 2026, Pittsburgh, PA, USA, March 22-26, 2026 , pages 290–306. ACM, 2026. [33] Lufei Liu, Mohammadreza Saed, Yuan-Hsi Chou, Davit Grigoryan, Tyler Nowicki, and Tor M. Aamodt. Lumibench: A benchmark suite for hardware ray tracing. In IEEE International Symposium on Workload Characterization, IISWC 2023, Ghent, Belgium, October 1-3, 2023 , pages 1–14. IEEE, 2023. 13 [34] Viktor Makoviychuk, Lukasz Wawrzyniak, Yunrong Guo, Michelle Lu, Kier Storey, Miles Macklin, David Hoeller, Nikita Rudin, Arthur All-shire, Ankur Handa, and Gavriel State. Isaac gym: High performance gpu-based physics simulation for robot learning. In Advances in Neu-ral Information Processing Systems (NeurIPS), Datasets and Benchmarks Track , 2021. [35] Mayank Mittal, Pascal Roth, James Tigue, Antoine Richard, Octi Zhang, Peter Du, Antonio Serrano-Muñoz, Xinjie Yao, René Zurbrügg, Nikita Rudin, Lukasz Wawrzyniak, Milad Rakhsha, Alain Denzler, Eric Hei-den, Ales Borovicka, Ossama Ahmed, Iretiayo Akinola, Abrar Anwar, Mark T. Carlson, Ji Yuan Feng, Animesh Garg, Renato Gasoto, Li-onel Gulich, Yijie Guo, M. Gussert, Alex Hansen, Mihir Kulkarni, Chenran Li, Wei Liu, Viktor Makoviychuk, Grzegorz Malczyk, Ham-mad Mazhar, Masoud Moghani, Adithyavairavan Murali, Michael Noseworthy, Alexander Poddubny, Nathan Ratliff, Welf Rehberg, Clemens Schwarke, Ritvik Singh, James Latham Smith, Bingjie Tang, Ruchik Thaker, Matthew Trepte, Karl Van Wyk, Fangzhou Yu, Alex Millane, Vikram Ramasamy, Remo Steiner, Sangeeta Subramanian, Clemens Volk, CY Chen, Neel Jawale, Ashwin Varghese Kuruttuku-lam, Michael A. Lin, Ajay Mandlekar, Karsten Patzwaldt, John Welsh, Huihua Zhao, Fatima Anes, Jean-Francois Lafleche, Nicolas Moënne-Loccoz, Soowan Park, Rob Stepinski, Dirk Van Gelder, Chris Amevor, Jan Carius, Jumyung Chang, Anka He Chen, Pablo de Heras Ciechom-ski, Gilles Daviet, Mohammad Mohajerani, Julia von Muralt, Viktor Reutskyy, Michael Sauter, Simon Schirm, Eric L. Shi, Pierre Terdiman, Kenny Vilella, Tobias Widmer, Gordon Yeoman, Tiffany Chen, Sergey Grizan, Cathy Li, Lotus Li, Connor Smith, Rafael Wiltz, Kostas Alexis, Yan Chang, David Chu, Linxi "Jim" Fan, Farbod Farshidian, Ankur Handa, Spencer Huang, Marco Hutter, Yashraj Narang, Soha Pouya, Shiwei Sheng, Yuke Zhu, Miles Macklin, Adam Moravanszky, Philipp Reist, Yunrong Guo, David Hoeller, and Gavriel State. Isaac lab: A gpu-accelerated simulation framework for multi-modal robot learning. 
+
+arXiv preprint arXiv:2511.04831 , 2025. [36] Kelvin K. W. Ng, Henri Maxime Demoulin, and Vincent Liu. Paella: Low-latency model serving with software-defined GPU scheduling. In Jason Flinn, Margo I. Seltzer, Peter Druschel, Antoine Kaufmann, and Jonathan Mace, editors, Proceedings of the 29th Symposium on Operating Systems Principles, SOSP 2023, Koblenz, Germany, October 23-26, 2023 , pages 595–610. ACM, 2023. [37] NVIDIA, :, Niket Agarwal, Arslan Ali, Maciej Bala, Yogesh Balaji, Erik Barker, Tiffany Cai, Prithvijit Chattopadhyay, Yongxin Chen, Yin Cui, Yifan Ding, Daniel Dworakowski, Jiaojiao Fan, Michele Fenzi, Francesco Ferroni, Sanja Fidler, Dieter Fox, Songwei Ge, Yunhao Ge, Jinwei Gu, Siddharth Gururani, Ethan He, Jiahui Huang, Jacob Huff-man, Pooya Jannaty, Jingyi Jin, Seung Wook Kim, Gergely Klár, Grace Lam, Shiyi Lan, Laura Leal-Taixe, Anqi Li, Zhaoshuo Li, Chen-Hsuan Lin, Tsung-Yi Lin, Huan Ling, Ming-Yu Liu, Xian Liu, Alice Luo, Qianli Ma, Hanzi Mao, Kaichun Mo, Arsalan Mousavian, Seungjun Nah, Sri-harsha Niverty, David Page, Despoina Paschalidou, Zeeshan Patel, Lindsey Pavao, Morteza Ramezanali, Fitsum Reda, Xiaowei Ren, Vas-anth Rao Naik Sabavat, Ed Schmerling, Stella Shi, Bartosz Stefaniak, Shitao Tang, Lyne Tchapmi, Przemek Tredak, Wei-Cheng Tseng, Jibin Varghese, Hao Wang, Haoxiang Wang, Heng Wang, Ting-Chun Wang, Fangyin Wei, Xinyue Wei, Jay Zhangjie Wu, Jiashu Xu, Wei Yang, Lin Yen-Chen, Xiaohui Zeng, Yu Zeng, Jing Zhang, Qinsheng Zhang, Yuxuan Zhang, Qingqing Zhao, and Artur Zolkowski. Cosmos world foundation model platform for physical ai, 2025. [38] NVIDIA, Johan Bjorck, Nikita Cherniadev Fernando Castañeda, Xingye Da, Runyu Ding, Linxi "Jim" Fan, Yu Fang, Dieter Fox, Fengyuan Hu, Spencer Huang, Joel Jang, Zhenyu Jiang, Jan Kautz, Kaushil Kundalia, Lawrence Lao, Zhiqi Li, Zongyu Lin, Kevin Lin, Guilin Liu, Edith Llontop, Loic Magne, Ajay Mandlekar, Avnish Narayan, Soroush Nasiriany, Scott Reed, You Liang Tan, Guanzhi Wang, Zu Wang, Jing Wang, Qi Wang, Jiannan Xiang, Yuqi Xie, Yinzhen Xu, Zhenjia Xu, Seonghyeon Ye, Zhiding Yu, Ao Zhang, Hao Zhang, Yizhou Zhao, Ruijie Zheng, and Yuke Zhu. GR00T N1: An open foundation model for generalist humanoid robots. In ArXiv Preprint ,March 2025. [39] NVIDIA Corporation. CUDA green contexts. https: //docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/green-contexts.html , 2024. CUDA C++ Programming Guide. Accessed: 2026-03-22. [40] NVIDIA Corporation. NVIDIA open GPU kernel modules. https:// github.com/NVIDIA/open-gpu-kernel-modules , 2024. Accessed: 2026-03-22. [41] NVIDIA Corporation. Cuda c++ programming guide. https://docs. nvidia.com/cuda/cuda-c-programming-guide/ , 2026. Accessed: 2026-03-22. [42] NVIDIA Corporation. Multi-Instance GPU (MIG). https://docs.nvidia. com/datacenter/tesla/mig-user-guide/ , 2026. Accessed: 2026-03-22. [43] NVIDIA Corporation. Multi-Process Service (MPS). https://docs. nvidia.com/deploy/mps/ , 2026. Accessed: 2026-03-22. [44] Xiaowei Ren and Mieszko Lis. CHOPIN: scalable graphics rendering in multi-gpu systems via parallel image composition. In IEEE Interna-tional Symposium on High-Performance Computer Architecture, HPCA 2021, Seoul, South Korea, February 27 - March 3, 2021 , pages 709–722. IEEE, 2021. [45] Christopher J. Rossbach, Jon Currey, Mark Silberstein, Baishakhi Ray, and Emmett Witchel. Ptask: operating system abstractions to manage gpus as compute devices. In Ted Wobber and Peter Druschel, editors, 
+
+Proceedings of the 23rd ACM Symposium on Operating Systems Prin-ciples 2011, SOSP 2011, Cascais, Portugal, October 23-26, 2011 , pages 233–248. ACM, 2011. [46] Runway. Introducing gwm-1, December 2025. Accessed: 2026-05-01. [47] Manolis Savva, Abhishek Kadian, Oleksandr Maksymets, Yili Zhao, Erik Wijmans, Bhavana Jain, Julian Straub, Jia Liu, Vladlen Koltun, Jitendra Malik, Devi Parikh, and Dhruv Batra. Habitat: A platform for embodied ai research. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 9339–9347, 2019. [48] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347 , 2017. [49] Morgan Stanley. Embodied ai and the rise of humanoid robots. https://www.morganstanley.com/im/publication/insights/ articles/article_humanoid-robots_a4.pdf , 2026. Accessed: 2026-03-22. [50] Yusuke Suzuki, Shinpei Kato, Hiroshi Yamada, and Kenji Kono. Gpuvm: Why not virtualizing gpus at the hypervisor? In Garth Gibson and Nickolai Zeldovich, editors, Proceedings of the 2014 USENIX Annual Technical Conference, USENIX ATC 2014, Philadelphia, PA, USA, June 19-20, 2014 , pages 109–120. USENIX Association, 2014. [51] Cheng Tan, Zhichao Li, Jian Zhang, Yu Cao, Sikai Qi, Zherui Liu, Yibo Zhu, and Chuanxiong Guo. Serving DNN models with multi-instance gpus: A case of the reconfigurable machine scheduling problem. CoRR ,abs/2109.11067, 2021. [52] Stone Tao, Fanbo Xiang, Arth Shukla, Yuzhe Qin, Xander Hinrichsen, Xiaodi Yuan, Chen Bao, Xinsong Lin, Yulin Liu, Tse kai Chan, Yuan Gao, Xuanlin Li, Tongzhou Mu, Nan Xiao, Arnav Gurha, Viswesh Na-gaswamy Rajesh, Yong Woo Choi, Yen-Ru Chen, Zhiao Huang, Roberto Calandra, Rui Chen, Shan Luo, and Hao Su. Maniskill3: Gpu paral-lelized robotics simulation and rendering for generalizable embodied ai. Robotics: Science and Systems , 2025. [53] Gemini Robotics Team, Saminda Abeyruwan, Joshua Ainslie, Jean-Baptiste Alayrac, Montserrat Gonzalez Arenas, Travis Armstrong, Ashwin Balakrishna, Robert Baruch, Maria Bauza, Michiel Blokzijl, Steven Bohez, Konstantinos Bousmalis, Anthony Brohan, Thomas Buschmann, Arunkumar Byravan, Serkan Cabi, Ken Caluwaerts, Federico Casarini, Oscar Chang, Jose Enrique Chen, Xi Chen, Hao-Tien Lewis Chiang, Krzysztof Choromanski, David D’Ambrosio, 14 Sudeep Dasari, Todor Davchev, Coline Devin, Norman Di Palo, Tianli Ding, Adil Dostmohamed, Danny Driess, Yilun Du, Debidatta Dwibedi, Michael Elabd, Claudio Fantacci, Cody Fong, Erik Frey, Chuyuan Fu, Marissa Giustina, Keerthana Gopalakrishnan, Laura Graesser, Leonard Hasenclever, Nicolas Heess, Brandon Hernaez, Alexander Herzog, R. Alex Hofer, Jan Humplik, Atil Iscen, Mithun George Jacob, Deepali Jain, Ryan Julian, Dmitry Kalashnikov, M. Emre Karagozler, Stefani Karp, Chase Kew, Jerad Kirkland, Sean Kirmani, Yuheng Kuang, Thomas Lampe, Antoine Laurens, Isabel Leal, Alex X. Lee, Tsang-Wei Edward Lee, Jacky Liang, Yixin Lin, Sharath Maddineni, Anirudha Majumdar, Assaf Hurwitz Michaely, Robert Moreno, Michael Neunert, Francesco Nori, Carolina Parada, Emilio Parisotto, Peter Pastor, Acorn Pooley, Kanishka Rao, Krista Reymann, Dorsa Sadigh, Stefano Sal-iceti, Pannag Sanketi, Pierre Sermanet, Dhruv Shah, Mohit Sharma, Kathryn Shea, Charles Shu, Vikas Sindhwani, Sumeet Singh, Radu Soricut, Jost Tobias Springenberg, Rachel Sterneck, Razvan Surdulescu, Jie Tan, Jonathan Tompson, Vincent Vanhoucke, Jake Varley, Grace Ve-som, Giulia Vezzani, Oriol Vinyals, Ayzaan Wahid, Stefan Welker, Paul Wohlhart, Fei Xia, Ted Xiao, Annie Xie, Jinyu Xie, Peng Xu, Sichun Xu, Ying Xu, Zhuo Xu, Yuxiang Yang, Rui Yao, Sergey Yaroshenko, Wen-hao Yu, Wentao Yuan, Jingwei Zhang, Tingnan Zhang, Allan Zhou, and Yuxiang Zhou. Gemini robotics: Bringing ai into the physical world, 2025. [54] Generalist AI Team. Gen-1: Scaling embodied foundation models to mastery. Generalist AI Blog , 2026. https://generalistai.com/blog/apr-02-2026-GEN-1. [55] Tesla, Inc. Tesla optimus: Humanoid robot. https://www.teslarati. com/tesla-optimus-job-listings/ , 2025. Accessed: 2026-03-22. [56] Kun Tian, Yaozu Dong, and David Cowperthwaite. A full GPU virtu-alization solution with mediated pass-through. In Garth Gibson and Nickolai Zeldovich, editors, Proceedings of the 2014 USENIX Annual Technical Conference, USENIX ATC 2014, Philadelphia, PA, USA, June 19-20, 2014 , pages 121–132. USENIX Association, 2014. [57] Unitree Robotics. Unitree H1: Full-size humanoid robot. https://www. unitree.com/h1 , 2025. Accessed: 2026-03-22. [58] Tianxia Wang, Zhuofu Chen, Xingda Wei, Jinyu Gu, Rong Chen, and Haibo Chen. Characterizing network requirements for gpu api remot-ing in ai applications, 2024. [59] Xingda Wei, Zhuobin Huang, Tianle Sun, Yingyi Hao, Rong Chen, Mingcong Han, Jinyu Gu, and Haibo Chen. Phoenixos: Concurrent os-level gpu checkpoint and restore with validated speculation. In 
+
+Proceedings of the ACM SIGOPS 31st Symposium on Operating Sys-tems Principles , SOSP ’25, page 996–1013, New York, NY, USA, 2025. Association for Computing Machinery. [60] Xingda Wei, Zhuobin Huang, Tianle Sun, Yingyi Hao, Rong Chen, Mingcong Han, Jinyu Gu, and Haibo Chen. Phoenixos: Concurrent os-level GPU checkpoint and restore with validated speculation. In Youjip Won, Youngjin Kwon, Ding Yuan, and Rebecca Isaacs, editors, 
+
+Proceedings of the ACM SIGOPS 31st Symposium on Operating Sys-tems Principles, SOSP 2025, Lotte Hotel World, Seoul, Republic of Korea, October 13-16, 2025 , pages 996–1013. ACM, 2025. [61] World Labs team. Marble: A multimodal world model, November 2025. Accessed: 2026-05-01. [62] Bingyang Wu, Zili Zhang, Zhihao Bai, Xuanzhe Liu, and Xin Jin. Trans-parent GPU sharing in container clouds for deep learning workloads. In 20th USENIX Symposium on Networked Systems Design and Imple-mentation (NSDI 23) , pages 69–85, Boston, MA, April 2023. USENIX Association. [63] Hao Wu, Yue Yu, Junxiao Deng, Shadi Ibrahim, Song Wu, Hao Fan, Ziyue Cheng, and Hai Jin. StreamBox: A lightweight GPU SandBox for serverless inference workflow. In 2024 USENIX Annual Technical Conference (USENIX ATC 24) , pages 59–73, Santa Clara, CA, July 2024. USENIX Association. [64] Yuanpei Wu, Chao Xu, Yubin Xia, Yang Yu, Ming Fu, Binyu Zang, and Haibo Chen. OS rendering service made parallel with out-of-order execution and in-order commit. In Lidong Zhou and Yuanyuan Zhou, editors, 19th USENIX Symposium on Operating Systems Design and Implementation, OSDI 2025, Boston, MA, USA, July 7-9, 2025 , pages 693–710. USENIX Association, 2025. [65] Fanbo Xiang, Yuzhe Qin, Kaichun Mo, Yikuan Xia, Hao Zhu, Fangchen Liu, Minghua Liu, Hanxiao Jiang, Yifu Yuan, He Wang, Li Yi, Angel X. Chang, Leonidas J. Guibas, and Hao Su. SAPIEN: A simulated part-based interactive environment. In The IEEE Conference on Computer Vision and Pattern Recognition (CVPR) , June 2020. [66] Yuxing Xiang, Xue Li, Kun Qian, Yufan Yang, Diwen Zhu, Wenyuan Yu, Ennan Zhai, Xuanzhe Liu, Xin Jin, and Jingren Zhou. Aegaeon: Effective GPU pooling for concurrent LLM serving on the market. In Youjip Won, Youngjin Kwon, Ding Yuan, and Rebecca Isaacs, ed-itors, Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles, SOSP 2025, Lotte Hotel World, Seoul, Republic of Korea, October 13-16, 2025 , pages 1030–1045. ACM, 2025. [67] Wencong Xiao, Romil Bhardwaj, Ramachandran Ramjee, Muthian Sivathanu, Nipun Kwatra, Zhenhua Han, Pratyush Patel, Xuan Peng, Hanyu Zhao, Quanlu Zhang, Fan Yang, and Lidong Zhou. Gandiva: In-trospective cluster scheduling for deep learning. In Andrea C. Arpaci-Dusseau and Geoff Voelker, editors, 13th USENIX Symposium on Op-erating Systems Design and Implementation, OSDI 2018, Carlsbad, CA, USA, October 8-10, 2018 , pages 595–610. USENIX Association, 2018. [68] Wencong Xiao, Shiru Ren, Yong Li, Yang Zhang, Pengyang Hou, Zhi Li, Yihui Feng, Wei Lin, and Yangqing Jia. Antman: Dynamic scaling on GPU clusters for deep learning. In 14th USENIX Symposium on Operating Systems Design and Implementation, OSDI 2020, Virtual Event, November 4-6, 2020 , pages 533–548. USENIX Association, 2020. [69] Fei Xu, Jianian Xu, Jiabin Chen, Li Chen, Ruitao Shang, Zhi Zhou, and Fangming Liu. igniter: Interference-aware GPU resource provision-ing for predictable DNN inference in the cloud. IEEE Trans. Parallel Distributed Syst. , 34(3):812–827, 2023. [70] Mochi Xue, Kun Tian, Yaozu Dong, Jiacheng Ma, Jiajun Wang, Zheng-wei Qi, Bingsheng He, and Haibing Guan. gscale: Scaling up GPU virtualization with dynamic sharing of graphics memory space. In Ajay Gulati and Hakim Weatherspoon, editors, Proceedings of the 2016 USENIX Annual Technical Conference, USENIX ATC 2016, Denver, CO, USA, June 22-24, 2016 , pages 579–590. USENIX Association, 2016. [71] Adina Yakefu, Bin Xie, Chongyang Xu, Enwen Zhang, Erjin Zhou, Fan Jia, Haitao Yang, Haoqiang Fan, Haowei Zhang, Hongyang Peng, Jing Tan, Junwen Huang, Kai Liu, Kaixin Liu, Kefan Gu, Qinglun Zhang, Ruitao Zhang, Saike Huang, Shen Cheng, Shuaicheng Liu, Tiancai Wang, Tiezhen Wang, Wei Sun, Wenbin Tang, Yajun Wei, Yang Chen, Youqiang Gui, Yucheng Zhao, Yunchao Ma, Yunfei Wei, Yunhuan Yang, Yutong Guo, Ze Chen, Zhengyuan Du, Ziheng Zhang, Ziming Liu, and Ziwei Yan. Robochallenge: Large-scale real-robot evaluation of embodied policies, 2025. [72] Gwangoo Yeo, Jiin Kim, Yujeong Choi, and Minsoo Rhu. Preba: A hardware/software co-design for multi-instance gpu based ai inference servers, 2024. [73] Hongzhi Zang, Mingjie Wei, Si Xu, Yongji Wu, Zhen Guo, Yuanqing Wang, Hao Lin, Liangzhi Shi, Yuqing Xie, Zhexuan Xu, et al. Rlinf-vla: A unified and efficient framework for vla+ rl training. arXiv preprint arXiv:2510.06710 , 2025. [74] Yifan Zhang, Chunli Peng, Boyang Wang, Puyi Wang, Qingcheng Zhu, Fei Kang, Biao Jiang, Zedong Gao, Eric Li, Yang Liu, and Yahui Zhou. Matrix-game: Interactive world foundation model, 2025. [75] Yongkang Zhang, Haoxuan Yu, Chenxia Han, Cheng Wang, Baotong Lu, Yunzhe Li, Zhifeng Jiang, Yang Li, Xiaowen Chu, and Huaicheng Li. SGDRC: software-defined dynamic resource control for concurrent DNN inference on NVIDIA gpus. In Proceedings of the 30th ACM SIGPLAN Annual Symposium on Principles and Practice of Parallel 
+
+15 Programming, PPoPP 2025, Las Vegas, NV, USA, March 1-5, 2025 , pages 267–281. ACM, 2025. [76] Hanyu Zhao, Zhenhua Han, Zhi Yang, Quanlu Zhang, Fan Yang, Li-dong Zhou, Mao Yang, Francis C.M. Lau, Yuqi Wang, Yifan Xiong, and Bin Wang. HiveD: Sharing a GPU cluster for deep learning with guarantees. In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) , pages 515–532. USENIX Association, November 2020. [77] Wei Zhao, Anand Jayarajan, and Gennady Pekhimenko. Tally: Non-intrusive performance isolation for concurrent deep learning work-loads. In Lieven Eeckhout, Georgios Smaragdakis, Kaitai Liang, Adrian Sampson, Martha A. Kim, and Christopher J. Rossbach, editors, Pro-ceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1, ASPLOS 2025, Rotterdam, The Netherlands, 30 March 2025 - 3 April 2025 , pages 1052–1068. ACM, 2025. [78] Yihao Zhao, Xin Liu, Shufan Liu, Xiang Li, Yibo Zhu, Gang Huang, Xuanzhe Liu, and Xin Jin. Muxflow: Efficient and safe gpu sharing in large-scale production deep learning clusters, 2023. [79] Xian Zhou, Theophile Luo, Zhaoting Ren, Hao Li, Zhiao Luo, Jian’an Ye, Haoyu Liu, Jiangmiao Li, Zhiwei Zhong, He Wang, and Hao Su. Genesis: A generative and universal physics engine for robotics and beyond. arXiv preprint arXiv:2409.15824 , 2024. 16
