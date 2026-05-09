@@ -1,0 +1,864 @@
+Title: ROSE: Rollout On Serving GPUs via Cooperative Elasticity for Agentic RL
+
+URL Source: https://arxiv.org/pdf/2605.06534v1
+
+Published Time: Fri, 08 May 2026 01:35:12 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# ROLL ROSE : Rollout On Serving GPUs via Cooperative Elasticity for Agentic RL 
+
+## Wei Gao †∗ , Yuheng Zhao †∗ , Dilxat Muhtar ‡, Dakai An †, Xuchun Shang ‡,Tianyuan Wu †, Lunxi Cao †, Shaopan Xiong ‡, Weixun Wang ‡, Ju Huang ‡,Teng Ma ‡, Siran Yang ‡, Jiamang Wang ‡, Lin Qu ‡, Bo Zheng ‡, Wei Wang ††HKUST ‡Alibaba Group 
+
+> ∗Equal contribution
+
+## Abstract 
+
+Agentic reinforcement learning (RL) has emerged as a key dri-ver for improving LLMs’ multi-step reasoning and tool-use capabilities. However, its efficiency is bottlenecked by long-tail rollouts with multi-turn environment interactions. This renders static GPU provisioning a poor fit: overprovision-ing wastes GPUs on stragglers, whereas underprovisioning increases contention and slows training. We observe that production serving clusters routinely leave substantial GPU compute and memory headroom. We therefore argue for cooperative elasticity : opportunistically repurposing underutilized serving GPUs to execute rollouts. Realizing cooperative elasticity is non-trivial due to preserv-ing serving Service Level Objectives (SLOs) under bursty traf-fic, and heavy communication overhead. We present ROSE , a cooperative, resource-elastic post-training system that safely harvests idle compute and memory on serving GPUs to expe-dite agentic RL rollouts. ROSE comprises three components: (1) an SLO-safe co-serving executor that improves rollout throughput while preserving serving SLOs via efficient GPU memory and compute sharing; (2) a cross-cluster weight transfer engine that leverages weight shards and sparsity for fast cross-cluster weight synchronization; and (3) an elastic rollout scheduler that dynamically provisions cooperative ca-pacity and routes trajectory rollouts across dedicated rollout GPUs and opportunistic serving GPUs. Experiments across multiple model sizes and cluster scales show that ROSE im-proves average end-to-end throughput by 1.20 –3.31 × versus state-of-the-art resource-fixed and elastic baselines. 
+
+## 1 Introduction 
+
+The advent of agentic reinforcement learning (RL) is reshap-ing large language model (LLM) post-training, shifting mod-els from passive response generation to actively interacting with complex, dynamic environments. Recent advances in tool use [ 20 , 68 ], computer use [ 34 , 36 , 38 ], and software engineering [ 26 , 61 , 77 ] suggest that this training paradigm enables LLMs to progressively solve complex tasks through planning [31], tool use [59], and multi-step reasoning [48]. A typical agentic RL training pipeline consists of two stages, rollout and training . During rollout, the agent LLM interacts with environments over multiple turns. At each turn, the agent decodes tokens that serve as action signals, and then runs prefill on the feedback returned by the envi-ronment. The resulting sequence of actions and feedback forms a trajectory. During training, the agent LLM updates its weights using the collected trajectories, and then synchro-nizes the updated weights to the rollout stage for the next iteration. Practically , agentic RL is predominantly pursued in industry, where organizations can absorb the substantial training cost and the operational complexity of interactive environments, and where sizeable serving GPUs are already deployed for production usage of agentic LLMs. Similar to conventional single-turn RL, end-to-end agentic RL training is dominated by the rollout stage, which accounts for over 70% of total wall-clock time (see Figure 1a). Rollout batches also exhibit a pronounced long-tail distribution in execution time (see Figure 1b). Beyond this shared charac-terization, agentic RL rollouts differ from single-turn RL in two key aspects. First, multi-turn environment interactions impose stringent demands on compute throughput to reduce rollout overhead. In particular, the prefill phase is compute-intensive and benefits from prefix caching and resource scal-ing (see Figure 1c). Second, agentic RL typically launches additional rollouts to improve trajectory quality for gradient stability [ 81 , 87 ], which in turn exacerbates GPU memory pressure and contention. Collectively, both characteristics suggest that scaling out GPUs for rollout can expedite agen-tic RL training. However, long-tail trajectories render static provisioning inefficient: overprovisioning leaves GPUs idle while waiting for stragglers, whereas underprovisioning am-plifies contention among concurrent rollouts and increases rollout latency. Recently, many resource-fixed RL systems have been pro-posed to improve efficiency given a fixed GPU budget , using techniques such as resource disaggregation [ 69 , 89 ], coloca-tion [ 24 , 55 ], asynchronous execution [ 13 , 19 , 35 , 54 ], fully asynchronous training [ 13 ], tail batching [ 16 ], stage over-lapping [ 4 , 71 , 90 ], and speculative decoding [ 5 , 23 , 45 , 52 ]. While effective within a fixed allocation, these systems still require manual GPU provisioning. Because rollout demand varies over time, an allocation that is appropriate for one RL step can be suboptimal for another (Figure 1d). Existing resource-elastic RL systems typically realize elas-ticity by acquiring additional GPUs for rollouts on demand, using spot instances (e.g., RLBoost [ 70 ]) or serverless GPUs (e.g., tinker [ 62 ], OpenPipe [ 42 ]). While effective when spare  
+
+> arXiv:2605.06534v1 [cs.DC] 7 May 2026 Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al.
+
+capacity is readily available, this add-capacity approach has three limitations. First, the achievable speedup is bounded by the availability of incremental GPUs, which can be scarce during cluster-wide contention [ 70 ]. Second, because these GPUs are outside the steady-state deployment, elasticity often incurs repeated model initialization when capacity churns (e.g., spot preemption or serverless pool rotation), reducing effective throughput (Figure 3c). Third, acquiring extra GPUs typically increases monetary cost due to dynamic provisioning and pricing variability. An alternative is bidirectional autoscaling , which shrinks the serving cluster during low load and redirects freed GPUs to rollouts. However, serving traffic is bursty at second-level granularity (§3.2), and reclaiming GPUs back to serving takes tens of seconds (Figure 3c), making bidirectional autoscaling unable to preserve serving SLOs (§3.3, §6.5). Instead, we explore cooperative elasticity , which reuses 
+
+already-deployed serving capacity within an organization. In many industrial LLM companies, the RL training team and the LLM serving team are part of the same institution and operate separate large-scale GPU clusters. Prior stud-ies [ 44 , 66 , 74 , 82 , 85 ] report that fluctuating serving traffic causes serving GPU underutilization. Our empirical study (see Figure 3b) confirms that serving GPUs have low compute utilization (18.9%) and memory utilization (14.3%). Cooper-ative elasticity turns this headroom into rollout capacity by harvesting idle GPU cycles and memory from the serv-ing cluster subject to Service Level Objectives (SLOs) con-straints. By reusing existing capacity, cooperative elasticity expands effective rollout resources without acquiring addi-tional GPUs, avoids on-demand provisioning overheads, and incurs little incremental monetary cost. In this paper, we present ROSE , a cooperative, elastic sys-tem for agentic RL post-training that harvests serving GPUs for rollouts. While promising, repurposing serving GPUs poses two primary challenges. First, co-locating heteroge-neous serving and rollout LLMs must preserve serving SLOs under bursty traffic, despite contention for both GPU mem-ory and compute ( C1 ). Prior GPU multiplexing systems cannot simultaneously handle heterogeneous KVC layouts across models [ 44 ], retain rollout prefix cache in GPU for short-lived reuse [ 72 , 82 ], and yield resources promptly under serving bursts [ 7, 72 , 82 ] (§6.5). We observe three properties of agentic rollouts that enable SLO-safe co-serving: (1) het-erogeneous models require flexible KVC rebalancing across incompatible layouts, (2) rollout environment interactions are short-lived (typically <10 s [ 17 ]), favoring in-GPU pre-fix caching with fast memory preemption, and (3) rollouts tolerate seconds-level latency because preempted rollouts can be rerouted to dedicated rollout GPUs. We design a co-serving executor that combines CUDA VMM for cross-model KV cache rebalancing, preemptive memory sharing that re-tains rollout prefix cache in GPU and aggressively reclaims it during serving bursts, and dual-SLO admission control that prioritizes serving via temporal sharing while opportunisti-cally executing rollouts. Second, the serving and RL clusters may reside in dif-ferent datacenters connected by bandwidth-limited links (10–200 Gbps Ethernet), causing cross-cluster weight trans-fer to take dozens of seconds to minutes (Figure 3d), eroding the speedups from elastic rollouts ( C2 ). Existing bandwidth-optimized communication systems [ 10 , 33 , 50 , 67 ] rely on collective communication over fixed process groups with uniform sharding, which cannot accommodate cooperative elasticity where (1) serving GPUs dynamically join or leave across RL steps, and (2) training and serving adopt different parallelism strategies requiring automatic shard mapping. Furthermore, we observe that RL post-training weight deltas 
+
+exhibit lossless sparsity (Figure 6), a property rare in con-ventional LLM training [ 40 , 49 , 76 ] that can be exploited for cross-cluster transfer. We design a cross-cluster weight transfer engine that combines a relay layer for asynchronous, fault-tolerant propagation, shard-aware routing across het-erogeneous parallelism configurations, and sparsity-aware compression that transmits only non-zero deltas, reducing transfer overhead to within 20 seconds even under 20 Gbps Ethernet (§6.3). Beyond these challenges, we design a rollout scheduler that capitalizes on cooperative elasticity by dynamically dispatch-ing rollouts across dedicated rollout GPUs and opportunis-tic serving GPUs. To adapt to time-varying serving load, the scheduler uses two heuristics. First, it performs turn-wise, concurrency-aware routing to decide how many rollouts to offload to serving GPUs while maintaining high rollout throughput. Second, it adopts a cache-affinity placement pol-icy that preferentially routes each turn to the GPU holding the trajectory’s prefix KVC, and otherwise falls back to load-aware placement. Together, these policies allow ROSE to exploit underutilized serving capacity to accelerate rollouts while minimizing interference with serving workloads. This paper makes the following contributions: 
+
+• We propose cooperative elasticity , the first approach to harvest serving GPUs for RL rollouts while preserving serving SLOs. 
+
+• We design a co-serving executor that uniquely sup-ports heterogeneous LLMs, prefix caching, and bursty serving—capabilities not simultaneously addressed by prior co-serving systems. 
+
+• We discover that RL weight deltas exhibit >95% spar-sity and design the first cross-cluster weight trans-fer engine that exploits both shard-awareness and sparsity-awareness for efficient RL weight propagation across datacenters. 
+
+• We design an elastic rollout scheduler with turn-wise routing and cache-affinity that adapts to time-varying serving load without global synchronization.   
+
+> 2ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA
+
+• We implement ROSE atop ROLL [ 64 ] and evaluate it with Qwen3-8B/32B [ 75 ] on agentic tasks [ 9 , 58 ], using 16–48 training GPUs and 16–64 serving GPUs (H800). Compared with resource-fixed baselines ROLL [ 64 ]and AReaL [ 13 ], ROSE improves average throughput by 1.20 –3.31 × and 1.44 –2.69 ×, respectively. Compared with resource-elastic baselines RLBoost [ 70 ] and 𝜆 RL [ 42 ,62 ], ROSE outperforms by 1.20 –1.26 × and 1.29 –1.52 ×,respectively. 
+
+## 2 Background and Motivation 
+
+2.1 Agentic RL Training 
+
+An agentic RL training pipeline alternates between rollout 
+
+and training . In modern agentic RL, rollout is often organized using group-based algorithms [ 11 , 53 , 81 ]. Taking GRPO as an example, the rollout stage launches 𝐵 0 environment groups ,where environments within the same group share the same initial state. For each group, the agent LLM (actor) interacts with the environment over multiple turns: at each turn it observes the current state , samples an action from its pol-icy, and sends it back to the environment; the environment then transitions to a new state and returns feedback. The agent generates 𝐺 0 sampled responses per group, produc-ing 𝐺 0 trajectories from the same starting point. When each trajectory receives the terminal signal, a reward worker eval-uates it and assigns a scalar reward. In the training stage, the agent LLM updates its model weights using the collected trajectories and reward signals, and the updated weights are synchronized back to the rollout workers for the next step. 
+
+2.2 Workload Characterization 
+
+We perform workload characterization using Qwen3-8B and Qwen3-32B [ 75 ] within the agentic RL framework ROLL [ 64 ], configured with a maximum response length of 32k tokens, a batch size of 256, and a group size of 8 under the GRPO algorithm [ 53 ], on 16 H800 GPUs. We adopt synchronous RL training to profile the end-to-end training time. Specifically, we run the 8B and 32B LLMs on the agentic tasks FrozenLake and ALFWorld, respectively, for five consecutive steps. 
+
+Dominant Rollout Overhead. We report the performance breakdown in Figure 1a. The end-to-end training time con-sists of rollout, training, and weight synchronization over-head. The rollout stage accounts for over 70% of total time and dominates end-to-end training. This motivates the tai-lored rollout optimizations to improve training efficiency. 
+
+Long-tail Rollouts. Figure 1b presents the execution time distribution of trajectories during rollout for the 8B and 32B LLMs. We observe a pronounced long-tail pattern: most trajectories finish quickly, while a small fraction take much longer. In particular, the 75th percentile (P75) is at most 30% of the end-to-end rollout time. This observation is consistent with prior studies [ 16 , 35 , 65 ]. Such long-tail phenomena can cause GPU underutilization, as many GPUs remain idle while waiting for straggler trajectories to complete. 
+
+The Impact of Prefill. Multi-turn agentic RL entails fre-quent prefills [ 17 , 65 ]. In our workloads, prefill tokens ac-count for 77% (Qwen3-8B) and 86% (Qwen3-32B) of total tokens, making prefill a dominant cost. As a result, prefix caching, which reuses KV cache (KVC) for shared prefixes across requests, is widely used in multi-turn rollouts [ 12 , 17 ,35 ]. To quantify its impact, we vary the number of GPUs for Qwen3-8B and measure average rollout time with and with-out prefix caching in Figure 1c. Under resource contention, prefix caching improves rollout throughput by up to 3.4×
+
+(at 8 GPUs). As more GPUs are allocated, the rollout time reduces from 607 s to 435 s. This contrasts with single-turn RL, where scaling GPUs often yields limited benefit because long-tail samples are dominated by the bandwidth-bound decoding phase. In multi-turn agentic RL, scaling is more effective because of the compute-heavy prefill stage. Next, we analyze how rollout demand varies across steps to under-stand whether a static GPU allocation can be optimal. 
+
+Need for Resource Elasticity. In agentic RL training, agent– environment interaction often yields sparse rewards, and reward values within a group may exhibit low (or even zero) variance, weakening the learning signal. Hence, many al-gorithmic studies [ 81 , 84 , 87 ] propose redundant sampling: dynamically increasing 𝐵 0 to launch additional environment workers, and continuing rollouts until collecting 𝐵 0 groups with non-zero reward variance. We observe that many agen-tic RL jobs enable this feature in our internal cluster. Fig-ure 1d shows that when training a Qwen3-8B model with DAPO [ 81 ], the number of generated trajectories vary sig-nificantly across steps, with the maximum reaching 5.7×
+
+the user specified batch size. With a fixed GPU budget, re-dundant sampling increases memory pressure, and the high variability in rollout volume makes a static, resource-fixed configuration inefficient. Beyond redundant sampling, even standard GRPO with a fixed batch size benefits from resource elasticity: long-tail rollouts and compute-heavy prefills cre-ate variable per-step resource demand, and our end-to-end evaluation (§6.1) confirms that resource elasticity improves average throughput by 1.31 –1.46 × under GRPO. These re-sults motivate a resource-elastic agentic RL system that ad-justs rollout GPU allocation over time to reduce contention and shorten step time. 
+
+2.3 Limitations of Existing Solutions Resource-fixed RL systems struggle to balance utiliza-tion and training time. Many existing RL training sys-tems [ 4, 12 , 13 , 16 , 19 , 23 , 35 , 52 , 54 , 64 , 69 , 71 , 89 , 90 ] provi-sion a fixed number of GPUs for rollouts throughout train-ing. This static allocation cannot align the actual rollout workload demand: rollout latency exhibits heavy tails, so overprovisioning leaves GPUs underutilized due to long-tail trajectories, while underprovisioning increases contention     
+
+> 3Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al. 8B 32B
+> Model Size
+> 0
+> 25
+> 50
+> 75
+> 100
+> Ratio (%)
+> 86.9%
+> 12.9%
+> 0.2%
+> 70.5%
+> 29.2%
+> 0.3%
+> Rollout Train Weight Sync.
+
+(a) Performance Breakdown. 0 200 400 600  
+
+> Time (s)
+> 0
+> 25
+> 50
+> 75
+> 100
+> CDF (%)
+> 8B
+> 32B
+
+(b) Long-tail Rollouts. 2000      
+
+> 2250 w/o Prefix Caching
+> w/ Prefix Caching
+> 812 16
+> Number of GPUs
+> 0
+> 500
+> Time(s)
+
+(c) Impact of Prefill. 0 25 50 75 100   
+
+> Steps
+> 0
+> 500
+> 1k
+> Num Traj.
+> Num Traj. Batch Size
+
+(d) Need for Elasticity. 
+
+Figure 1. Characterization of agentic RL: (a) The breakdown of end-to-end training time; (b) The long-tail distribution of rollout execution time; (c) The impact of prefill on rollouts; (d) The demand for resource elasticity. Train   
+
+> Agentic LLM Environment
+> Action
+> Observation
+> Weight Sync.
+> Trajectory
+
+Rollout 
+
+Figure 2. Illustration of Agentic RL Pipeline. for compute and memory, inflating rollout time. Moreover, as Figure 1d shows, rollout demand varies across steps, making any single fixed allocation suboptimal over time. 
+
+Existing elastic RL systems depend on abundant spare GPUs. Existing resource-elastic designs typically rely on spot instances [ 70 ] or serverless GPUs [ 42 , 62 ] to scale rollout capacity on demand. However, as cluster-wide RL demand grows, opportunistic capacity becomes scarce and cannot reliably satisfy rollout demand. As such, the effectiveness of RLBoost [ 70 ] is limited by spot availability. Moreover, fluctu-ating spot capacity introduces frequent resource allocation churn, reducing effective rollout throughput. Similarly, un-der heavy contention from many concurrent RL jobs, server-less RL systems [ 42 , 62 ] may trigger frequent reallocation while still failing to secure GPUs for many jobs, undermining elasticity benefits. Beyond, dynamic provisioning exposes training to volatile pricing, increasing and destabilizing the monetary cost of agentic RL training. 
+
+## 3 Opportunities and Challenges 
+
+We first outline the opportunity to repurpose serving GPUs for RL via cooperative elasticity. We then quantify the har-vestable serving capacity and highlight the key challenges. 
+
+3.1 Infrastructure for RL and Serving 
+
+Today, many AI organizations operate both RL infrastruc-ture and LLM serving infrastructure, and Figure 4 illustrates a typical deployment within one organization. For clarity, we categorize GPUs into three clusters: a training cluster , a 
+
+rollout cluster , and a serving cluster . The training and rollout clusters are co-located in the same datacenter and communi-cate via high-speed interconnects (e.g., NVLink and Infini-Band). The serving cluster may reside in the same or a differ-ent datacenter. In large organizations such as Google [ 27 ], ByteDance [ 25 ], and Alibaba [ 72 ], training and serving clus-ters are routinely placed in separate datacenters for oper-ational isolation, capacity planning, and proximity to end users. Cross-datacenter links are bandwidth-limited (e.g., 10–200 Gbps Ethernet) [17, 69]. RL infrastructure and LLM serving infrastructure are op-erated by different teams within the same organization, each managing large-scale GPUs. Since rollout and serving are both inference workloads, both teams often collaborate on optimizing a shared LLM inference engine, a pattern also ob-served in open-source communities [ 51 ]. This organizational structure creates an opportunity for cooperative elasticity :
+
+conceptually , the RL infrastructure team can collaborate with the serving team to repurpose serving GPUs for rollouts when rollout demand spikes, thereby enabling resource elasticity without expanding the training cluster. 
+
+3.2 Serving Capacity Availability 
+
+We next quantify how much serving capacity is empirically 
+
+harvestable for the cooperative elasticity of rollouts. 
+
+Fluctuating Serving Traffic Leads to GPU Underutiliza-tion. Production LLM serving workloads exhibit fluctuating request rates [ 47 , 63 , 66 , 74 , 82 ]. Figure 3a plots a 24-hour Microsoft trace [ 60 ] at minute granularity alongside three zoomed-in 5-minute windows at per-second granularity. At the minute level, the peak rate reaches 1.7× the 24-hour aver-age. At the second level, burstiness is far more pronounced: per-second peaks reach 4.22 ×, 1.58 ×, and 1.73 × their respec-tive window averages, consistent with second-level spikes reported by BurstGPT [ 66 ]. To absorb such spikes, providers often statically overprovision for peak demand [ 88 ], result-ing in substantial GPU underutilization. We quantify this by replaying a 24-hour production trace from [ 47 ] (preserving original prompt lengths, response lengths, and arrival pro-cess) on Qwen3-8B with 8 H800 GPUs. Figure 3b shows the GPU utilization sampled at 1-second intervals and smoothed with a one-minute moving average. On average, GPUs reach only 18.9% SM utilization and 14.3% HBM utilization, con-firming that peak-provisioned GPUs remain significantly underutilized for much of the day. 
+
+Abundant Serving GPU Capacity for Rollouts. Beyond per-GPU underutilization, serving clusters often comprise thousands of GPUs [ 72 ], so even modest slack per GPU aggre-gates into a large pool of idle cycles and memory. A natural question is whether serving autoscaling [ 80 , 83 ] can harvest this capacity by shrinking the serving cluster during low        
+
+> 4ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA 0816 24
+> Time (h)
+> 2000
+> 4000
+> #Req/min  #1
+> #2
+> #3 50
+> 100
+> 150
+> #r/s
+> 50
+> 100
+> #r/s
+> 0300
+> Time(s)
+> 25
+> 50
+> #r/s
+
+(a) Serving Traffic. 0 6 12 18 24  
+
+> Time (h)
+> 0
+> 10
+> 20
+> 30
+> Util.(%)  Computation Util.
+> Memory Util.
+
+(b) GPU Utilization. 8B(TP1) 14B(TP2) 32B(TP4)  
+
+> Model Size
+> 0
+> 25
+> 50
+> Time (s)
+> 32
+> 44
+> 58
+
+(c) Allocation Overhead. 8B 14B 32B   
+
+> Model Size
+> 0
+> 100
+> 200
+> Time (s)
+> 38 70
+> 145
+> 90
+> 152
+> 202 RDMA
+> TCP
+
+(d) Comm Betw. Train&Serve. 
+
+Figure 3. Characterization of serving clusters and workloads: (a) Fluctuating serving traffic; (b) Serving GPU underutilization; (c) High allocation overhead; (d) Substantial communication overhead. Datacenter   
+
+> IB/ RoCe
+> TCP/IP
+> NVLink
+> Datacenter
+> IB/RoCe
+> Rollout Cluster Training Cluster Serving Cluster
+
+Figure 4. Scheme of Datacenter Infrastructure. load and redirecting freed GPUs to rollouts. However, bidi-rectional autoscaling is fundamentally limited: reclaiming GPUs from rollouts back to serving requires evicting in-flight rollouts and reloading models, taking tens of seconds (Figure 3c) and far exceeding typical SLO budgets. Because serving traffic is bursty at second-level granularity, frequent mode switching triggers repeated initialization overhead that erodes throughput gains. Our evaluation (§6.5) confirms that an autoscaling-based baseline cannot safely exploit serving slack without SLO violations. As a result, many providers still adopt fixed-capacity serving deployments to react to bursty traffic, leaving substantial spare capacity that cooperative elasticity can exploit without GPU-level mode switching. 
+
+3.3 Challenges in Cooperative Elasticity 
+
+Making bidirectional autoscaling burst-aware would require preemptive memory sharing and SLO-aware admission con-trol, fundamentally transforming it into a co-serving system. Cooperative elasticity embraces this direction by co-locating 
+
+rollout and serving workloads on the same GPUs. This avoids allocation overhead but requires careful GPU memory and compute sharing to preserve serving SLOs. 
+
+C1: Preserving Serving SLOs under Bursty Traffic. Un-like bidirectional autoscaling, which reassigns entire GPUs between workloads, cooperative elasticity keeps both the serving and rollout models resident on each GPU and dy-namically shares resources between them. This avoids the tens-of-seconds reallocation overhead (Figure 3c) that makes bidirectional autoscaling impractical, but introduces finer-grained contention for GPU memory and compute. 
+
+• Inefficient memory sharing. Mainstream LLM serving engines [ 28 , 51 ] rely on static GPU memory reservation for a given model. A natural co-location approach is to reserve static, exclusive GPU memory regions for the KVC of the serving and rollout LLMs while sharing compute. This can work under low serving traffic, but bursty ar-rivals require dynamically resizing the KVC partitions to accommodate more serving requests and meet SLOs. Un-fortunately, resizing KVC memory in existing engines typ-ically requires terminating the process and reinitializing it, which can take dozens of seconds (Figure 3c). Moreover, rollouts benefit from prefix caching, which competes with the serving KVC for limited HBM capacity. Under spikes, this contention can inflate decoding latency and trigger SLO violations. 
+
+• Severe compute interference. LLM serving consists of two phases: prefill (compute-intensive) and decoding 
+
+(memory- and latency-sensitive). Serving systems enforce two latency SLOs: time-to-first-token (TTFT) and time-per-output-token (TPOT), reflecting prefill and decoding latency, respectively. Several systems disaggregate prefill and decoding onto separate GPU pools (PD disaggrega-tion) to stabilize TTFT/TPOT under bursty traffic [ 43 , 88 ]. Unlike standard multi-tenant serving, where co-located workloads share comparable SLO requirements, rollout inference has fundamentally asymmetric characteristics: rollouts run a different LLM with much looser latency tar-gets, generate long multi-turn sequences that sustain GPU occupancy for seconds, and perform both prefill and de-code on the same GPU (PD co-location) even when serving deployment uses PD disaggregation. The standard request scheduling cannot bound the compute interference: a sin-gle rollout prefill chunk can delay serving decodes, and sustained rollout batches can starve serving prefills (ana-lyzed in §6.2). 
+
+C2: Heavy Cross-cluster Communication Overhead. 
+
+In many deployments, RL training and online serving are provisioned as separate GPU clusters, and weight updates must traverse cross-cluster links via a flexible transfer engine. To quantify this overhead, we measure the end-to-end time to transfer LLM parameters of varying sizes from a GPU node in the RL cluster to a GPU node in the serving cluster using Mooncake Store [46 ]1, over TCP (200 Gbps Ethernet) and RDMA (400 Gbps InfiniBand), shown in Figure 3d. Even with InfiniBand (which is uncommon across datacenters),                
+
+> 1The weight transfer adopted here is a batch baseline in §6.3. 5Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al. Training Rollout
+> Rollout Worker
+> Train Worker
+> RL Post -Training GPU Cluster
+> Rollout GPU Training GPU
+> Serving GPU Cluster
+> Algorithm & System Config
+> Serving Worker
+> Serving GPU
+> VLLM / SGLang
+> Executor
+> Megatron
+> Executor
+> Elastic Rollout Scheduler §4.3
+> Cross -Cluster Weight Transfer Engine §4.2
+> Co -Serve
+> Executor §4.1
+> CPU Cluster
+> CPU
+> Env Worker
+> Env
+> Executor
+> Rollout Cluster Training Cluster Serving Cluster
+
+Figure 5. System Architecture of ROSE .it can take up to 145 s and grow quickly with model size, becoming a bottleneck for frequent weight synchronization. 
+
+## 4 System Design 
+
+System Overview. To address the above challenges, we introduce ROSE , the architecture of which is illustrated in Figure 5. It includes three novel components: (1) an SLO-safe 
+
+co-serving executor that co-locates heterogeneous serving and rollout LLMs on the same GPUs, dynamically sharing mem-ory and compute while preserving serving SLOs (§4.1); (2) a cross-cluster weight transfer engine that asynchronously synchronizes model weights from the training cluster to the serving cluster with sharding and sparsity awareness (§4.2); and (3) an elastic rollout scheduler that dispatches rollouts across rollout and serving GPUs to realize the cooperative elasticity and achieve end-to-end training throughput im-provement under varying serving and rollout load (§4.3). 
+
+Serving Cluster Setup. ROSE supports diverse serving de-ployments, including PD disaggregation vs. co-location and autoscaled vs. statically provisioned clusters. In our evalua-tion, we use PD disaggregation with a statically provisioned serving cluster and enforce P99 tail-latency SLOs on TTFT and TPOT. To avoid the initialization overhead of loading rollout models on demand, we pre-deploy commonly used rollout models alongside the heterogeneous serving LLMs in the serving cluster (e.g., by running sglang.launch_server 
+
+or vllm serve ) and expose endpoints for weight transfer and response generation. When there is no training job, roll-out workers remain deactivated (i.e., not resident on the GPU) and consume at most 2 GB GPU memory, and they are activated during the rollout stage. We detail the concrete model pairing and cluster configuration in §6. 
+
+System Workflow. The user specifies the RL resource re-quest 𝑁 rl and an upper bound on the number of serving GPUs that can be borrowed 𝑁 serving . Upon job submission, the RL cluster reserves 𝑁 rl GPUs, and the serving cluster selects up to 𝑁 serving GPUs with the lowest recent KVC us-age over a fixed window (e.g., 1 hour). To avoid contention among concurrent RL jobs, ROSE assigns each selected serv-ing GPU to at most one RL job for rollouts. During this setup, 
+
+ROSE initializes the RL runtime on the reserved RL GPUs and launches rollout workers accordingly. On selected serving GPUs, ROSE activates the rollout runtime into GPU memory. Each RL step follows a typical RL pipeline. First, ROSE ini-tiates the rollout stage. Each trajectory involves multi-turn environment interactions, and the elastic rollout scheduler dispatches each turn to either dedicated rollout GPUs or bor-rowed serving GPUs to improve rollout throughput while enforcing serving SLOs. Second, on each serving GPU, the co-serving executor dynamically shares memory and com-pute between the heterogeneous serving and rollout LLMs, enforcing serving TTFT and TPOT SLOs while harvesting otherwise idle GPU cycles for rollouts. If serving load causes rollout stalls, the scheduler reroutes subsequent trajectories to underutilized GPUs. Third, the generated trajectories are fed into the training stage. Once training produces updated weights, ROSE invokes the cross-cluster weight transfer en-gine, which asynchronously pushes weight updates to serv-ing GPUs while the next step’s intra-cluster synchronization and rollout execution proceed in parallel (§4.2). 
+
+4.1 SLO-Safe Co-Serving Executor 
+
+The co-serving executor runs rollouts opportunistically on serving GPUs while preserving serving TTFT and TPOT SLOs. This requires managing two sources of contention: 
+
+GPU memory (dominated by KVC) and GPU compute (which directly affects token-level latency). Existing GPU multiplex-ing systems target either homogeneous models [ 41 , 44 ] or workloads with comparable SLO requirements [ 7 , 72 , 82 ], and none simultaneously addresses the three challenges of cooperative elasticity: co-serving heterogeneous LLMs with incompatible KVC layouts, managing in-GPU prefix caching for inference workloads (Figure 1c), and yielding resources immediately when serving load spikes. Our evaluation (§6.5) confirms that naively adopting existing multiplexing en-gine [ 82 ] degrades rollout throughput while violating serv-ing TTFT SLOs. We address these challenges through three techniques, enforcing two invariants: serving-first memory 
+
+(serving always has priority on KVC capacity) and serving-first compute (serving always has priority on GPU compute). 
+
+VMM-based Cross-Model KV Cache Memory Sharing. 
+
+Serving and rollout models are often heterogeneous (e.g., Qwen3-8B for serving vs. Qwen3-32B for rollouts) with in-compatible KVC layouts due to different head dimensions, layer counts, and tensor parallelism degrees. Unlike PD-disaggregated inference [ 43 , 88 ], which transfers KVC be-tween hosts running the same model, co-serving requires two 
+
+heterogeneous models to dynamically share a single GPU’s memory. Mainstream engines [ 28 , 51 ] pre-allocate per-model KVC pools at initialization and cannot rebalance across dif-ferent layouts—reallocating memory between models would require destroying one model’s KVC pool and reconstructing it with a different layout, incurring seconds-level overhead. We leverage CUDA VMM to enable fast, flexible KVC re-balancing across heterogeneous models. We decouple virtual   
+
+> 6ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA
+
+KV address spaces from physical GPU pages: each model reserves a contiguous virtual KV address space that pre-serves its attention-kernel indexing, while all models share a global physical page allocator that maps and unmaps pages on demand. When serving load increases, we unmap phys-ical pages from rollout’s virtual address space and remap them into serving’s virtual address space at page granularity (typically 2MB). This enables cross-model memory rebalanc-ing without modifying KVC layouts or restarting attention kernels. We keep a lightweight runtime context warm on serving GPUs for fast rollout model (re-)activation. Acti-vating Qwen3-32B completes within 5 s via PCIe/NVLink weight loading, avoiding the tens-of-seconds overhead of add-capacity elasticity. 
+
+Preemptive Memory Sharing Policy. Prefix caching is critical for rollout performance (Figure 1c), but existing mul-tiplexing systems [ 72 , 82 ] offload completed request KVC to CPU memory to free GPU capacity. However, rollout environ-ment interactions are short-lived: consecutive interactions typically occur within 10 s [ 17 ], concentrating prefix reuse in a brief window. CPU-GPU transfer latency ( ∼ms) makes offloading ineffective for such short intervals. We instead keep rollout prefix cache resident in GPU to exploit short-term reuse, but this creates memory contention with serving that prior systems do not address. We note that prior KVC engines [ 6, 46 ] also use host memory offloading, which is ineffective for rollouts because weights are updated every RL step, quickly invalidating cached entries but increase high CPU memory pressure. We address this tension through preemptive memory shar-ing : we keep rollout prefix cache in GPU under typical load, but aggressively reclaim it during serving bursts, relying on the short interaction window to recapture most reuse before entries expire. At the beginning of each RL step, the elas-tic rollout scheduler derives a per-GPU rollout KVC budget from the serving model’s recent memory usage and reserves a fixed KVC headroom 𝐻 (e.g., 20% of total GPU memory) for serving. This iteration-level budget stabilizes rollout mem-ory usage under typical serving load, but it cannot react to sudden serving bursts. The memory sharing policy proceeds in three steps. (1) 
+
+Burst trigger: The co-serving executor continuously moni-tors serving KVC usage. When serving starts to consume the reserved headroom (i.e., serving KVC usage crosses a high-watermark within 𝐻 ), the executor enters a pressure 
+
+state. (2) Emergency cut: In the pressure state, the executor immediately shrinks the rollout KVC budget by a fixed fac-tor (2 ×) and returns the freed physical pages to the shared allocator. It reclaims rollout KVC pages at request granu-larity, aborts the affected rollout requests, and notifies the rollout scheduler (§4.3) to reroute the affected trajectories to other underutilized GPUs. This one-time aggressive cut avoids repeated fine-grained reallocations and reduces al-location/reclamation churn during load bursts. (3) Freeze: 
+
+To prevent oscillation between reclaiming and regrowing rollout KVC under bursty traffic, the executor does not in-crease the rollout budget until the next RL step, when the rollout scheduler recomputes budgets using updated serving statistics. This conservative choice preserves serving SLOs, while the rollout scheduler absorbs the transient capacity loss by shifting subsequent rollout steps to underutilized GPUs, including dedicated rollout GPUs, as rollouts progress. We attach a short lease (e.g., 10 s) to each rollout KVC page and reclaim pages when the lease expires, bounding HBM consumption while capturing most prefix reuse within the typical environment interaction window. 
+
+Dual-SLO Admission Controller. Co-serving causes com-pute interference between rollout and serving under spa-tial co-location (analyzed in §6.2). Unlike serving requests that require millisecond-level TTFT (e.g., 100 ms) and TPOT (e.g., 50 ms) SLOs, rollouts tolerate seconds-level delays be-cause preempted rollouts can be rerouted to dedicated rollout GPUs by the global scheduler (§4.3). We exploit this asym-metry through temporal sharing with serving-first admission control: only one workload executes on the GPU at a time while both reside in GPU memory, serving tokens are al-ways prioritized, and rollout tokens are admitted only when sufficient SLO slack exists. When serving bursts arrive, we immediately yield compute—stalled rollouts simply migrate to underutilized GPUs without permanent progress loss. We pre-profile runtime costs for both serving and rollout execution and use them to make online admission decisions. For prefill, we profile the latency of monolithic and chunked prefill as a function of prompt length, denoted by ˆ𝑇 prf (𝐿, 𝑚 )
+
+where 𝑚 ∈ { mono , chunk }. For decode, we profile the per-step latency as a function of batch size, denoted by ˆ𝑇 dec (𝑏 ).These profiles allow the executor to estimate, at each sched-uling tick, the remaining slack under the serving TTFT and TPOT SLOs, and to admit rollout tokens only when sufficient slack is available. Although the serving stack uses PD disag-gregation, we perform PD colocation for rollouts to maximize serving resource utilization. We further enable chunked pre-fill for rollouts (e.g., chunk size 512 tokens), which bounds the runtime of each rollout step and avoids head-of-line blocking for serving. Next, we describe the computation of SLO slack on prefiller and decoder instances. On prefiller instances, we first compute the TTFT slack of pending serving requests at each scheduling tick. For a serving request 𝑟 , let 𝑡 now be the current time and 𝑡 arr  
+
+> 𝑟
+
+be its arrival time. Let 𝐵 TTFT be the configured TTFT SLO budget. Given prompt length 𝐿 𝑟 and the serving prefill mode 𝑚 , the remaining TTFT slack is 
+
+𝑆 prf  
+
+> 𝑟
+
+=  𝑡 arr  
+
+> 𝑟
+
++ 𝐵 TTFT 
+
+ − 𝑡 now − ˆ𝑇 prf (𝐿 𝑟 , 𝑚 ). (1) We conservatively use the minimum slack among queued prefills as the TTFT slack for rollouts, 𝑆 prf min = min 𝑟 ∈ Q prf 𝑆 prf  
+
+> 𝑟
+
+. 
+
+> 7Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al.
+
+On decoder instances, for a serving request 𝑟 , let 𝑡 last  
+
+> 𝑟
+
+be the time it produced its most recent token. Let 𝐵 TPOT be the configured TPOT budget, and let 𝑏 be the current serving decode batch size. The remaining TPOT slack is 
+
+𝑆 dec  
+
+> 𝑟
+
+=
+
+
+
+𝑡 last  
+
+> 𝑟
+
++ 𝐵 TPOT 
+
+
+
+− 𝑡 now − ˆ𝑇 dec (𝑏 ). (2) We again use the minimum slack among active decodes, 
+
+𝑆 dec min = min 𝑟 ∈ Q dec 𝑆 dec  
+
+> 𝑟
+
+. We admit rollout token generation only when two conditions hold. First, the serving workload has sufficient TTFT and TPOT slack to accommodate the additional compute for rollout tokens. Second, allocating the corresponding KVC pages for rollout does not reduce the serving model’s available KVC capacity below a reserved headroom. If rollout prefill or decoding makes no progress for a fixed timeout (e.g., 2 seconds), the co-serving executor reports a stall to the global scheduler and drops this trajec-tory, allowing the scheduler to reroute it elsewhere. 
+
+4.2 Cross-Cluster Weight Transfer Engine 
+
+The serving and training clusters may reside in different datacenters connected by bandwidth-limited interconnects. As discussed in §3, cross-cluster communication overhead can become a bottleneck and undermine the benefits of co-operative elasticity. Existing communication systems [ 10 ,33 , 50 , 67 ] exploit gradient sparsity for intra -cluster commu-nication, but assume collective communication over fixed process groups with uniform sharding (typically data paral-lelism). Cooperative elasticity introduces two requirements absent in these settings: (1) dynamic GPU membership, as serving GPUs join or leave across RL steps, precludes fixed collectives; and (2) heterogeneous parallelism strategies be-tween training and serving require automatic shard mapping. Additionally, we observe that RL post-training weight deltas 
+
+are >95% sparse (Figure 6), a property uncommon in conven-tional LLM training that enables lossless compressed delta transfer for cross -cluster weight synchronization. We address these through three techniques. 
+
+Asynchronous Weight Transfer. Resource elasticity makes the set of participating serving GPUs dynamic : serving GPUs may join or leave between RL steps due to changing serv-ing load. This precludes fixed collective groups and requires fault-tolerant, point-to-point transfer that gracefully han-dles membership changes. Following RollArt [ 17 ], we build the transfer engine on Mooncake Store as a relay layer that decouples training and serving: training workers push weights in fixed-size buckets (e.g., 64 MB) to relay workers asynchronously, and serving workers pull in larger batches (e.g., 1 GB) on demand without coordinating with training or other serving workers. This avoids establishing fixed com-munication groups and makes transfer robust to membership changes. We overlap cross-cluster transfer with NCCL-based intra-cluster synchronization so that rollout workers can resume without waiting for cross-cluster transfer to finish. 0 7 14 21 28 35        
+
+> Layer Index
+> 96
+> 98
+> 100
+> Sparsity (%)
+> (a) FrozenLake-8B. 015 30 45 60
+> Layer Index
+> 97
+> 98
+> 99
+> 100
+> Sparsity (%) (b) ALFWorld-32B.
+
+Figure 6. Layer-wise sparsity ratio at 10th step. 
+
+Shard-aware Weight Transfer. Training and serving clus-ters adopt heterogeneous parallelism strategies (e.g., training with TP8 ×PP2 and serving with TP4), requiring automatic shard mapping across configurations. Naive approaches re-quire manual resharding or full model aggregation before transfer. ROSE automatically infers each parameter’s shard-ing rule by identifying the sharded dimension from the mod-ule type and parameter shape, computing per-rank slice ranges, and encoding this metadata in the Mooncake object key. On the training side, each device pushes its local shard asynchronously rather than first all-gathering the full model. To avoid redundant sends, each data-parallel rank transmits a mutually exclusive set of shards, parallelizing transfers and improving link utilization. On the serving side, each rank deterministically derives which buckets to pull based on the encoded metadata, fetching only its needed shards rather than a full model replica. This substantially reduces transfer volume and makes weight transfer transparent to the RL algorithm. We support tensor parallelism (TP) and pipeline parallelism (PP). 
+
+Sparsity-aware Weight Transfer. Transfer time scales with data volume, so naively synchronizing full weights be-comes prohibitive as model size grows. Prior communication systems [ 10 , 67 ] exploit gradient sparsity to improve intra -cluster communication efficiency, but lossless gradient spar-sity is rare in LLM training [ 40 , 49 , 76 ]. We observe that RL post-training produces a natural source of lossless sparsity: the weight differentials Δ𝑊 𝑡 = 𝑊 𝑡 − 𝑊 𝑡 −1 between consecu-tive steps are highly sparse, because RL algorithms employ gradient-stabilization techniques (e.g., reference models, KL penalties, and conservative update rules) [ 53 , 81 ] that con-strain policy drift. We exploit this weight-differential sparsity for cross -cluster transfer after training completes. We define sparsity ratio as the fraction of zero elements in 
+
+Δ𝑊 𝑡 . Figure 6 reports the layer-wise sparsity for Qwen3-8B and Qwen3-32B at the 10th RL step. Across layers, more than 95% of elements in Δ𝑊 𝑡 are zero, consistent with prior obser-vations in RL post-training [ 29 , 62 ]. §6.3 confirms that this high sparsity persists across RL steps. The engine therefore ships sparse deltas rather than full replicas. To exploit this sparsity efficiently, we compress Δ𝑊 𝑡 in COO (coordinate) format for transfer and keep the previous-step weights 𝑊 𝑡 −1 resident on local devices. At each update, we reconstruct the current weights by applying Δ𝑊 𝑡 to 𝑊 𝑡 −1.This additive update introduces at most ∼1 s of compute   
+
+> 8ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA
+
+overhead, which is small relative to the cross-cluster transfer time (up to minutes). To further reduce overhead, we shard the COO tensors according to the chosen parallelism strategy so that each device applies only its local shard, avoiding sparse-to-dense materialization and redundant additions. 
+
+4.3 Elastic Rollout Scheduler 
+
+The rollout scheduler harnesses cooperative elasticity to or-chestrate trajectory generation across rollout and serving GPUs. However, rollout workers on serving GPUs expose a response generation endpoint, and their data plane differs from that of rollout workers running on dedicated rollout GPUs. We therefore introduce a unified rollout proxy to al-low the scheduler to manage heterogeneous rollout workers sharing a common interface for response generation and per-trajectory metric collection. Next, we describe how the scheduler decides how many trajectories to offload to serving GPUs and how it places each trajectory. 
+
+Turn-wise Concurrency-aware Routing. The GPU com-pute and memory jointly bound the number of trajectories that can execute efficiently on the dedicated rollout GPUs. We perform offline profile and cap rollout concurrency at a workload-dependent threshold (e.g., 16 per GPU for Qwen3 models with 32K context length) to avoid KVC pressure and excessive scheduling overhead. When the instantaneous roll-out demand exceeds this limit, the scheduler offloads the excess trajectories to available serving GPUs. Since multi-turn agentic RL alternates environment interaction with LLM generation, ROSE schedules rollouts at turn granularity rather than pinning each trajectory to a single GPU. This fine-grained control allows subsequent turns of a trajectory to spill over to serving GPUs under contention, and to mi-grate back to rollout GPUs once capacity becomes available. 
+
+Cache-Affinity Placement. To maximize the benefit of pre-fix caching, the rollout scheduler employs a cache-affinity placement policy across both dedicated rollout GPUs and opportunistic serving GPUs. For each trajectory, the sched-uler records the rollout worker that served its previous turn, which typically retains the trajectory’s prefix KVC. For each new turn, the scheduler first routes the request to the cache-affine worker if it has available capacity on a rollout GPU or, for a serving GPU, if admitting the request would not violate serving SLOs. If the cache-affine worker is unavailable, the scheduler falls back to a load-aware policy by dispatching the request to the least-loaded rollout GPU when possible; otherwise, it dispatches to the least-loaded eligible serving GPU. If neither pool has capacity, the request is queued until resources become available. 
+
+Fault Tolerance and Recovery. The rollout scheduler uses a heartbeat mechanism to monitor the liveness of each serv-ing worker. When it receives an execution stall signal from the co-serving executor (§4.1) or detects a failure via health checks, the scheduler promptly reroutes the affected trajec-tories to other available GPUs, enabling fast recovery. 
+
+Extensions to Other Deployment Settings. ROSE can gen-eralize to two other LLM serving deployments. PD colocation. 
+
+When prefill and decode are co-located on the same serving instance, the executor derives per-tick compute slack for rollout admission as the minimum one between TTFT and TPOT slack. Autoscaling. This can leave a fraction of GPUs idle under low traffic. ROSE can run rollouts on these idle GPUs and leverage the fast model swap mechanism in §4.1 to utilize GPU compute and memory without contending with serving traffic. Due to the cost of large-scale evaluation across multiple production configurations, we focus on the mainstream PD-disaggregated deployment used in industry. 
+
+## 5 Implementation 
+
+We implement ∼5k lines of Python atop agentic training framework ROLL [64] and serving framework vLLM [28]. 
+
+Agentic RL training. The rollout scheduler and the push side of the weight transfer engine are implemented inside ROLL. ROSE uses Megatron-LM [ 57 ] for training, vLLM for rollout/serving with request migration, and ROLL’s native environment runtime to manage environments. 
+
+Serving engine. The pull side of the transfer engine and the co-serving executor are built atop vLLM 0.10.0 [ 28 ]. We also implement a Ray-based [ 39 ] load-balancing scheduling policy to route serving requests. 
+
+Relay worker. We use Mooncake v0.3.8 in the relay worker, allowing ROLL to publish updated weights and vLLM to pull them. We extend Mooncake with shard awareness and sparsity awareness to reduce communication overhead. 
+
+Environment runtime. Environments run in CPU-only containers on a separate Kubernetes cluster, communicating with rollout workers via K8S API calls. This isolates envi-ronment execution from GPU workloads. ROSE ’s design is orthogonal to environment placement and extends to GPU-accelerated environments. 
+
+## 6 Performance Evaluation 
+
+Models and Training Configurations. We use Qwen3-8B/32k for FrozenLake [ 9] and Qwen3-32B/32k for ALF-World [ 58 ]. Both are widely adopted benchmarks in the agen-tic RL literature [ 12 , 17 , 64 ]. We train them with GRPO [ 53 ]and DAPO [ 81 ]. For all tasks, we set the group size to 16 and use batch sizes of 256 and 1024 for Qwen3-8B and Qwen3-32B, respectively. For DAPO, the rollout stage continues until it collects the target number of trajectory groups with non-zero reward variance. We adjust the maximum number of concurrent trajectories at each step based on the previous step to speed up the collection of valid trajectories. We train the 8B and 32B models on 16 and 48 dedicated GPUs, with (Rollout, Training) allocations of (8, 8) and (16, 32). Rollout TP is 1 (8B) and 4 (32B), while training parallelism (TP, PP, CP) is (4, 1, 1) and (8, 1, 2). We cap borrowed serving GPUs at 16 (8B) and 64 (32B), and set the per-device rollout batch  
+
+> 9Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al.
+
+size to 16 to avoid contention (see Appendix A) based on profiling. 
+
+Cluster Setup. We run agentic RL training on an H800 clus-ter with up to 48 GPUs and online serving on a separate H800 cluster with 64 GPUs. Within each cluster, nodes are connected via 400 Gbps InfiniBand. Due to operational con-straints, our evaluation uses a 200 Gbps Ethernet link for cross-cluster communication. We further evaluate commu-nication efficiency under different link bandwidths in §6.3. We use NCCL and Mooncake Store [46 ] for intra- and cross-cluster weight transfer. For the serving cluster, we pre-deploy Qwen3-8B and Qwen3-32B as rollout models, which are used by 40% and 19% of agentic RL training jobs in our cluster, re-spectively, and together cover most workloads. We co-locate them with similarly sized heterogeneous serving models (Qwen3-8B with Qwen2.5-7B, Qwen3-32B with Qwen2.5-32B) because they use compatible parallelism configurations. We set the prefill-to-decoding instance ratio to 1:3. We replay the 24-hour online serving trace from Microsoft [ 60 ], and run a load-balancing policy to route online serving requests. 
+
+Baselines and Training Recipe. We evaluate ROSE against state-of-the-art RL post-training systems. ROSE is agnostic to the choice of on-policy or off-policy RL algorithms, and also supports fully asynchronous training (e.g., AReaL [ 13 ], eval-uated in §6.5). Due to the substantial overhead of agentic RL, we adopt one-step off-policy training [ 37 ] for all approaches. We use ROLL [ 64 ] as our resource-fixed baseline, as it pro-vides better support for agentic tasks than veRL [ 56 ]. We follow the design of existing commercial products [ 42 , 62 ]to implement a ServerlessRL baseline, where the number of available serverless GPUs is set to the maximum number of available spot GPUs, and we configure the function timeout to 15 minutes [ 1 ]. On ROSE and ROLL, we perform training until the models converge. Specifically, for GRPO, we train Qwen3-8B and Qwen3-32B for 100 and 40 steps, respectively, while for DAPO, we use 50 and 25 steps. For RLBoost, to capture the impact of spot GPU availability, we reproduce a representative 2-hour window characterized by high re-source volatility from the traces (see Appendix B). We run RLBoost within this time window using GRPO. 
+
+Metrics. We measure training throughput as the total num-ber of input and output tokens processed per global step divided by the step time [ 23 , 89 ]. We use the average critic score as the accuracy metric. For serving, we set P99 SLOs for (TPOT, TTFT) to (150 ms, 500 ms) for Qwen2.5-7B and (450 ms, 1000 ms) for Qwen2.5-32B [83, 88]. 
+
+6.1 End-to-End Evaluation Model Convergence. We report the critic scores over the training in Figure 8. It shows that ROSE preserves the model convergence due to its algorithm-agnostic design, achieving final scores nearly identical to the baselines. 
+
+End-to-End Throughput. Figure 7 compares the end-to-end throughput across tasks. Compared with ROLL, ROSE 
+
+achieves average throughput improvements of 1.31 × and 1.46 × with GRPO, the maximum throughput increase is 2.16 × and 1.76 ×. The advantage of ROSE becomes more pro-nounced under the DAPO algorithm, where average through-put increases by 1.42 × and 3.31 × with a maximum of 4.82 ×.We attribute the throughput gains to three components. (1) 
+
+Cooperative elasticity via co-serving executor : by harvesting idle serving GPUs, ROSE effectively expands the rollout GPU pool. With 16 additional serving GPUs, rollout time decreases by 1.69 × (Figure 9b), confirming that the co-serving execu-tor successfully converts serving slack into rollout capacity. (2) Elastic rollout scheduler : DAPO’s redundant sampling can launch up to 5.7× the base batch size (Figure 1d). The resource-fixed baseline cannot absorb this burst and suffers severe contention, whereas ROSE ’s scheduler dynamically offloads excess trajectories to serving GPUs. The scheduler’s turn-wise routing and KVC affinity together improve rollout efficiency by up to 1.48 × (Table 3). (3) Weight transfer en-gine : cross-cluster synchronization completes within 21 s for Qwen3-32B (§6.3), preventing weight updates from becom-ing a bottleneck between steps. Moreover, ROSE eliminates the allocation overhead that plagues elastic baselines (0% vs. 6.8–26.1% for RLBoost and 𝜆 RL, Table 1). Across all exper-iments, ROSE keeps the serving P99 latency within target SLOs (§6.2). We further compare with AReaL [ 13 ], a fully asynchronous RL baseline, in §6.5. 
+
+Comparison with Elastic Baselines. Figure 9a compares rollout efficiency against 𝜆 RL and RLBoost. 𝜆 RL uses 16 and 32 serverless GPUs for rollouts of the 8B and 32B models, re-spectively, which is consistent with the maximum number of GPUs available to RLBoost. We observe that allocating more GPUs to rollouts yields up to 1.31 × and 1.23 × speedups over ROLL for Qwen3-8B and Qwen3-32B, respectively. Although RLBoost experiences fluctuating spot GPU availability, its resource allocation changes less frequently than that of 𝜆 RL, which reallocates resources at a fixed 15-minute lease inter-val. As a result, RLBoost achieves 1.41 × and 1.48 × speedups over ROLL for Qwen3-8B and Qwen3-32B, respectively, al-though its gains are still constrained by the instability of spot GPUs. ROSE further reduces rollout time by 1.20 × and 
+
+1.26 × compared to RLBoost. This improvement suggests that opportunistically leveraging serving GPUs provides more abundant and stable compute for rollouts while avoiding frequent preemption, thereby shortening rollout time.  
+
+> Model
+
+𝜆 RL RLBoost ROSE 
+
+Qwen3-8B 16.1% 7.3% 0% Qwen3-32B 26.1% 6.8% 0% 
+
+Table 1. Ratio of allocation overhead to training time.   
+
+> 10 ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA
+
+(a) FrozenLake/8B/GRPO. (b) ALFWorld/32B/GRPO. (c) FrozenLake/8B/DAPO. (d) ALFWorld/32B/DAPO. 
+
+Figure 7. ROSE ’s end-to-end throughput improvements. The data are normalized to the baseline’s first step. 0 25 50 75 100 
+
+> Steps
+> 0.2
+> 0.4
+> 0.6
+> Score  ROLL
+> ROSE
+
+(a) FrozenLake-8B-GRPO. 0 10 20 30 40  
+
+> Steps
+> 0.5
+> 0.0
+> Score  ROLL
+> ROSE
+
+(b) ALFWorld-32B-GRPO. 
+
+Figure 8. End-to-end critic scores for (a) 8B and (b) 32B models using the GRPO algorithm. 8B 32B      
+
+> Model Size
+> 0
+> 50
+> 100
+> Norm. Time
+> 1709 1502
+> 1301 1224
+> 1210 1012
+> 1010 805
+> ROLL
+> RL RLBoost
+> CoRL
+
+(a) Micro Benchmark. 0 4 8 16  
+
+> Available Serving GPUs
+> 0
+> 500
+> 1k
+> 1.5k
+> Time (s)
+
+(b) Scalability [8B, GRPO]. 
+
+Figure 9. End-to-end evaluation. (a) Rollout time compared with baselines. (b) Scalability of ROSE on Qwen3-8B with GRPO as Serving GPUs increase. 
+
+Allocation Overhead. We further analyze the allocation overhead of elastic resource management schemes. We quan-tify the total preempted GPU time as the product of the num-ber of preempted GPUs and the per-preemption overhead, and normalize it by the total GPU time. As shown in Ta-ble 1, 𝜆 RL incurs the highest overhead (up to 26.1%), be-cause serverless GPUs are leased for fixed durations that are often shorter than a complete rollout, resulting in fre-quent preemptions and restarts. RLBoost experiences less frequent preemptions on spot instances, but still incurs non-negligible overhead (6.8–7.3%). In contrast, ROSE eliminates nearly all allocation overhead, thereby introducing the small-est training-time overhead. 
+
+Serving GPU Availability. The amount of underutilized ca-pacity in the serving cluster also affects rollout performance. To quantify this effect, we measure the average rollout time of Qwen3-8B on FrozenLake using eight dedicated rollout GPUs over the first five RL steps, while varying the number of available serving GPUs. As shown in Figure 9b, rollout time decreases as the serving GPU quota increases. With an additional 16, 8 and 4 serving GPUs, ROSE reduces rollout time by 1.69 ×, 1.45 ×, and 1.26 ×, respectively. These results show that ROSE can effectively harvest underutilized serving resources to reduce the rollout overhead. 
+
+Table 2. [Co-Serve Executor]. The impact of memory sharing policy for rollout and SLO efficiency.                                       
+
+> Model Policy Rollout TTFT (ms) TPOT (ms)
+> Time (s) P95 P99 P95 P99 Qwen3-8B Static Partition 776.7 299.5 330.95 1462.5 1488.2 + Memory Preemption 591.7 348.8 517.9 153.6 162.8 + Prefix Caching 469.3 318.5 333.6 173.2 186.3 Qwen3-32B Static Partition 1310.5 595.6 603 6835.9 7021.1 + Memory Preemption 959.7 596.7 651.3 493.5 503.8 + Prefix Caching 920.4 607.2 640.6 477.9 483.2
+
+6.2 Analysis of Co-serving Executor 
+
+To analyze the efficiency of the co-serving executor, we use the end-to-end setups for Qwen3-8B and Qwen3-32B and run GRPO for five steps. Because evaluation incurs substantial overhead, we use the checkpoint at step 50, which yields moderate rollout time and fluctuating serving load. 
+
+Preemptive Dynamic Memory Sharing Policy. This pol-icy incorporates two memory-sharing optimizations, namely 
+
+memory preemption and prefix caching . We run rollouts on serving GPUs via spatial GPU sharing and measure end-to-end rollout time, along with serving P95 and P99 TTFT and TPOT, to quantify rollout efficiency and SLO compliance. We first evaluate memory preemption. As a static partition 
+
+baseline, we split GPU memory evenly between serving and rollout LLMs. Compared to static partitioning , memory pre-emption reduces P99 TPOT latency by 9.14 × for Qwen3-8B and 13 .94 × for Qwen3-32B, indicating that it absorbs bursty serving-side memory demand and reduces tail latency. Second, we enable prefix caching atop memory preemption. This reduces rollout time by 1.26 × for Qwen3-8B and 1.04 ×
+
+for Qwen3-32B, with only a slight increase in serving tail latency. These results indicate that prefix caching mainly improves rollout throughput, but does not by itself ensure serving SLO compliance. Overall, the memory sharing policy effectively limits tail-latency inflation, but without explicit SLO-aware scheduling, P99 latency still misses our target. 
+
+Dual-SLO Admission Controller. This controller com-pares the current serving TTFT and TPOT against their SLO targets and time-multiplexes between serving traffic and rollout requests to maintain SLO compliance. We evaluate three policies under the same setup in Figure 11: TTFT-only ,
+
+TPOT-only , and Dual-SLO . TTFT-only enforces only the TTFT SLO, while TPOT-only enforces only the TPOT SLO. The av-erage step time is similar across all three policies, suggesting that the policy choice has limited impact on rollout time. 
+
+> 11
+
+Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al. 0 100 200 
+
+> Comm Time (s)
+> 32B
+> 8B
+> Model
+> 192
+> 87
+> 127
+> 56
+> 96
+> 31
+> 21
+> 7
+> Batch
+> +Async
+> +Shard
+> +Sparsity
+
+(a) Weight transfer overhead. Shard  [96s]  
+
+> Push
+> Pull
+> D2S
+> Timeline
+> 0.2 s
+> 0.2 s
+> 0.3 s
+> 0.4 s
+
+…… 0.4 s 
+
+> 0.3 s
+> 2.7 s
+> 3.9 s
+> 3.2 s
+> 5.4 s
+
+……          
+
+> Sparsity  [21s]  5 ms
+> 4 ms
+> 0.2 s
+> 10 ms 1.2 s
+> 0.3 s
+> 60 buckets
+> take 65s
+> 16 buckets
+> take 42s S2D
+> 12 ms 0.9 s
+> ……
+> ……
+> close -up  6 ms
+> 5 ms
+> 0.2 s
+> 0.3 s
+> 9 ms 0.8 s4 ms 0.7 s
+> 60 buckets
+> take 15s
+
+…
+
+> 16 buckets
+> take 10s
+
+… 
+
+> train rank 0
+> train rank 1
+> serve rank 0
+> serve rank 1
+> train rank 0
+> train rank 1
+> serve rank 0
+> serve rank 1
+
+(b) Timeline of shard and sparsity methods [32B]. 0      
+
+> 50
+> 100
+> [8B]
+> Time (s)
+> Shard
+> Sparsity
+> 12510 100 200
+> Bandwidth (Gbps)
+> 0
+> 200
+> 400
+> 600
+> [32B]
+> Time (s)
+> Shard
+> Sparsity
+
+(c) Sensitivity to bandwidth. 
+
+Figure 10. [Transfer Engine] (a) Cross-cluster weight transfer time under different optimizations; each optimization is additive over the previous one. (b) Timeline breakdown of shard-aware and sparsity-aware transfer for Qwen3-32B. D2S denotes the dense-to-sparse conversion, and S2D denotes the sparse-to-dense conversion. (c) Sensitivity of shard-aware and sparsity-aware transfer of different LLMs to cross-cluster bandwidth. TTFT-Only         
+
+> TPOT-Only
+> Dual-SLO
+> 400
+> 450
+> 500
+> Avg Iter Time (s)
+> 497.3 492.5 496.3
+> 200 400 600 800
+> 80
+> 90
+> 100
+> CDF (%)
+> TTFT (ms)
+> 100 150 200 250
+> 60
+> 80
+> 100
+> CDF (%)
+> TPOT (ms)
+
+Figure 11. Analysis of Dual-SLO Admission Controller. Compared to the single-objective baselines, Dual-SLO con-sistently achieves lower P99 tail latency on both metrics. It reduces P99 TPOT by 3.4% and 76.3% relative to TPOT-only 
+
+and TTFT-only , respectively, and reduces P99 TTFT by 3.7% and 28.4% over the same baselines. Overall, Dual-SLO ex-plicitly provides guarantees for both TTFT and TPOT while preserving rollout efficiency. We further explore the sen-sitivity of the co-serving executor to online serving load (Appendix D) and prefix caching lease time (Appendix C), demonstrating its robustness. 
+
+6.3 Effectiveness of Transfer Engine 
+
+We evaluate the transfer engine using 16 GPUs for training and 16 GPUs for serving, and measure cross-cluster com-munication overhead over three RL steps. Unless otherwise specified, the training and serving clusters are connected by a 200 Gbps Ethernet link. 
+
+Analysis of Weight Transfer Optimizations. Figure 10a quantifies the cross-cluster communication efficiency of asyn-chrony , shard-awareness , and sparsity-awareness for Qwen3-8B and Qwen3-32B. As a baseline ( batch ), training workers all-gather model weights and transmit the entire model, and then serving workers pull model weights from relay work-ers into GPU memory. First, asynchronous transfer streams parameters at bucket granularity and pipelines publishing with pulling. Compared to batch , it reduces end-to-end com-munication time by 1.6 × (Qwen3-8B) and 1.5 × (Qwen3-32B), primarily by overlapping the sender-side publish with the receiver-side pull rather than reducing transmitted bytes. Second, we enable shard-awareness : each training worker publishes only its local shard, and each serving worker pulls 0 50 100 
+
+> Steps
+> 98.75
+> 99.00
+> 99.25
+> 99.50
+> Sparsity Ratio(%)
+
+(a) Sparsity Ratio [8B]. 1 2 5 10 20 50  
+
+> Non-Zero Elements Frac.(%)
+> 0
+> 25
+> 50
+> 75
+> 100
+> 125
+> Comm Time (s)  8B
+> 32B
+
+(b) Sensitivity to Sparsity. 
+
+Figure 12. [Analysis of Sparsity]. (a) The sparsity of weight differentials across steps for Qwen3-8B. (b) The sensitivity of transfer engine to sparsity. only the shards it hosts. This further reduces communica-tion time by 1.8 × (Qwen3-8B) and 1.3 × (Qwen3-32B). More-over, Figure 10b (top) illustrates the Qwen3-32B timeline. On the sender side, each training worker streams ∼60 buck-ets (64 MB each); each bucket takes 0.2–0.4 s to push, for a total of 65 seconds. On the receiver side, serving workers pull the corresponding weight buckets from the relay and load them into GPU memory, taking 42 s in total. Overall, shard-awareness prevents redundant weight all-gather and avoids pulling and re-sharding a full replica on each serving worker, while increasing effective parallelism by utilizing multiple cross-cluster links. Third, sparsity-awareness provides the largest gain, re-ducing communication time by 4.4 × (Qwen3-8B) and 4.6 ×
+
+(Qwen3-32B). Figure 10b (bottom) shows the 32B timeline. Because weight deltas are highly sparse, each bucket is much smaller: per-bucket push and pull latency drops from hun-dreds of milliseconds to just a few milliseconds. The remain-ing per-bucket overhead is dominated by (de)sparsification, specifically Dense-to-Sparse (D2S) on the training side and Sparse-to-Dense (S2D) on the serving side, which stays sub-second. As a result, end-to-end transfer time decreases to 21 s. Overall, our optimized cross-cluster weight transfer en-gine reduces end-to-end communication time by 12.4 × for Qwen3-8B and 9.1 × for Qwen3-32B, bringing cross-cluster transfer down to tens of seconds and close to intra-cluster weight transfer overhead. 
+
+Sensitivity to Cross-Cluster Bandwidth. We study the sensitivity of shard-aware and sparsity-aware transfer to 
+
+12 ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA 
+
+Table 3. [Rollout Scheduler] . The speedup of the elastic rollout scheduler on rollout time.         
+
+> Policy Qwen3-8B Qwen3-32B Baseline 1.00 ×1.00 ×
+> + Turn-Wise Routing 1.11 ×1.08 ×
+> + KVC Affinity 1.16 ×1.48 ×
+
+Table 4. ROSE vs. alternative serving engines: rollout time and serving SLO metrics.                           
+
+> Model Method Rollout Time (s) TTFT-P99 (ms) TPOT-P99 (ms) 8B
+> ROSE 496.3 338.1 136.1 ServerlessLLM –314.8 117.8 ServerlessLLM+Rollout 651.7 1166.1 135.6 Prism 731.7 973.2 115.4
+> 32B
+> ROSE 960.1 837.5 398.1 ServerlessLLM –716.1 312.8 ServerlessLLM+Rollout 1161.8 2426.2 565.3 Prism 1301.2 1625.4 351.7
+
+cross-cluster bandwidth by throttling link capacity from 200 Gbps to 1 Gbps using tc command, and measuring end-to-end communication overhead for Qwen3-8B (Figure 10c, top) and Qwen3-32B (Figure 10c, bottom). For Qwen3-8B, shard-aware transfer increases from 31 s (200 Gbps) to 109 s (1 Gbps), while sparsity-aware transfer stays within 7–39 s, delivering a 2.8×–4.4× speedup. For Qwen3-32B, shard-aware transfer grows from 96 s to 584 s, whereas sparsity-aware transfer remains within 21–89 s ( 4.6×–6.6× faster). Overall, sparsity-awareness flattens the scaling curve by reducing transferred bytes. Even at 5 Gbps, transfer completes within 10 s (Qwen3-8B) and 30 s (Qwen3-32B). Because cross-cluster transfer is overlapped with training and intra-cluster com-munication, it increases end-to-end training time by at most 5%. 
+
+Analysis of Weight Differential Sparsity. Figure 12a shows that the weight-differential sparsity for Qwen3-8B stays around 99% throughout training. This indicates that sparsity is persistent rather than a transient artifact of a particular training phase. We next vary the non-zero frac-tion in Figure 12b for Qwen3-8B and Qwen3-32B to evaluate the sensitivity of our sparsity-aware transfer engine to the sparsity ratio. As the non-zero fraction increases, commu-nication overhead rises and the benefit of sparse transfer diminishes. Beyond ∼20%, sparse-format metadata (e.g., in-dices) and (de)sparsification overhead begin to offset the reduction in transmitted weights. In our workloads, the mea-sured non-zero fraction remains well below this threshold, enabling consistently efficient weight propagation.    
+
+> (a) FrozenLake-8B-AReaL. (b) ALFWorld-32B-AReaL.
+
+Figure 13. ROSE under fully asynchronous RL training work-loads. We monitor the average throughput between consec-utive RL steps. 
+
+6.4 Effectiveness of Rollout Scheduler. 
+
+We follow the end-to-end setups and evaluate the elastic roll-out scheduler using Qwen3-8B and Qwen3-32B with GRPO algorithm for the first five RL steps. Table 3 analyzes the contribution of two heuristics adopted by the rollout sched-uler. As a baseline, we pin each trajectory to a fixed rollout worker for its entire lifetime. This static assignment leads to load imbalance because trajectory runtimes vary widely. As a result, enabling turn-wise routing reduces rollout time by 
+
+1.11 × (Qwen3-8B) and 1.08 × (Qwen3-32B), demonstrating the benefit of fine-grained, flexible routing. Adding KVC affinity yields further improvements, bringing the cumula-tive speedup to 1.16 × for Qwen3-8B and 1.48 × for Qwen3-32B. This is because larger models incur heavier prefill costs, making KV reuse more effective at reducing per-turn over-head. Overall, these simple heuristics substantially improve rollout efficiency. The scheduler adds negligible overhead (at most 10 ms per decision) throughout training, suggesting that it scales well. 
+
+6.5 Extension to Other Scenarios 
+
+We evaluate ROSE under alternative serving engines and RL algorithms to demonstrate generality. 
+
+Bidirectional Autoscaling as Serving Engine. We replace 
+
+ROSE ’s co-serving executor with ServerlessLLM [ 14 ], a state-of-the-art open-source LLM autoscaling engine, to orches-trate serving GPUs via bidirectional autoscaling. We follow the end-to-end setup (§6.2) and run GRPO for ten RL steps. We configure ServerlessLLM to preserve serving TTFT and TPOT P99 SLOs. Table 4 reports the results. Without rollout co-location, ServerlessLLM achieves lower serving latency than ROSE (e.g., TTFT-P99: 314.8 ms vs. 338.1 ms for 8B) be-cause it does not share GPU resources. However, once rollout is enabled (ServerlessLLM + Rollout), the bidirectional au-toscaling must repeatedly evict and reload models when serving load spikes, inflating rollout time by 1.31 × (8B) and 1.21 × (32B) compared to ROSE , while severely violating TTFT SLOs (1166 ms and 2426 ms). This confirms our analysis in §3.2: bidirectional autoscaling cannot safely harvest serving slack under bursty traffic. 
+
+Prism as Serving Engine. We evaluate Prism [ 82 ], a GPU multiplexing system for heterogeneous LLM serving work-loads. We configure Prism to co-schedule rollout and serving  
+
+> 13 Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al.
+
+requests, setting rollout SLOs to 4× the serving SLOs, and run GRPO for ten RL steps. Unlike ROSE , Prism does not sup-port fast memory preemption or prefix caching for rollouts. When request SLOs cannot be met, Prism defers its execu-tion, which significantly degrades both rollout throughput and serving TTFT. As shown in Table 4, Prism inflates rollout time by 1.47 × (8B) and 1.36 × (32B) compared to ROSE , while also violating TTFT SLOs (973 ms and 1625 ms vs. targets of 500 ms and 1000 ms). This confirms that generic GPU mul-tiplexing without RL-aware co-serving cannot effectively handle rollouts and serving under bursty traffic. 
+
+Comparison to AReaL. To compare ROSE against fully asynchronous RL training, we integrate AReaL [ 13 ], a fully asynchronous off-policy RL system that keeps GPUs satu-rated by continuously generating trajectories without wait-ing for training to complete. We follow the end-to-end setup (§6) and compare throughput under GRPO in Figure 13. ROSE 
+
+achieves 1.44 × (Qwen3-8B) and 2.69 × (Qwen3-32B) through-put compared with AReaL. Although AReaL eliminates GPU idle time via full asynchrony, it is constrained by its fixed GPU budget and may introduce stale trajectories that re-duce sample efficiency. ROSE complements this by expand-ing effective GPU capacity through cooperative elasticity, providing throughput gains orthogonal to asynchronous ex-ecution. 
+
+## 7 Related Works 
+
+Agentic RL Training Systems. Many systems optimize conventional single-turn RL post-training [ 5, 16 , 19 , 22 – 24 ,45 , 55 , 70 , 79 , 89 , 90 ]. The rise of agentic LLMs has also mo-tivated agentic RL training frameworks [ 4, 12 , 17 , 58 , 64 , 69 ]. However, these agentic systems typically assume fixed re-sources. A few elastic RL systems exploit spot instances [ 70 ]or serverless GPUs [ 42 , 62 ]. ROSE explores underutilized serving GPUs for resource elasticity and is complementary to these elastic approaches. 
+
+Serving GPU Sharing. GPU multiplexing has been widely studied for years. Prior DL systems [ 15 , 18 , 32 , 73 , 86 ] inter-leave multiple models on the same GPUs to improve utiliza-tion. More recently, LLM serving systems multiplex GPUs across multiple LLM workloads [ 7, 74 , 82 , 85 ]. However, they do not target co-serving RL rollouts with online LLM serving. 
+
+Sparsity-based Optimization. Recent systems including Check-N-Run [ 8] and LowDiff [ 78 ] leverage sparsity in the 
+
+weight differential to reduce storage and checkpoint over-head. Many training systems [ 2, 10 , 33 , 67 ] exploit gradient sparsity to cut communication cost. Inspired by these works, we observe the sparsity in the weight differential of RL train-ing and leverage it to reduce the communication overhead. 
+
+Cycle Stealing. Harvesting idle resources across workloads is a well-studied concept. Cycle stealing [ 21 ] demonstrated that beneficiaries gain unbounded benefit from donors’ idle cycles with only slight donor penalty. In the GPU era, Ekya [ 3 ]balances inference and continuous retraining on edge GPUs, and Lyra [ 30 ] loans idle serving GPUs to training jobs. ROSE 
+
+extends this philosophy to co-serving heterogeneous LLMs, additionally handling incompatible KVC layouts, prefix caching contention, and cross-cluster weight synchronization. 
+
+## 8 Conclusion 
+
+In this paper, we present ROSE , a cooperative, elastic post-training system that opportunistically harvests serving GPUs to accelerate agentic RL training. ROSE combines (i) a co-serving executor for SLO-safe compute and memory sharing, (ii) a cross-cluster weight transfer engine for low-overhead weight synchronization, and (iii) an elastic rollout scheduler that efficiently realizes the cooperative elasticity. Extensive experiments show that ROSE improves training efficiency over baselines while preserving serving SLOs. 
+
+## References                       
+
+> [1] Alibaba Cloud. 2026. Creating a GPU function. https://www.alibabac loud.com/help/en/functioncompute/fc/user-guide/creating-a-gpu-function/ . (2026). Accessed: 2026-04. [2] Dan Alistarh, Demjan Grubic, Jerry Z. Li, Ryota Tomioka, and Milan Vojnovic. 2017. QSGD: communication-efficient SGD via gradient quantization and encoding. In Proceedings of the 31st International Conference on Neural Information Processing Systems (NIPS’17) . Curran Associates Inc., Red Hook, NY, USA, 1707–1718. [3] Romil Bhardwaj, Zhengxu Xia, Ganesh Ananthanarayanan, Junchen Jiang, Yuanchao Shu, Nikolaos Karianakis, Kevin Hsieh, Paramvir Bahl, and Ion Stoica. 2022. Ekya: Continuous Learning of Video Analytics Models on Edge Compute Servers. In 19th USENIX Symposium on Networked Systems Design and Implementation (NSDI 22) . USENIX Association, Renton, WA, 119–135. https://www.usenix.org/conferenc e/nsdi22/presentation/bhardwaj
+> [4] Shiyi Cao, Dacheng Li, Fangzhou Zhao, Shuo Yuan, Sumanth R. Hegde, Connor Chen, Charlie Ruan, Tyler Griggs, Shu Liu, Eric Tang, Richard Liaw, Philipp Moritz, Matei Zaharia, Joseph E. Gonzalez, and Ion Stoica. 2025. SkyRL-Agent: Efficient RL Training for Multi-turn LLM Agent.
+> arXiv preprint arXiv:2511.16108 (2025). [5] Rongxin Cheng, Kai Zhou, Xingda Wei, Siyuan Liu, Mingcong Han, Mingjing Ai, Yeju Zhou, Baoquan Zhong, Wencong Xiao, Rong Chen, and Haibo Chen. 2025. Fast LLM Post-training via Decoupled and Best-of-N Speculation. arXiv preprint arXiv:2511.16193 (2025). [6] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv preprint arXiv:2510.09665 (2025). [7] Jiangfei Duan, Runyu Lu, Haojie Duanmu, Xiuhong Li, Xingcheng Zhang, Dahua Lin, Ion Stoica, and Hao Zhang. 2024. MuxServe: Flexible Spatial-Temporal Multiplexing for Multiple LLM Serving. In ICML .[8] Assaf Eisenman, Kiran Kumar Matam, Steven Ingram, Dheevatsa Mudigere, Raghuraman Krishnamoorthi, Krishnakumar Nair, Misha Smelyanskiy, and Murali Annavaram. 2022. Check-N-Run: A check-pointing system for training deep learning recommendation models. In 19th USENIX Symposium on Networked Systems Design and Imple-mentation (NSDI 22) . 929–943. [9] Farama Foundation. 2024. Gymnasium - FrozenLake Environment.
+> https://gymnasium.farama.org/environments/toy_text/frozen_lake/ .(2024). Accessed: 2025-09. [10] Jiawei Fei, Chen-Yu Ho, Atal N Sahu, Marco Canini, and Amedeo Sapio. 2021. Efficient sparse collective communication and its application to 14
+
+ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA 
+
+accelerate distributed deep learning. In Proceedings of the 2021 ACM SIGCOMM 2021 Conference . 676–691. [11] Lang Feng, Zhenghai Xue, Tingcong Liu, and Bo An. 2025. Group-in-Group Policy Optimization for LLM Agent Training. arXiv preprint arXiv:2505.10978 (2025). [12] Lang Feng, Zhenghai Xue, Tingcong Liu, and Bo An. 2025. Group-in-Group Policy Optimization for LLM Agent Training. arXiv preprint arXiv:2505.10978 (2025). [13] Wei Fu, Jiaxuan Gao, Xujie Shen, Chen Zhu, Zhiyu Mei, Chuyi He, Shusheng Xu, Guo Wei, Jun Mei, Jiashu Wang, Tongkai Yang, Binhang Yuan, and Yi Wu. 2025. AReaL: A Large-Scale Asynchronous Rein-forcement Learning System for Language Reasoning. arXiv preprint arXiv:2505.10978 (2025). [14] Yao Fu, Leyang Xue, Yeqi Huang, Andrei-Octavian Brabete, Dmitrii Ustiugov, Yuvraj Patel, and Luo Mai. 2024. ServerlessLLM: Low-Latency Serverless Inference for Large Language Models. In OSDI’24 .[15] Wei Gao, Zhuoyuan Ouyang, Peng Sun, Tianwei Zhang, and Yonggang Wen. 2025. IceFrog: A Layer-Elastic Scheduling System for Deep Learning Training in GPU Clusters. IEEE Transactions on Parallel and Distributed Systems 36, 6 (2025), 1071–1086. https://doi.org/10.1109/ TPDS.2025.3553137 
+
+[16] Wei Gao, Yuheng Zhao, Dakai An, Tianyuan Wu, Lunxi Cao, Shaopan Xiong, Ju Huang, Weixun Wang, Siran Yang, Wenbo Su, Jiamang Wang, Lin Qu, Bo Zheng, and Wei Wang. 2025. RollPacker: Mitigating Long-Tail Rollouts for Fast, Synchronous RL Post-Training. arXiv preprint arXiv:2509.21009 (2025). [17] Wei Gao, Yuheng Zhao, Tianyuan Wu, Shaopan Xiong, Weixun Wang, Dakai An, Lunxi Cao, Dilxat Muhtar, Zichen Liu, Haizhou Zhao, Ju Huang, Siran Yang, Yongbin Li, Wenbo Su, Jiamang Wang, Lin Qu, Bo Zheng, and Wei Wang. 2025. RollArt: Scaling Agentic RL Training via Disaggregated Infrastructure. arXiv preprint arXiv:2512.22560 (2025). [18] Mingcong Han, Hanze Zhang, Rong Chen, and Haibo Chen. 2022. Microsecond-scale preemption for concurrent {GPU-accelerated } { DNN } inferences. In 16th USENIX Symposium on Oper-ating Systems Design and Implementation (OSDI 22) . 539–558. [19] Zhenyu Han, Ansheng You, Haibo Wang, Kui Luo, Guang Yang, Wenqi Shi, Menglong Chen, Sicheng Zhang, Zeshun Lan, Chunshi Deng, Huazhong Ji, Wenjie Liu, Yu Huang, Yixiang Zhang, Chenyi Pan, Jing Wang, Xin Huang, Chunsheng Li, and Jianping Wu. 2025. AsyncFlow: An Asynchronous Streaming RL Framework for Efficient LLM Post-Training. arXiv preprint arXiv:2507.01663 (2025). [20] Bingguang Hao, Maolin Wang, Zengzhuang Xu, Yicheng Chen, Cunyin Peng, Jinjie GU, and Chenyi Zhuang. 2025. Exploring Superior Func-tion Calls via Reinforcement Learning. arXiv preprint arXiv:2508.05118 
+
+(2025). [21] Mor Harchol-Balter, Cuihong Li, Takayuki Osogami, Alan Scheller-Wolf, and Mark S. Squillante. 2003. Cycle stealing under immediate dispatch task assignment. In Proceedings of the Fifteenth Annual ACM Symposium on Parallel Algorithms and Architectures (SPAA ’03) . As-sociation for Computing Machinery, New York, NY, USA, 274–285. 
+
+https://doi.org/10.1145/777412.777462 
+
+[22] Eric Harper, Somshubra Majumdar, Oleksii Kuchaiev, Li Jason, Yang Zhang, Evelina Bakhturina, Vahid Noroozi, Sandeep Subramanian, Koluguri Nithin, Huang Jocelyn, Fei Jia, Jagadeesh Balam, Xuesong Yang, Micha Livne, Yi Dong, Sean Naren, and Boris Ginsburg. 2025. NeMo: a toolkit for Conversational AI and Large Language Models. (2025). https://github.com/NVIDIA/NeMo 
+
+[23] Jingkai He, Tianjian Li, Erhu Feng, Dong Du, Qian Liu, Tao Liu, Yubin Xia, and Haibo Chen. 2025. History Rhymes: Accelerating LLM Rein-forcement Learning with RhymeRL. arXiv preprint arXiv:2508.18588 
+
+(2025). [24] Jian Hu, Xibin Wu, Weixun Wang, Dehao Zhang, Yu Cao, et al . 2024. OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework. arXiv preprint arXiv:2405.11143 (2024). [25] Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen, Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, Yulu Jia, Sun He, Hongmin Chen, Zhihao Bai, Qi Hou, Shipeng Yan, Ding Zhou, Yiyao Sheng, Zhuo Jiang, Haohan Xu, Haoran Wei, Zhang Zhang, Pengfei Nie, Leqi Zou, Sida Zhao, Liang Xiang, Zherui Liu, Zhe Li, Xiaoying Jia, Jianxi Ye, Xin Jin, and Xin Liu. 2024. MegaScale: scaling large language model training to more than 10,000 GPUs. In Pro-ceedings of the 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI’24) . USENIX Association, USA, Article 41, 16 pages. [26] Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. 2024. SWE-bench: Can Language Models Resolve Real-World GitHub Issues? arXiv preprint arXiv:2310.06770 (2024). [27] Norm Jouppi, George Kurian, Sheng Li, Peter Ma, Rahul Nagarajan, Lifeng Nai, Nishant Patil, Suvinay Subramanian, Andy Swing, Brian Towles, et al . 2023. Tpu v4: An optically reconfigurable supercom-puter for machine learning with hardware support for embeddings. In 
+
+Proceedings of the 50th annual international symposium on computer architecture . 1–14. [28] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Sto-ica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .[29] Jung Hyun Lee, Jeonghoon Kim, June Yong Yang, Se Jung Kwon, Eunho Yang, Kang Min Yoo, and Dongsoo Lee. 2025. LRQ: Optimizing Post-Training Quantization for Large Language Models by Learning Low-Rank Weight-Scaling Matrices. arXiv preprint arXiv:2407.11534 (2025). [30] Jiamin Li, Hong Xu, Yibo Zhu, Zherui Liu, Chuanxiong Guo, and Cong Wang. 2023. Lyra: Elastic Scheduling for Deep Learning Clusters. In 
+
+Proceedings of the Eighteenth European Conference on Computer Systems .Association for Computing Machinery, New York, NY, USA, 835–850. 
+
+https://doi.org/10.1145/3552326.3587445 
+
+[31] Zhiwei Li, Yong Hu, and Wenqing Wang. 2025. Encouraging Good Pro-cesses Without the Need for Good Answers: Reinforcement Learning for LLM Agent Planning. arXiv preprint arXiv:2508.19598 (2025). [32] Zhuohan Li, Lianmin Zheng, Yinmin Zhong, Vincent Liu, Ying Sheng, Xin Jin, Yanping Huang, Zhifeng Chen, Hao Zhang, Joseph E Gon-zalez, et al . 2023. {AlpaServe }: Statistical multiplexing with model parallelism for deep learning serving. In 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23) . 663–679. [33] Hwijoon Lim, Juncheol Ye, Sangeetha Abdu Jyothi, and Dongsu Han. 2024. Accelerating model training in multi-cluster environments with consumer-grade gpus. In Proceedings of the ACM SIGCOMM 2024 Con-ference . 707–720. [34] Yuhang Liu, Pengxiang Li, Congkai Xie, Xavier Hu, Xiaotian Han, Shengyu Zhang, Hongxia Yang, and Fei Wu. 2025. Infigui-r1: Ad-vancing multimodal gui agents from reactive actors to deliberative reasoners. arXiv preprint arXiv:2504.14239 (2025). [35] Han Lu, Zichen Liu, Shaopan Xiong, Yancheng He, Wei Gao, Yanan Wu, Weixun Wang, Jiashun Liu, Yang Li, Haizhou Zhao, Ju Huang, Siran Yang, Xiaoyang Li, Yijia Luo, Zihe Liu, Ling Pan, Junchi Yan, Wei Wang, Wenbo Su, Jiamang Wang, Lin Qu, and Bo Zheng. 2025. Part II: ROLL Flash – Accelerating RLVR and Agentic Training with Asynchrony. arXiv preprint arXiv:2510.11345 (2025). [36] Zhengxi Lu, Yuxiang Chai, Yaxuan Guo, Xi Yin, Liang Liu, Hao Wang, Han Xiao, Shuai Ren, Guanjing Xiong, and Hongsheng Li. 2025. UI-R1: Enhancing Efficient Action Prediction of GUI Agents by Reinforcement Learning. arXiv preprint arXiv:2503.21620 (2025). [37] Michael Luo, Sijun Tan, Roy Huang, Ameen Patel, Alpay Ariyak, Qingyang Wu, Xiaoxiang Shi, Rachel Xin, Colin Cai, Maurice We-ber, Ce Zhang, Li Erran Li, Raluca Ada Popa, and Ion Stoica. 2025. DeepCoder: A Fully Open-Source 14B Coder at O3-mini Level. https: 
+
+15 Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al. //pretty-radio-b75.notion.site/DeepCoder-A-Fully-Open-Source-14B-Coder-at-O3-mini-Level-1cf81902c14680b3bee5eb349a512a51 .(2025). Notion Blog. [38] Run Luo, Lu Wang, Wanwei He, and Xiaobo Xia. 2025. GUI-R1 : A Generalist R1-Style Vision-Language Action Model For GUI Agents. 
+
+arXiv preprint arXiv:2504.10458 (2025). [39] Philipp Moritz, Robert Nishihara, Stephanie Wang, Alexey Tumanov, Richard Liaw, Eric Liang, Melih Elibol, Zongheng Yang, William Paul, Michael I Jordan, et al . 2018. Ray: A distributed framework for emerg-ing {AI } applications. In 13th USENIX symposium on operating systems design and implementation (OSDI 18) . 561–577. [40] Aashiq Muhamed, Oscar Li, David Woodruff, Mona Diab, and Virginia Smith. 2024. Grass: Compute efficient low-memory llm training with structured sparse gradients. In Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing . 14978–15003. [41] NVIDIA Corporation. 2024. NVIDIA Multi-Process Service (MPS) Documentation. https://docs.nvidia.com/deploy/mps/index.html .(2024). [42] OpenPipe. 2025. Serverless RL. (2025). https://openpipe.ai/blog/serve rless-rl 
+
+[43] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2025. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. In Proceedings of the 51st Annual International Symposium on Computer Architecture (ISCA ’24) . IEEE Press, 118–132. https://doi.org/10.1109/ISCA59077.2024.000 19 
+
+[44] Yifan Qiao, Shu Anzai, Shan Yu, Haoran Ma, Shuo Yang, Yang Wang, Miryung Kim, Yongji Wu, Yang Zhou, Jiarong Xing, Joseph E. Gon-zalez, Ion Stoica, and Harry Xu. 2025. ConServe: Fine-Grained GPU Harvesting for LLM Online and Offline Co-Serving. arXiv preprint arXiv:2410.01228 (2025). [45] Ruoyu Qin, Weiran He, Weixiao Huang, Yangkun Zhang, Yikai Zhao, Bo Pang, Xinran Xu, Yingdi Shan, Yongwei Wu, and Mingxing Zhang. 2025. Seer: Online Context Learning for Fast Synchronous LLM Rein-forcement Learning. arXiv preprint arXiv:2511.14617 (2025). [46] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Heyi Tang, Feng Ren, Teng Ma, Shangming Cai, Yineng Zhang, Mingxing Zhang, et al . 2024. Mooncake: A kvcache-centric disaggregated architecture for llm serv-ing. ACM Transactions on Storage (2024). [47] Haoran Qiu, Anish Biswas, Zihan Zhao, Jayashree Mohan, Alind Khare, Esha Choukse, Íñigo Goiri, Zeyu Zhang, Haiying Shen, Chetan Bansal, Ramachandran Ramjee, and Rodrigo Fonseca. 2025. ModServe: Modality- and Stage-Aware Resource Disaggregation for Scalable Mul-timodal Model Serving. In Proceedings of the 2025 ACM Symposium on Cloud Computing (SoCC 2025) . Association for Computing Machinery, New York, NY, USA. [48] Mrinal Rawat, Ambuje Gupta, Rushil Goomer, Alessandro Di Bari, Neha Gupta, and Roberto Pieraccini. 2025. Pre-Act: Multi-Step Plan-ning and Reasoning Improves Acting in LLM Agents. arXiv preprint arXiv:2505.09970 (2025). [49] Amir Sarfi, Benjamin Thérien, Joel Lidin, and Eugene Belilovsky. 2025. Communication Efficient LLM Pre-training with SparseLoCo. (2025). arXiv:cs.LG/2508.15706 https://arxiv.org/abs/2508.15706 
+
+[50] Alexander Sergeev and Mike Del Balso. 2018. Horovod: fast and easy distributed deep learning in TensorFlow. arXiv preprint arXiv:1802.05799 (2018). [51] SGLang Team. 2025. SGLang: Fast Serving Framework for Large Language Models. https://github.com/sgl-project/sglang . (2025). Version 0.4. [52] Zelei Shao, Vikranth Srivatsa, Sanjana Srivastava, Qingyang Wu, Al-pay Ariyak, Xiaoxia Wu, Ameen Patel, Jue Wang, Percy Liang, Tri Dao, Ce Zhang, Yiying Zhang, Ben Athiwaratkun, Chenfeng Xu, and Junx-iong Wang. 2025. Beat the long tail: Distribution-Aware Speculative Decoding for RL Training. arXiv preprint arXiv:2511.13841 (2025). [53] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, YK Li, Y Wu, et al . 2024. Deepseekmath: Pushing the limits of mathematical reasoning in open language models. arXiv preprint arXiv:2402.03300 (2024). [54] Guangming Sheng, Yuxuan Tong, Borui Wan, Wang Zhang, Chaobo Jia, Xibin Wu, Yuqi Wu, Xiang Li, Chi Zhang, Yanghua Peng, Haibin Lin, Xin Liu, and Chuan Wu. 2025. Laminar: A Scalable Asynchronous RL Post-Training Framework. arXiv preprint arXiv:2510.12633 (2025). [55] Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2024. Hy-bridFlow: A Flexible and Efficient RLHF Framework. arXiv preprint arXiv:2409.19256 (2024). [56] Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2024. verl: Volcano Engine Reinforcement Learning for LLM. https://github.com /volcengine/verl . (2024). [57] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2019. Megatron-lm: Training multi-billion parameter language models using model parallelism. arXiv preprint arXiv:1909.08053 (2019). [58] Mohit Shridhar, Xingdi Yuan, Marc-Alexandre Côté, Yonatan Bisk, Adam Trischler, and Matthew Hausknecht. 2021. ALFWorld: Aligning Text and Embodied Environments for Interactive Learning. arXiv preprint arXiv:2010.03768 (2021). [59] Joykirat Singh, Raghav Magazine, Yash Pandya, and Akshay Nambi. 2025. Agentic Reasoning and Tool Integration for LLMs via Reinforce-ment Learning. arXiv preprint arXiv:2505.01441 (2025). [60] Jovan Stojkovic, Chaojie Zhang, Íñigo Goiri, Josep Torrellas, and Esha Choukse. 2025. Dynamollm: Designing llm inference clusters for per-formance and energy efficiency. In 2025 IEEE International Symposium on High Performance Computer Architecture (HPCA) . IEEE, 1348–1362. [61] The Terminal-Bench Team. 2025. Terminal-Bench: A Benchmark for AI Agents in Terminal Environments. (2025). https://github.com/laude-institute/terminal-bench 
+
+[62] Thinking Machines AI. 2025. Tinker. https://thinkingmachines.ai/ti nker/ . (2025). Accessed: 2026-02. [63] Jiahao Wang, Jinbo Han, Xingda Wei, Sijie Shen, Dingyan Zhang, Chenguang Fang, Rong Chen, Wenyuan Yu, and Haibo Chen. 2025. KVCache cache in the wild: characterizing and optimizing KVCache cache at a large cloud provider. In Proceedings of the 2025 USENIX Conference on Usenix Annual Technical Conference (USENIX ATC ’25) .USENIX Association, USA, Article 28, 18 pages. [64] Weixun Wang, Shaopan Xiong, Gengru Chen, Wei Gao, Sheng Guo, Yancheng He, Ju Huang, Jiaheng Liu, Zhendong Li, Xiaoyang Li, Zichen Liu, Haizhou Zhao, Dakai An, Lunxi Cao, Qiyang Cao, Wanxi Deng, Feilei Du, Yiliang Gu, Jiahe Li, Xiang Li, Mingjie Liu, Yijia Luo, Zihe Liu, Yadao Wang, Pei Wang, Tianyuan Wu, Yanan Wu, Yuheng Zhao, Shuaibing Zhao, Jin Yang, Siran Yang, Yingshui Tan, Huimin Yi, Yuchi Xu, Yujin Yuan, Xingyao Zhang, Lin Qu, Wenbo Su, Wei Wang, Jiamang Wang, and Bo Zheng. 2025. Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library. 
+
+arXiv preprint arXiv:2506.06122 (2025). [65] Weixun Wang, XiaoXiao Xu, Wanhe An, Fangwen Dai, Wei Gao, Yancheng He, Ju Huang, Qiang Ji, Hanqi Jin, Xiaoyang Li, Yang Li, Zhongwen Li, Shirong Lin, Jiashun Liu, Zenan Liu, Tao Luo, Dilxat Muhtar, Yuanbin Qu, Jiaqiang Shi, Qinghui Sun, Yingshui Tan, Hao Tang, Runze Wang, Yi Wang, Zhaoguo Wang, Yanan Wu, Shaopan Xiong, Binchen Xu, Xander Xu, Yuchi Xu, Qipeng Zhang, Xixia Zhang, Haizhou Zhao, Jie Zhao, Shuaibing Zhao, Baihui Zheng, Jianhui Zheng, Suhang Zheng, Yanni Zhu, Mengze Cai, Kerui Cao, Xitong Chen, Yue Dai, Lifan Du, Tao Feng, Tao He, Jin Hu, Yijie Hu, Ziyu Jiang, Cheng Li, Xiang Li, Jing Liang, Xin Lin, Chonghuan Liu, ZhenDong Liu, Zhiqiang Lv, Haodong Mi, Yanhu Mo, Junjia Ni, Shixin Pei, Jingyu Shen, Xi-aoShuai Song, Cecilia Wang, Chaofan Wang, Kangyu Wang, Pei Wang, 16 ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA 
+
+Tao Wang, Wei Wang, Ke Xiao, Mingyu Xu, Tiange Xu, Nan Ya, Siran Yang, Jianan Ye, Yaxing Zang, Duo Zhang, Junbo Zhang, Boren Zheng, Wanxi Deng, Ling Pan, Lin Qu, Wenbo Su, Jiamang Wang, Wei Wang, Hu Wei, Minggang Wu, Cheng Yu, Bing Zhao, Zhicheng Zheng, and Bo Zheng. 2026. Let It Flow: Agentic Crafting on Rock and Roll, Building the ROME Model within an Open Agentic Learning Ecosystem. arXiv preprint arXiv:2512.24873 (2026). [66] Yuxin Wang, Yuhan Chen, Zeyu Li, Xueze Kang, Yuchu Fang, Yeju Zhou, Yang Zheng, Zhenheng Tang, Xin He, Rui Guo, Xin Wang, Qiang Wang, Amelie Chi Zhou, and Xiaowen Chu. 2025. BurstGPT: A Real-world Workload Dataset to Optimize LLM Serving Systems. arXiv preprint arXiv:2401.17644 (2025). [67] Zhuang Wang, Zhaozhuo Xu, Jingyi Xi, Yuke Wang, Anshumali Shri-vastava, and TS Eugene Ng. 2025. {ZEN }: Empowering Distributed Training with Sparsity-driven Data Synchronization. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . 537–556. [68] Junde Wu, Jiayuan Zhu, Yuyuan Liu, Min Xu, and Yueming Jin. 2025. Agentic reasoning: A streamlined framework for enhancing llm rea-soning with agentic tools. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) .28489–28503. [69] Tianyuan Wu, Lunxi Cao, Yining Wei, Wei Gao, Yuheng Zhao, Dakai An, Shaopan Xiong, Zhiqiang Lv, Ju Huang, Siran Yang, Yinghao Yu, Jiamang Wang, Lin Qu, and Wei Wang. 2025. RollMux: Phase-Level Multiplexing for Disaggregated RL Post-Training. arXiv preprint arXiv:2512.11306 (2025). [70] Yongji Wu, Xueshen Liu, Haizhong Zheng, Juncheng Gu, Beidi Chen, Z. Morley Mao, Arvind Krishnamurthy, and Ion Stoica. 2025. RLBoost: Harvesting Preemptible Resources for Cost-Efficient Reinforcement Learning on LLMs. arXiv preprint arXiv:2510.19225 (2025). [71] Bingquan Xia, Bowen Shen, Cici, Dawei Zhu, Di Zhang, Gang Wang, Hailin Zhang, Huaqiu Liu, Jiebao Xiao, Jinhao Dong, Liang Zhao, Peid-ian Li, Peng Wang, Shihua Yu, Shimao Chen, Weikun Wang, Wenhan Ma, Xiangwei Deng, Yi Huang, Yifan Song, Zihan Jiang, Bowen Ye, Can Cai, Chenhong He, Dong Zhang, Duo Zhang, Guoan Wang, Hao Tian, Haochen Zhao, Heng Qu, Hongshen Xu, Jun Shi, Kainan Bao, Kai Fang, Kang Zhou, Kangyang Zhou, Lei Li, Menghang Zhu, Nuo Chen, Qiantong Wang, Shaohui Liu, Shicheng Li, Shuhao Gu, Shuhuai Ren, Shuo Liu, Sirui Deng, Weiji Zhuang, Weiwei Lv, Wenyu Yang, Xin Zhang, Xing Yong, Xing Zhang, Xingchen Song, Xinzhe Xu, Xu Wang, Yihan Yan, Yu Tu, Yuanyuan Tian, Yudong Wang, Yue Yu, Zhenru Lin, Zhichao Song, and Zihao Yue. 2025. MiMo: Unlocking the Reasoning Potential of Language Model – From Pretraining to Posttraining. arXiv preprint arXiv:2505.07608 (2025). [72] Yuxing Xiang, Xue Li, Kun Qian, Yufan Yang, Diwen Zhu, Wenyuan Yu, Ennan Zhai, Xuanzhe Liu, Xin Jin, and Jingren Zhou. 2025. Aegaeon: Effective GPU pooling for concurrent LLM serving on the market. In 
+
+Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles . 1030–1045. [73] Wencong Xiao, Shiru Ren, Yong Li, Yang Zhang, Pengyang Hou, Zhi Li, Yihui Feng, Wei Lin, and Yangqing Jia. 2020. AntMan: Dynamic scaling on GPU clusters for deep learning. In USENIX OSDI .[74] Jiarong Xing, Yifan Qiao, Simon Mo, Xingqi Cui, Gur-Eyal Sela, Yang Zhou, Joseph Gonzalez, and Ion Stoica. 2025. Towards Efficient and Practical GPU Multitasking in the Era of LLM. arXiv preprint arXiv:2508.08448 (2025). [75] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 (2025). [76] David H. Yang, Mohammad Mohammadi Amiri, Tejaswini Pedap-ati, Subhajit Chaudhury, and Pin-Yu Chen. 2025. Sparse Gradi-ent Compression for Fine-Tuning Large Language Models. (2025). arXiv:cs.LG/2502.00311 https://arxiv.org/abs/2502.00311 
+
+[77] John Yang, Kilian Lieret, Carlos E Jimenez, Alexander Wettig, Kabir Khandpur, Yanzhe Zhang, Binyuan Hui, Ofir Press, Ludwig Schmidt, and Diyi Yang. 2025. Swe-smith: Scaling data for software engineering agents. arXiv preprint arXiv:2504.21798 (2025). [78] Chenxuan Yao, Feifan Liu, Yuchong Hu, Zhengyu Liu, Xinjue Zheng, and Wenxiang Zhou. 2025. LowDiff: Efficient Frequent Checkpointing via Low-Cost Differential for High-Performance Distributed Train-ing Systems. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC ’25) .Association for Computing Machinery, 1113–1126. [79] Zhewei Yao, Reza Yazdani Aminabadi, Olatunji Ruwase, Samyam Rajb-handari, Xiaoxia Wu, Ammar Ahmad Awan, Jeff Rasley, Minjia Zhang, Conglong Li, Connor Holmes, Zhongzhu Zhou, Michael Wyatt, Molly Smith, Lev Kurilenko, Heyang Qin, Masahiro Tanaka, Shuai Che, Shuai-wen Leon Song, and Yuxiong He. 2023. DeepSpeed-Chat: Easy, Fast and Affordable RLHF Training of ChatGPT-like Models at All Scales. 
+
+arXiv preprint arXiv:2308.01320 (2023). [80] Minchen Yu, Rui Yang, Chaobo Jia, Zhaoyuan Su, Sheng Yao, Tingfeng Lan, Yuchen Yang, Yue Cheng, Wei Wang, Ao Wang, and Ruichuan Chen. 2025. lambdaScale: Enabling Fast Scaling for Serverless Large Language Model Inference. arXiv preprint arXiv:2502.09922 (2025). [81] Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo, Yu Yue, Weinan Dai, Tiantian Fan, Gaohong Liu, Lingjun Liu, Xin Liu, Haibin Lin, Zhiqi Lin, Bole Ma, Guangming Sheng, Yuxuan Tong, Chi Zhang, Mofan Zhang, Wang Zhang, Hang Zhu, Jinhua Zhu, Jiaze Chen, Jiangjie Chen, Chengyi Wang, Hongli Yu, Yuxuan Song, Xiangpeng Wei, Hao Zhou, Jingjing Liu, Wei-Ying Ma, Ya-Qin Zhang, Lin Yan, Mu Qiao, Yonghui Wu, and Mingxuan Wang. 2025. DAPO: An Open-Source LLM Reinforcement Learning System at Scale. arXiv preprint arXiv:2503.14476 (2025). [82] Shan Yu, Jiarong Xing, Yifan Qiao, Mingyuan Ma, Yangmin Li, Yang Wang, Shuo Yang, Zhiqiang Xie, Shiyi Cao, Ke Bao, Ion Stoica, Harry Xu, and Ying Sheng. 2025. Prism: Unleashing GPU Sharing for Cost-Efficient Multi-LLM Serving. arXiv preprint arXiv:2505.04021 (2025). [83] Dingyan Zhang, Haotian Wang, Yang Liu, Xingda Wei, Yizhou Shan, Rong Chen, and Haibo Chen. 2025. {BlitzScale }: Fast and Live Large Model Autoscaling with O (1) Host Caching. In 19th USENIX Sym-posium on Operating Systems Design and Implementation (OSDI 25) .275–293. [84] Ruiqi Zhang, Daman Arora, Song Mei, and Andrea Zanette. 2025. SPEED-RL: Faster Training of Reasoning Models via Online Curricu-lum Learning. arXiv preprint arXiv:2506.09016 (2025). [85] Yihao Zhao, Jiadun Chen, Peng Sun, Lei Li, Xuanzhe Liu, and Xin Jin. 2025. SeaLLM: Service-Aware and Latency-Optimized Re-source Sharing for Large Language Model Inference. arXiv preprint arXiv:2504.15720 (2025). [86] Yihao Zhao, Yuanqiang Liu, Yanghua Peng, Yibo Zhu, Xuanzhe Liu, and Xin Jin. 2022. Multi-resource interleaving for deep learning training. In Proceedings of the ACM SIGCOMM 2022 Conference . 428–440. [87] Haizhong Zheng, Yang Zhou, Brian R. Bartoldson, Bhavya Kailkhura, Fan Lai, Jiawei Zhao, and Beidi Chen. 2025. Act Only When It Pays: Efficient Reinforcement Learning for LLM Reasoning via Selective Rollouts. arXiv preprint arXiv:2506.02177 (2025). [88] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. {DistServe }: Disaggregating 17 Conference’17, July 2017, Washington, DC, USA Gao, Zhao et al. 
+
+prefill and decoding for goodput-optimized large language model serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 193–210. [89] Yinmin Zhong, Zili Zhang, Xiaoniu Song, Hanpeng Hu, Chao Jin, Bingyang Wu, Nuo Chen, Yukun Chen, Yu Zhou, Changyi Wan, Hongyu Zhou, Yimin Jiang, Yibo Zhu, and Daxin Jiang. 2025. StreamRL: Scalable, Heterogeneous, and Elastic RL for LLMs with Disaggregated Stream Generation. arXiv preprint arXiv:2504.15930 (2025). [90] Yinmin Zhong, Zili Zhang, Bingyang Wu, Shengyu Liu, Yukun Chen, Changyi Wan, Hanpeng Hu, Lei Xia, Ranchen Ming, Yibo Zhu, et al .2025. Optimizing {RLHF } training for large language models with stage fusion. In 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) . 489–503. 18 ROSE : Rollouts on Serving GPUs Conference’17, July 2017, Washington, DC, USA 
+
+## Appendix A Rollout Concurrency Profiling 
+
+ROSE profiles and caps rollout concurrency on dedicated rollout GPUs to avoid excessive KV cache (KVC) memory pressure. Figure 14 shows the rollout throughput of Qwen3-8B with a 32K context length under different per-GPU batch sizes. Throughput increases with concurrency up to a batch size of 16, after which it saturates. Increasing concurrency beyond this point increases rollout latency due to memory contention and KVC fragmentation, which in turn degrades effective throughput. Therefore, unless otherwise specified, we cap the maximum number of concurrent rollout requests per dedicated rollout GPU at 16. 8 64 128 256 384 
+
+> Per-Device Batch Size
+> 4k
+> 5k
+> 6k
+> Tokens/s
+> 16
+
+Figure 14. The system throughput with different per-device batch sizes. [Qwen3-8B/32K] 
+
+## B Spot instance trace 
+
+We extract the spot-instance traces for the 8B model from Seg.B in Figure 8(a) and for the 32B model from Seg.B in Figure 9 of the RLBoost paper [ 70 ]. Figure 15 shows the vari-ations in the number of preemptible and reserved GPUs over time. In the experiments, we used these traces to evaluate RLBoost’s performance. 0 30 60 90 120       
+
+> Time (min)
+> 0
+> 4
+> 8
+> 12
+> 16
+> #GPUs
+> 8B
+> 030 60 90 120
+> Time (min)
+> 0
+> 4
+> 8
+> 12
+> 16
+> 20
+> 24
+> 28
+> 32
+> #GPUs
+> 32B
+> Reserved Preemptible Total Capacity
+
+Figure 15. RLBoost trace used for 8B and 32B models. 
+
+## C Sensitivity to caching lease 
+
+We set the lease time for prefix cache of rollout in the memory sharing policy. Table 5 evaluates how the prefix cache lease time affects rollout efficiency and serving SLOs for Qwen3-8B. The rollout time is largely insensitive to the lease time, suggesting that longer cache persistence provides limited additional benefit for rollouts in this setting. In contrast, lease time has a clear impact on serving tail latency: since the Dual-SLO admission controller is designed to enforce SLO thresholds rather than explicitly minimize tail latency, a longer lease can keep more rollout KVC resident and reduce GPU memory headroom for bursty serving traffic, inflating P99 latency. Consequently, a moderate lease time offers the best trade-off, retaining most prefix cache of rollouts benefits while provide scheduling flexibility to prevent rollout prefix-cache residency from degrading serving SLOs. 
+
+Table 5. [Co-Serve Executor]. The impact of prefix-cache lease time on rollout and serving SLO.                
+
+> Lease (s) Avg Rollout Time (s) TTFT P99 (ms) TPOT P99 (ms)
+> 10 496.3 338.11 136.13 20 497.1 334.71 135.28 50 492.2 371.10 140.70 100 502.1 491.90 148.10
+
+## D Sensitivity to Serving Traffic. 
+
+Serving GPUs can be repurposed for rollouts because serving demand fluctuates over time, leaving transient compute and memory headroom. To understand how ROSE behaves as this headroom shrinks, we scale the serving request arrival density and measure both rollout efficiency (average rollout time) and serving QoS (TTFT/TPOT P99). Table 6 shows that higher serving density increases resource contention, which in turn prolongs rollouts and degrades serving tail latency. Two additional observations stand out. First, TTFT is more sensitive to increasing load than TPOT, suggesting that con-tention primarily hurts the prefill, while per-token genera-tion is comparatively less affected. Second, the larger model exhibits more stable rollout time as serving density increases, but its serving tail latencies still rise with load, indicating that compute/memory interference persists and must be managed by the co-serving executor. Overall, the results confirm the expected trade-off under cooperative elasticity: as serving load grows, ROSE gradually reduces effective rollout capacity while keeping serving performance degradation bounded rather than causing sharp SLO violations. 
+
+Table 6. [Co-Serve Executor]. The impact of serving traffic density on rollout and serving SLO.
