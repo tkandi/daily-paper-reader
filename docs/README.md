@@ -7,72 +7,84 @@
 
 ## 每次日报
 - 最新运行日期：2026-05-12
-- 运行时间：2026-05-12 03:26:38 UTC
+- 运行时间：2026-05-12 21:16:22 UTC
 - 运行状态：成功
-- 本次总论文数：17
-- 精读区：6
+- 本次总论文数：21
+- 精读区：10
 - 速读区：11
 
 ### 今日简报（AI）
-今日精选 17 篇前沿论文，深度聚焦异构硬件下的长文本训练与超大规模模型扩展效率。
-满分论文 HexiSeq 与 SuperMUC-NG 分别给出了异构集群长序列训练及大规模高效训练的最优解。
-建议重点关注 CPU-GPU 协同推理与 MatryoshkaLoRA 微调技术，以实现更低成本的长文本处理与模型定制。
+今日精选 21 篇前沿论文，深度聚焦大模型在异构硬件与超算集群上的大规模训练与长文本优化。
+重点推荐 HexiSeq 解决异构硬件长序列训练难题，以及 SuperMUC-NG 提供的超大规模模型高效训练实战方案。
+建议关注 CPU-GPU 协同推理与双向压缩优化，探索在有限算力下实现长文本处理与分布式训练的性能突破。
 - 详情：[/202605/12/README](/202605/12/README)
 
 ### 精读区论文标签
 1. [HexiSeq: Accommodating Long Context Training of LLMs over Heterogeneous Hardware](/202605/12/2605.07569v1-hexiseq-accommodating-long-context-training-of-llms-over-heterogeneous-hardware)  
    标签：评分：10.0/10、query:mlsys
-   evidence：异构集群中的GPU资源调度
+   evidence：在异构GPU集群上调度长文本训练
 2. [A Scalable Recipe on SuperMUC-NG Phase 2: Efficient Large-Scale Training of Language Models](/202605/12/2605.07726v1-a-scalable-recipe-on-supermuc-ng-phase-2-efficient-large-scale-training-of-language-models)  
    标签：评分：10.0/10、query:mlsys
-   evidence：在HPC基础设施上进行高效的大规模语言模型训练
-3. [RcLLM: Accelerating Generative Recommendation via Beyond-Prefix KV Caching](/202605/12/2605.07443v1-rcllm-accelerating-generative-recommendation-via-beyond-prefix-kv-caching)  
+   evidence：在HPC基础设施上高效进行大规模语言模型训练
+3. [MegaScale-Omni: A Hyper-Scale, Workload-Resilient System for MultiModal LLM Training in Production](/202605/12/2605.08962v1-megascale-omni-a-hyper-scale-workload-resilient-system-for-multimodal-llm-training-in-production)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：具有解耦并行策略的大规模多模态大模型训练系统
+4. [From Detection to Recovery: Operational Analysis on LLM Pre-training with 504 GPUs](/202605/12/2605.09370v1-from-detection-to-recovery-operational-analysis-on-llm-pre-training-with-504-gpus)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：对504个GPU进行LLM预训练的运营分析及存储I/O瓶颈研究
+5. [Lakestream: A Consistent and Brokerless Data Plane for Large Foundation Model Training](/202605/12/2605.09994v1-lakestream-a-consistent-and-brokerless-data-plane-for-large-foundation-model-training)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：用于大型基础模型训练优化的无代理数据平面
+6. [Navigating LLM Valley: From AdamW to Memory-Efficient and Matrix-Based Optimizers](/202605/12/2605.09176v1-navigating-llm-valley-from-adamw-to-memory-efficient-and-matrix-based-optimizers)  
+   标签：评分：9.5/10、query:mlsys
+   evidence：从系统与优化视角综述大语言模型优化器设计
+7. [FedQueue: Queue-Aware Federated Learning for Cross-Facility HPC Training](/202605/12/2605.02125v2-fedqueue-queue-aware-federated-learning-for-cross-facility-hpc-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：具有分层存储设计的生成式推荐分布式推理系统
-4. [Scalable Distributed Stochastic Optimization via Bidirectional Compression: Beyond Pessimistic Limits](/202605/12/2605.07795v1-scalable-distributed-stochastic-optimization-via-bidirectional-compression-beyond-pessimistic-limits)  
+   evidence：针对HPC训练和调度延迟管理的队列感知联邦学习
+8. [Deadline-Driven Hierarchical Agentic Resource Sharing for AI Services and RAN Functions in AI-RAN](/202605/12/2605.07547v1-deadline-driven-hierarchical-agentic-resource-sharing-for-ai-services-and-ran-functions-in-ai-ran)  
    标签：评分：9.0/10、query:mlsys
-   evidence：通过双向压缩实现的可扩展分布式随机优化
-5. [Deadline-Driven Hierarchical Agentic Resource Sharing for AI Services and RAN Functions in AI-RAN](/202605/12/2605.07547v1-deadline-driven-hierarchical-agentic-resource-sharing-for-ai-services-and-ran-functions-in-ai-ran)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：AI-RAN中GPU/CPU分配的分层框架
-6. [Rethinking Local Learning: A Cheaper and Faster Recipe for LLM Post-Training](/202605/12/2605.04913v3-rethinking-local-learning-a-cheaper-and-faster-recipe-for-llm-post-training)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：通过梯度解耦实现更廉价、更快速的LLM后训练方案
+   evidence：边缘AI服务的GPU资源共享与调度
+9. [ExecuTorch -- A Unified PyTorch Solution to Run AI Models On-Device](/202605/12/2605.08195v1-executorch----a-unified-pytorch-solution-to-run-ai-models-on-device)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：用于边缘AI的统一PyTorch原生部署框架
+10. [Accelerating Compound LLM Training Workloads with Maestro](/202605/12/2605.10501v1-accelerating-compound-llm-training-workloads-with-maestro)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：加速具有异构组件的复合大模型训练负载
 
 ### 速读区论文标签
 1. [An Efficient Hybrid Sparse Attention with CPU-GPU Parallelism for Long-Context Inference](/202605/12/2605.07719v1-an-efficient-hybrid-sparse-attention-with-cpu-gpu-parallelism-for-long-context-inference)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于长上下文推理的CPU-GPU并行与协同执行
-2. [MatryoshkaLoRA: Learning Accurate Hierarchical Low-Rank Representations for LLM Fine-Tuning](/202605/12/2605.07850v1-matryoshkalora-learning-accurate-hierarchical-low-rank-representations-for-llm-fine-tuning)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：大规模模型的高效微调
-3. [TENNOR: Trustworthy Execution for Neural Networks through Obliviousness and Retrievals](/202605/12/2605.07160v1-tennor-trustworthy-execution-for-neural-networks-through-obliviousness-and-retrievals)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：长上下文推理中的CPU-GPU并行与跨设备协同执行
+2. [Scalable Distributed Stochastic Optimization via Bidirectional Compression: Beyond Pessimistic Limits](/202605/12/2605.07795v1-scalable-distributed-stochastic-optimization-via-bidirectional-compression-beyond-pessimistic-limits)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：通过双向压缩实现可扩展的分布式随机优化
+3. [LBI: Parallel Scan Backpropagation via Latent Bounded Interfaces](/202605/12/2605.09204v1-lbi-parallel-scan-backpropagation-via-latent-bounded-interfaces)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：并行扫描反向传播以解决并行训练瓶颈
+4. [ATLAS: Efficient Out-of-Core Inference for Billion-Scale Graph Neural Networks](/202605/12/2605.09402v1-atlas-efficient-out-of-core-inference-for-billion-scale-graph-neural-networks)  
+   标签：评分：8.5/10、query:mlsys
+   evidence：针对十亿级图的核外推理框架
+5. [TENNOR: Trustworthy Execution for Neural Networks through Obliviousness and Retrievals](/202605/12/2605.07160v1-tennor-trustworthy-execution-for-neural-networks-through-obliviousness-and-retrievals)  
    标签：评分：7.5/10、query:mlsys
-   evidence：云端可信神经网络执行系统
-4. [NeuralSet: A High-Performing Python Package for Neuro-AI](/202605/12/2605.03169v2-neuralset-a-high-performing-python-package-for-neuro-ai)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：用于神经AI和深度学习嵌入的Python框架
-5. [Star Elastic: Many-in-One Reasoning LLMs with Efficient Budget Control](/202605/12/2605.07182v1-star-elastic-many-in-one-reasoning-llms-with-efficient-budget-control)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：大语言模型家族的高效预算控制与后训练
-6. [Reformulating KV Cache Eviction Problem for Long-Context LLM Inference](/202605/12/2605.07234v1-reformulating-kv-cache-eviction-problem-for-long-context-llm-inference)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：优化长文本LLM推理的KV缓存内存和运行开销
-7. [MISA: Mixture of Indexer Sparse Attention for Long-Context LLM Inference](/202605/12/2605.07363v1-misa-mixture-of-indexer-sparse-attention-for-long-context-llm-inference)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：LLM推理中稀疏注意力的优化
-8. [Memory-Efficient Looped Transformer: Decoupling Compute from Memory in Looped Language Models](/202605/12/2605.07721v1-memory-efficient-looped-transformer-decoupling-compute-from-memory-in-looped-language-models)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：循环语言模型的内存高效架构设计
-9. [Personalized Federated Learning for Gradient Alignment](/202605/12/2605.02143v1-personalized-federated-learning-for-gradient-alignment)  
+   evidence：协同设计神经网络训练流水线与不经意原语
+6. [MISA: Mixture of Indexer Sparse Attention for Long-Context LLM Inference](/202605/12/2605.07363v1-misa-mixture-of-indexer-sparse-attention-for-long-context-llm-inference)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：使用稀疏注意力的高效长上下文LLM推理系统设计
+7. [Adaptive DNN Partitioning and Offloading in Heterogeneous Edge-Cloud Continuum](/202605/12/2605.09623v1-adaptive-dnn-partitioning-and-offloading-in-heterogeneous-edge-cloud-continuum)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：边缘云系统中的动态DNN分区和卸载框架
+8. [DP-LAC: Lightweight Adaptive Clipping for Differentially Private Federated Fine-tuning of Language Models](/202605/12/2605.10272v1-dp-lac-lightweight-adaptive-clipping-for-differentially-private-federated-fine-tuning-of-language-models)  
+   标签：评分：7.5/10、query:mlsys
+   evidence：大规模语言模型的联邦微调
+9. [Flexible Routing via Uncertainty Decomposition](/202605/12/2605.07805v1-flexible-routing-via-uncertainty-decomposition)  
    标签：评分：6.5/10、query:mlsys
-   evidence：联邦学习的梯度对齐框架
-10. [Adaptive Selection of LoRA Components in Privacy-Preserving Federated Learning](/202605/12/2605.05769v1-adaptive-selection-of-lora-components-in-privacy-preserving-federated-learning)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：大模型联邦微调的自适应框架
-11. [FedFrozen: Two-Stage Federated Optimization via Attention Kernel Freezing](/202605/12/2605.06446v1-fedfrozen-two-stage-federated-optimization-via-attention-kernel-freezing)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：异构客户端下Transformer架构的联邦优化
+   evidence：机器学习系统中的动态路由以平衡性能与成本
+10. [FedVSSAM: Mitigating Flatness Incompatibility in Sharpness-Aware Federated Learning](/202605/12/2605.09144v1-fedvssam-mitigating-flatness-incompatibility-in-sharpness-aware-federated-learning)  
+   标签：评分：6.5/10、query:mlsys
+   evidence：异构数据下的锐度感知联邦学习
+11. [Mixture of Layers with Hybrid Attention](/202605/12/2605.09516v1-mixture-of-layers-with-hybrid-attention)  
+   标签：评分：6.5/10、query:mlsys
+   evidence：用并行块取代单体层的新型Transformer架构
 
 
 <div class="dpr-home-promo-card">
