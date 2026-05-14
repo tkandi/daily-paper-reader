@@ -1,0 +1,511 @@
+Title: ChunkFlow: Communication-Aware Chunked Prefetching for Layerwise Offloading in Distributed Diffusion Transformer Inference
+
+URL Source: https://arxiv.org/pdf/2605.11335v1
+
+Published Time: Wed, 13 May 2026 00:23:22 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# ChunkFlow: Communication-Aware Chunked Prefetching for Layerwise Offloading in Distributed Diffusion Transformer Inference 
+
+Han Meng 
+
+University of California, Merced 
+
+Danny Willow Liu 
+
+University of Chicago 
+
+Dong Li 
+
+University of California, Merced Yotta Labs 
+
+## Abstract 
+
+Layerwise offloading reduces the GPU memory footprint of large diffusion trans-former (DiT) inference by prefetching upcoming layers from host memory, but its effectiveness hinges on hiding prefetch latency behind per-layer computation. This assumption breaks down when the per-GPU compute workload is small. Moreover, on PCIe-only nodes, prefetch and inter-GPU collective communications such as all-reduce and all-to-all contend on the shared PCIe path, exposing prefetch latency even when compute would otherwise hide it. We revisit layerwise offloading as a co-scheduling problem between prefetch and communication, guided by a first-order analytical model that predicts when prefetch can be hidden by computation. Building on this model, we design ChunkFlow, a communication-aware, chunk-granular offloading runtime that adaptively yields to collective communication and smoothly trades GPU memory for prefetch volume. On three representative diffu-sion transformers running on two H100 GPUs over PCIe with Ulysses sequence parallelism, ChunkFlow delivers up to 1.28 × step-time speedup over SGLang’s existing layerwise offloading, reduces peak GPU memory by up to 49% over the no-offload baseline at near-identical step time once the workload is large enough, and exposes a tunable memory–latency tradeoff that recovers near-zero step-time overhead in the small-workload regime. 
+
+## 1 Introduction 
+
+Diffusion models [ 11 , 35 ] have become one of the dominant paradigms for generative modeling, powering state-of-the-art systems in image [ 30 , 25 ] and video [ 2, 16 , 39 ] generation. Modern systems increasingly adopt Transformer-based denoisers [ 38 , 7], commonly referred to as Diffusion Transformers (DiTs) [ 24 , 4, 8], which scale to tens of billions of parameters and unify architectures across modalities. A key bottleneck in serving large DiTs is GPU memory capacity. Unlike LLMs, where sequence lengths are typically on the order of 10 3–10 4 tokens, DiTs operate on significantly longer sequences due to spatial and temporal tokenization, often reaching 10 5 to 10 6 tokens for high-resolution images and videos. For example, generating a single 1280 ×720 ×129 -frame video with the 13B-parameter HunyuanVideo [ 16 ] requires distributing the model across 8 H100 GPUs via sequence parallelism using the official xDiT [ 10 ] configuration. This scaling is primarily driven by the memory footprint of large model weight and long-sequence attention—dominated by activations and KV buffers—rather than intrinsic compute demand. A standard remedy to the above problem is layerwise offloading , which stores weights in host memory and asynchronously prefetches them to the GPU memory one layer ahead. By keeping only two layers on the GPU memory, this solution substantially reduces peak memory, and hence is adopted in production-quality inference systems such as SGLang [42] and vLLM [17].         
+
+> Preprint.
+> arXiv:2605.11335v1 [cs.DC] 11 May 2026 GPU
+> Host CPU
+> Peer GPU
+> Rx
+> H2D Prefetch
+> NCCL Collective
+> Contention at PCIe Rx
+> shared PCIe fabric (a) Data-path sharing. Compute
+> 45%
+> NCCL
+> 24% 10% 21%
+> H2D Prefetch Stall
+> PCIe Contention Stall
+> 0% 20% 40% 60% 80% 100%
+> Fraction of Denoising Step Latency (%) (b) Latency breakdown.
+
+Figure 1: PCIe contention on PCIe-based nodes during distributed DiT inference. (a) H2D prefetch and inter-GPU collectives converge at each GPU’s PCIe receive port (Rx) and contend for bandwidth. (b) Denoising step latency breakdown: the contention stall ( 21% ) accounts for a large portion. The efficiency of layerwise offloading depends on whether the per-layer compute time is long enough to hide the host-to-device (H2D) prefetch time. Whether this overlap is achievable is determined by per-GPU compute throughput and host-to-device bandwidth. When the overlap is achievable, offloading reduces memory without inflating latency; otherwise, the unfinished prefetch is exposed to the critical path and slows down inference. In commodity multi-GPU deployments—e.g., 8 ×L40 or 8 ×A6000 PCIe nodes widely used in cloud and on-premise environments [ 13 , 41 , 37 ]—intra-node GPU-to-GPU traffic traverses PCIe rather than a dedicated high-bandwidth fabric (NVLink). On such PCIe-only nodes, distributed inference introduces an additional issue beyond the baseline overlap analysis above: H2D prefetch and inter-GPU collective communications—such as all-reduce, all-gather, and all-to-all, commonly employed in distributed inference for weight and activation re-sharding (e.g., Ulysses sequence parallelism [ 12 ])—traverse the same PCIe fabric and converge at each GPU’s PCIe receive port (Rx), as illustrated in Figure 1a. This data-path sharing can significantly slow down the prefetching. For example, on two H100 GPUs over PCIe with Ulysses sequence parallelism, enabling existing layerwise offloading at the official default resolutions inflates denoising step time by up to 2.0×,
+
+1.9×, and 1.8× on WanVideo (5B) [ 39 ], HunyuanVideo (13B) [ 16 ], and Flux (12B) [ 1], respectively. The data-path sharing problem is the major bottleneck that prevents the combination of the offloading and parallel strategy to maximize GPU memory saving while having short inference latency. In this work, we build a first-order analytical model to decide when layer prefetch can be hidden behind per-block computation. The model defines a single quantity—the critical compute workload 
+
+F ⋆—that characterizes the regime boundary: when the block-level FLOPs Fblock exceed F ⋆, full-layer prefetching is expected to incur little overhead; otherwise, part of the prefetch is exposed. Guided by this model, we design ChunkFlow, a chunk-granular offloading runtime with two mechanisms: (1) communication-aware chunked prefetching, which splits each layer’s parameters into fixed-size chunks and enables pauseable/resumable transfers of weights. Based on this mechanism, the collective communications can be triggered between chunk boundaries, instead of being blocked behind a full-layer transfer of parameters. The contention slowdown on PCIe-based nodes is effectively reduced. (2) Chunk-granular partial parameter residency, which keeps a tunable fraction of chunks resident in the GPU memory and prefetches the rest, providing a tunable, fine-grained memory–latency trade-off for workloads below F ⋆.On representative DiTs spanning text-to-image and text-to-video generation, ChunkFlow consistently reduces denoising step time over state-of-the-art layerwise offloading for DiT by up to 1.28 ×, matches the no-offload baseline (assuming the GPU memory is sufficient) once the workload is large enough while retaining up to 49% peak-memory savings. 
+
+Contributions. (1) We develop a first-order analytical model that characterizes when layer prefetch can be fully hidden behind per-layer compute, applicable to layerwise offloading in general. (2) We identify a previously overlooked failure mode during layerwise offloading on PCIe-based distributed execution—contention between layer prefetch and collective communication on the shared PCIe path—and address this problem with a communication-aware chunked prefetching mechanism that yields PCIe to collectives at chunk boundaries. (3) For workloads whose per-layer compute is intrinsically too small to hide prefetch, we introduce a chunk-granular partial parameter residency mechanism that provides a tunable, fine-grained memory–latency trade-off. 22 Background & Motivation 
+
+2.1 DiT Inference and Distributed Execution 
+
+DiTs [ 24 ] couple an iterative sampler with a Transformer-based denoiser invoked once per denoising step on a sequence of S tokens obtained after VAE downsampling and patchification. To scale beyond a single GPU, distributed DiT inference commonly employs tensor parallelism (TP) and sequence (or context) parallelism (SP). TP partitions weight matrices and attention heads across devices, and reconciles partial results within a block through collective communications such as all-reduce or all-gather, depending on the sharding pattern. SP partitions tokens across devices and exchanges them through all-to-all communication inside attention; in particular, Ulysses SP [ 12 ]has been widely adopted as the SP backbone in distributed DiT inference engines [ 9, 10 ] and is the SP setup we use throughout this paper. These collective communications are interleaved with computation within each block and can lie directly on the critical path of execution. 
+
+2.2 Layerwise Offloading 
+
+Layerwise offloading reduces GPU memory footprint by keeping only a small working set of layers resident on the GPU, while the remaining weights are staged in host memory and transferred back on demand. Offloading is performed at layer granularity: during initialization all layers are placed in pinned host memory, and each denoising step then iterates over Transformer blocks. The processing of each layer l proceeds as follows. • The compute stream waits for the asynchronous prefetch of the layer l to complete, ensuring its parameters are resident on the GPU. • The compute stream then executes the forward pass of the layer l.• During this execution, a dedicated CUDA copy stream asynchronously prefetches the next layer (l+1 ). • After the layer l completes, the runtime releases the parameters in l to reclaim GPU memory. This reduces the resident working set to only two layers (one active, and one to prefetch). The standard implementation hinges on the assumption that the prefetch of layer l+1 finishes before layer 
+
+l’s compute does; otherwise, the computation stream must explicitly wait for the prefetch stream at step (1), introducing stalls on the critical path. 
+
+2.3 PCIe Contention under Distributed Offloading 
+
+The interaction between offloading and communication depends strongly on the interconnect. On NVLink-equipped systems, inter-GPU collectives use a dedicated high-bandwidth fabric while H2D transfers use the PCIe I/O path, so the two do not directly interfere. On PCIe-only systems— commonplace in commodity multi-GPU servers (e.g., 8 ×L40 PCIe nodes) that underpin budget-conscious DiT deployments—both inter-GPU collectives and H2D prefetch traverse the same PCIe fabric and converge at each GPU’s PCIe receive port, creating the potential for cross-traffic contention. 
+
+Performance characterization. We evaluate this effect using a 5B-parameter WanVideo diffusion transformer on a single node with two H100 GPUs connected via PCIe Gen5 ×16 (peak 64 GB/s per-GPU Rx shared between CPU-to-GPU H2D transfers and inter-GPU collective traffic), generating 81 frames with Ulysses sequence parallelism [ 12 ]. Enabling layerwise offloading increases the average denoising step latency from 1.307 s to 1.888 s—a 1.44 × slowdown. The intrinsic cost of the all-to-all communication in sequence-parallel attention is an order of magnitude smaller than this gap, indicating that the slowdown cannot be explained by raw PCIe saturation alone. Figure 1b breaks down the inflated step latency: the NCCL all-to-all collective itself accounts for 24% , while the PCIe-contention stall—the all-to-all delayed behind in-flight prefetch traffic at the GPU’s Rx—accounts for 21% , an overhead comparable to the collective’s own time and confirming that the contention, rather than raw bandwidth or communication cost, dominates the gap. Profiling traces reveal the underlying mechanism. In the default implementation, the prefetch stream for the next layer is issued near the beginning of the current layer and therefore precedes the in-block all-to-all. By the time the compute stream reaches the communication phase, the GPU Rx path is already occupied by an in-flight H2D prefetch. Because PCIe provides no prioritization between 3DMA transfers and collective traffic, the all-to-all is effectively delayed until the prefetch transfer completes, and the prefetch latency that was supposed to be hidden by computation is instead exposed to the critical path. 
+
+## 3 Design 
+
+This section addresses three layered questions. Section 3.1 asks when full-layer prefetch can in principle be hidden behind per-block computation , deriving a first-order overlap model with a critical compute workload F ⋆. The two subsequent mechanisms then tackle two distinct failure modes identified by the model. Section 3.2 (PCIe-specific) recovers overlap when prefetch is theoretically hidable ( Fblock ≥ F ⋆) but PCIe contention with collectives breaks it. Section 3.3 (interconnect-agnostic) trades GPU memory for prefetch volume when overlap is intrinsically infeasible ( Fblock <F ⋆). 
+
+3.1 Analytical Model for Prefetch–Compute Overlap 
+
+We build an analytical model for two dominant terms in one block execution window: the computation time of the current block and the host-to-device prefetch time of the next block. This model captures the first-order prefetch–compute overlap behavior of layerwise offloading: it depends only on per-GPU compute throughput and H2D bandwidth, and therefore applies regardless of the interconnect (PCIe or NVLink) and to both single-GPU and distributed settings. 
+
+Compute model. We model the per-block compute cost of one Transformer block on a single GPU. Our evaluation covers two block designs: the standard DiT block (e.g., in WanVideo), which serially interleaves self-attention, cross-attention to the text context, and an MLP; and the MM-DiT 
+
+block [ 8] (e.g., in Flux, HunyuanVideo), which jointly processes image and text streams in a single attention call. We focus on the high-FLOP operators (attention projections, attention, and the MLP); lower-order components such as normalization, softmax, and elementwise operations are absorbed into an empirical calibration factor introduced below. The explicit per-term FLOP derivations for both block types are deferred to Appendix B. Let B denote the batch size, S the global sequence length after patchification, d the hidden dimension, 
+
+f the FFN expansion dimension, and Lctx the text context length. We write the resulting per-block FLOP count as Fblock (B, S ). Under fixed (d, f, L ctx ), Fblock scales linearly in B and is quadratic in S
+
+only through self-attention while all other terms are linear in S.Given the peak BF16 throughput Ppeak of the GPU, we model the block compute time as 
+
+Tcomp (B, S ) = Fblock (B, S )
+
+ηcomp Ppeak 
+
+, (1) where ηcomp ∈ (0 , 1] is a compute calibration factor capturing the realized fraction of peak BF16 throughput on the target hardware (absorbing imperfect tensor-core utilization, memory-bound kernels, and non-GEMM operators); it is calibrated empirically per platform. 
+
+Prefetch model. Let Bpref denote the parameter bytes transferred before the next layer can execute (the entire layer for standard layerwise offloading) and BW h2d the host-to-device bandwidth. We model the prefetch time as 
+
+Tpref = Bpref 
+
+ηpref BW h2d 
+
+, (2) where ηpref ∈ (0 , 1] is a prefetch calibration factor absorbing DMA startup cost, transfer granularity effects, and software runtime overheads; it is similarly calibrated empirically. 
+
+Critical compute workload. The first-order condition for fully hiding prefetch behind computation is defined as follows. 
+
+Tcomp ≥ Tpref . (3) This inequality states that the computation window of the current block must be at least as long as the service time of the next-layer prefetch. 4(a) No Offload                        
+
+> GPU
+> All2All
+> H2D
+> (b) Layerwise
+> Offload
+> GPU
+> All2All
+> H2D
+> S-Proj S-Attn C-Proj C-Attn MLP S-Proj ...
+> Block n+1
+> Block n+1
+> S-Attn C-Proj C-Attn MLP
+> Block n
+> S-Proj ...
+> (c) ChunkFlow
+> GPU
+> All2All
+> H2D
+> Block n
+> yield for All-to-All
+> S-Proj QKV projection before self-attention
+> S-Attn visual self-attention
+> C-Proj QKV projection before cross-attention
+> C-Attn visual-text cross-attention
+> MLP linear layer
+> NCCL All-to-All
+> (chunked) weight prefetching
+> contention stall on critical path
+> Time
+> Out Out
+> Out Out projection after attention
+> S-Proj Out Out
+> S-Proj S-Attn C-Proj C-Attn MLP S-Proj ...
+> Block n+1 Block n
+> Out Out
+
+Figure 2: Block-level timing under (a) no offload, (b) whole-layer layerwise offload, and (c) our communication-aware chunked prefetch, illustrated on a DiT block with Ulysses sequence parallelism. Substituting the compute and prefetch models above, the overlap condition can be written directly in terms of the block-level compute workload Fblock .
+
+Fblock (B, S ) ≥ F ⋆, F ⋆ := ηcomp Ppeak · Tpref = ηcomp Ppeak Bpref 
+
+ηpref BW h2d 
+
+. (4) We call F ⋆ the critical compute workload : when Fblock ≥ F ⋆, the compute window is long enough to hide a full prefetch; when Fblock < F ⋆, a part of the transfer is exposed to the critical path. Equivalently, I⋆ := F ⋆/B pref is the turning point between the calibrated GPU compute roof and the host-to-device bandwidth roof in a roofline plot, connecting our analysis to the Hierarchical Roofline Model [ 3]; see Appendix A for the graphical view, and Appendix C for the numerical instantiation of 
+
+F ⋆ on our evaluation platform. Since Bpref is approximately fixed for a given layer while Fblock grows monotonically in both B and 
+
+S, increasing either B or S pushes the workload across F ⋆ and is generally favorable; conversely, partitioning computation across more GPUs (e.g., higher tensor or sequence parallelism degree) shrinks the per-GPU Fblock and can pull the local workload back below F ⋆.
+
+3.2 Communication-Aware Chunked Prefetching 
+
+In the default whole-layer prefetch design, the prefetch of layer l+1 is issued near the beginning of layer l on a dedicated copy stream. However, the computation window before the first collective communication in a transformer block is typically short—for instance, in a self-attention layer under Ulysses sequence parallelism the collective is needed right after the QKV projection. As a result, next-layer prefetch and collective communication frequently overlap in time and contend for the same PCIe path on PCIe-only nodes. Once a large H2D transfer is in flight, the later-arriving collective is effectively delayed until the ongoing transfer finishes, so a part of the prefetch latency that is intended to be hidden by computation is instead exposed to the critical path, as illustrated in Figure 2(b). To address this issue in PCIe-based environments, we design a communication-aware chunked prefetching mechanism. The key idea is to make layer prefetch pauseable and resumable , so that prefetch traffic can temporarily yield to the collective communications. Rather than issuing the entire next layer as one monolithic transfer, we partition the parameters of each layer into fixed-size chunks and prefetch them asynchronously chunk by chunk on the copy stream. Since PCIe provides no mechanism to prioritize collective traffic over in-flight prefetch (Section 2.3) and CUDA streams provide no built-in preemption either, we orchestrate pause/resume in software via a lightweight control flag checked at chunk boundaries. When the compute stream issues an inter-GPU collective, the runtime sets a per-layer pause flag and records a CUDA event signaling the collective’s completion. Before launching each chunk’s H2D copy, the prefetch worker checks the flag; if set, it enqueues a cudaStreamWaitEvent on the recorded event so that the copy stream stalls on the GPU until the collective finishes, after which subsequent chunks resume automatically. This design preserves correctness—no in-flight DMA is ever aborted—and lets the collective interleave with chunk prefetching instead of serialized behind a full-layer transfer, as shown in Figure 2(c). 5Because the copy stream can only yield at chunk boundaries, a small residual stall—bounded by the service time of one in-flight chunk—remains, but much shorter than the full-layer blocking of whole-layer prefetch. Chunking does not change the total I/O volume—it only turns a monolithic transfer into a sequence of shorter ones, leaving the chunk size C as a tunable parameter. Concretely, the residual stall above equals one chunk’s service time Tchunk = C/ (ηpref BW h2d ), and C governs a tradeoff between transfer efficiency and pause responsiveness: larger C amortizes DMA startup and runtime overhead and improves H2D efficiency at the cost of a longer residual stall, while smaller C enables finer-grained interruption but underutilizes PCIe bandwidth. 
+
+3.3 Reducing Prefetch Time via Partial Parameter Residency 
+
+When Fblock < F ⋆, full offloading unavoidably exposes part of the prefetch latency on the critical path, creating an inherent tradeoff between GPU memory footprint and exposed prefetch volume. To navigate this tradeoff, we introduce partial parameter residency , which, unlike the chunked prefetching mechanism in Section 3.2, is not specific to PCIe-based nodes and applies whenever the per-layer compute window is too short to hide a full prefetch. Instead of offloading all parameter chunks of a layer, we keep a subset of chunks resident in GPU memory and prefetch only the remaining ones. This mechanism is a natural extension to the chunked layout introduced in Section 3.2: since ChunkFlow already partitions each layer into fixed-size chunks, the residency can be controlled at chunk granularity rather than at the coarser module or whole-layer granularity. This enables finer control of the memory–latency tradeoff. This continuously trades prefetch volume for memory: at 0% residency the mechanism reduces to full offloading, at 100% residency to no offloading, and intermediate levels recover overlap when 
+
+Fblock < F ⋆ at the cost of additional resident memory. 
+
+## 4 Evaluation 
+
+4.1 Experimental Setup 
+
+We evaluate three open-source diffusion transformers spanning two modalities: Wan2.2-TI2V-5B [ 39 ](5B, text-to-video), HunyuanVideo [ 16 ] (13B, text-to-video), and FLUX.1-dev [ 1 ] (12B, text-to-image). For each model we use the official default resolution, 10 denoising steps, and guidance configuration, and use a single fixed prompt across all runs. Experiments run on a single node with two NVIDIA H100 GPUs over PCIe, using Ulysses sequence parallelism [ 12 ] with degree 2 and FlashAttention [ 6, 5 , 31 ] as the attention backend. ChunkFlow is built on SGLang [ 42 ] multimodal-generation runtime. We compare three configurations: (1) No Offload (all weights resident, assuming GPU memory is sufficient, which represents the shortest inference latency), (2) layerwise offload (SGLang’s whole-layer prefetching, named Layerwise in the later discussion), and (3) ChunkFlow. The overlap model and both the mechanisms generalize beyond this specific GPU count and paral-lelism style. Varying the GPU count simply re-parameterizes the per-GPU Fblock and Bpref in the overlap model (Section 3.1). Switching to a different parallelism style—e.g., tensor parallelism or other SP variants—only shifts where collectives are inserted within each block, and the collective type itself (all-reduce, all-gather, and all-to-all) does not change how the chunked prefetch worker yields: all interact identically through the pause/resume control flag discussed in Section 3.2. The mechanisms are also architecturally portable beyond DiT, but the underlying overlap regime is less favorable for LLM inference (especially decode coupled with KV-cache offloading); we discuss this asymmetry in Appendix D. 
+
+4.2 Scaling over Frame Size and Batch Size 
+
+This evaluation has two goals: (i) evaluating how ChunkFlow performs across a range of per-GPU compute workloads, and (ii) validating the overlap model developed in Section 3.1. For the video models WanVideo and HunyuanVideo, we sweep the number of output frames, which changes the post-patchification sequence length S. For the image model Flux, we sweep the batch size B instead, 641 81 121 161                  
+
+> Frame size
+> 1
+> 2
+> 3
+> Step time (s)
+> WanVideo
+> 4812 16
+> Batch size
+> 1.0
+> 1.5
+> 2.0
+> 2.5
+> 3.0
+> 3.5
+> Step time (s)
+> Flux
+> 921 33 45
+> Frame size
+> 1
+> 2
+> 3
+> 4
+> Step time (s)
+> HunyuanVideo
+> 41 81 121 161
+> Frame size
+> 20.0
+> 22.5
+> 25.0
+> 27.5
+> 30.0
+> Peak memory (GB)
+> WanVideo
+> 4812 16
+> Batch size
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> Peak memory (GB)
+> Flux
+> 921 33 45
+> Frame size
+> 20
+> 30
+> 40
+> Peak memory (GB)
+> HunyuanVideo
+> (a) Latency scaling (b) Memory scaling
+> No Offload Layerwise ChunkFlow
+
+Figure 3: Denoising step time (top) and GPU peak memory (bottom) across frame and batch sizes which changes the block-level compute workload Fblock through the linear-in-B dependence in the FLOP model. Across all settings we report the average denoising step time and GPU peak memory. 
+
+Peak memory. Although ChunkFlow operates at chunk rather than whole-layer granularity, the bottom row of Figure 3 shows that its peak memory is essentially the same as Layerwise and remains substantially below No Offload. At the third configuration point of each model—past the predicted 
+
+F ⋆—ChunkFlow reduces peak memory by 30 .5% , 30 .1% , and 49 .3% over No Offload on WanVideo, Flux, and HunyuanVideo, respectively, while keeping denoising step time within a small margin of No Offload baseline. The finer granularity therefore introduces no memory overhead. In a few cases, such as Flux at batch size 8, ChunkFlow in fact consumes less memory than layerwise offloading. This comes from allocating chunk buffers at a fixed size, which stabilizes the allocator’s request pattern and reduces memory fragmentation compared to allocating whole-layer-sized blocks. 
+
+Step time. Figure 3 (top row) shows that ChunkFlow consistently achieves lower denoising step time than Layerwise across all three models and all configurations. In the figure, the orange shaded regions in the top row mark the step-time speedup of ChunkFlow over Layerwise, and the blue shaded regions in the bottom row mark the peak-memory savings of ChunkFlow over No Offload. Concretely, ChunkFlow delivers up to 1.26 ×, 1.13 ×, and 1.28 × step-time speedup over Layerwise on WanVideo, Flux, and HunyuanVideo, respectively. As the frame size or batch size grows, ChunkFlow’s step time steadily approaches No Offload, matching the prediction of Section 3.1: a larger Fblock extends the compute window available to hide the prefetch overhead. We validate F ⋆ derived in Section 3.1. The hardware constants Ppeak and BW h2d are read from the platform specification, and ηcomp and ηpref are obtained from offline profiling on the same platform; the exact values are listed in Table 1 of Appendix C. Plugging these values into F ⋆ yields thresholds that correspond to approximately 121 frames on WanVideo, batch size 12 on Flux, and 33 frames on HunyuanVideo—that is, the third configuration point in each panel. Starting from this point our step time is nearly indistinguishable from No Offload, which is consistent with the model. The measured gap continues to shrink slightly even beyond F ⋆, indicating that the first-order model is accurate to within a small margin. The residual discrepancy is expected: the calibration factors ηcomp and ηpref are picked empirically and not fitted per configuration, and ChunkFlow itself introduces a small amount of synchronization overhead (quantified in Section 4.3) that is not explicitly modeled. 
+
+4.3 Step Time Breakdown 
+
+To attribute ChunkFlow’s speedup over Layerwise to specific cost components, we decompose ChunkFlow’s per-step latency at each swept configuration into four parts: compute, NCCL all-to-all, H2D prefetch stall, and ChunkFlow runtime overhead (Figure 4). Each bar’s height equals ChunkFlow’s step time. A dashed red marker above each bar shows Layerwise’s step time with the 741 81 121 161           
+
+> Frame size
+> 0
+> 1
+> 2
+> 3
+> 4
+> Step time (s)
+> WanVideo
+> 4812 16
+> Batch size
+> Flux
+> 921 33 45
+> Frame size
+> HunyuanVideo
+> Compute NCCL All-to-All H2D Prefetch Stall ChunkFlow Overhead Layerwise total
+
+Figure 4: Per-step latency decomposition across frame and batch sizes with ChunkFlow. 4 16 64 256   
+
+> Chunk size C(MB)
+> 1.5
+> 1.6
+> 1.7
+> 1.8
+> 1.9
+> Step time (s)
+> chosen
+> WanVideo (Frame size=81)
+> ChunkFlow
+> Layerwise
+
+Figure 5: Step time vs. chunk size C
+
+on WanVideo at 81 frames. same configuration; the gap between the bar top and marker is the PCIe contention stall introduced in Section 2.3 that Layerwise pays and that ChunkFlow eliminates. 
+
+H2D prefetch stall shrinks with workload. Recapping the trend discussed in Section 4.2: the H2D prefetch stall is large at the smallest configuration of each model and shrinks as n or b grows, becoming a thin sliver at the largest configuration. This matches the prediction of the overlap model in Section 3.1—a wider compute window overlaps more of the prefetch. 
+
+ChunkFlow’s runtime overhead is small. ChunkFlow’s own overhead in Figure 4 comes from two sources. First, the runtime synchronizes the compute stream and the prefetch worker—signaling a pause request at each communication boundary and a resume request after the collective completes— which adds a small fixed cost per collective invocation. Second, as illustrated in Figure 2(c), when the compute stream signals a pause, the copy stream finishes the in-flight chunk before yielding, so the collective waits up to one chunk-transfer time. In practice both contributions remain small: across all three models and all swept configurations, ChunkFlow’s overhead stays within about 2% of the total step time, far smaller than the PCIe contention stall it eliminates. 
+
+4.4 Chunk Size Selection 
+
+ChunkFlow’s chunk size C controls the granularity at which the prefetch worker yields to NCCL col-lectives, and the right value balances two opposing effects. Figure 5 sweeps C ∈ { 4, 16 , 64 , 256 } MB on WanVideo at 81 frames. At C = 4 MB, the per-chunk DMA startup cost is amortized over too few bytes, effective PCIe bandwidth drops, and step time degrades close to Layerwise. As C
+
+grows to 64 MB and then 256 MB, the chunks become progressively coarser and expose fewer yield points to collectives, so the prefetch behaves more and more like a whole-layer transfer and the schedule gradually falls back toward Layerwise. The chunk-tail stall incurred at each yield—bounded by C/ (ηpref BW h2d ) as discussed in Section 3.2—also grows linearly with C, amplifying the fixed yielding cost on top of the lost overlap. C = 16 MB sits at the sweet spot between these two regimes and is the operating point we use in all other experiments. 
+
+4.5 Memory–Latency Tradeoff via Partial Residency 
+
+We evaluate the partial parameter residency mechanism introduced in Section 3.3. For each model we deliberately pick the smallest configuration from the previous experiment— 41 frames on WanVideo, batch size 4 on Flux, and 9 frames on HunyuanVideo—because at this scale the compute window is short enough such that a substantial portion of each layer’s prefetch is exposed to the critical path under full offloading (i.e., no residency), leaving meaningful headroom for residency to recover. Starting from the fully-offloaded setting (ChunkFlow in Figure 3, labelled as 0% residency here), we progressively keep a 20% , 40% , and 60% fraction of each layer’s parameter chunks resident in GPU memory and prefetch only the remaining chunks. Because ChunkFlow’s runtime manages parameters as fixed-size chunks, the residency ratio is enforced at chunk granularity rather than at the coarser module or whole-layer granularity, so the actual resident fraction closely tracks the target value. Figure 6 illustrates the memory–latency tradeoff. As the resident fraction grows, the prefetch volume per layer shrinks, and denoising step time monotonically decreases toward No Offload. Correspondingly, peak memory rises monotonically from the fully-offloaded level toward No Offload, since more parameters must sit in GPU memory simultaneously. The two trends are strictly opposed, giving a continuous spectrum between minimum memory (full offload) and minimum latency (full residency). At only 60% residency, the step time of all three models comes within a very small 80% 20% 40% 60%          
+
+> Resident fraction
+> 0.7
+> 0.8
+> 0.9
+> 1.0
+> Step time (s)
+> WanVideo (Frame size=41)
+> 0% 20% 40% 60%
+> Resident fraction
+> 0.8
+> 0.9
+> 1.0
+> 1.1
+> 1.2
+> 1.3
+> Step time (s)
+> Flux (Batch size=4)
+> 0% 20% 40% 60%
+> Resident fraction
+> 0.8
+> 0.9
+> 1.0
+> 1.1
+> 1.2
+> Step time (s)
+> HunyuanVideo (Frame size=9)
+> 18
+> 20
+> 22
+> 24
+> 26
+> Peak memory (GB)
+> 20
+> 25
+> 30
+> 35
+> 40
+> Peak memory (GB)
+> 20
+> 25
+> 30
+> 35
+> 40
+> Peak memory (GB)
+> ChunkFlow latency No Offload latency ChunkFlow memory No Offload memory
+
+Figure 6: Denoising step time and GPU peak memory at the smallest configuration. margin of No Offload, indicating that the prefetch of the remaining 40% of parameters can be almost fully hidden by the compute window. At this point ChunkFlow still reduces peak memory by 7.2% ,
+
+14 .3% , and 15 .2% over No Offload on WanVideo, Flux, and HunyuanVideo, respectively. In other words, even in the low-compute regime where full offloading leaves visible overhead, ChunkFlow can recover near-zero step-time overhead while still delivering a meaningful reduction in peak memory. In practice, this allows the user to dial in any point along the curve to meet a latency target under a given memory budget, or conversely to minimize memory while staying within a target step time. 
+
+## 5 Related Work 
+
+Memory-efficient inference via offloading. Existing efforts save GPU memory by offloading weights or activations to host or NVMe storage [ 27 , 28 , 18 , 29 , 40 , 15 ]. ZeRO-Infinity [ 26 ] pioneered hierarchical CPU/NVMe offloading. FlexGen [ 32 ] formulates LLM inference as a tensor place-ment problem and searches for high-throughput offloading schedules under GPU memory budgets. vLLM [ 17 ] introduces paged KV-cache management built on tensor parallelism [ 33 ], and supports group-wise weight offloading at layer granularity. MoE-Lightning [ 3] targets MoE inference and develops a CPU–GPU–I/O pipelining schedule with paged weights to overlap expert transfer with computation. Production-quality inference systems such as SGLang [ 42 ] and vLLM [ 17 ] rely on naive whole-layer prefetching. They do not model the contention when distributed collectives and H2D transfers share a PCIe fabric. 
+
+Efficient diffusion inference. Diffusion model inference is dominated by repeated evaluations of a large denoiser, and a long line of work attacks this bottleneck along two complementary axes. The first axis reduces per-step compute or the number of steps. Faster ODE/SDE samplers [ 34 , 21 , 14 ] cut the number of denoising steps from hundreds to tens, and step-distillation methods such as consistency models [ 36 ] push generation toward a few or even a single step. Architectural efficiency is improved through better DiT designs [ 4, 8] and post-training optimizations including weight quantization [ 20 ]and feature caching that reuses high-level activations across adjacent denoising steps [ 23 , 22 ]. The second axis is distributing computation across multiple GPUs. DistriFusion [ 19 ] partitions the latent into spatial patches and reuses stale feature maps to amortize cross-patch communication; PipeFusion [ 9] extends this with a patch-level pipeline parallel schedule; xDiT [ 10 ] integrates sequence parallelism, patch-level pipeline parallelism, and CFG parallelism into a unified inference engine; these two lines of work reduce or distribute computation, while we study how to combine layerwise weight offloading with distributed execution. 
+
+## 6 Conclusions 
+
+We revisited layerwise offloading for DiT inference as a prefetch–communication co-scheduling problem. Guided by a first-order overlap model that defines a critical compute workload F ⋆, we designed a chunk-granular offloading runtime with two mechanisms: communication-aware chunked prefetching, which eliminates PCIe contention by yielding the PCIe Rx to collective communication at chunk boundaries on PCIe-based nodes, and chunk-granular partial parameter residency, a general mechanism that trades GPU memory for prefetch volume whenever the compute window is too short, regardless of interconnect. Experiments on WanVideo, Flux, and HunyuanVideo on two H100 GPUs over PCIe with Ulysses sequence parallelism show that ChunkFlow consistently accelerates layerwise offloading, matches the no-offload baseline once the workload is large enough while retaining substantial peak-memory savings, and recovers near-zero step-time overhead for small workloads through partial residency. 9References 
+
+[1] Black Forest Labs. FLUX.1. https://github.com/black-forest-labs/flux , 2024. [2] Tim Brooks, Bill Peebles, Connor Holmes, Will DePue, Yufei Guo, Li Jing, David Schnurr, Joe Taylor, Troy Luhman, Eric Luhman, Clarence Ng, Ricky Wang, and Aditya Ramesh. Video generation models as world simulators. https://openai.com/research/ video-generation-models-as-world-simulators , 2024. [3] Shiyi Cao, Shu Liu, Tyler Griggs, Peter Schafhalter, Xiaoxuan Liu, Ying Sheng, Joseph E. Gonzalez, Matei Zaharia, and Ion Stoica. MoE-Lightning: High-throughput MoE inference on memory-constrained GPUs. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , 2025. [4] Junsong Chen, Jincheng Yu, Chongjian Ge, Lewei Yao, Enze Xie, Yue Wu, Zhongdao Wang, James Kwok, Ping Luo, Huchuan Lu, and Zhenguo Li. PixArt-α: Fast training of diffusion transformer for photorealistic text-to-image synthesis. In International Conference on Learning Representations (ICLR) , 2024. [5] Tri Dao. FlashAttention-2: Faster attention with better parallelism and work partitioning. In 
+
+International Conference on Learning Representations (ICLR) , 2024. [6] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. Flashattention: Fast and memory-efficient exact attention with io-awareness. Advances in neural information processing systems , 35:16344–16359, 2022. [7] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is worth 16x16 words: Transformers for image recognition at scale. In International Conference on Learning Representations (ICLR) , 2021. [8] Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim Entezari, Jonas Müller, Harry Saini, Yam Levi, Dominik Lorenz, Axel Sauer, Frederic Boesel, et al. Scaling rectified flow trans-formers for high-resolution image synthesis. In International Conference on Machine Learning (ICML) , 2024. [9] Jiarui Fang et al. PipeFusion: Patch-level pipeline parallelism for diffusion transformers inference. arXiv preprint arXiv:2405.14430 , 2024. [10] Jiarui Fang et al. xDiT: an inference engine for diffusion transformers (DiTs) with massive parallelism. arXiv preprint arXiv:2411.01738 , 2024. [11] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) , 2020. [12] Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: System optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509 , 2023. [13] Youhe Jiang, Fangcheng Fu, Xiaozhe Wang, Jiawei Yang, Yang Liu, and Bin Cui. Demystifying cost-efficiency in LLM serving over heterogeneous GPUs. arXiv preprint arXiv:2502.00722 ,2025. [14] Tero Karras, Miika Aittala, Timo Aila, and Samuli Laine. Elucidating the design space of diffusion-based generative models. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. [15] Kihyun Kim, Jinwoo Kim, Hyunsun Chung, Myung-Hoon Cha, Hong-Yeon Kim, and Youngjae Kim. Cost-efficient llm serving in the cloud: Vm selection with kv cache offloading, 2025. [16] Weijie Kong, Qi Tian, Zijian Zhang, Rox Min, Zuozhuo Dai, et al. HunyuanVideo: A systematic framework for large video generative models. arXiv preprint arXiv:2412.03603 , 2024. 10 [17] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th symposium on operating systems principles , pages 611–626, 2023. [18] Tingfeng Lan, Yusen Wu, Bin Ma, Zhaoyuan Su, Rui Yang, Tekin Bicer, Masahiro Tanaka, Olatunji Ruwase, Dong Li, and Yue Cheng. ZenFlow: Enabling Stall-Free Offloading Training via Asynchronous Updates, 2025. [19] Muyang Li, Tianle Cai, Jiaxin Cao, Qinsheng Zhang, Han Cai, Junjie Bai, Yangqing Jia, Ming-Yu Liu, Kai Li, and Song Han. DistriFusion: Distributed parallel inference for high-resolution diffusion models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2024. [20] Xiuyu Li, Yijiang Liu, Long Lian, Huanrui Yang, Zhen Dong, Daniel Kang, Shanghang Zhang, and Kurt Keutzer. Q-Diffusion: Quantizing diffusion models. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , 2023. [21] Cheng Lu, Yuhao Zhou, Fan Bao, Jianfei Chen, Chongxuan Li, and Jun Zhu. DPM-Solver: A fast ODE solver for diffusion probabilistic model sampling in around 10 steps. In Advances in Neural Information Processing Systems (NeurIPS) , 2022. [22] Xinyin Ma, Gongfan Fang, Michael Bi Mi, and Xinchao Wang. Learning-to-cache: Accelerating diffusion transformer via layer caching. In Advances in Neural Information Processing Systems (NeurIPS) , 2024. [23] Xinyin Ma, Gongfan Fang, and Xinchao Wang. DeepCache: Accelerating diffusion models for free. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2024. [24] William Peebles and Saining Xie. Scalable diffusion models with transformers. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , pages 4195–4205, 2023. [25] Dustin Podell, Zion English, Kyle Lacey, Andreas Blattmann, Tim Dockhorn, Jonas Müller, Joe Penna, and Robin Rombach. SDXL: Improving latent diffusion models for high-resolution image synthesis. In International Conference on Learning Representations (ICLR) , 2024. [26] Samyam Rajbhandari, Olatunji Ruwase, Jeff Rasley, Shaden Smith, and Yuxiong He. ZeRO-Infinity: Breaking the GPU memory wall for extreme scale deep learning. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC) , 2021. [27] Jie Ren, Jiaolin Luo, Kai Wu, Minjia Zhang, Hyeran Jeon, and Dong Li. Sentinel: Efficient Tensor Migration and Allocation on Heterogeneous Memory Systems for Deep Learning. In 
+
+International Symposium on High Performance Computer Architecture (HPCA) , 2020. [28] Jie Ren, Samyam Rajbhandari, Reza Yazdani Aminabadi, Olatunji Ruwase, Shuangyan Yang, Minjia Zhang, Dong Li, and Yuxiong He. ZeRO-Offload: Democratizing Billion-Scale Model Training. In USENIX Annual Technical Conference , 2021. [29] Jie Ren, Dong Xu, Shuangyan Yang, Jiacheng Zhao, Zhicheng Li, Christian Navasca, Chenxi Wang, Harry Xu, and Dong Li. Enabling large dynamic neural network training with learning-based memory management. In IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2024. [30] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. High-resolution image synthesis with latent diffusion models. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2022. [31] Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. FlashAttention-3: Fast and accurate attention with asynchrony and low-precision. In Advances in Neural Information Processing Systems (NeurIPS) , 2024. 11 [32] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Daniel Y. Fu, Zhiqiang Xie, Beidi Chen, Clark Barrett, Joseph E. Gonzalez, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. FlexGen: High-throughput generative inference of large language models with a single GPU. In International Conference on Machine Learning (ICML) , 2023. [33] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. Megatron-LM: Training multi-billion parameter language models using model parallelism. arXiv preprint arXiv:1909.08053 , 2019. [34] Jiaming Song, Chenlin Meng, and Stefano Ermon. Denoising diffusion implicit models. In 
+
+International Conference on Learning Representations (ICLR) , 2021. [35] Yang Song, Jascha Sohl-Dickstein, Diederik P. Kingma, Abhishek Kumar, Stefano Ermon, and Ben Poole. Score-based generative modeling through stochastic differential equations. In 
+
+International Conference on Learning Representations (ICLR) , 2021. [36] Yang Song, Prafulla Dhariwal, Mark Chen, and Ilya Sutskever. Consistency models. In 
+
+International Conference on Machine Learning (ICML) , 2023. [37] Didem Unat et al. The landscape of GPU-centric communication. arXiv preprint arXiv:2409.09874 , 2024. [38] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Informa-tion Processing Systems (NeurIPS) , 2017. [39] Ang Wang et al. Wan: Open and advanced large-scale video generative models. arXiv preprint arXiv:2503.20314 , 2025. [40] Dong Xu, Yuan Feng, Kwangsik Shin, Daewoo Kim, Hyeran Jeon, and Dong Li. Efficient Tensor Offloading for Large Deep-Learning Model Training based on Compute Express Link. In 36th ACM/IEEE International Conference for High Performance Computing, Performance Measurement, Modeling and Tools (SC) , 2024. [41] Dongming Zhang et al. HGCA: Hybrid GPU-CPU attention for long context LLM inference. 
+
+arXiv preprint arXiv:2507.03153 , 2025. [42] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. SGLang: Efficient execution of structured language model programs. In Advances in Neural Information Processing Systems (NeurIPS) , 2024. 12 A Roofline View of the Overlap Threshold 
+
+The critical compute workload F ⋆ derived in Section 3.1 admits a natural geometric interpretation. Define the per-layer operational intensity as the ratio of block-level FLOPs to the parameter bytes that must be prefetched before the block executes, 
+
+Iblock (B, S ) := Fblock (B, S )
+
+Bpref 
+
+(FLOPs/byte) . (5) The overlap condition Fblock ≥ F ⋆ is then equivalent to Iblock ≥ I⋆, where 
+
+I⋆ = F ⋆
+
+Bpref 
+
+= ηcomp Ppeak 
+
+ηpref BW h2d 
+
+. (6) 10 1 10 0 10 1 10 2 10 3 10 4 10 5         
+
+> Operational intensity Iblock (FLOPs/byte)
+> 10 3
+> 10 2
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Achievable throughput (TFLOP/s)
+> I
+> GPU roofline (comp Ppeak , HBM)
+> H2D bandwidth roof (pref BW h2d )
+
+Figure 7: HRM with the GPU roofline and the host-to-device bandwidth roof. Plotted as a roofline (Figure 7), I⋆ is the turning point between the calibrated GPU compute roof ηcomp Ppeak and the host-to-device bandwidth roof of slope ηpref BW h2d . Workloads whose opera-tional intensity lies to the right of I⋆ admit full prefetch overlap; workloads to its left are H2D-bound and expose a portion of the transfer on the critical path. 
+
+Connection to the Hierarchical Roofline Model. The Hierarchi-cal Roofline Model (HRM) [ 3 ] provides a general framework for analyzing computations that span multiple memory hierarchies, and has been used to guide policy search for offloaded MoE in-ference. Our analytical model can be viewed as an adaptation of HRM to the specific question of prefetch–compute overlap in lay-erwise offloading: by specializing the operational intensity to the per-block prefetch volume Bpref and folding empirical calibration factors into the two roofs, the same geometry yields a direct view of when the next layer’s prefetch can be hidden behind the current layer’s compute. 
+
+## B Per-Block Compute Model: DiT and MM-DiT 
+
+This appendix instantiates the overlap model of Section 3.1 for the two block designs used by our evaluated models: the standard DiT block (WanVideo) and the MM-DiT block (Flux, HunyuanVideo). Both follow the same template— block-level FLOPs summed over the dominant operators, an empirical calibration factor ηcomp , and the same critical compute workload threshold F ⋆—but differ in the per-term FLOPs because MM-DiT processes the image and text token streams jointly in a single attention call rather than via a self-attention and a separate text cross-attention. We reuse the notation of Section 3.1: B is the batch size, S the image/video token length after patchification, Lctx the text context length, d the hidden dimension, and f the FFN expansion. FLOP counts below are written in global (across-GPU) form; under distributed execution each GPU performs only a fraction of them, and the per-GPU breakdown depends on the parallelism scheme. Tensor parallelism with degree TTP and Ulysses sequence parallelism with degree TSP both partition the head dimension, so every FLOP term below is divided by the corresponding degree on a per-GPU basis. Token-partitioned sequence parallelism (e.g., ring attention) instead splits the sequence S across devices, so the projection and MLP terms still divide by TSP while the attention term is divided according to the variant’s load-balancing strategy. In all cases the structure of the overlap model is unchanged—only the per-GPU Fblock and hence F ⋆ are reparameterized—and the chunked prefetching and partial residency mechanisms apply unmodified. Residual losses (e.g., load imbalance, kernel-launch overhead) are absorbed into the calibration factor ηcomp .13 DiT block. A standard DiT block serially interleaves self-attention, cross-attention to the text context, and an MLP. The dominant FLOPs are 
+
+Fself-proj = 8 BSd 2, (7) 
+
+Fself-attn = 4 BS 2d, (8) 
+
+Fcross-proj = 4 BSd 2 + 4 BL ctx d2, (9) 
+
+Fcross-attn = 4 BSL ctx d, (10) 
+
+Fmlp = 4 BSdf, (11) where “self-proj” covers the QKV and output projection of the self-attention, and “cross-proj” covers the video-side query, the text-side key/value, and the output projection of the cross-attention. Summing these dominant terms gives the per-block FLOP count 
+
+F DiT block (B, S ) = Fself-proj + Fself-attn + Fcross-proj + Fcross-attn + Fmlp . (12) The MM-DiT denoiser is built from two block types (double-stream and single-stream) that we model separately and then combine via an averaged block size. 
+
+Double-stream block. A double-stream block (e.g., transformer_blocks in Flux, 
+
+double_blocks in HunyuanVideo) maintains separate image-side and text-side weights for QKV projection, output projection, and the FFN, but the two streams are concatenated along the token dimension before the joint attention and split afterwards. The dominant FLOPs are 
+
+Fimg-proj = 8 BSd 2, (13) 
+
+Ftxt-proj = 8 BL ctx d2, (14) 
+
+Fjoint-attn = 4 B(S + Lctx )2d, (15) 
+
+Fimg-mlp = 4 BSdf, (16) 
+
+Ftxt-mlp = 4 BL ctx df, (17) where the “proj” terms cover both QKV and output projection on each side ( 4d2 each, hence the leading coefficient 8). Summing, 
+
+Fdbl (B, S ) = Fimg-proj + Ftxt-proj + Fjoint-attn + Fimg-mlp + Ftxt-mlp . (18) Compared with the DiT block, the quadratic-in-S contribution is replaced by a quadratic-in-(S + Lctx )
+
+contribution from joint attention, and the cross-attention term disappears. 
+
+Single-stream block. A single-stream block (e.g., single_transformer_blocks in Flux, 
+
+single_blocks in HunyuanVideo) concatenates the image and text tokens at block entry and processes them as one stream. It uses a single fused linear linear 1 that produces both QKV and the MLP up-projection, and a single fused linear linear 2 that absorbs the attention output and the MLP down-projection: 
+
+Fsng-lin1 = 2 B(S + Lctx )d(3 d + f ), (19) 
+
+Fsng-attn = 4 B(S + Lctx )2d, (20) 
+
+Fsng-lin2 = 2 B(S + Lctx )( d + f )d, (21) 
+
+Fsng (B, S ) = Fsng-lin1 + Fsng-attn + Fsng-lin2 . (22) 
+
+Block-averaged compute time. Let Nd and Ns be the number of double-stream and single-stream blocks in the model. We collapse the two block types into a single average block when applying the overlap condition: 
+
+¯Fblock (B, S ) = NdFdbl (B, S ) + NsFsng (B, S )
+
+Nd + Ns
+
+, ¯Tcomp (B, S ) = ¯Fblock (B, S )
+
+ηcomp Ppeak 
+
+. (23) 
+
+Prefetch model. The prefetch model carries over without change. The per-block parameter volume 
+
+Bpref used in Tpref = Bpref /(ηpref BW h2d ) is now an average across the two block types: a double-stream block contributes roughly β(20 d2 + 4 df ) bytes (two attention projection sets, two MLPs, plus modulation), and a single-stream block contributes roughly β(7 d2 + 2 df ) bytes (the fused linear 1
+
+and linear 2 together with one modulation), where β is the parameter byte width. 14 Critical compute workload. With ¯Fblock and the average Bpref above, the overlap condition 
+
+¯Fblock (B, S ) ≥ F ⋆ and the critical compute workload F ⋆ defined in Section 3.1 apply unchanged. In-creasing B or S continues to grow ¯Fblock monotonically, with the same regime-boundary interpretation as the DiT case. 
+
+Timing under distributed offloading. Both Flux and HunyuanVideo place the sequence-parallel collectives inside the joint attention call of each block (as well as within the joint attention of the single-stream block, which operates on the concatenated image+text sequence). The block-level timing therefore mirrors Figure 2: in the layerwise-offload schedule, the in-flight H2D prefetch can block the in-block all-to-all at the GPU Rx and expose prefetch latency on the critical path; in ChunkFlow’s chunked-prefetch schedule, the prefetch is paused at chunk boundaries and resumes after the collective completes. Because the chunked-prefetch and partial-residency mechanisms of Sections 3.2 and 3.3 operate on parameter chunks without reference to the block’s internal structure, they apply to MM-DiT blocks with no structural changes. 
+
+## C Numerical Instantiation and F ⋆ Predictions 
+
+This appendix instantiates the overlap model of Section 3.1 on our evaluation platform: it lists the hardware constants, calibration factors, and per-model parameters, then plugs them into the overlap condition to derive the predicted critical configuration for each model. Our evaluation node has two H100 PCIe GPUs that share the host PCIe root complex, running BF16 inference with Ulysses sequence parallelism degree 2 and chunked prefetching. The hardware constants Ppeak and BW h2d are fixed by the platform and are read directly from the device specification: 
+
+Ppeak is the peak BF16 Tensor Core throughput of a single H100 PCIe in dense (no-sparsity) mode, and BW h2d is the PCIe Gen5 ×16 effective bandwidth ( ≈ 63 GB/s) halved because the two GPUs share the host PCIe root. The calibration factors ηcomp and ηpref are obtained from offline profiling on the same platform: ηcomp 
+
+from the BF16 FLOP/s achieved on a single DiT block on each of the three evaluated models, and 
+
+ηpref from the H2D throughput measured under SGLang’s layerwise prefetch. The per-model values of ηcomp differ slightly across the three models; to keep the overlap model simple, we use the average. The four hardware and calibration constants are summarized in Table 1. Table 1: Hardware constants and empirical calibration factors used to evaluate F ⋆ in Section 4.2. Symbol Value 
+
+Ppeak 756 TFLOP/s 
+
+BW h2d 31 .5 GB/s 
+
+ηcomp 0.60 
+
+ηpref 0.89 
+
+The FLOP counts Fblock in Section 3.1 and Appendix B are the global per-block FLOPs, i.e., summed over the entire batch and sequence before sequence-parallel partitioning; under SP degree 2 each GPU performs Fblock /2 FLOPs. WanVideo uses the standard DiT block of Section 3.1 with 30 blocks, while Flux and HunyuanVideo use the MM-DiT block of the same appendix with (Nd, N s) = (19 , 38) and 
+
+(20 , 40) double-/single-stream blocks respectively. The other formula parameters and the effective per-block prefetch volume Bpref are summarized in Table 2: B is the batch size (swept for Flux; fixed at 1 for the two video models), d the hidden dimension, f the FFN intermediate dimension, Lctx the text context length, and S the image-token sequence length. The S formula in each row reflects the model’s input resolution—WanVideo at 704 × 1280 , Flux at 1024 × 1024 , and HunyuanVideo at 
+
+720 × 1280 —together with its VAE compression and patchification. Bpref is obtained from offline profiling on each model. Plugged into the per-GPU overlap condition Tcomp = Tpref together with the constants in Table 1, the values in Table 2 yield predicted critical configurations of n⋆ ≈ 119 .2 frames for WanVideo, 
+
+b⋆ ≈ 11 .5 for Flux, and n⋆ ≈ 34 .5 frames for HunyuanVideo. Rounding each to the nearest valid swept configuration in Section 4.2 gives 121 frames, batch 12 , and 33 frames respectively, which are the third configuration we chose for each model. 15 Table 2: Per-model formula parameters and effective per-block prefetch volume Bpref .Model B d f Lctx Sequence length S Bpref 
+
+WanVideo 1 3072 14336 512 220( n+3) 520 MB Flux b 3072 12288 512 4096 465 MB HunyuanVideo 1 3072 12288 161 900( n+3) 675 MB 
+
+## D Applicability to LLM Inference 
+
+The design of ChunkFlow—the overlap model (Section 3.1), communication-aware chunked prefetch-ing (Section 3.2), and partial parameter residency (Section 3.3)—is not architecturally tied to diffusion transformers: each component depends only on per-GPU compute throughput, host-to-device band-width, and the layered structure of the forward pass, all of which are shared by any transformer-based inference workload. We focus on DiT inference rather than LLM inference because the underlying overlap regime is far more favorable for DiT, as outlined below. 
+
+Long per-step compute window favors DiT. DiT inference processes the entire post-patchification token sequence in every denoising step; the per-block compute cost Fblock scales with the global sequence length S (Section 3.1). For high-resolution image and video models, S routinely reaches 
+
+10 5–10 6 tokens, pushing Fblock above the critical compute workload F ⋆ in the configurations we evaluate. LLM inference operates at a much smaller scale: prefill sequences are typically only on the order of 10 3–10 4 tokens (e.g., the default per-batch token budget of vLLM [ 17 ] is 2048 ), and decode produces a single new token per request per step, so the effective per-step sequence length equals the batch size, which is generally smaller than the prefill length. The corresponding Fblock is therefore substantially smaller than DiT’s, placing typical LLM workloads well below F ⋆, with decode being the most extreme case. 
+
+Memory-bound regimes (decode, MoE) make prefetch even harder. Two important LLM regimes are dominated by memory traffic rather than tensor-core arithmetic: dense-model decode and MoE inference, where the per-layer compute is bottlenecked by HBM weight (and, in decode, KV-cache) reads rather than peak FLOP/s. Since HBM bandwidth exceeds PCIe bandwidth by roughly an order of magnitude (e.g., ∼ 3 TB/s vs 64 GB/s on H100 PCIe), an H2D prefetch of the same weights over PCIe is substantially slower than the HBM-bound compute it must hide behind, so Tpref ≫ Tcomp once layerwise offloading is enabled. Recovering overlap via partial residency (Section 3.3) would require a resident fraction so high that it approaches the no-offload baseline, eroding the memory-saving rationale for offloading in the first place. 
+
+KV-cache offloading further compresses the prefetch bandwidth budget. In memory-constrained LLM deployments, KV-cache offloading is commonly enabled alongside weight offloading: the KV cache is staged in host memory and streamed to the GPU as needed. This adds a second stream of H2D traffic in both prefill and decode, competing with model-weight prefetch on the same PCIe path and effectively shrinking the prefetch calibration factor ηpref in the overlap model. The result is to push F ⋆ even higher, exacerbating the compute-bound regime described above. 
+
+Summary. All three components of ChunkFlow—the overlap model, chunk-granular pause/resume, and partial residency—are general and could be applied to LLM inference with no architectural change. Their practical effectiveness, however, is governed by the overlap model itself: DiT inference sits comfortably in the regime where prefetch can be hidden, whereas LLM inference (decode in particular, especially with concurrent KV-cache offloading) sits deep in the compute-bound regime where neither chunked prefetching nor moderate residency is sufficient. A satisfactory treatment of LLM inference under offloading would likely require co-designing model-weight and KV-cache offloading scheduling, which is beyond the scope of this work. 
+
+## E Broader Impact 
+
+The system optimizations proposed in this work reduce the GPU memory and end-to-end latency of distributed diffusion transformer inference. The direct positive consequences are lower hardware requirements and lower energy cost for deploying large diffusion transformers, which can democratize 16 access to high-quality image and video generation and reduce the carbon footprint of generative inference. We do not propose new generative models or new training data, and our method is purely a runtime-level optimization that leaves the underlying model and sampler unchanged; consequently, it does not introduce new capabilities for content generation. As with any infrastructure that lowers the cost of diffusion model deployment, our work indirectly makes the existing limitations of large generative models—including potential misuse for disinformation or deepfakes, and existing biases inherited from training data—easier to encounter at scale. Our method does not address these issues, which we view as the responsibility of model developers, model licensors, and downstream system operators rather than of the inference runtime itself. 17
