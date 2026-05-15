@@ -6,79 +6,73 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-14
-- 运行时间：2026-05-14 21:34:01 UTC
+- 最新运行日期：2026-05-15
+- 运行时间：2026-05-15 20:21:53 UTC
 - 运行状态：成功
-- 本次总论文数：19
-- 精读区：8
+- 本次总论文数：17
+- 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-今日聚焦大模型训练的容错与效率优化，深度解析 ResiHP 与 ReCoVer 等满分系统架构。
-核心结论指出动态混合并行与 CPU-GPU 协同显存交换是解决训练中断及长文本推理瓶颈的关键。
-建议开发者重点关注分布式系统中的故障恢复机制，以提升超大规模模型生产的稳定性。
-- 详情：[/202605/14/README](/202605/14/README)
+今日深度研读 17 篇前沿论文，重点突破高并发分布式 VLA 强化学习框架与神经网络训练优化算法。
+核心结论指向 D-VLA 在异步学习上的效率提升，以及 MoE 架构从大规模扩展稳定性到端侧设备部署的全面优化。
+推荐关注具身智能与高效推理的读者，重点查阅 D-VLA 的分布式架构设计与 BlitzGS 的极速城市级建模技术。
+- 详情：[/202605/15/README](/202605/15/README)
 
 ### 精读区论文标签
-1. [ResiHP: Taming LLM Training Failures with Dynamic Hybrid Parallelism](/202605/14/2605.06374v2-resihp-taming-llm-training-failures-with-dynamic-hybrid-parallelism)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：大规模LLM训练中混合并行的容错系统
-2. [ReCoVer: Resilient LLM Pre-Training System via Fault-Tolerant Collective and Versatile Workload](/202605/14/2605.11215v1-recover-resilient-llm-pre-training-system-via-fault-tolerant-collective-and-versatile-workload)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：针对大规模GPU集群的弹性LLM预训练系统
-3. [ChunkFlow: Communication-Aware Chunked Prefetching for Layerwise Offloading in Distributed Diffusion Transformer Inference](/202605/14/2605.11335v1-chunkflow-communication-aware-chunked-prefetching-for-layerwise-offloading-in-distributed-diffusion-transformer-inference)  
-   标签：评分：9.5/10、query:mlsys
-   evidence：分布式推理中预取与通信的协同调度
-4. [Unleashing Scalable Context Parallelism for Foundation Models Pre-Training via FCP](/202605/14/2605.08524v1-unleashing-scalable-context-parallelism-for-foundation-models-pre-training-via-fcp)  
+1. [D-VLA: A High-Concurrency Distributed Asynchronous Reinforcement Learning Framework for Vision-Language-Action Models](/202605/15/2605.13276v2-d-vla-a-high-concurrency-distributed-asynchronous-reinforcement-learning-framework-for-vision-language-action-models)  
    标签：评分：9.0/10、query:mlsys
-   evidence：基础模型预训练的可扩展上下文并行
-5. [Training-Inference Consistent Segmented Execution for Long-Context LLMs](/202605/14/2605.11744v1-training-inference-consistent-segmented-execution-for-long-context-llms)  
+   evidence：面向VLA模型的高并发分布式异步强化学习框架
+2. [A Non-Monotone Preconditioned Trust-Region Method for Neural Network Training](/202605/15/2605.14860v1-a-non-monotone-preconditioned-trust-region-method-for-neural-network-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：长文本大模型的分段执行框架
-6. [D-VLA: A High-Concurrency Distributed Asynchronous Reinforcement Learning Framework for Vision-Language-Action Models](/202605/14/2605.13276v1-d-vla-a-high-concurrency-distributed-asynchronous-reinforcement-learning-framework-for-vision-language-action-models)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：分布式异步强化学习框架
-7. [TurboGR: An Accelerated Training System for Large-Scale Generative Recommendation](/202605/14/2605.13433v1-turbogr-an-accelerated-training-system-for-large-scale-generative-recommendation)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对NPU的大规模生成式推荐加速训练系统
-8. [Rescaled Asynchronous SGD: Optimal Distributed Optimization under Data and System Heterogeneity](/202605/14/2605.13434v1-rescaled-asynchronous-sgd-optimal-distributed-optimization-under-data-and-system-heterogeneity)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：系统异构下分布式优化的异步SGD算法
+   evidence：用于深度神经网络跨子域并行训练的领域分解方法。
+3. [Decentralized Time-Varying Optimization for Streaming Data via Temporal Weighting](/202605/15/2605.06971v1-decentralized-time-varying-optimization-for-streaming-data-via-temporal-weighting)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：分布式代理网络中流数据的去中心化优化。
+4. [Split CNN Inference on Networked Microcontrollers](/202605/15/2605.09357v1-split-cnn-inference-on-networked-microcontrollers)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：联网微控制器的拆分推理系统
+5. [Attention Once Is All You Need: Efficient Streaming Inference with Stateful Transformers](/202605/15/2605.13784v1-attention-once-is-all-you-need-efficient-streaming-inference-with-stateful-transformers)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：高效流式推理引擎架构
+6. [EnergyLens: Predictive Energy-Aware Exploration for Multi-GPU LLM Inference Optimization](/202605/15/2605.14249v1-energylens-predictive-energy-aware-exploration-for-multi-gpu-llm-inference-optimization)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：能效感知的多GPU大模型推理优化框架
 
 ### 速读区论文标签
-1. [An Efficient Hybrid Sparse Attention with CPU-GPU Parallelism for Long-Context Inference](/202605/14/2605.07719v1-an-efficient-hybrid-sparse-attention-with-cpu-gpu-parallelism-for-long-context-inference)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：针对长上下文推理的CPU-GPU并行与跨设备协同执行
-2. [OOM-Free Alpamayo via CPU-GPU Memory Swapping for Vision-Language-Action Models](/202605/14/2605.11678v1-oom-free-alpamayo-via-cpu-gpu-memory-swapping-for-vision-language-action-models)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：通过CPU-GPU内存交换实现显存高效VLA推理的系统级优化
-3. [Distributed Seeking for Fixed Points of Biased Stochastic Operators: A Communication Efficient Approach](/202605/14/2605.07633v1-distributed-seeking-for-fixed-points-of-biased-stochastic-operators-a-communication-efficient-approach)  
+1. [BlitzGS: City-Scale Gaussian Splatting at Lightning Speed](/202605/15/2605.13794v1-blitzgs-city-scale-gaussian-splatting-at-lightning-speed)  
    标签：评分：8.0/10、query:mlsys
-   evidence：具有压缩功能的通信高效分布式算法
-4. [SlimQwen: Exploring the Pruning and Distillation in Large MoE Model Pre-training](/202605/14/2605.08738v1-slimqwen-exploring-the-pruning-and-distillation-in-large-moe-model-pre-training)  
+   evidence：跨GPU的分布式3D重建框架
+2. [How to Scale Mixture-of-Experts: From muP to the Maximally Scale-Stable Parameterization](/202605/15/2605.14200v1-how-to-scale-mixture-of-experts-from-mup-to-the-maximally-scale-stable-parameterization)  
    标签：评分：8.0/10、query:mlsys
-   evidence：预训练规模下MoE压缩与剪枝的系统研究
-5. [Rethinking Local Learning: A Cheaper and Faster Recipe for LLM Post-Training](/202605/14/2605.04913v3-rethinking-local-learning-a-cheaper-and-faster-recipe-for-llm-post-training)  
+   evidence：大规模MoE训练中稳定且优化的超参数缩放
+3. [DECO: Sparse Mixture-of-Experts with Dense-Comparable Performance on End-Side Devices](/202605/15/2605.10933v2-deco-sparse-mixture-of-experts-with-dense-comparable-performance-on-end-side-devices)  
    标签：评分：7.5/10、query:mlsys
-   evidence：局部学习后训练策略，减少反向耦合和激活存储
-6. [Beyond Factor Aggregation: Gauge-Aware Low-Rank Server Representations for Federated LoRA](/202605/14/2605.06733v1-beyond-factor-aggregation-gauge-aware-low-rank-server-representations-for-federated-lora)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：针对去中心化数据和有限客户端资源的联邦LoRA聚合规则
-7. [Toward Communication-Efficient Space Data Centers: Bottlenecks, Architectures, and New Paradigms](/202605/14/2605.12681v1-toward-communication-efficient-space-data-centers-bottlenecks-architectures-and-new-paradigms)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：天基AI计算基础设施的架构与范式
-8. [GeoStack: A Framework for Quasi-Abelian Knowledge Composition in VLMs](/202605/14/2605.06477v1-geostack-a-framework-for-quasi-abelian-knowledge-composition-in-vlms)  
+   evidence：用于高效端侧部署的稀疏混合专家架构
+4. [Star Elastic: Many-in-One Reasoning LLMs with Efficient Budget Control](/202605/15/2605.07182v1-star-elastic-many-in-one-reasoning-llms-with-efficient-budget-control)  
    标签：评分：7.0/10、query:mlsys
-   evidence：视觉语言模型知识组合的模块化框架
-9. [Enhancing Federated Quadruplet Learning: Stochastic Client Selection and Embedding Stability Analysis](/202605/14/2605.07888v1-enhancing-federated-quadruplet-learning-stochastic-client-selection-and-embedding-stability-analysis)  
+   evidence：具有预算控制的LLM家族高效训练
+5. [HARMONY: Bridging the Personalization-Generalization Gap by Mitigating Representation Skew in Heterogeneous Split Federated Learning](/202605/15/2605.07211v1-harmony-bridging-the-personalization-generalization-gap-by-mitigating-representation-skew-in-heterogeneous-split-federated-learning)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：针对异构移动设备的混合拆分联邦学习架构
+6. [MISA: Mixture of Indexer Sparse Attention for Long-Context LLM Inference](/202605/15/2605.07363v1-misa-mixture-of-indexer-sparse-attention-for-long-context-llm-inference)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：稀疏注意力索引器的即插即用替代方案以降低推理成本
+7. [UMEDA: Unified Multi-modal Efficient Data Fusion for Privacy-Preserving Graph Federated Learning via Spectral-Gated Attention and Diffusion-Based Operator Alignment](/202605/15/2605.08288v1-umeda-unified-multi-modal-efficient-data-fusion-for-privacy-preserving-graph-federated-learning-via-spectral-gated-attention-and-diffusion-based-operator-alignment)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：面向分布式边缘设备的图联邦学习框架。
+8. [Hierarchical Mixture-of-Experts with Two-Stage Optimization](/202605/15/2605.08292v1-hierarchical-mixture-of-experts-with-two-stage-optimization)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：用于扩展模型容量的分层混合专家框架
+9. [Direction-Preserving Number Representations](/202605/15/2605.07662v1-direction-preserving-number-representations)  
    标签：评分：6.5/10、query:mlsys
-   evidence：分布式客户端之间的联邦学习
-10. [DataMaster: Data-Centric Autonomous AI Research](/202605/14/2605.10906v2-datamaster-data-centric-autonomous-ai-research)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：通过自主数据工程改进机器学习系统
-11. [Stabilizing LLM Supervised Fine-Tuning via Explicit Distributional Control](/202605/14/2605.04468v1-stabilizing-llm-supervised-fine-tuning-via-explicit-distributional-control)  
+   evidence：现代机器学习系统中的低精度数字表示
+10. [Adaptive Selection of LoRA Components in Privacy-Preserving Federated Learning](/202605/15/2605.05769v1-adaptive-selection-of-lora-components-in-privacy-preserving-federated-learning)  
    标签：评分：6.0/10、query:mlsys
-   evidence：稳定LLM有监督微调的框架
+   evidence：分布式训练动态与自适应LoRA选择
+11. [FastOmniTMAE: Parallel Clause Learning for Scalable and Hardware-Efficient Tsetlin Embeddings](/202605/15/2605.06982v1-fastomnitmae-parallel-clause-learning-for-scalable-and-hardware-efficient-tsetlin-embeddings)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：针对逻辑学习嵌入模型的硬件高效并行训练过程。
 
 
 <div class="dpr-home-promo-card">
