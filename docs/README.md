@@ -7,69 +7,72 @@
 
 ## 每次日报
 - 最新运行日期：2026-05-18
-- 运行时间：2026-05-18 07:16:54 UTC
+- 运行时间：2026-05-18 20:18:00 UTC
 - 运行状态：成功
-- 本次总论文数：16
-- 精读区：5
+- 本次总论文数：17
+- 精读区：6
 - 速读区：11
 
 ### 今日简报（AI）
-今日深度解析 16 篇 AI 论文，聚焦标准化基准测试与高效分布式学习架构。
-满分神作 MLCommons Chakra 统一了软硬件协同设计的执行追踪标准，异构系统下的梯度编码技术则大幅优化了通信效率。
-推荐开发者关注多模态 LLM 推理能耗建模与个性化联邦学习，以应对异构算力下的性能瓶颈。
+今日深度解析大模型训练底座，重点攻克对象存储一致性与标准化性能评测两大核心难题。
+满分论文 BatchWeave 与 Chakra 揭示了原生数据平面优化与软硬协同设计的最新范式。
+建议关注 MoE 训练均衡及 AI 数据中心碳中和方案，把握算力效率与环境可持续性的双重趋势。
 - 详情：[/202605/18/README](/202605/18/README)
 
 ### 精读区论文标签
-1. [MLCommons Chakra: Advancing Performance Benchmarking and Co-design using Standardized Execution Traces](/202605/18/2605.11333v1-mlcommons-chakra-advancing-performance-benchmarking-and-co-design-using-standardized-execution-traces)  
+1. [BatchWeave: A Consistent Object-Store-Native Data Plane for Large Foundation Model Training](/202605/18/2605.09994v2-batchweave-a-consistent-object-store-native-data-plane-for-large-foundation-model-training)  
    标签：评分：10.0/10、query:mlsys
-   evidence：用于分布式机器学习工作负载优化和软硬件协同设计的标准化执行追踪
-2. [Communication-Efficient Approximate Gradient Coding for Distributed Learning in Heterogeneous Systems](/202605/18/2605.15890v1-communication-efficient-approximate-gradient-coding-for-distributed-learning-in-heterogeneous-systems)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：分布式学习中的梯度编码
-3. [KV-RM: Regularizing KV-Cache Movement for Static-Graph LLM Serving](/202605/18/2605.09735v1-kv-rm-regularizing-kv-cache-movement-for-static-graph-llm-serving)  
+   evidence：用于分布式大模型训练的原生对象存储训练数据平面
+2. [MLCommons Chakra: Advancing Performance Benchmarking and Co-design using Standardized Execution Traces](/202605/18/2605.11333v1-mlcommons-chakra-advancing-performance-benchmarking-and-co-design-using-standardized-execution-traces)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：用于AI基础设施和软硬件协同设计的标准化执行追踪
+3. [Runtime-Orchestrated Second-Order Optimization for Scalable LLM Training](/202605/18/2605.16184v1-runtime-orchestrated-second-order-optimization-for-scalable-llm-training)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：在GPU、CPU和NVMe之间分配优化器状态的运行时系统
+4. [Communication-Efficient Approximate Gradient Coding for Distributed Learning in Heterogeneous Systems](/202605/18/2605.15890v1-communication-efficient-approximate-gradient-coding-for-distributed-learning-in-heterogeneous-systems)  
+   标签：评分：9.5/10、query:mlsys
+   evidence：异构系统中分布式学习的通信高效梯度编码
+5. [GQLA: Group-Query Latent Attention for Hardware-Adaptive Large Language Model Decoding](/202605/18/2605.15250v1-gqla-group-query-latent-attention-for-hardware-adaptive-large-language-model-decoding)  
    标签：评分：8.5/10、query:mlsys
-   evidence：静态图LLM推理的运行时设计
-4. [$φ$-Balancing for Mixture-of-Experts Training](/202605/18/2605.15403v1--balancing-for-mixture-of-experts-training)  
-   标签：评分：8.5/10、query:mlsys
-   evidence：MoE训练中专家负载均衡的原则性框架
-5. [MetaMoE: Diversity-Aware Proxy Selection for Privacy-Preserving Mixture-of-Experts Unification](/202605/18/2605.14289v1-metamoe-diversity-aware-proxy-selection-for-privacy-preserving-mixture-of-experts-unification)  
+   evidence：针对大语言模型解码和张量并行的硬件自适应注意力机制
+6. [EnergyLens: Interpretable Closed-Form Energy Models for Multimodal LLM Inference Serving](/202605/18/2605.10556v2-energylens-interpretable-closed-form-energy-models-for-multimodal-llm-inference-serving)  
    标签：评分：8.0/10、query:mlsys
-   evidence：分布式MoE训练的隐私保护框架
+   evidence：跨异构加速器的多模态LLM推理服务能效模型
 
 ### 速读区论文标签
-1. [Function-Space ADMM for Decentralized Federated Learning: A Control Theoretic Perspective](/202605/18/2605.09356v1-function-space-admm-for-decentralized-federated-learning-a-control-theoretic-perspective)  
+1. [Recasting AI Data Centers as Engines for Carbon Removal](/202605/18/2605.13114v1-recasting-ai-data-centers-as-engines-for-carbon-removal)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：AI数据中心基础设施与碳移除
+2. [$φ$-Balancing for Mixture-of-Experts Training](/202605/18/2605.15403v1--balancing-for-mixture-of-experts-training)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：MoE模型训练可扩展性的负载均衡
+3. [DualKV: Shared-Prompt Flash Attention for Efficient RL Training with Large Rollouts and Long Contexts](/202605/18/2605.15422v1-dualkv-shared-prompt-flash-attention-for-efficient-rl-training-with-large-rollouts-and-long-contexts)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：针对长上下文RL训练的算子级优化
+4. [Ascend-RaBitQ: Heterogeneous NPU-CPU Acceleration of Billion-Scale Similarity Search with 1-bit Quantization](/202605/18/2605.16007v1-ascend-rabitq-heterogeneous-npu-cpu-acceleration-of-billion-scale-similarity-search-with-1-bit-quantization)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：用于AI搜索的异构NPU-CPU加速系统
+5. [FedHPro: Federated Hyper-Prototype Learning via Gradient Matching](/202605/18/2605.13475v1-fedhpro-federated-hyper-prototype-learning-via-gradient-matching)  
    标签：评分：7.5/10、query:mlsys
-   evidence：边缘系统的去中心化联邦学习优化
-2. [EnergyLens: Interpretable Closed-Form Energy Models for Multimodal LLM Inference Serving](/202605/18/2605.10556v2-energylens-interpretable-closed-form-energy-models-for-multimodal-llm-inference-serving)  
+   evidence：通过梯度匹配为分布式客户端进行联邦学习
+6. [BEAM: Binary Expert Activation Masking for Dynamic Routing in MoE](/202605/18/2605.14438v1-beam-binary-expert-activation-masking-for-dynamic-routing-in-moe)  
    标签：评分：7.5/10、query:mlsys
-   evidence：异构加速器上多模态LLM推理服务的能耗模型
-3. [COSMOS: Model-Agnostic Personalized Federated Learning with Clustered Server Models and Pseudo-Label-Only Communication](/202605/18/2605.11165v1-cosmos-model-agnostic-personalized-federated-learning-with-clustered-server-models-and-pseudo-label-only-communication)  
-   标签：评分：7.5/10、query:mlsys
-   evidence：模型无关的个性化联邦学习框架
-4. [Improving Generalization by Permutation Routing Across Model Copies](/202605/18/2605.09256v1-improving-generalization-by-permutation-routing-across-model-copies)  
+   evidence：MoE效率的动态路由架构
+7. [Sparse Layers are Critical to Scaling Looped Language Models](/202605/18/2605.09165v1-sparse-layers-are-critical-to-scaling-looped-language-models)  
    标签：评分：7.0/10、query:mlsys
-   evidence：分布式训练中模型副本间的消息传输拓扑与路由
-5. [Make Each Token Count: Towards Improving Long-Context Performance with KV Cache Eviction](/202605/18/2605.09649v1-make-each-token-count-towards-improving-long-context-performance-with-kv-cache-eviction)  
+   evidence：循环MoE架构的扩展特性与内存效率
+8. [Function-Space ADMM for Decentralized Federated Learning: A Control Theoretic Perspective](/202605/18/2605.09356v1-function-space-admm-for-decentralized-federated-learning-a-control-theoretic-perspective)  
    标签：评分：7.0/10、query:mlsys
-   evidence：针对长文本推理中KV缓存内存瓶颈的系统优化
-6. [Unveiling High-Probability Generalization in Decentralized SGD](/202605/18/2605.10205v1-unveiling-high-probability-generalization-in-decentralized-sgd)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：去中心化SGD的高概率泛化理论
-7. [SoK: A Systematic Bidirectional Literature Review of AI & DLT Convergence](/202605/18/2605.10515v1-sok-a-systematic-bidirectional-literature-review-of-ai--dlt-convergence)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：AI与分布式账本技术架构相互作用的系统性综述
-8. [DECO: Sparse Mixture-of-Experts with Dense-Comparable Performance on End-Side Devices](/202605/18/2605.10933v1-deco-sparse-mixture-of-experts-with-dense-comparable-performance-on-end-side-devices)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：用于高效部署的稀疏MoE架构设计
-9. [ISAC for AI: A Trade-off Framework Across Data Acquisition and Transfer in Federated Learning](/202605/18/2605.11915v1-isac-for-ai-a-trade-off-framework-across-data-acquisition-and-transfer-in-federated-learning)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：联邦学习系统中的资源分配
-10. [Recasting AI Data Centers as Engines for Carbon Removal](/202605/18/2605.13114v1-recasting-ai-data-centers-as-engines-for-carbon-removal)  
-   标签：评分：6.5/10、query:mlsys
-   evidence：AI数据中心基础设施与废热集成的评估
-11. [Octopus Protocol: One-Shot Hardware Discovery and Control for AI Agents via Infrastructure-as-Prompts](/202605/18/2605.09055v1-octopus-protocol-one-shot-hardware-discovery-and-control-for-ai-agents-via-infrastructure-as-prompts)  
+   evidence：机器学习模型的去中心化联邦学习
+9. [Improving Generalization by Permutation Routing Across Model Copies](/202605/18/2605.09256v1-improving-generalization-by-permutation-routing-across-model-copies)  
    标签：评分：6.0/10、query:mlsys
-   evidence：用于硬件发现和控制的提示即基础设施
+   evidence：分布式训练中跨模型副本的消息路由
+10. [Concordia: Self-Improving Synthetic Tables for Federated LLMs](/202605/18/2605.09855v1-concordia-self-improving-synthetic-tables-for-federated-llms)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：使用合成数据流水线的LLM联邦适配
+11. [BROS: Bias-Corrected Randomized Subspaces for Memory-Efficient Single-Loop Bilevel Optimization](/202605/18/2605.10288v2-bros-bias-corrected-randomized-subspaces-for-memory-efficient-single-loop-bilevel-optimization)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：针对大型神经网络的内存高效优化
 
 
 <div class="dpr-home-promo-card">
