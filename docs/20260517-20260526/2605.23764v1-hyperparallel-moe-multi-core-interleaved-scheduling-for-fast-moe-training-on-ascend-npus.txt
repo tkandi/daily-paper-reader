@@ -1,0 +1,528 @@
+Title: HyperParallel-MoE: Multi-Core Interleaved Scheduling for Fast MoE Training on Ascend NPUs
+
+URL Source: https://arxiv.org/pdf/2605.23764v1
+
+Published Time: Mon, 25 May 2026 01:07:22 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# HyperParallel-MoE: Multi-Core Interleaved Scheduling for Fast MoE Training on Ascend NPUs 
+
+## Zewen Jin ♣*, Congkun Ai ♣*, Guangpeng Zhang ♥*, Hanbo Zhang ♦† , Haoran Wang ♥,Shihan Xiao ♥, Da Lei ♥, Xuefeng Jin ♥, Teng Su ♥, Cheng Li ♣♠ ♣ University of Science and Technology of China 
+
+♥ Huawei Technologies Co., Ltd 
+
+♦ Peking University 
+
+♠ Institute of Artificial Intelligence, Hefei Comprehensive National Science Center 
+
+## Abstract 
+
+Modern Mixture-of-Experts (MoE) models increasingly rely on large-scale AI accelerator clusters for efficient training. Ascend NPUs expose heterogeneous on-chip compute re-sources, including matrix-oriented AIC units and vector-oriented AIV units with explicit cross-queue synchronization support. However, existing training frameworks largely exe-cute MoE operators in a serialized kernel-by-kernel manner, leaving substantial heterogeneous parallelism underutilized. This paper presents HyperParallel-MoE, a compilation and scheduling framework for MoE training on Ascend NPUs. HyperParallel-MoE transforms operator-level MoE execu-tion into a statically scheduled tile-level heterogeneous task-flow spanning AIC and AIV resources. It introduces AIV-driven one-sided communication to eliminate host-side col-lective synchronization, dependency-preserving tile task gen-eration to unify communication and computation under a common task abstraction, and event-driven static schedul-ing to coordinate cross-queue execution with low runtime overhead. HyperParallel-MoE further executes the compiled taskflow within a unified runtime that concurrently drives AIC and AIV workers inside a single kernel launch, enabling fine-grained overlap among communication, matrix compu-tation, and vector computation while preserving existing optimized operators. We implement HyperParallel-MoE in the MindSpore and MindFormers stack and evaluate it using DeepSeek-style MoE models on Ascend A3 clusters. Across multiple expert-parallel configurations, HyperParallel-MoE reduces Dispatch-to-Combine MoE-FFN latency by up to 
+
+1.58 ×, demonstrating that tile-level heterogeneous schedul-ing can substantially improve MoE training efficiency on modern NPUs. 
+
+## 1 Introduction 
+
+Mixture-of-Experts (MoE) architectures have become a domi-nant design choice for modern large language models (LLMs), including DeepSeek-V3, Mixtral, and Qwen2.5-MoE [ 4 , 6, 7,11 , 13 , 19 , 20 ], because they scale model capacity without proportionally increasing per-token computation. As model 
+
+> *Equal contribution.
+> †Work done during an internship at Huawei.
+
+sizes continue to grow toward hundreds of billions or even trillions of parameters, efficient MoE training increasingly relies on large clusters of AI accelerators [ 15 , 21 ]. At such scale, training efficiency is no longer determined solely by raw compute throughput, but also by how effectively frame-works exploit heterogeneous on-chip resources, overlap com-munication with computation, and reduce synchronization overheads. Consequently, recent system efforts have be-gun exploring fine-grained scheduling and communication-computation overlap to improve utilization of modern AI accelerators [1–3, 8, 14, 18, 24, 26]. Ascend NPUs are an increasingly adopted class of AI ac-celerators that expose a heterogeneous on-chip execution model [ 12 , 23 , 28 , 29 ]. Each Ascend AI Core contains physi-cally decoupled AI Cube (AIC) and AI Vector (AIV) execution units: AIC specializes in matrix-intensive operators such as GEMM, while AIV executes vector computation, data move-ment, and communication-related operations [ 28 , 29 ]. Unlike conventional homogeneous execution models, Ascend NPUs provide independent hardware queues for Cube and Vec-tor tasks, together with explicit event-based synchronization primitives. This architecture enables tile-level heterogeneous scheduling, where matrix computation, vector computation, and communication tasks can execute concurrently on dif-ferent resources within the same kernel execution window. In addition, AIC and AIV share a large on-chip L2 cache, cre-ating opportunities for cross-unit intermediate-result reuse without returning data to HBM. However, existing training frameworks [ 16 , 21 ] remain largely unaware of these architectural features, leading to suboptimal hardware utilization. Current frameworks typi-cally run MoE-FFN as a kernel-by-kernel pipeline: Dispatch, GMM, SwiGLU, and Combine are each launched as sepa-rate kernels. AIC and AIV units therefore often idle in al-ternation rather than execute concurrently. Our profiling of a DeepSeek-V3-style model [ 7 ] on 256 Ascend A3 NPUs reveals several inefficiencies. Although GMM operators dom-inate execution time, AIC units achieve only about 67% MAC utilization on average. Meanwhile, Vector-side operators on the critical path still account for roughly 18% of end-to-end 
+
+> 1
+> arXiv:2605.23764v1 [cs.DC] 22 May 2026
+
+training time, while EP communication contributes an addi-tional 17% overhead. More importantly, only about 61% of EP communication latency can be hidden behind Cube com-putation, leaving the remaining 39% exposed on the critical path. These inefficiencies stem from the mismatch between existing framework scheduling models and Ascend’s hetero-geneous execution architecture. In this paper, we present HyperParallel-MoE, a compi-lation and scheduling framework for MoE training on As-cend NPUs. HyperParallel-MoE transforms the originally operator-serialized MoE-FFN computation graph into a stat-ically scheduled tile-level heterogeneous taskflow spanning AIC and AIV resources. Rather than isolating communication and computation behind global barriers, HyperParallel-MoE decomposes both into fine-grained tile tasks and runs them concurrently within a unified execution window. Achiev-ing this goal requires addressing three major challenges. First, conventional collectives impose global barriers and block fine-grained overlap between communication and com-putation. Second, tile decomposition must preserve both operator-level optimization constraints and cross-operator dependency correctness. Third, runtime scheduling must simultaneously satisfy correctness, low overhead, and high-quality heterogeneous overlap. Existing GPU-oriented fu-sion approaches either assume homogeneous SM architec-tures or require intrusive rewrites of production-grade oper-ators, making them unsuitable for Ascend’s heterogeneous AIC/AIV execution model [1–3, 8, 10, 14, 24, 26, 27]. To address the communication challenge, HyperParallel-MoE introduces AIV-driven one-sided communication. Rather than relying on host-orchestrated collective communica-tion, HyperParallel-MoE converts EP AllToAll into device-side schedulable communication tasks driven directly by AIV workers. Each communication tile independently per-forms remote memory writes and updates completion signals through lightweight event counters, enabling communica-tion progression to overlap naturally with computation at tile granularity. As a result, downstream GMM tasks can begin execution as soon as their required communication tiles become available, without waiting for the completion of the entire collective communication phase. To address task decomposition and scheduling challenges, HyperParallel-MoE introduces efficient dependency-aware tile task generation and static heterogeneous scheduling. HyperParallel-MoE first constructs tile tasks from an Opera-tor Dependency Graph (ODG), ensuring that communication, matrix computation, and vector computation share aligned tile boundaries and explicit dependency relationships. The framework then compiles these tasks into statically sched-uled Cube Task Queue (CTQ) and Vector Task Queue (VTQ) taskflows augmented with event-driven synchronization se-mantics. Runtime execution therefore reduces to lightweight queue consumption and event waiting, while all dependency analysis, task generation, and execution ordering decisions Global Memory  
+
+> L2 Cache
+> AI Cube (AIC)
+> AI Vector (AIV)
+> Matrix
+> Engine
+> Vector / Comm ops
+> Matrix ops
+> Cube Task Queue (CTQ)
+> Vector Task Queue (VTQ)
+> Scheduler
+> Vector
+> Engine
+> Event flags SetFlag / WaitFlag
+
+Figure 1. Ascend NPU heterogeneous AIC/AIV execution model. are resolved offline. We integrate HyperParallel-MoE into the MindSpore and MindFormers training stack [ 16 , 17 ] with low code intrusion, while preserving existing optimized im-plementations of GMM, SwiGLU, and communication opera-tors. We evaluate HyperParallel-MoE using DeepSeek-V3-style MoE models [ 7 ] on clusters of Ascend A3 NPUs. Across EP4, EP8, and EP16 settings, HyperParallel-MoE reduces Dispatch-to-Combine MoE-FFN latency by 1.49 ×–1.58 × un-der balanced routing and achieves 1.08 ×–1.09 × speedup in end-to-end training under sampled natural routing. These results demonstrate that exposing heterogeneous AIC/AIV concurrency through tile-level static scheduling can substan-tially improve MoE training efficiency on existing Ascend hardware. In summary, this paper makes the following contributions: 
+
+• We propose a tile-level heterogeneous task abstraction for MoE training on Ascend NPUs, enabling commu-nication, matrix computation, and vector computation to be jointly represented and scheduled within a uni-fied taskflow. 
+
+• We design a static scheduling framework with event-driven synchronization that compiles MoE-FFN execu-tion into precomputed CTQ/VTQ taskflows, enabling low-overhead heterogeneous execution while preserv-ing dependency correctness. 
+
+• We implement HyperParallel-MoE in the training stack of MindSpore and MindFormers and demonstrate its effectiveness and generality on DeepSeek-style MoE models, achieving substantial MoE-FFN speedups on Ascend A3 clusters. 
+
+## 2 Background and Motivation 
+
+2.1 Ascend NPU Architecture 
+
+Ascend NPUs are advanced processors for neural network computations that have seen increasing adoption [ 12 , 23 ,28 , 29 ]. As shown in Figure 1, they feature a heterogeneous 
+
+> 2
+
+multi-core architecture, where each AI Core contains one AI Cube (AIC) unit and two AI Vector (AIV) units. AIC units are optimized for matrix operations, including GEMM and batched matrix multiplication, whereas AIV units execute vector-style operators, such as data movement and communi-cation signaling. As an example, the recent Ascend A3 NPU consists of 25 AI Cores, providing a total of 25 AIC units and 50 AIV units. The AIC and AIV units are physically independent and are driven by separate instruction queues: the Cube Task Queue (CTQ) for AIC and the Vector Task Queue (VTQ) for AIV. Ascend NPUs further provide a programmer-controlled dispatch interface for heterogeneous scheduling [ 28 , 29 ]. First, AIC and AIV units concurrently fetch and execute tile-level tasks from their respective queues, enabling computa-tions from both resource types to proceed in parallel when-ever no data dependencies exist. Second, the architecture allows precise cross-queue dependency enforcement through event synchronization primitives, i.e., CrossCoreSetFlag 
+
+and CrossCoreWaitFlag establish fine-grained dependen-cies between CTQ and VTQ. This lets matrix processing and vector processing form a tile-level pipeline within a single kernel. Overall, the explicit programming interface enables developers to directly specify, at tile granularity, which unit type handles which computation, precisely directing tasks into the dedicated hardware queues and realizing a fine-grained, event-driven scheduling paradigm that orchestrates on-chip heterogeneous resources with tight control. Beyond synchronization via signals, the two types of cores share an on-chip L2 cache (192 MB) that is substantially larger than the data footprint of a single tile [ 28 , 29 ]. Con-sequently, when an AIC unit finishes a matrix multiply tile and writes the output to the L2 cache, a subsequent AIV vector tile can directly read that data from the L2, eliminat-ing the need to write back to or read from the global High Bandwidth Memory (HBM). Note that the L2 cache delivers more than 4 × the read bandwidth of HBM. This on-chip data path, in which matrix multiply output lands in L2 and is then consumed by vector operations, turns the L2 cache into a high-bandwidth shared buffer that bridges the AIC and AIV pipelines, serving as a key foundation for efficient on-chip heterogeneous concurrency. 
+
+2.2 Mixture-of-Experts (MoE) Models 
+
+Modern large language models increasingly adopt Mixture-of-Experts (MoE) architectures [ 11 , 20 ] to scale model ca-pacity without proportionally increasing the computation performed per token. An MoE layer contains a router and a set of expert networks. For each input token, the router selects a small subset of experts, typically through top-𝑘 
+
+routing; only the selected experts process the token, and their outputs are weighted by routing scores and combined (a) Forward Operator Graph         
+
+> Dispatch All-to-All
+> GMM gate / up SwiGLU GMM down
+> Combine All-to-All
+> (b) Backward Operator Graph
+> [AIV] [AIC] [AIV] [AIC] [AIV]
+> Dispatch All-to-All
+> [AIV]
+> GMM w2_grad
+> [AIC]
+> GMM act_grad
+> [AIC]
+> SwiGLU grad
+> [AIV] GMM gate_grad
+> [AIC]
+> GMM w1_grad
+> [AIC]
+> Combine All-to-All
+> [AIV]
+> Cube Operators Vector Operators
+
+Figure 2. Forward and backward MoE-FFN operator graph with AIC/AIV mapping. to form the final MoE output. Representative MoE models in-clude DeepSeek-V2 [ 6 ], DeepSeek-V3 [ 7 ], Mixtral 8 ×7B [ 13 ], and Qwen2.5-MoE [19]. To better support Mixture-of-Experts (MoE) training on A3 NPUs, we examine its computational structure in depth. Consider the MoE feed-forward network (MoE-FFN) as a rep-resentative example. Its forward pass can be decomposed into three high-level stages: (1) dispatching tokens to the ranks that host their selected experts, (2) performing the local ex-pert feed-forward computation, and (3) combining the expert outputs back to the source ranks. As shown in Figure 2(a), these stages are realized by five core operators: Dispatch , the first GroupedGEMM (GMM ), SwiGLU , the second GMM , and 
+
+Combine . Dispatch permutes and transfers tokens accord-ing to the routing decisions. The first GMM computes the gate and up projections, followed by the SwiGLU activation, while the second GMM performs the down projection. Fi-nally, Combine routes the expert outputs back to the original ranks and accumulates the top-𝑘 contributions [4, 7]. The backward pass exposes additional operator-level par-allelism. Figure 2(b) contains seven nodes: backward Dis-patch, GMM act _grad , GMM w2 _grad , SwiGLU grad , GMM gate _grad ,backward Combine, and GMM w1 _grad . Here, act _grad and 
+
+gate _grad are for activation-gradient computations, while 
+
+w1 _grad and w2 _grad compute the two expert weight gradi-ents. After backward Dispatch, GMM act _grad and GMM w2 _grad 
+
+independently consume the dispatched upstream gradient.  
+
+> 3GMM
+> MM
+> FA
+> Vector
+> DP
+> TP/CP
+> EP
+> PP
+> Others
+> 0.00
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> 0.30
+> Ratio
+> 0.25
+> 0.19
+> 0.10
+> 0.17
+> 0.01 0.03
+> 0.17
+> 0.07
+> 0.01
+> End-to-End Training Step Time Breakdown
+> Time Ratio
+
+Figure 3. End-to-end training step time breakdown on As-cend A3. D0           
+
+> G⭡0IG⭣0
+> SG0
+> Cube Vector
+> Dispatch / Combine
+> Idle
+> GMM_gate / up
+> GMM_down
+> SwiGLU
+> Dispatch
+> Idle Cube Vector
+> GMM_gate / up
+> Idle SwiGLU
+> Idle GMM_down
+> Idle
+> Idle
+> (a) Kernel-by-Kernel Execution (b) Tile-Level AIC/AIV Pipeline
+> G⭡1G⭡2G⭣1G⭣2
+> SG1 SG2
+> I
+> D1 D2 CB0 CB1 CB2
+> Combine
+
+Figure 4. Kernel-by-kernel execution versus tile-level AIC/AIV pipelining. After SwiGLU grad , GMM gate _grad and GMM w1 _grad become in-dependent consumers; backward Combine then returns the resulting input activation gradient [7, 16]. These operators stress different hardware resources. GMM 
+
+operators mainly use Cube matrix engines, whereas Dispatch ,
+
+Combine , SwiGLU , activation gradients, and data movement map mostly to AIV resources [28, 29]. 
+
+2.3 MoE Training Inefficiencies 
+
+Efficient training of such MoE models on Ascend A3 NPU clusters demands a thorough understanding of the under-lying performance bottlenecks. To this end, we profile a DeepSeek-V3 [ 7] variant with 256 experts, 671B total param-eters, and 37B activated parameters, running on a cluster of 256 A3 NPUs (each NPU carries two devices). The training job uses the MindSpore framework [ 16 ] with a parallelism strategy of dp=32, pp=8, tp=2, ep=32. Our profiling reveals several critical performance inefficiencies. Figure 3 presents the time breakdown of the major steps in an MoE training job. Matrix computation dominates the over-all execution time, with the GroupedGEMM (GMM) opera-tors inside the FFN accounting for the largest share, reaching 25%. To further examine whether the Cube cores are satu-rated, we use the profiler-reported MAC ratio, defined as the ratio of cycles spent on Cube-type instructions to total cycles. On average, however, the AIC cores attain only about 67% MAC ratio. FlashAttention (FA) has been heavily optimized and is no longer a bottleneck [ 5 ]. In contrast, vector opera-tors constitute a non-negligible portion: those that fall on the critical path account for roughly 18% of the end-to-end step time. We next analyze the communication overhead. The time costs introduced by data parallelism (DP), tensor parallelism (TP), and context parallelism (CP) have become negligible. However, expert parallelism (EP) imposes a 17% overhead on the critical path. A closer examination of EP reveals that only about 61% of its communication latency can be hidden behind Cube computation, leaving roughly 39% exposed on the critical path. This exposed fraction is expected to grow further as the number of experts increases [8, 14, 15, 24]. Figure 4(a) also illustrates the microbatch-level computa-tion pipeline, taking the FFN forward pass as a representative example. We further observe that although Cube and Vec-tor operators use distinct hardware resources and the NPU provides an interface for on-chip heterogeneous scheduling, the pipeline is in fact serial: every kernel is dispatched to the NPU sequentially, causing the AIC and AIV units to idle in alternation rather than operate simultaneously. The root cause of this problem lies in a mismatch of scheduling patterns. Conventional training stacks, including Megatron-style model-parallel execution [ 21 ] and the Mind-Spore baseline used in our profiling [ 16 ], can overlap coarse computation and communication work, but still launch MoE operators as full-device kernels. They do not expose Ascend’s AIC and AIV queues as independent tile-level scheduling targets. As a result, in our profiled Ascend execution path, an AIC-dominant kernel must finish before an AIV-dominant kernel can run, and vice versa, causing the two resource classes to idle in alternation. Furthermore, in the profiled host-driven EP All-to-AllV (A2AV) path, communication is exposed as an operator-level synchronization point before dependent operators can be launched. This creates an idle interval for dependent AIC and AIV work and motivates fine-grained communication-computation overlap [8, 14, 24]. 
+
+2.4 Opportunities and Challenges 
+
+Ascend NPU’s physically decoupled heterogeneous on-chip resources and explicit programmability provide a potential optimization path for MoE execution [ 28 , 29 ]. By decom-posing coarse-grained operators into fine-grained tiles and mapping them onto AIC and AIV cores according to compu-tation type, it becomes possible to construct inter-operator pipelines across heterogeneous compute units. As illustrated in Figure 4(b), tiles with data dependencies can be organized into pipelined execution flows, while multiple independent streams can further reduce pipeline idle gaps and improve overlap efficiency. However, realizing this vision requires addressing several tightly coupled challenges; inefficiency 
+
+> 4
+
+in any stage may collapse the pipeline into serialized execu-tion or even introduce scheduling overhead exceeding the benefits of overlap. The first challenge lies in the execution model of All-ToAll communication. Conventional collective communi-cation exposes synchronization boundaries, and prior MoE systems show that these boundaries can limit fine-grained communication-computation overlap [ 14 , 24 ]. Recent GPU communication systems further demonstrate the value of lower-level or device-side communication primitives for EP traffic [ 8 , 26 ]. Therefore, HyperParallel-MoE moves AllToAll progress into AIV-managed asynchronous communication tasks to reduce tile-level communication latency and improve overlap efficiency. Furthermore, because AllToAll tiles must participate in fine-grained runtime scheduling, communica-tion tasks themselves need to be directly managed by AIV cores without host-side orchestration. In this regard, one-sided communication, where AIV independently issues and tracks point-to-point communication operations, naturally matches the design philosophy of the proposed framework. The second challenge concerns task decomposition under both intra-operator and cross-operator constraints. Within GMM, existing memory reordering and L2 cache reuse op-timizations require each tile to cover a complete expert width [ 28 , 29 ]; overly fine-grained partitioning breaks these optimizations and degrades compute efficiency, whereas overly coarse partitioning increases pipeline bubbles. Across operators, AllToAll tiles and SwiGLU tiles must align with the input and output row partitions of GMM, respectively, to preserve correct tile-level data dependencies. Moreover, All-ToAll completion signals must precisely reflect the visibility of destination-side buffers: downstream GMM tiles can only be triggered after the corresponding tile data is fully written and globally visible, preventing premature reads of incom-plete data. Consequently, task decomposition is not merely a matter of choosing smaller tile sizes, but rather a tradeoff among intra-operator optimization, inter-operator depen-dency alignment, synchronization overhead, and pipeline density. The third challenge is scheduling. After operator decom-position, the system must simultaneously satisfy scheduling correctness, low scheduling overhead, and high scheduling quality. Correctness requires strict enforcement of tile de-pendencies, such that a GMM tile cannot execute before the corresponding AllToAll tile completes. Low overhead requires dependency tracking and event triggering to remain lightweight; otherwise, scheduling itself becomes a perfor-mance bottleneck. High scheduling quality further requires maximizing Cube/Vector overlap and L2 cache reuse under dependency constraints. This introduces a tradeoff between runtime adaptability and critical-path overhead. Online dy-namic scheduling can adapt to token distribution changes, but dependency checking, task selection, and queue manage-ment all lie on the execution critical path [ 3 ]. Alternatively, statically generating task orders and synchronization events offline allows runtime execution to simply follow precom-puted schedules, reducing runtime decision overhead. The key challenge then becomes generating sufficiently high-quality task sequences while preserving dependency correct-ness. Finally, programmability and portability present additional practical challenges. A straightforward solution would be to manually implement fully fused kernels that integrate GMM, SwiGLU, AllToAll, and synchronization logic into a single operator. However, such designs tightly couple scheduling policies, communication protocols, and operator implemen-tations, making them difficult to adapt when model architec-tures, parallel configurations, data types, or tiling strategies change. Moreover, production-grade GMM, SwiGLU, and communication operators already incorporate substantial hardware-specific optimizations in tiling, memory access, and pipelining [ 28 , 29 ]; rewriting them from scratch is both costly and likely to sacrifice existing performance optimiza-tions. Therefore, a low-intrusion scheduling framework is needed: existing high-performance operators should be pre-served, while dependencies, tiling strategies, and scheduling constraints are declared externally. The framework can then automatically generate task descriptions, queue ordering, and synchronization events, significantly reducing the engi-neering burden of supporting new MoE variants. Prior GPU work has shown the value of overlap and pipeline scheduling, but these techniques do not transfer di-rectly to Ascend NPUs. FlashMoE, UniEP, and MegaMoE [ 1,10 , 27 ] explore persistent or MegaKernel-style MoE execu-tion on NVIDIA GPUs. Triton-distributed [ 26 ] exposes dis-tributed primitives in Triton. FLUX, COMET, Lancet, and DeepEP [ 2, 8, 14 , 24 ] reduce exposed EP communication, while PipeDream, PipeThreader, Megatron-LM and DHeL-lam [ 3 , 18 , 21 , 22 ] reduce pipeline bubbles. These systems rely on GPU-specific SMs, compilers, runtimes, or commu-nication kernels, and they do not target Ascend’s explicit AIC/AIV queues and cross-queue events. Ascend therefore needs a framework that reuses existing operators while gen-erating AIC/AIV task streams and tile-level synchronization offline. 
+
+## 3 System Overview 
+
+To effectively address the challenges discussed above, we present HyperParallel-MoE, a compilation and scheduling framework for MoE training on Ascend NPUs that fully ex-ploits the heterogeneous on-chip compute resources. The key idea of HyperParallel-MoE is to transform the originally operator-serialized MoE-FFN computation graph into a stat-ically scheduled tile-level task pipeline spanning AIC and AIV resources. Instead of executing GMM, SwiGLU, com-munication, and synchronization as independent kernels separated by global barriers [ 8 , 14 , 24 ], HyperParallel-MoE 
+
+> 5
+
+Figure 5. Overview of HyperParallel-MoE. decomposes them into fine-grained tile tasks and organizes these tasks into concurrent execution streams across hetero-geneous hardware queues. At a high level, HyperParallel-MoE shifts MoE execution from a kernel-centric model to a taskflow-centric model. Dur-ing compilation, the framework analyzes operator depen-dencies, legal tiling strategies, tensor layouts, and hardware resource types, and determines how each tile task should be mapped onto the underlying execution queues. Compute-intensive matrix tiles are assigned to the Cube Task Queue (CTQ) and executed by AIC workers, while vector computa-tion, data movement, synchronization, and communication progression tasks are assigned to the Vector Task Queue (VTQ) and executed by AIV workers [ 28 , 29 ]. Through this static orchestration, the originally serialized execution across kernel boundaries becomes a unified heterogeneous task-flow capable of concurrent execution across AIC and AIV resources. This design both improves hardware utilization and reduces host-side launch and synchronization overheads. A central insight behind HyperParallel-MoE is that com-munication itself should be elevated to a first-class schedula-ble task. Rather than treating communication as an externally orchestrated collective operation, HyperParallel-MoE repre-sents communication progress as tile-level AIV tasks. AIV workers directly drive one-sided communication operations, update synchronization signals, and establish dependencies with AIC tasks through lightweight event counters. As a result, communication progression, data movement, and ma-trix computation can naturally overlap at tile granularity. Although tasks from different experts, operators, and hard-ware resources may execute asynchronously and out of order, HyperParallel-MoE preserves the original MoE computa-tion semantics through explicit dependency events between tasks. To support this execution model, HyperParallel-MoE in-troduces Static Schedule Configuration (SSC) as the core ab-straction between compilation and runtime. SSC encodes the complete execution plan generated by the static sched-uler, including CTQ/VTQ task sequences, task metadata, dependency events, and triggering conditions. Conceptually, SSC serves as a precompiled taskflow that specifies how a particular MoE-FFN instance should execute on heteroge-neous hardware resources. Developers only need to declare operator dependency relationships, legal tiling dimensions, and a small amount of operator-specific configuration logic, while the framework automatically generates task queues, synchronization metadata, and execution ordering. This sig-nificantly reduces the engineering burden compared with manually implementing fused kernels for every MoE vari-ant [1, 10, 24, 27]. Figure 5 illustrates the overall architecture of HyperParallel-MoE. The system consists of three major components: the ap-plication layer, the static scheduler, and the unified runtime. The application layer interfaces with upper-level training frameworks and operator developers. It describes an MoE-FFN fragment using an Operator Dependency Graph (ODG), which specifies operators, tensor connections, input/output metadata, and the dimensions along which each operator can be legally partitioned. Importantly, this layer only de-fines how data flows and how operators may be decomposed, without directly determining execution order. The static scheduler runs before the training loop begins. Given the ODG, model shapes, parallel configurations, and 
+
+> 6
+
+rank information, it generates tile tasks, allocates depen-dency events, constructs CTQ/VTQ task streams, and opti-mizes execution ordering under hardware constraints. The re-sulting execution plan is serialized into SSC for runtime exe-cution. By moving scheduling decisions offline, HyperParallel-MoE avoids expensive runtime dependency analysis and task selection on the execution critical path [3]. At runtime, the training framework invokes the unified runtime with cached SSC metadata, model tensors, and event counters. A single kernel launch then executes the corre-sponding forward or backward taskflow. AIC and AIV work-ers independently consume CTQ and VTQ tasks while coor-dinating through lightweight event synchronization. Conse-quently, runtime logic is reduced to lightweight task fetch-ing, dependency waiting, and event triggering, while com-plex scheduling decisions remain entirely in the compilation stage. Through this layered design, HyperParallel-MoE decou-ples operator implementation from execution scheduling and enables efficient tile-level heterogeneous pipelining without requiring intrusive rewrites of existing high-performance operators. The detailed mechanisms of operator partition-ing, communication taskization, event generation, and queue reordering are presented in Section 4. 
+
+## 4 Design of HyperParallel-MoE 
+
+This section presents the design of HyperParallel-MoE along its execution pipeline. Section 4.1 next first describes how HyperParallel-MoE transforms EP AllToAll from a host-driven collective communication primitive into schedula-ble one-sided VTQ tasks. Section 4.2 then introduces how dependency-preserving tile tasks are generated from oper-ator graphs, enabling communication, matrix computation, and vector computation to share a unified task abstraction. Section 4.3 further explains how the static scheduler com-piles these tasks into CTQ/VTQ taskflows augmented with queue ordering and event-driven synchronization semantics. Section 4.4 describes how the unified runtime drives con-current AIC/AIV execution within a single kernel launch. Finally, Section 4.5 presents how HyperParallel-MoE opti-mizes legal task ordering under dependency constraints to improve cross-rank communication balance and L2 cache locality. 
+
+4.1 AIV-Driven One-Sided Communication 
+
+HyperParallel-MoE builds its communication mechanism upon device-side remote memory writes and device-side signal updates. Ascend NPUs provide SHMEM-like remote memory access capabilities [ 28 , 29 ], where an AIV worker on one rank can directly access communication buffers exposed by a remote rank through device-side address translation, and can further update synchronization signals on the des-tination side. HyperParallel-MoE leverages this capability to move communication from the host-side collective com-munication runtime into the device-side AIV execution path. As a result, communication is no longer treated as a glob-ally synchronized operator stage initiated by the host, but instead becomes an actively progressing component within the unified taskflow executed by AIV workers. Based on this capability, HyperParallel-MoE encapsulates device-side remote write with completion notification into a communication primitive called put_mem_signal . The in-terface takes as input a source buffer, destination rank, des-tination buffer, transfer range, and a destination-side event counter. Its semantics are straightforward: the sender-side AIV worker writes a specified data block into the remote buffer of the destination rank, and updates the destination-side event counter once the transferred data becomes glob-ally visible to the receiver. Conventional communication primitives return tensors. In contrast, this primitive exposes two observable side effects on the destination rank: the tar-get buffer becomes readable, and the corresponding event counter is updated. Therefore, it simultaneously serves as both a data transfer operation and a completion notification mechanism. Using this primitive, HyperParallel-MoE decomposes the AllToAll communication into a collection of fine-grained tasks of put_mem_signal . This taskization follows the same high-level goal as prior systems that expose communication at finer granularity or through device-side communication primitives [ 8, 24 , 26 ], but the completion semantics here are the Ascend AIV-side remote-write and event-counter seman-tics described above. Each AllToAll tile corresponds to one remote write operation that transfers a contiguous data block from a source rank to a destination rank. The communication task descriptor records metadata including source tensor, des-tination tensor, destination rank, communication range, and synchronization events. During execution, the AIV worker computes the source offset, destination offset, and transfer size for the current tile, and invokes put_mem_signal to complete both data transfer and signal update. Since each communication tile independently updates its associated completion counter after data becomes visible on the desti-nation side, downstream computation can determine data readiness based on fine-grained tile completion rather than waiting for the entire AllToAll phase to finish. Dispatch AllToAll and Combine AllToAll correspond to two opposite directions of this communication mechanism. During Dispatch, source ranks send routed tokens to the des-tination ranks that host the selected experts. HyperParallel-MoE decomposes each expert/rank communication region into communication tasks. Once all required input tiles for a local expert have arrived on the destination rank and their completion signals indicate readability, the corresponding GMM task can begin execution immediately without waiting for Dispatch completion of unrelated experts or ranks. 
+
+> 7
+
+Algorithm 1 Split Propagation                                                                                                     
+
+> Input: ODG 𝐺 , shape and parallel configuration 𝐶
+> Output: Task count 𝑜𝑝. task_num for each operator, and split labels on output tensors
+> // Split labels are stored on tensors shared by producer outputs and con-sumer inputs.
+> 1: for all tensor 𝑥 in 𝐺 do
+> 2: 𝑥 . split_dim ← − 1
+> 3: 𝑥 . split_num ←1
+> 4: end for
+> 5: for all operator 𝑜𝑝 in TopologicalSort (𝐺 )do
+> 6: 𝑠 ←𝑜𝑝. SplitSpec
+> 7: if 𝑠. split_inputs =None then
+> 8: 𝑛 ←𝑠. task_num_fn (𝐶 )
+> 9: else if ∀ ( 𝑖, 𝑑 ) ∈ 𝑠. split_inputs , 𝑜𝑝. inputs [𝑖 ].split_dim =𝑑 then
+> 10: 𝑛 ←𝑠. task_num_fn (𝐶 )
+> 11: else
+> 12: 𝑛 ←1⊲fallback to one unsplit task 13: end if
+> 14: 𝑜𝑝. task_num ←𝑛
+> 15: for all output 𝑦 𝑗 ∈𝑜𝑝. outputs do
+> 16: 𝑑 ←𝑠. split_output_dims [𝑗 ]
+> 17: if 𝑛 >1and 𝑑 ≥0then
+> 18: 𝑦 𝑗 .split_dim ←𝑑
+> 19: 𝑦 𝑗 .split_num ←𝑛 ⊲visible to downstream inputs 20: else
+> 21: 𝑦 𝑗 .split_dim ← − 1
+> 22: 𝑦 𝑗 .split_num ←𝑛
+> 23: end if
+> 24: end for
+> 25: end for
+
+During Combine, the communication direction is reversed. After expert computation completes, destination ranks send expert outputs back to the original token source ranks, where top-𝑘 expert contributions are accumulated according to routing scores. Combine communication tasks depend on the completion events of their corresponding local expert output tiles. Once a GMM task produces a complete and readable output tile, the associated Combine task can invoke 
+
+put_mem_signal to return the result to the source rank and update the source-side completion counter. Through this transformation, AllToAll communication evolves from a host-side opaque collective communication stage into a collection of VTQ tasks with explicit inputs, outputs, and completion events. Dispatch and Combine com-munication tasks follow the same execution model as or-dinary AIV tasks such as SwiGLU, allowing the scheduler to jointly orchestrate communication, vector computation, and synchronization within a unified taskflow. More impor-tantly, communication tasks can establish explicit dependen-cies with CTQ-resident GMM tasks through event counters, enabling communication, matrix computation, and vector computation to coexist within a single dependency graph and be statically scheduled together at tile granularity. 
+
+4.2 Tile Task Generation from Operator Graphs 
+
+In HyperParallel-MoE, tile tasks serve as the fundamental ex-ecution unit. Each tile task must explicitly specify its target execution queue, input and output tensor ranges, and depen-dency endpoints with upstream and downstream tasks. How-ever, tile boundaries cannot be chosen arbitrarily: overly fine-grained or misaligned partitioning may break the carefully optimized tiling, memory access, and buffering strategies in production-grade operators [ 25 , 28 , 29 ], and may even ex-pose incomplete data to downstream consumers. Therefore, HyperParallel-MoE determines tile task boundaries during static compilation rather than runtime execution. Instead of generating tasks independently for each oper-ator, HyperParallel-MoE constructs tile tasks from an Op-erator Dependency Graph (ODG), enabling cross-operator aligned task decomposition. ODG is the scheduling inter-mediate representation introduced by HyperParallel-MoE to describe the operator-level dataflow within a schedulable computation fragment. Nodes in the graph correspond to 
+
+OperatorNode s, while edges represent tensor dependencies between operators. Each OperatorNode records operator type, input/output tensors, and an associated SplitSpec 
+
+that defines the legal tiling strategy for the operator. Specifically, SplitSpec captures three aspects of task de-composition: which input tensor partition should be inher-ited by the current operator, along which dimension the out-put partition should continue propagating downstream, and how many tile tasks should be generated under a given ten-sor shape and parallel configuration. These decomposition rules must simultaneously satisfy both operator semantics and hardware execution constraints. For GMM operators, HyperParallel-MoE only exposes task-level parallelism along independent token or expert-block dimensions, while preserving reduction dimensions such as 𝐾 intact. This design avoids breaking the inter-nal accumulation structure and expert-local output layout, thereby preserving existing GMM optimizations including expert grouping, memory reordering, and L2 cache local-ity [ 25 , 28 , 29 ]. For AIV-side operators, including Dispatch, SwiGLU, and Combine, tile boundaries must align with the input or output row partitions of GMM operators. Conse-quently, every downstream task consumes a well-defined tensor region produced by a deterministic set of upstream producers. Declaring legal decomposition rules for individual oper-ators alone is insufficient, because downstream operators can only generate compatible tile tasks when their inputs already carry the expected partitioning structure. To address this issue, HyperParallel-MoE performs split propagation over the ODG to infer task counts and output partition labels across operators. Split propagation traverses the graph in topological order and applies the SplitSpec of each node sequentially. 
+
+> 8
+
+Table 1. Key fields in a Task Descriptor (TD).                        
+
+> Field Type Semantics
+> task_type uint32 Task handler type, e.g., GMM, SwiGLU, SwiGLUGrad, or put_mem_signal queue_type uint32 Target execution queue: CTQ for AIC tasks or VTQ for AIV tasks
+> dependent_event uint32 Event counter that must reach its threshold before this task starts
+> trigger_event uint32 Event counter updated after this task completes
+> inputs TDesc[] Input tensor slots, shapes, flags, and tile offsets
+> outputs TDesc[] Output tensor slots, shapes, flags, and tile offsets
+> task_index uint32 Tile index within the operator
+> task_split_num uint32 Number of tile tasks generated for this operator
+> task_split_value uint32 Per-task split granularity used to derive tile ranges
+> tiling_data_ position uint32 Argument-list position of the operator tiling data
+
+For operators that do not inherit upstream partitioning, such as Dispatch, SplitSpec directly generates the initial decomposition. For downstream operators, tile tasks are gen-erated only when their inputs already carry the required partition labels. Otherwise, the operator falls back to a non-partitioned execution mode to preserve semantic correctness at the cost of reduced parallelism. Algorithm 1 illustrates this process. Conceptually, split propagation is implemented through tensor-level partition annotations: upstream opera-tors write partition labels into output tensors, while down-stream operators retrieve these labels when validating their 
+
+split_inputs requirements. As an example, consider a forward MoE-FFN pipeline. Dis-patch specifies split_inputs=None , meaning that it does not inherit partitioning from upstream operators. Instead, it serves as the partitioning origin and generates Dispatch communication tasks while annotating its output tensors with row-wise partition labels. This row partitioning is then propagated through the main dataflow path across GMM1, SwiGLU, and GMM2, allowing subsequent compute tasks to be generated over compatible row partitions. Combine addi-tionally consumes communication metadata such as offset and size tensors; therefore, it ignores these metadata inputs during split checking and instead inherits row-wise partition-ing from the source-data input produced by GMM2. Based on this inherited partitioning, Combine generates communica-tion tasks aligned with GMM2 outputs. Through this propa-gation mechanism, communication, matrix computation, and vector computation all obtain compatible task boundaries before execution scheduling begins. To materialize the runtime metadata required for tile ex-ecution, HyperParallel-MoE provides an operator-specific 
+
+FillConfig for each operator type. FillConfig defines how legal tile tasks are transformed into runtime-consumable Task Descriptors (TDs). A TD is the basic runtime-consumed task unit and records the task type, hardware resource type, input/output tensor ranges, task identifiers, split strides, tiling pointers, and operator-specific metadata. Table 1 sum-marizes the key TD fields. After FillConfig converts tile tasks into TDs, operator-specific details such as offset computation, tiling selection, and private metadata layouts become encapsulated within a unified task representation. Consequently, the static sched-uler only needs to reason about TD-level resource types and dependency endpoints when constructing CTQ and VTQ schedules, without reanalyzing operator internals. Through ODG-driven task generation, HyperParallel-MoE ultimately produces a static task collection with dependency-preserving semantics, aligned tile boundaries, and explicit resource assignments. Dispatch and Combine communica-tion tasks, GMM tasks, and SwiGLU tasks are all represented within the same task abstraction. This design avoids the coarse-grained synchronization boundaries introduced by operator-level execution while simultaneously preventing ex-cessively fine-grained decomposition from disrupting exist-ing operator-level optimizations. The next section describes how HyperParallel-MoE further organizes these TDs into CTQ and VTQ schedules and generates low-overhead static execution plans through event-based synchronization. 
+
+4.3 Static Scheduling and Event-Driven Synchronization 
+
+The TD collection generated in the previous stage specifies how each tile task should execute, but does not yet deter-mine when tasks should execute. The scheduler must further determine two aspects of execution: the placement of each task within CTQ or VTQ, and the synchronization relation-ships among tasks. The former defines the execution order candidates within the same resource type, while the latter ensures that AIC and AIV workers do not violate true data dependencies during concurrent execution. HyperParallel-MoE adopts static scheduling to make these decisions offline. During stable training phases, MoE models typically exhibit fixed operator structures, parallel config-urations, and dominant tensor shapes. As a result, task de-composition, resource mapping, and dependency topology can all be determined before execution begins. In contrast, online dynamic scheduling requires runtime task selection, dependency checking, and queue management on the de-vice execution path, introducing overhead on the critical path and consuming hardware resources that could other-wise be used for computation or communication [ 3 , 18 , 24 ]. By moving scheduling decisions into the compilation stage, HyperParallel-MoE reduces runtime responsibilities to light-weight task fetching, dependency waiting, and event trigger-ing. Table 2 summarizes this tradeoff in HyperParallel-MoE’s target setting. 
+
+> 9
+
+Table 2. Static and dynamic scheduling tradeoffs for HyperParallel-MoE taskflows.         
+
+> Aspect Static scheduling Dynamic schedul-ing
+> Runtime work Consumes precomputed CTQ/VTQ and event metadata Builds or updates ready queues during execution Critical-path cost Performs task fetch, event wait, and event trigger Performs readiness checks and task selection online Dependency handling Encodes dependencies before launch using event counters Resolves dependen-cies from runtime task state Ordering policy Applies communication- and locality-aware ordering offline Adapts ordering to runtime state with online overhead Shape variability Reuses SSC for stable shapes or shape buckets Handles new shapes after runtime meta-data is available Implementation fit Matches Ascend CTQ/VTQ execution with lightweight workers Requires a device-side scheduler and mutable task state
+
+The scheduler first constructs two execution queues ac-cording to the resource type recorded in each TD. Matrix-intensive tasks such as GMM are placed into CTQ and exe-cuted by AIC workers, while Dispatch, Combine, SwiGLU, and other vector or communication-related tasks are placed into VTQ and executed by AIV workers [ 28 , 29 ]. Importantly, queue order only defines execution ordering among tasks of the same resource type. Cross-resource dependencies are not implicitly enforced through queue position, but instead explicitly represented through event synchronization. Con-sequently, CTQ and VTQ can progress independently while still preserving semantic correctness through dependency events. HyperParallel-MoE uses event counters as the synchro-nization mechanism between heterogeneous queues. Each task is associated with two events: a dependent event , rep-resenting the prerequisite completion condition required before execution, and a trigger event , representing the com-pletion signal that will be emitted after execution finishes. Each event is additionally associated with a statically gener-ated threshold indicating how many times the event must be triggered before dependent downstream tasks become executable. Before executing a task, the worker continuously polls the counter associated with the dependent event until the counter value reaches the required threshold. After task com-pletion, the worker updates the counter associated with the trigger event, thereby releasing downstream tasks waiting on that condition. Event counters reside in device-visible mem-ory and are accessible to both AIC and AIV workers [ 28 , 29 ]. Since all event relationships and thresholds are statically generated during compilation, runtime execution does not require dependency graph construction or complex schedul-ing logic. This threshold-based synchronization mechanism natu-rally expresses many-to-many tile-level dependencies. Multi-ple upstream tasks may contribute to the same event counter, and downstream execution begins only after the accumu-lated counter value reaches the corresponding threshold. For example, a GMM task may wait until several Dispatch communication tiles have all arrived before computation be-gins. Conversely, multiple downstream tasks may wait on the same event, thereby sharing a common completion condition. For instance, completion of a GMM output tile may simul-taneously release subsequent vector computation tasks and communication tasks. Through this design, HyperParallel-MoE synchronizes based on true tile-level data readiness rather than coarse-grained operator-level barriers. Scheduling correctness follows from two properties. First, all tasks are generated from the ODG and SplitSpec , en-suring that each task has explicitly defined input regions and deterministic upstream producers. Second, events are triggered only after upstream outputs become fully readable, while downstream tasks remain blocked until event coun-ters reach the required thresholds. Consequently, although HyperParallel-MoE changes task granularity and execution ordering, it preserves the original data dependencies and mathematical semantics of the MoE-FFN computation graph. Moreover, since the ODG is a directed acyclic graph, split propagation only proceeds along topological order, and stat-ically generated event relationships never introduce cyclic dependencies. Workers simply consume tasks sequentially from CTQ and VTQ while respecting event waits, guaran-teeing continuous forward progress of the taskflow. After static scheduling, HyperParallel-MoE produces a CTQ/VTQ taskflow augmented with explicit execution or-dering and synchronization semantics, and serializes this execution plan into SSC for runtime consumption. The next section describes how the unified runtime interprets this taskflow within a single kernel execution window and drives concurrent execution across AIC and AIV workers. 
+
+4.4 Unified AIC/AIV Task Execution 
+
+Unified AIC/AIV task execution refers to the execution model in which HyperParallel-MoE concurrently advances both AIC and AIV tasks within the same device-side execution window. Unlike traditional kernel-by-kernel execution, where Dispatch, GMM, SwiGLU, and Combine are launched se-quentially as independent kernels, HyperParallel-MoE ex-ecutes an entire MoE-FFN forward or backward taskflow within a single unified kernel launch [ 1 , 10 , 16 , 21 , 27 ]. Under this model, AIC workers consume matrix-computation tasks from CTQ, while AIV workers consume vector-computation, data-movement, and communication tasks from VTQ. The two worker groups synchronize through event counters and progress concurrently at tile granularity. To realize this execution model, the training framework passes SSC, model tensors, event counters, and necessary 
+
+> 10
+
+runtime metadata into the unified runtime at each invoca-tion. The runtime launches both AIC workers and AIV work-ers within the same kernel context. Although both worker types follow the same queue-consumption protocol, they fetch tasks from different queues. Each worker retrieves the next TD index from CTQ or VTQ according to its resource type, loads the corresponding TD, waits for dependency sat-isfaction, and dispatches execution to the appropriate task handler according to the task_type field recorded in the TD, such as GMM handlers, SwiGLU handlers, or communi-cation handlers. Importantly, the runtime neither modifies queue order nor reallocates synchronization events; it sim-ply executes the precompiled CTQ/VTQ taskflow encoded in SSC. Task handlers further bridge the scheduling framework and existing optimized operator implementations. TDs spec-ify the input/output tensor regions and operator-specific metadata associated with each task, while handlers invoke the corresponding GMM, SwiGLU, Combine, or communica-tion logic based on this metadata. HyperParallel-MoE there-fore does not require rewriting the computational core of production-grade operators. Instead, existing operators are encapsulated into taskflow-compatible execution handlers. This design cleanly decouples scheduling policy from oper-ator implementation: the scheduler determines task granu-larity and execution order, while handlers preserve operator semantics during task execution. This execution model directly enables overlap between AIC and AIV activities. Consider a forward MoE-FFN pipeline. Under conventional execution, Dispatch must complete glob-ally before the first GMM kernel launches, and the first GMM stage must fully finish before SwiGLU begins, with subse-quent stages following the same serialized pattern [ 2 , 8 , 14 ,24 ]. In contrast, HyperParallel-MoE allows a GMM task for a particular expert to begin execution immediately once its required token block arrives, while AIV workers continue advancing Dispatch communication for other experts or ex-ecuting SwiGLU and Combine tasks for experts that have already completed computation. As a result, Cube computa-tion for one expert, Vector computation for neighboring ex-perts, and communication progression can all overlap within the same execution window. Beyond increasing concurrency, unified execution also exposes on-chip data reuse opportunities as a schedulable optimization target. Since AIC and AIV share the same L2 cache [ 28 , 29 ], outputs produced by GMM tasks may still reside in L2 when consumed by downstream AIV tasks. If the scheduler places producers and consumers close in execution time, downstream AIV tasks can directly reuse intermediate results from L2 rather than reloading them from HBM. Im-portantly, this benefit does not require modifying operator internals; instead, it emerges naturally from exposing task granularity and execution ordering to the scheduler. Therefore, Unified AIC/AIV task execution serves as the runtime foundation of HyperParallel-MoE. It enables AIC and AIV workers to cooperatively execute precompiled het-erogeneous taskflows within a single kernel lifetime, while creating opportunities for concurrent execution and on-chip cache reuse. However, even under dependency constraints, substantial freedom still exists in determining legal task or-derings. The next section describes how HyperParallel-MoE exploits this flexibility to further optimize communication balance and cache locality. 
+
+4.5 Execution-Order Optimizations 
+
+Static scheduling must first guarantee correctness, but a cor-rect execution order is not necessarily efficient. Within the same dependency graph, many tasks do not have direct de-pendencies and therefore admit multiple semantically equiv-alent legal execution orders. Different orderings can signifi-cantly affect cross-rank communication balance, inter-rank waiting time, and opportunities for L2 cache reuse [ 3 , 24 , 28 ]. HyperParallel-MoE formulates execution-order optimization as the problem of selecting efficient task schedules within the space of legal topological orderings. HyperParallel-MoE reorders only tasks that are mutually independent. The scheduler does not modify ODG edges, task input/output regions, or event-trigger semantics. In-stead, it only changes the relative order of independent tasks within the same queue, or selects a more efficient ordering among multiple legal topological schedules. This constraint guarantees that execution-order optimization preserves pro-gram semantics while still exposing meaningful optimization opportunities. The first optimization is rank-aware task reordering (RATR). For EP AllToAll, a naive order makes all ranks issue commu-nication tasks in the same destination-rank sequence. As a result, communication traffic may become concentrated on the same destination ranks or communication links during certain time windows, leading to communication imbalance and increasing completion-time skew across ranks [ 8 , 15 ,24 ]. To alleviate this issue, HyperParallel-MoE rotates the communication-task ordering according to source rank ID, as illustrated in Figure 6. Different source ranks therefore begin communication from different destination ranks and traverse the remaining destinations in a ring-like order. This transformation does not change the set of transmitted data or dependency relationships, but only changes the relative or-dering of independent communication tasks. Consequently, communication traffic becomes temporally distributed across different destinations, improving load balance within the EP group and reducing downstream waiting caused by a small number of lagging ranks. The second optimization is cache-guided GMM interleaving .In backward MoE-FFN execution, multiple GMM branches may consume shared input activations while remaining topo-logically independent. For example, after backward Dispatch,                                                                                  
+
+> 11 R3 ⟶R0
+> R2 ⟶R0
+> R1 ⟶R0
+> R0 ⟶R0
+> （local ）
+> R3 ⟶R1
+> R2 ⟶R1
+> R1 ⟶R1
+> （local ）
+> R0 ⟶R1
+> R3 ⟶R2
+> R2 ⟶R2
+> （local ）
+> R1 ⟶R2
+> R0 ⟶R2
+> R3 ⟶R3
+> （local ）
+> R2 ⟶R3
+> R1 ⟶R3
+> R0 ⟶R3 Rank 3 (sender) Rank 2 (sender) Rank 1 (sender) Rank 0 (sender)
+> All ⟶R0 (HOTSPOT) All ⟶R1 (HOTSPOT) All ⟶R2 (HOTSPOT) All ⟶R3 (HOTSPOT)
+> Step t=0 Step t=1 Step t=2 Step t=3
+> (a) Naive Order (No RATR)
+> R3 ⟶R3
+> （local ）
+> R2 ⟶R2
+> （local ）
+> R1 ⟶R1
+> （local ）
+> R0 ⟶R0
+> （local ）
+> R3 ⟶R0
+> R2 ⟶R3
+> R1 ⟶R2
+> R0 ⟶R1
+> R3 ⟶R1
+> R2 ⟶R0
+> R1 ⟶R3
+> R0 ⟶R2
+> R3 ⟶R2
+> R2 ⟶R1
+> R1 ⟶R0
+> R0 ⟶R3 Rank 3 (sender) Rank 2 (sender) Rank 1 (sender) Rank 0 (sender)
+> Balanced (4 distinct)
+> Step t=0 Step t=1 Step t=2 Step t=3
+> (b) RATR
+> Balanced (4 distinct) Balanced (4 distinct) Balanced (4 distinct)
+> Destination: Rank 0 Destination: Rank 1 Destination: Rank 2 Destination: Rank 3
+> AlltoAll Processing Order AlltoAll Processing Order
+
+Figure 6. Rank-Aware Task Reordering (RATR). The naive order creates destination-rank hotspots, while RATR rotates each rank’s task order to form a balanced communication pattern. both the activation-gradient GMM and the down-projection weight-gradient GMM consume the dispatched expert acti-vations without depending on each other. If the scheduler ex-ecutes one GMM branch in its entirety before launching the other, shared expert activations may already be evicted from L2 cache before reuse occurs [ 25 , 28 , 29 ]. HyperParallel-MoE therefore interleaves these GMM tasks according to expert locality, placing GMM tasks associated with the same expert as closely together in time as possible. This optimization does not modify dependencies between the two GMM branches, nor does it alter the input/output semantics of individual GMM tasks. Instead, it only changes the relative ordering of independent CTQ-resident GMM tasks, thereby shortening the reuse interval of shared activation data and increasing opportunities for L2 cache reuse. Overall, these optimizations stay within legal topologi-cal orders. RATR balances traffic across ranks, and GMM interleaving improves L2 cache reuse. Neither optimization changes task semantics or event dependencies, allowing HyperParallel-MoE to improve static taskflow efficiency while preserving correctness. 
+
+## 5 Evaluation 
+
+5.1 Implementation Details 
+
+We implement HyperParallel-MoE in the MindSpore [ 16 ]and MindFormers [ 17 ] MoE-FFN path on Ascend A3 [ 28 ,29 ]. A host-side compiler constructs the ODG, applies legal split rules, materializes TDs, assigns event counters, orders task queues, and serializes the per-rank result into a Static Schedule Configuration (SSC). Compilation is outside the timed module interval. For a fixed shape bucket, EP size, and rank, the SSC is reused across training steps; each step supplies only tensor pointers, routing-derived offsets, and fresh event-counter state. 
+
+Runtime integration. During runtime, MindSpore [ 16 ]launches one unified AscendC operator [ 28 , 29 ] with model tensors, the SSC, communication buffers, and event counters. AIC workers consume CTQ entries, AIV workers consume VTQ entries, and both worker groups follow a simple proto-col: fetch a precompiled TD, wait on its dependency counter, execute the selected handler, and trigger successor counters. The runtime does not build dependency graphs, allocate TDs, or reorder queues on the critical path. 
+
+Operator reuse and validation. Task handlers wrap the existing optimized compute bodies for GMM, SwiGLU, and related MoE-FFN operators, while Dispatch and Combine use AIV-side put_mem_signal operations over preallocated device-visible buffers. Unless otherwise stated, HyperParallel-MoE denotes the full optimized configuration, including one-sided communication, Rank-Aware Task Reordering (RATR), and cache-guided GMM interleaving for backward execution. We validate forward and backward bf16 outputs against the standard MindSpore MoE-FFN path [ 7 , 16 , 17 ] before timing. 
+
+5.2 Experimental Setup 
+
+We evaluate HyperParallel-MoE at two levels. The module-level experiment measures the MoE-FFN boundary trans-formed by the proposed scheduler: the interval starts at Dispatch and ends after Combine, and includes the unified AscendC runtime, put_mem_signal communication, event-counter synchronization, RATR, and backward GMM inter-leaving. We also report end-to-end training-step latency to show how the optimized MoE-FFN path affects a complete step; this interval includes unchanged model computation and framework overhead in addition to the transformed MoE-FFN execution. Experiments run on 64 Ascend A3 devices using the Mind-Spore [ 16 ] and MindFormers [ 17 ] training stack. Each As-cend A3 device provides 25 AIC units, 50 AIV units, and a 192 MB L2 cache [ 28 , 29 ]. The workload follows a DeepSeek-V3-style MoE-FFN module [ 7 ] with sequence length 4096, microbatch size 2, hidden size 7168, intermediate size 2048, top-𝑘 = 8, and bf16 arithmetic. We evaluate EP group sizes 4, 8, and 16, corresponding to 32, 64, and 128 total experts with 8 local experts per rank. The corresponding training configuration labels are DP32/TP2/EP4, DP32/TP2/EP8, and DP32/TP2/EP16, all with global batch size 512. Module la-tency is measured at the Dispatch-to-Combine boundary, while step latency is measured around one complete training iteration. The baseline is the standard operator-by-operator 
+
+> 12
+
+Table 3. Dispatch-to-Combine MoE-FFN latency with bal-anced routing.                                      
+
+> EP set-ting Path Baseline (ms) HyperParallel-MoE (ms) Speedup
+> EP4 Forward 16.3 10.2 1.60 ×
+> Backward 27.9 19.4 1.44 ×
+> Total 44.2 29.6 1.49 ×
+> EP8 Forward 17.3 10.3 1.68 ×
+> Backward 29.8 19.6 1.52 ×
+> Total 47.1 29.9 1.58 ×
+> EP16 Forward 18.4 11.2 1.64 ×
+> Backward 30.5 19.9 1.53 ×
+> Total 48.9 31.1 1.57 ×EP4 EP8 EP16
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> Latency (ms)
+> 1.49x 1.58x 1.57x
+> Baseline Fwd
+> Baseline Bwd
+> HyperParallel-MoE Fwd
+> HyperParallel-MoE Bwd
+
+Figure 7. Forward/backward Dispatch-to-Combine latency breakdown under balanced routing. Bar annotations report total speedup over the standard operator-by-operator base-line. execution path with full-device operators, full-core exclusive execution, and collective AllToAll communication. For end-to-end step latency, the baseline also retains MindSpore’s DVM-level automatic fusion and graph-level execution plan-ning, which can partially mask the module-level gains. We report two complementary measurements after train-ing reaches steady-state execution. The primary controlled setting uses balanced routing and reports module latency at the Dispatch-to-Combine boundary. The step-level set-ting uses sampled natural routing and reports end-to-end training-step latency. 
+
+5.3 Main Results: MoE-FFN Module and Step Latency 
+
+We first evaluate Dispatch-to-Combine MoE-FFN latency under a balanced-routing setting. Each expert receives the same number of tokens, so the comparison isolates the ef-fect of tile-level scheduling, one-sided communication, and execution-order optimizations from router-induced skew. We then report end-to-end training-step latency under sam-pled natural routing, which tests whether the module-level gain remains visible after including the unchanged parts of the training stack. EP4 EP8 EP16   
+
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Per-step latency (s)
+> 1.09x 1.09x
+> 1.08x
+> Baseline HyperParallel-MoE
+
+Figure 8. End-to-end latency for one training step with sam-pled natural routing. Bar annotations report total step-level speedup over the standard operator-by-operator baseline. 
+
+Balanced routing. Table 3 and Figure 7 report forward, backward, and total Dispatch-to-Combine latency under forced load-balanced routing. Across EP4, EP8, and EP16, HyperParallel-MoE consistently reduces total module la-tency from 44.2–48.9 ms to 29.6–31.1 ms, corresponding to a 1.49–1.58 × speedup. The improvement is consistent in both execution directions: forward execution improves by 1.60– 1.68 ×, while backward execution improves by 1.44–1.53 ×.The balanced-routing result shows that the optimized task-flow remains effective as the EP group grows. The baseline total latency increases from 44.2 ms at EP4 to 48.9 ms at EP16, reflecting the growing cost of the conventional full-device, collective-communication path. In contrast, HyperParallel-MoE stays within a narrow 29.6–31.1 ms range because communication, vector work, and GMM computation are exposed as schedulable tasks inside the unified AIC/AIV runtime. These numbers evaluate the full optimized configu-ration described in Section 5.1; component-level attribution is outside this main-results comparison. 
+
+End-to-end training step. Figure 8 reports the latency of one complete training step with sampled natural rout-ing. Unlike the balanced module-level setting, this measure-ment includes the full training loop around the transformed MoE-FFN path, including unchanged attention and dense-model computation, framework overhead, DVM-level op-timizations in the baseline, and naturally produced expert token counts. We use this result to quantify how much of the module-level MoE-FFN improvement remains visible after it is amortized across the complete training step. For the measured step, HyperParallel-MoE achieves 1.08– 1.09 × end-to-end speedups across EP4, EP8, and EP16. These gains are smaller than the Dispatch-to-Combine speedups because MoE-FFN is only one part of the training critical path: unchanged model computation and framework execu-tion still dominate a large fraction of the step. The step-level result therefore should be interpreted as the diluted effect of a faster MoE-FFN path inside a complete training workflow, rather than as a module-only speedup.            
+
+> 13 2k 4k 8k 16k 32k
+> Row dimension M
+> 200
+> 400
+> 600
+> Latency (us)  Serial
+> Interleaved (a) Execution latency 2k 4k 8k 16k 32k
+> Row dimension M
+> 0
+> 10
+> 20
+> 30
+> L2 cache hit rate (%) (b) L2 cache hit rate
+
+Figure 9. SwiGLU+Add cache microbenchmarks under serial and tile-interleaved execution. Left: execution latency. Right: L2 cache hit rate. 
+
+## 6 Microbenchmarks 
+
+Section 5 reports both Dispatch-to-Combine MoE-FFN mod-ule latency and end-to-end training-step latency after com-munication, computation, synchronization, and ordering op-timizations are applied together. This section complements that evaluation with focused microbenchmarks that isolate two design assumptions behind HyperParallel-MoE’s tile-level scheduler. First, decomposing an operator chain into interleaved tiles should expose useful L2 cache reuse of pro-ducer outputs without being offset by tile-management over-head. Second, once a workload is taskized, scheduling deci-sions should be compiled into SSC rather than made by an online dynamic scheduler on the device critical path. We use a SwiGLU + Add operator pair as the workload. The pair is small enough to expose scheduling and cache effects clearly, but it has the same producer-consumer structure as the vector-side stages in MoE-FFN: SwiGLU produces an intermediate tensor that is immediately consumed by a downstream elementwise operator. All measurements are collected on Ascend A3. The row dimension 𝑀 is varied while the SwiGLU input shape is 𝑀 × 4096 and the Add input shape is 𝑀 × 2048 .
+
+6.1 Tile Interleaving and L2 Cache Reuse 
+
+This experiment compares the conventional serial execu-tion of SwiGLU followed by Add with a statically scheduled tile-interleaved execution. In the serial mode, each opera-tor runs as a complete kernel-sized stage: SwiGLU finishes all rows before Add begins. In the interleaved mode, both operators are split along the row dimension, and the static schedule places each Add tile soon after the corresponding SwiGLU tile. This is a controlled instance of the mechanism described in Sections 4.4 and 4.5: the unified launch lets ad-jacent tasks pass intermediate data through L2 cache, and the fixed schedule can place related tasks close enough to increase L2 reuse. Figure 9a shows that tile interleaving becomes most valu-able when the working set is large enough for the serial 2k 16k 32k  
+
+> Row dimension M
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> Latency (us)
+> 413.0 484.1
+> 862.8
+> 54.0
+> 340.0
+> 588.4
+> Dynamic scheduling
+> Static scheduling
+
+Figure 10. SwiGLU+Add latency under dynamic and static scheduling. producer-consumer distance to exceed useful cache resi-dency. At 𝑀 = 32 K, tile interleaving reduces latency from 723.29 𝜇 s to 588.38 𝜇 s, corresponding to a 1.23 × speedup. Fig-ure 9b explains this latency reduction: the L2 cache hit rate increases from 5.20% to 25.44%, reaching 4.9 × that of the serial path. The higher hit rate lets the Add tile read more SwiGLU intermediates from L2 cache instead of HBM; on Ascend A3, L2 cache read bandwidth is more than 4 × higher than HBM bandwidth, so avoiding HBM round trips directly reduces latency. This is the expected effect of the static order: after a SwiGLU tile produces its output, the matching Add tile reads the intermediate before it is displaced by later rows. For smaller 𝑀 , both execution modes already fit more comfortably within the cache behavior of the device, so the latency gap is small. The 8K point shows a minor slowdown from interleaving, which is consistent with a regime where the extra tile synchronization and queue-consumption work is not yet compensated by additional locality. The important observation is that the interleaved schedule does not rely on changing the SwiGLU or Add implementation. The benefit comes from exposing tile boundaries and choosing a cache-friendly legal order, which is the same scheduling lever used by HyperParallel-MoE for larger MoE-FFN taskflows. 
+
+6.2 Static vs. Dynamic Scheduling Overhead 
+
+The previous subsection uses the serial operator sequence as the baseline for the benefit of taskization and interleav-ing. We therefore isolate whether, after the workload has already been decomposed into tiles, the tile order should be decided dynamically at runtime or statically through SSC. Both configurations in this experiment execute the taskized SwiGLU + Add workload with the same event dependen-cies. The dynamic path performs runtime task dispatch and scheduling decisions on the device path, while the static path consumes the precompiled CTQ/VTQ order and event metadata from SSC. The scheduling-overhead measurements show that dy-namic scheduling is too expensive for the tile sizes targeted by HyperParallel-MoE. The measured dynamic task dispatch cost is about 2.36 𝜇 s per AIV task, while the static path costs 
+
+> 14
+
+about 0.1 𝜇 s per task. This per-task gap dominates the small-
+
+𝑀 workload: as shown in Figure 10, at 𝑀 = 2K, dynamic scheduling takes 413.00 𝜇 s, whereas static scheduling takes only 54.00 𝜇 s; the dynamic scheduling time is 7.65 × that of static scheduling. Even at 𝑀 = 32 K, where computation is large enough to amortize part of the overhead, dynamic scheduling still takes 862.80 𝜇 s compared with 588.38 𝜇 s for static scheduling; its execution time is 1.47 × that of the static path. These results justify the static scheduling choice in Sec-tion 4.3. In the target MoE training setting, operator struc-ture, parallel configuration, and dominant shape buckets are known before steady-state execution. Compiling tile order, dependency thresholds, and event assignments into SSC re-moves per-tile scheduling decisions from the runtime critical path, while still allowing the scheduler to choose locality-aware and overlap-aware legal task orders offline. Dynamic scheduling remains useful for highly unpredictable shape or dependency patterns. For MoE training, however, the oper-ator structure and dominant shape buckets can usually be compiled ahead of time; in this setting, online flexibility is outweighed by per-task dispatch cost on the device critical path. 
+
+## 7 Other Related Work 
+
+In this section, we focus on the closest recent MoE mega-kernel systems. COMET [ 24 ] and UniEP [ 27 ] both target distributed MoE execution on GPU clusters, with a focus on communication-computation fusion and fine-grained over-lap for expert parallelism. COMET decomposes MoE execu-tion, analyzes the dependencies between AllToAll communi-cation and expert computation, and reorders tasks to reduce exposed communication latency. UniEP uses a MegaKernel to unify multiple EP optimization paths and relies on pa-rameter search to adapt to different configurations. These systems share with HyperParallel-MoE the goal of breaking coarse-grained operator boundaries and reducing EP com-munication and scheduling overhead. The key difference is that HyperParallel-MoE targets the AIC/AIV heterogeneous execution model of Ascend NPUs [ 28 , 29 ]. Rather than only optimizing the overlap between EP communication and ex-pert GMM, HyperParallel-MoE organizes the full MoE-FFN path, including Dispatch/Combine, GMM, SwiGLU, and the corresponding backward operators, as a static heterogeneous taskflow. The benefit of this full-path organization comes not only from reducing kernel launches, host-side synchro-nization, and intermediate tensor traffic through operator fusion, but also from the cross-operator scheduling space ex-posed by the unified taskflow: communication, GMM, vector operators, and backward branches can be partitioned, syn-chronized, and ordered within the same dependency graph, improving AIC/AIV overlap in both forward and backward execution. MegaMoE [ 10 ], described in the DeepSeek-V4 technical report [ 9 ], demonstrates the engineering value of production-grade MoE mega-kernels [ 25 ]. MegaMoE targets NVIDIA SM90/SM100 CUDA platforms and fuses the forward MoE-FFN taskflow into a single mega-kernel to overlap NVLink communication with Tensor Core computation. Similar to MegaMoE, HyperParallel-MoE transforms MoE execution from a sequence of kernel launches into a fine-grained pipeline within a single fused execution window. However, the two systems differ in their goals and scope. MegaMoE currently mainly serves inference and does not cover MoE backward training operators, whereas HyperParallel-MoE is designed to cover both forward and backward MoE-FFN taskflows. It supports unified scheduling of Dispatch/Combine, GMM, SwiGLU, and gradient operators for both training and infer-ence, while preserving existing optimized operator imple-mentations where possible. Overall, HyperParallel-MoE targets a different hardware setting: these systems primarily optimize MoE execution on GPUs through mega-kernel fusion, whereas HyperParallel-MoE focuses on static heterogeneous task scheduling for MoE execution on Ascend NPUs. 
+
+## 8 Conclusion 
+
+This paper presents HyperParallel-MoE, a fine-grained sched-uling framework for MoE training on Ascend NPUs. Instead of executing MoE-FFN as a sequence of full-device operators, HyperParallel-MoE compiles it into a static tile-level taskflow that coordinates matrix, vector, and communication work while reusing optimized operator bodies. Integrated into the MindFormers stack, the Ascend A3 prototype reduces Dispatch-to-Combine MoE-FFN latency by 1.49–1.58 × under balanced routing, with a sampled natural-routing window showing 1.08–1.09 × end-to-end training speedup. These re-sults indicate that scheduling-layer optimization can expose AIC/AIV parallelism on existing hardware; full-model evalu-ation and broader operator coverage remain future work. 
+
+## References        
+
+> [1] Osayamen Aimuyo, Byungsoo Oh, and Rachee Singh. 2025. Flash-MoE: Fast Distributed MoE in a Single Kernel. In Advances in Neural Information Processing Systems , D. Belgrave, C. Zhang, H. Lin, R. Pascanu, P. Koniusz, M. Ghassemi, and N. Chen (Eds.), Vol. 38. Curran Associates, Inc., Red Hook, NY, USA, 100676– 100699. https://proceedings.neurips.cc/paper_files/paper/2025/file/ 918d938bd209e5b56072777366f8a211-Paper-Conference.pdf
+> [2] Li-Wen Chang, Wenlei Bao, Qi Hou, Chengquan Jiang, Ningxin Zheng, Yinmin Zhong, Xuanrun Zhang, Zuquan Song, Chengji Yao, Ziheng Jiang, Haibin Lin, Xin Jin, and Xin Liu. 2024. FLUX: Fast Software-based Communication Overlap On GPUs Through Kernel Fusion. arXiv:2406.06858 [cs.LG] https://arxiv.org/abs/2406.06858
+> [3] Yu Cheng, Lei Wang, Yining Shi, Yuqing Xia, Lingxiao Ma, Jilong Xue, Yang Wang, Zhiwen Mo, Feiyang Chen, Fan Yang, Mao Yang, and Zhi Yang. 2025. PipeThreader: Software-Defined Pipelining for Efficient DNN Execution. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . USENIX Association,
+> 15
+
+Boston, MA, 767–783. https://www.usenix.org/conference/osdi25/ presentation/cheng 
+
+[4] Damai Dai, Chengqi Deng, Chenggang Zhao, R.X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, et al . 2024. DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models. arXiv:2401.06066 [cs.CL] https://arxiv.org/ abs/2401.06066 
+
+[5] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems ,Vol. 35. Curran Associates, Inc., Red Hook, NY, USA, 16344–16359. 
+
+https://arxiv.org/abs/2205.14135 
+
+[6] DeepSeek-AI. 2024. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv:2405.04434 [cs.CL] https: //arxiv.org/abs/2405.04434 
+
+[7] DeepSeek-AI. 2024. DeepSeek-V3 Technical Report. arXiv:2412.19437 [cs.CL] https://arxiv.org/abs/2412.19437 
+
+[8] DeepSeek-AI. 2025. DeepEP. https://github.com/deepseek-ai/DeepEP .[9] DeepSeek-AI. 2026. DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence. Technical report. https://huggingface. co/deepseek-ai/DeepSeek-V4-Pro/blob/main/DeepSeek_V4.pdf . Ac-cessed May 19, 2026. [10] DeepSeek-AI. 2026. MegaMoE. https://github.com/deepseek-ai/ DeepGEMM/pull/304 . Merged Apr. 17, 2026. [11] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Effi-cient Sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39. http://jmlr.org/papers/v23/21-0998.html 
+
+[12] Junhao Hu, Jiang Xu, Zhixia Liu, Yulong He, Yuetao Chen, Hao Xu, Jiang Liu, Jie Meng, Baoquan Zhang, Shining Wan, Gengyuan Dan, Zhiyu Dong, Zhihao Ren, Changhong Liu, Tao Xie, Dayun Lin, Qin Zhang, Yue Yu, Hao Feng, Xusheng Chen, and Yizhou Shan. 2025. DEEPSERVE: Serverless Large Language Model Serving at Scale. In 
+
+2025 USENIX Annual Technical Conference (USENIX ATC 25) . USENIX Association, Boston, MA, 57–72. https://www.usenix.org/conference/ atc25/presentation/hu-junhao 
+
+[13] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Men-sch, Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las Casas, Emma Bou Hanna, Florian Bressand, Gianna Lengyel, Guillaume Bour, Guillaume Lample, Lélio Renard Lavaud, Lucile Saulnier, Marie-Anne Lachaux, Pierre Stock, Sandeep Subramanian, Sophia Yang, Szymon Antoniak, Teven Le Scao, Théophile Gervet, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2024. Mixtral of Experts. arXiv:2401.04088 [cs.LG] https: //arxiv.org/abs/2401.04088 
+
+[14] Chenyu Jiang, Ye Tian, Zhen Jia, Shuai Zheng, Chuan Wu, and Yida Wang. 2024. Lancet: Accelerating Mixture-of-Experts Training via Whole Graph Computation-Communication Overlapping. In Proceedings of Machine Learning and Systems , Vol. 6. MLSys, Santa Clara, CA, USA, 13 pages. arXiv:2404.19429 [cs.DC] 
+
+https://proceedings.mlsys.org/paper_files/paper/2024/file/ 339caf45a6fa281cae8adc6465343464-Paper-Conference.pdf 
+
+[15] Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen, Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, Yulu Jia, Sun He, Hongmin Chen, Zhihao Bai, Qi Hou, Shipeng Yan, Ding Zhou, Yiyao Sheng, Zhuo Jiang, Haohan Xu, Haoran Wei, Zhang Zhang, Pengfei Nie, Leqi Zou, Sida Zhao, Liang Xiang, Zherui Liu, Zhe Li, Xiaoying Jia, Jianxi Ye, Xin Jin, and Xin Liu. 2024. MegaScale: Scaling LLM Training to More Than 10,000 GPUs. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) . USENIX Association, Santa Clara, CA, 745–760. https://www. usenix.org/conference/nsdi24/presentation/jiang-ziheng 
+
+[16] MindSpore Contributors. 2020. MindSpore. https://www.mindspore. cn/ .[17] MindSpore Contributors. 2024. MindSpore Transformers. https://www. mindspore.cn/mindformers/docs/en/master/mindformers.html .[18] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil Devanur, Greg Granger, Phil Gibbons, and Matei Zaharia. 2019. PipeDream: Generalized Pipeline Parallelism for DNN Training. In 
+
+Proceedings of the 27th ACM Symposium on Operating Systems Princi-ples . Association for Computing Machinery, Huntsville, ON, Canada, 15 pages. doi: 10.1145/3341301.3359646 
+
+[19] Qwen Team. 2024. Qwen2.5 Technical Report. arXiv:2412.15115 [cs.CL] https://arxiv.org/abs/2412.15115 
+
+[20] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc V. Le, Geoffrey E. Hinton, and Jeff Dean. 2017. Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. In 5th International Conference on Learning Representations, ICLR 2017, Toulon, France, April 24-26, 2017, Conference Track Proceedings . Open-Review.net, Toulon, France, 17 pages. https://openreview.net/forum? id=B1ckMDqlg 
+
+[21] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2019. Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism. arXiv:1909.08053 [cs.CL] https://arxiv.org/abs/1909.08053 
+
+[22] Haiquan Wang, Chaoyi Ruan, Jia He, Jiaqi Ruan, Chengjie Tang, Xi-aosong Ma, and Cheng Li. 2025. DHeLlam: General-Purpose, Auto-matic Micro-Batch Co-Execution for Distributed LLM Training. In 
+
+2025 IEEE 43rd International Conference on Computer Design (ICCD) .70–78. doi: 10.1109/ICCD65941.2025.00017 
+
+[23] Jinwu Yang, Jiaan Wu, Zedong Liu, Xinyang Ma, Hairui Zhao, Yida Gu, Yuanhong Huang, Xingchen Liu, Wenjing Huang, Zheng Wei, Jing Xing, Yili Ma, Qingyi Zhang, Baoyi An, Zhongzhe Hu, Shaoteng Liu, Xia Zhu, Jiaxun Lu, Guangming Tan, and Dingwen Tao. 2026. ENEC: A Lossless AI Model Compression Method Enabling Fast Inference on Ascend NPUs. arXiv:2604.03298 [cs.AR] https://arxiv.org/abs/2604. 03298 
+
+[24] Shulai Zhang, Ningxin Zheng, Haibin Lin, Ziheng Jiang, Wen-lei Bao, Chengquan Jiang, Qi Hou, Weihao Cui, Size Zheng, Li-Wen Chang, Quan Chen, and Xin Liu. 2025. COMET: Fine-grained Computation-communication Overlapping for Mixture-of-Experts. In Proceedings of Machine Learning and Systems , M. Zaharia, G. Joshi, and Y. Lin (Eds.), Vol. 7. MLSys, Santa Clara, CA, USA, 16 pages. https://proceedings.mlsys.org/paper_files/paper/2025/file/ e27ea0cd50b798ff8942caf9203f0992-Paper-Conference.pdf 
+
+[25] Chenggang Zhao, Zhean Xu, Liang Zhao, Jiashi Li, Chenhao Xu, Anyi Xu, Shengyu Liu, Kexing Zhou, and Kuai Yu. 2025. DeepGEMM: clean and efficient BLAS kernel library on GPU. https://github.com/ deepseek-ai/DeepGEMM .[26] Size Zheng, Wenlei Bao, Qi Hou, Xuegui Zheng, Jin Fang, Chen-hui Huang, Tianqi Li, Haojie Duanmu, Renze Chen, Ruifan Xu, Yi-fan Guo, Ningxin Zheng, Ziheng Jiang, Xinyi Di, Dongyang Wang, Jianxi Ye, Haibin Lin, Li-Wen Chang, Liqiang Lu, Yun Liang, Jidong Zhai, and Xin Liu. 2025. Triton-distributed: Programming Overlap-ping Kernels on Distributed AI Systems with the Triton Compiler. arXiv:2504.19442 [cs.DC] https://arxiv.org/abs/2504.19442 
+
+[27] Size Zheng, Xuegui Zheng, Li-wen Chang, and Jidong Zhai. 2026. UniEP: Unified Expert-Parallel MoE MegaKernel for LLM Training. arXiv:2604.19241 [cs.DC] https://arxiv.org/abs/2604.19241 
+
+[28] Yuhang Zhou, Zhibin Wang, Guyue Liu, Shipeng Li, Xi Lin, Zibo Wang, Yongzhong Wang, Fuchun Wei, Jingyi Zhang, Zhiheng Hu, Yanlin Liu, Chunsheng Li, Ziyang Zhang, Yaoyuan Wang, Bin Zhou, Wanchun Dou, Guihai Chen, and Chen Tian. 2025. Squeezing Operator Performance Potential for the Ascend Architecture. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 (Rotterdam, Netherlands) (ASPLOS ’25) . Association for Computing Machinery, New York, NY, USA, 1156–1171. doi: 10.1145/3676641.3716243 
+
+> 16
+
+[29] Yuhang Zhou, Zibo Wang, Zhibin Wang, Ruyi Zhang, Chen Tian, Xiaoliang Wang, Wanchun Dou, Guihai Chen, Bingqiang Wang, Yonghong Tian, Yan Zhang, Hui Wang, Fuchun Wei, Boquan Sun, Jingyi Zhang, Bin She, Teng Su, Yifan Yao, Chunsheng Li, Ziyang Zhang, Yaoyuan Wang, Bin Zhou, and Guyue Liu. 2025. Accelerating Model Training on Ascend Chips: An Industrial System for Profiling, Analysis and Optimization. In 2025 USENIX Annual Technical Confer-ence (USENIX ATC 25) . USENIX Association, Boston, MA, 1387–1408. 
+
+https://www.usenix.org/conference/atc25/presentation/zhou
