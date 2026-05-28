@@ -1,0 +1,1702 @@
+Title: Addressing Variable Heterogeneity in Distributed Multimodal Training with Entrain
+
+URL Source: https://arxiv.org/pdf/2605.27918v1
+
+Published Time: Thu, 28 May 2026 00:41:57 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# Addressing Variable Heterogeneity in Distributed Multimodal Training with Entrain 
+
+Insu Jang 
+
+University of Michigan 
+
+Mosharaf Chowdhury 
+
+University of Michigan 
+
+Abstract 
+
+Multimodal LLM datasets are inherently heterogeneous, with significant data variability. Although each modality exhibits independent variability, sample-level entanglement makes it difficult to balance workloads across both modalities and batches. We present Entrain, a distributed MLLM training framework that addresses both heterogeneity and variabil-ity in multimodal training workloads. Entrain challenges the intuition that dynamic data variability requires dynamic model parallelism by shifting the profiling paradigm from micro-level samples to macroscopic batches. We prove that a single, static model-parallel configuration suffices for opti-mal load balancing under this paradigm. At the microscopic scale, Entrain introduces a hierarchical microbatch assign-ment algorithm that defers excess workload within each iteration to stabilize variability across microbatches. Evalua-tions show that Entrain reduces workload variability across microbatches by up to 10.6 ×, improving end-to-end training throughput by up to 1.40 × over existing baselines. 
+
+1 Introduction 
+
+The rapid evolution of Large Language Models (LLMs) into Multimodal LLMs (MLLMs) [ 11 , 20 , 24 , 27 , 32 , 33 , 41 , 46 , 47 ]has made efficient distributed training critical, yet balanced workload distribution remains particularly challenging due to the inherent heterogeneity and variability of multimodal datasets. Heterogeneity stems from the distinct computa-tional requirements and arithmetic intensities of different modalities. Variability arises because modality workload proportions fluctuate drastically across samples, with each modality following an independent distribution. In text-only LLM training, recent works address sequence length variabil-ity by dynamically adapting the model-parallel configuration on the fly [ 9, 10 ]. A natural intuition would be to extend this dynamic reconfiguration to MLLMs. Unfortunately, because each modality exhibits indepen-dent variability yet remains tightly entangled within a single sample, per-sample dynamic reconfiguration is prohibitively expensive. Our analysis reveals that dynamic adaptation is fundamentally unnecessary. While multimodal workloads are highly chaotic at the microscopic (sample or microbatch) level, the aggregate workload ratio between modalities reli-ably converges to a stable constant at the macroscopic scale of a global batch. This convergence implies that a single, static model-parallel configuration suffices for optimal load balancing, provided it is anchored to the global distribution. This exposes a critical shortcoming in existing MLLM train-ing systems [ 8, 15 , 48 , 52 ], which derive their static model-parallel configurations by profiling a non-representative slice (e.g., a single sample or a small microbatch). Profiling at a mi-croscopic scale dominated by extreme sample-level variance captures a distorted snapshot of the dataset. Consequently, these configurations inevitably suffer from severe load imbal-ances and pipeline bubbles when processing the full, highly variable dataset. To exploit this macro-level stability while managing the unavoidable micro-level pipeline execution imbalance, we propose Entrain, a distributed MLLM training system that addresses multimodal variability at both macroscopic and microscopic scales. At the macro level, Entrain shifts the profiling paradigm from isolated single samples or micro-batches to the entire global batch. Such macro-level profiling accurately captures the converged computational ratio be-tween the various modalities and the core LLM. Unlike prior works that blindly extrapolate brittle configurations from arbitrary, high-variance snapshots, Entrain mathematically anchors its parallel configuration to the globally converged workload distribution. Using the Law of Large Numbers, we prove that a single, static configuration derived from this macroscopic ratio suffices to guarantee optimal load balance throughout training. This sidesteps both the brittle configu-rations of micro-level profiling and the prohibitive overheads of dynamic reconfiguration. While the macro level profiling establishes a stable global baseline, partitioning the global batch into discrete micro-batches for execution inevitably re-exposes localized variabil-ity. Because each microbatch is much smaller than the global batch, the Law of Large Numbers no longer holds at this granularity, and workload variability across microbatches persists. Entrain addresses this through a decoupled micro-batch assignment strategy: it treats the MLLM data flow as a producer-consumer pipeline and decouples the schedul-ing constraints of each modality to resolve imbalance. With encoders as producers and the LLM as the consumer, En-train ensures constant production and consumption rates independently, balancing the execution time of modality pipeline stages while avoiding buffer stalls. Our hierarchical microbatch assignment algorithm first achieves a constant production rate by distributing encoder workloads evenly across microbatches, then balances the LLM workload by deferring excess workload from highly variable samples. 
+
+> 1
+> arXiv:2605.27918v1 [cs.DC] 27 May 2026 LLM Backbone
+> Encoder 1
+> Encoder 2
+> Projector
+> Image
+> Audio
+> Text
+
+Figure 1. Multimodal LLM architecture. 
+
+We have implemented Entrain on top of PyTorch and Cornstarch [ 16 ]. We evaluate Entrain on vision-language models (based on Qwen2.5Vision with Llama3-1b and 3b models) across four multimodal datasets with distinct distri-butions. Compared to DistTrain [ 52 ] and DIP [ 48 ], Entrain reduces workload variability across microbatches by up to 10.6 ×, improving end-to-end training throughput by up to 1.40 ×.In summary, we make the following contributions: 
+
+• We propose Entrain, the first distributed training frame-work to address both heterogeneity and variability in multimodal training workloads via batch-level profiling and decoupled microbatch-level workload balancing. 
+
+• We introduce a profiling approach that targets the global batch instead of micro-level samples to derive the optimal model-parallel configuration. 
+
+• We design a hierarchical microbatch assignment algo-rithm that defers excess workload within each iteration to stabilize workload variability across microbatches. 
+
+2 Background and Motivation 
+
+We first introduce MLLM architecture and parallelism (§2.1), then describe the dataset characteristics that make balanced workload distribution challenging (§2.2), and finally discuss the limitations of existing approaches (§2.3). 
+
+2.1 MLLM Architecture and Parallelism 
+
+To efficiently train massive MLLMs, modern distributed sys-tems employ 4D parallelism, combining data (DP), tensor (TP), context (CP), and pipeline parallelism (PP) [ 6 , 22 ]. While these dimensions effectively scale the model across devices, the inherently heterogeneous architecture of MLLMs re-quires careful parallelization to balance computational work-loads across the cluster. MLLMs enforce a strict structural dependency: raw mul-timodal inputs must first be processed by modality-specific encoders (e.g., Vision Transformers for images, Whisper for audio), whose outputs are then projected into a unified em-bedding space for the core LLM backbone, as shown in Fig-ure 1. Under PP, this architectural separation places encoders on earlier pipeline stages and the LLM on subsequent stages. To maintain high throughput, the global batch is partitioned into microbatches that are injected sequentially. Encoder Forward Encoder Backward LLM Forward LLM Backward Rank 3 
+
+> Rank 2
+> Rank 1
+> Rank 0
+
+(a) 1F1B pipeline parallel schedule. Rank 3 
+
+> Rank 2
+> Rank 1
+> Rank 0
+
+(b) DistTrain [ 52 ] pipeline parallel schedule. Same as 1F1B but with different microbatch order. Rank 3 
+
+> Rank 2
+> Rank 1
+> Rank 0
+
+(c) DIP [48] pipeline parallel schedule. 
+
+Figure 2. Visualization of different pipeline parallel schedules using 8 microbatches for a vision language model (VLM). SynthChartNet ChartQA CocoQA LLaVA-150k 32 64 128 256 512 1K 
+
+> Text tokens per sample
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> CDF (%)
+
+(a) Number of text tokens 32 64 128 256 512 1K 2K 4K 8K 16K  
+
+> Image tokens per sample
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> CDF (%)
+
+(b) Number of vision tokens 
+
+Figure 3. Distributions of number of vision and text tokens in various datasets. They are independently varying. 
+
+This pipeline design requires strict temporal and spatial balance: execution times must remain consistent across con-secutive microbatches, and all stages must have roughly equal execution times for a given microbatch. Violations in either dimension immediately produce pipeline bubbles and stragglers. Figure 2a shows the standard 1F1B schedule for a vision-language model (VLM), where vision encoder stages precede the LLM stages. DistTrain [ 52 ] (Figure 2b) uses the same schedule but reorders microbatches to reduce pipeline bubbles. DIP [ 48 ] (Figure 2c) parallelizes modalities independently and colocates their pipeline stages. 
+
+2.2 MLLM Dataset Characteristics 
+
+While a carefully tuned parallel configuration can theoreti-cally balance the heterogeneous architecture of an MLLM, maintaining this balance at runtime requires perfectly bal-anced data partitions. However, two inherent dataset char-acteristics severely disrupt this: workload heterogeneity and variability.         
+
+> 2SynthChartNet ChartQA CocoQA LLaVA-150k 020 40 60 80 100
+> Sample index
+> 0
+> 10
+> 20
+> Vision / Text
+> Workload Ratio
+
+Figure 4. Workload ratio of vision encoder (Qwen2Vision) and LLM (Llama3-1B) across 100 samples in datasets. N=1 N=4 N=16 N=64 N=256 0 20 40 60 80 100 
+
+> Batch index
+> 1
+> 2
+> 3
+> 4
+> Vision / Text
+> Workload Ratio  Dataset ratio: 2.43
+
+Figure 5. Workload ratio variability with different sample sizes in LLaVA-150K dataset. The mean ratio of vision-to-text workload of the entire dataset is 2.43. With larger sample size 
+
+𝑁 , the ratio between batches becomes more stable and converges to the dataset mean. 
+
+Workload heterogeneity refers to the systematic difference in computational characteristics across modalities. Modality-specific encoders and the LLM have fundamentally different structures; processing a high-resolution image through a vision encoder exhibits drastically different arithmetic in-tensity and memory access behavior from processing text tokens through the LLM. Workload variability refers to the sample-to-sample fluctuation in how much of each modal-ity appears. Unlike unimodal text datasets, where sequence length is the dominant source of variation, each modality in an MLLM dataset follows its own workload distribution. Figure 3 plots the CDFs of text and vision tokens across sev-eral vision-language datasets, confirming that each modality varies independently. The challenge is further compounded by an intrinsic cou-pling constraint: modalities are bound within each sample and must be processed together. The inter-modality work-load ratio is therefore determined jointly per sample rather than controlled independently. Figure 4 shows that this per-sample ratio between the vision encoder and the LLM fluctu-ates drastically, spanning a wide range with no stable central tendency, making any fixed GPU partition inherently mis-matched for the vast majority of samples it encounters. DistTrain DIP SynthChartNet LLaVA-150K ChartQA CocoQA 
+
+> 0
+> 50
+> Bubble Ratio (%)
+> Max
+> Mean
+> Min
+
+Figure 6. Pipeline bubbles of existing works vs ideal pipeline schedule with perfect workload balance. 
+
+2.3 Limitations of Existing Works 
+
+Existing MLLM training systems [ 8 , 48 , 52 ] recognize that workload imbalances arise at two granularities – profiling and execution – but no single system addresses both. 
+
+Profiling granularity. DistTrain [ 52 ] and DIP [ 48 ] derive parallel configurations by profiling a single sample or a small microbatch, which may not represent the entire dataset. The high per-sample variance suggests that dynamic reconfig-uration – as applied to sequence-length variability in LLM training [ 9 , 10 ] – is the right approach. Counterintuitively, however, Figure 5 shows that the workload ratio converges to a stable dataset mean as batch size increases, justifying a static configuration – but only when derived from this macroscopic ratio rather than an unrepresentative micro-sample. 
+
+Execution granularity. Even with a correct parallel config-uration, the workload ratio continues to fluctuate across mi-crobatches. Optimus [ 8 ] and DistTrain strictly couple modal-ities within the microbatch boundary, forcing the encoder and LLM to process an identical set of samples per micro-batch. Optimus schedules encoder stages into LLM pipeline bubbles, but with more microbatches or techniques such as zero-bubble pipeline parallelism (ZBPP) [ 35 ], few bub-bles remain to exploit, and fragmented bubbles from imbal-ance are not exploitable. DistTrain relies on data reorder-ing, which mitigates but cannot resolve workload variability across microbatches. DIP [ 48 ] partitions microbatches into sub-microbatches but still confines these partitions within the rigid boundaries of the parent microbatch. Figure 6 shows pipeline bubbles across four datasets (100 iterations, 4-stage PP, 16 microbatches); imbalance-driven bubbles compound the irreducible data-dependency bubbles. 
+
+3 Entrain Overview 
+
+Entrain is a distributed MLLM training framework that ad-dresses workload heterogeneity and variability in multi-modal datasets. Entrain maximizes training throughput by co-designing static hardware resource allocation and dy-namic data scheduling for distributed multimodal training:        
+
+> 3Planner
+> Training
+> Runtime
+> Model
+> Analytical
+> Cost Profiler
+> (§4.1)
+> Tl
+> Sample
+> Sizer
+> (§4.2)
+> bmin
+> Dataset
+> Parallelization
+> Planner
+> (§4.3)
+> Parallelized
+> Model
+> ②Get minimum
+> convergent
+> profiling size
+> ①Estimate
+> per-layer
+> cost models
+> ③Parallelize
+> the model
+> ④Draw batch of size ≥bmin
+> Global
+> Batch
+> Encoder
+> Microbatches
+> ⑤Assign samples to
+> microbatches hierarchically
+> Planning
+> Training
+> LLM
+> Microbatches
+> Mini-
+> batch
+> Stratified Sample
+> Assignment ( §5.1)
+> Pairwise Deferral
+> (§5.2)
+> Optimized
+> Pipeline
+> Schedule
+> (§5.3)
+
+Figure 7. Entrain design overview. 
+
+• Macroscopic profiling-based parallelization (§4) :Entrain profiles large batch to derive a parallel configura-tion that provides optimal load balance across modalities throughout training. 
+
+• Microscopic workload balancing via deferral (§5) :Inspired by the producer-consumer model, Entrain de-couples microbatch partitioning across modalities and balances workload by deferring excess LLM computation across microbatch boundaries. Figure 7 shows the architecture of Entrain, which consists of two components: the planner and the training runtime. 
+
+Planner. The planner runs before training begins, analyzing the model and dataset to derive the parallel configuration to allocate hardware resources to each modality. Instead of profiling with a single sample or a small microbatch, the planner profiles the large batch, capturing the converged workload ratio between modalities rather than a noisy, un-representative snapshot. The derived parallel configuration assigns hardware resources to each modality in proportion to its computational demand. Since profiling the full large batch before evaluating paral-lelization is infeasible, the planner first builds an analytical cost model by profiling with synthetic samples and fitting a polynomial equation via linear regression (§4.1). Using this cost model, the planner then derives the minimum profiling batch size ( 𝑏 𝑚𝑖𝑛 ) that guarantees statistical convergence of the workload ratio (§4.2). The user must set the global batch size to 𝑏 𝑚𝑖𝑛 or larger; otherwise, Entrain does not guarantee optimal load balance across iterations. Finally, the cost model and 𝑏 𝑚𝑖𝑛 together enable Entrain to find the optimal parallel configuration that maximizes training throughput (§4.3). 
+
+Training runtime. At each iteration, the runtime fetches a global batch and distributes it evenly across data-parallel replicas, each receiving a minibatch of size 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 /𝐷𝑃 . To distribute samples, the runtime sorts them by encoder work-load in descending order and greedily assigns each to the replica with the minimum current LLM workload. Sorting by encoder workload descending spreads the heaviest encoder samples across replicas before smaller ones fill the gaps, bal-ancing encoder workload. For LLM workload, each sample is assigned to the replica that has accumulated the least LLM workload so far, preventing any single replica from accu-mulating disproportionately more LLM workload than the others. Together, these heuristics balance both encoder and LLM workloads across replicas. Each replica then partitions its minibatch into microbatches for pipeline execution. While the planner’s configuration is macroscopically optimal, this partitioning re-exposes sample-level workload variance. Because encoder and LLM work-loads vary independently across samples, balancing both si-multaneously within each microbatch is intractable. Entrain addresses this by decoupling microbatch boundaries across modalities: the encoder and LLM need not process the same samples in a given microbatch. Entrain first strictly balances encoder microbatches (§5.1), then defers excess LLM work-load from overloaded to underloaded microbatches, equaliz-ing execution time across the pipeline (§5.2). The overhead of deferral due to the reversed data dependency in backward pass is handled by optimizing pipeline schedule (§5.3). 
+
+4 Macroscopic Analysis-Based Model Parallelization 
+
+The primary objective of macroscopic analysis is to derive a single, static parallel configuration that optimally balances the heterogeneous MLLM architecture. As established in Sec-tion 2.3, deriving this configuration via microscopic profiling fails due to the extreme sample-level variance inherent in multimodal datasets. Entrain instead anchors its resource allocation to a macroscopic view of the dataset. This section proceeds in three stages. We first build a hardware-calibrated analytical cost model 𝑇 𝑙,𝑖 that estimates per-layer workloads without exhaustive profiling (§4.1). We then use it to determine a profiling batch size 𝑏 𝑚𝑖𝑛 large enough to yield a stable macro-level allocation (§4.2). Finally, we derive the static parallel configuration through hierar-chical pipeline balancing that first optimizes each modality component locally and then aligns them under a shared pipeline schedule (§4.3). 
+
+4.1 Hardware-Calibrated Analytical Cost Model 
+
+Determining 𝑏 𝑚𝑖𝑛 and searching over configurations both re-quire repeated workload estimates across many batches and candidate partitions. Exhaustive profiling is prohibitively expensive in both cases, and pure FLOP counting is insuf-ficient because it misses hardware-specific effects such as memory-bandwidth saturation and kernel-launch overhead. 
+
+> 4
+
+Entrain therefore pre-builds a hardware-calibrated analyt-ical cost model before any profiling or parallel configuration search begins. It profiles every layer separately over the valid 
+
+(𝑇 𝑃, 𝐶𝑃 ) configurations using synthetic inputs at represen-tative sizes (e.g., number of tokens 𝑥 ∈ { 64 , 256 , 1𝑘, 4𝑘, 16 𝑘 }), then fits the measurements to a configuration-aware qua-dratic model 𝑇 𝑙,𝑖 (𝑥, TP , CP ) = 𝑎𝑥 2 + 𝑏𝑥 + 𝑐 [ 30 , 40 ] via linear regression. We fit a model per layer because different layer types scale differently with sequence length – e.g., atten-tion is 𝑂 (𝑥 2) while MLPs and embeddings are 𝑂 (𝑥 ) – and it enables estimating any pipeline stage cost by summing the costs of the individual layers it contains. 
+
+4.2 Deriving Minimum Stable Profiling Batch Size 
+
+Before beginning parallel configuration search, Entrain must determine a minimum profiling batch size 𝑏 𝑚𝑖𝑛 large enough that random batches of 𝑏 𝑚𝑖𝑛 samples consistently yield the same discrete GPU allocation under the chosen data-parallel degree 𝐷𝑃 . Entrain establishes this guarantee in two steps. First, it repeatedly samples batches of size 𝑏 𝑚𝑖𝑛 and uses Bernoulli trials to test whether the resulting allocation is stable. Second, it uses the Law of Large Numbers to show that stability at batch size 𝑏 𝑚𝑖𝑛 implies stability for any larger global batch size 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 ≥ 𝑏 𝑚𝑖𝑛 .
+
+Algorithm 1 Probabilistic Macroscopic Profiling Strategy                     
+
+> Input: Confidence level 1−𝛼 , Target error limit 𝑝 𝑒𝑟𝑟𝑜𝑟 , Initial sample size 𝑛 0, GPUs 𝑁 𝑡𝑜𝑡𝑎𝑙 , Data Parallel degree 𝐷𝑃 , Cost Models 𝑇 𝑙,𝑖
+> Output: Stable profiling batch size 𝑏 𝑚𝑖𝑛
+> 1: 𝑘 ← ⌈ ln (𝛼 )/ ln (1−𝑝 𝑒𝑟𝑟𝑜𝑟 ) ⌉
+
+# Compute required validation trials via Binomial bounds  
+
+> 2:
+
+𝑛 ← 𝑛 0 
+
+> 3:
+
+loop  
+
+> 4:
+
+®𝑃 𝑟𝑒 𝑓 ← EstimateMacroscopicProportions (𝑛,𝑇 𝑙,𝑖 ) 
+
+> 5:
+
+®𝑀 𝑟𝑒 𝑓 ← ProportionalAllocation (𝑁 𝑡𝑜𝑡𝑎𝑙 , 𝐷𝑃, ®𝑃 𝑟𝑒 𝑓 ) 
+
+> 6:
+
+𝐼𝑠𝑆𝑡𝑎𝑏𝑙𝑒 ← True  
+
+> 7:
+
+for 𝑡 = 1 to 𝑘 do  
+
+> 8:
+
+®𝑃 𝑡𝑒𝑠𝑡 ← EstimateMacroscopicProportions (𝑛,𝑇 𝑙,𝑖 ) 
+
+> 9:
+
+®𝑀 𝑡𝑒𝑠𝑡 ← ProportionalAllocation (𝑁 𝑡𝑜𝑡𝑎𝑙 , 𝐷𝑃, ®𝑃 𝑡𝑒𝑠𝑡 ) 
+
+> 10:
+
+if ®𝑀 𝑡𝑒𝑠𝑡 ≠ ®𝑀 𝑟𝑒 𝑓 then  
+
+> 11:
+
+𝐼𝑠𝑆𝑡𝑎𝑏𝑙𝑒 ← False  
+
+> 12:
+
+break  
+
+> 13:
+
+if 𝐼𝑠𝑆𝑡𝑎𝑏𝑙𝑒 then  
+
+> 14:
+
+return 𝑛 # Minimum stable profiling batch size 𝑏 𝑚𝑖𝑛  
+
+> 15:
+
+𝑛 ← 𝑛 × 2 # Increase batch size if variance is too high 
+
+Algorithm 1 describes the probabilistic procedure for de-termining the minimum stable profiling batch size 𝑏 𝑚𝑖𝑛 . For a candidate 𝑛 , Entrain first draws a reference batch and esti-mates the workload proportions across modality components 
+
+®𝑃 𝑟𝑒 𝑓 (Line 4). These proportions are continuous floating-point values, but GPU assignment must be discrete; thus, Entrain converts them into ®𝑀 𝑟𝑒 𝑓 , a vector of per-modality per-replica GPU counts, by distributing the per-replica bud-get of 𝑁 𝑡𝑜𝑡𝑎𝑙 /𝐷𝑃 GPUs proportionally across modality com-ponents and rounding to the nearest feasible integers (Line 5). It then draws 𝑘 additional independent validation batches (Line 7), and for each one, treats the event “the resulting discrete GPU allocation differs from the reference allocation” as a Bernoulli failure (Line 12). Because the continuous ra-tio is rounded to integer counts, small fluctuations between batches often fall into the same allocation (e.g., 1:0.98 and 1:1.12 both round to 1:1 when only 2 GPUs are available). If all 𝑘 trials return the same allocation, standard binomial bounds imply that, with confidence 1−𝛼 , a fresh batch of size 
+
+𝑏 𝑚𝑖𝑛 will yield a different allocation with probability at most 
+
+𝑝 𝑒𝑟𝑟𝑜𝑟 (Line 14). At batch size 𝑏 𝑚𝑖𝑛 , the Bernoulli test thus establishes that sampling noise is small enough that repeated random draws induce the same discrete allocation with high probability. If the test fails, Entrain doubles the batch size and repeats. The loop is guaranteed to terminate: by the Strong Law of Large Numbers, the sample mean converges almost surely to the population mean, so the test must eventually pass (Appendix A). In our experiments, convergence occurs by batch size 256 across all evaluated datasets and GPU configurations (Appendix F). The Bernoulli test certifies stability only at the profiled size 𝑏 𝑚𝑖𝑛 ; the Law of Large Numbers extends the guarantee to all larger batches. ®𝑃 𝑟𝑒 𝑓 and ®𝑃 𝑡𝑒𝑠𝑡 are sample means over per-sample workloads. By the Law of Large Numbers, they converge to the population mean as the batch size grows; so the estimator at any 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 ≥ 𝑏 𝑚𝑖𝑛 is at least as concentrated as the one at size 𝑏 𝑚𝑖𝑛 . Hence, if random size-𝑏 𝑚𝑖𝑛 batches already induce the same allocation with high probability, any global batch of size 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 ≥ 𝑏 𝑚𝑖𝑛 does so with at least as high probability. Appendix B provides the full derivation. Overall, this probabilistic procedure allows Entrain to use a small profiling batch while still recovering the correct macro-level hardware allocation. 
+
+4.3 Heterogeneous Pipeline Balancing 
+
+Given a stable profiling size 𝑏 𝑚𝑖𝑛 and calibrated layer costs 
+
+𝑇 𝑙,𝑖 , the remaining task is to derive a static parallel configu-ration. An MLLM forms a heterogeneous pipeline: modality-specific encoders feed the LLM, and end-to-end throughput is bounded by 𝛽 𝑚𝑎𝑥 , the slowest stage across all modality components. Rather than searching over all parallel dimen-sions of the full model, Entrain exploits the modularity of MLLMs – each modality encoder and the LLM are individual components – and decomposes the search into two tiers: it first optimizes each modality component locally, then evalu-ates the resulting per-component bottlenecks under a shared pipeline schedule. Algorithm 2 summarizes this search. 
+
+Intra-Module Balancing. Intra-module balancing balances the workload of pipeline stages within a modality component. Each modality encoder and the LLM backbone are internally 
+
+> 5
+
+Algorithm 2 Heterogeneous Model Parallel Configuration Search 
+
+Input: Stable profiling batch size 𝑏 𝑚𝑖𝑛 , Global Batch 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 , Micro-batch size 𝜇 , GPUs 𝑁 𝑡𝑜𝑡𝑎𝑙 , Modality components C, Cost Models 𝑇 𝑙,𝑖 
+
+Output: Optimal static parallel configuration 𝐶 ∗
+
+1: ®𝑃 𝑝𝑜𝑝 ← EstimateMacroscopicProportions (𝑏 𝑚𝑖𝑛 ,𝑇 𝑙,𝑖 )
+
+2: 𝑀𝑎𝑥𝑇 ℎ𝑟𝑜𝑢𝑔ℎ𝑝𝑢𝑡 ← 0
+
+3: for each valid hardware topology 𝐶 ℎ𝑤 = {𝐷𝑃, ®𝑇 𝑃, ®𝐶𝑃, ®𝑃𝑃 } do 
+
+4: ®𝑀 ← ProportionalAllocation (𝑁 𝑡𝑜𝑡𝑎𝑙 , 𝐷𝑃, ®𝑃 𝑝𝑜𝑝 )
+
+5: if 𝐶 ℎ𝑤 violates VRAM limits or 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 . 0 (mod 𝐷𝑃 · 𝜇 ) then 
+
+6: continue 
+
+7: 𝐾 ← 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 /( 𝐷𝑃 · 𝜇 )
+
+# Tier 1: Intra-module balancing via Dynamic Programming 
+
+8: for each modality component 𝑖 ∈ C do 
+
+9: {𝜏 𝑖,𝑝 }1≤𝑝 ≤𝑃𝑃 𝑖 ← IntraModuleBalance (𝑖, 𝑃𝑃 𝑖 ,𝑇 𝑃 𝑖 , 𝐶𝑃 𝑖 ,𝑇 𝑙,𝑖 )
+
+10: 𝛽 𝑖 ← max 1≤𝑝 ≤𝑃𝑃 𝑖 𝜏 𝑖,𝑝 
+
+# Tier 2: Inter-module balancing via Slowest-Stage Evaluation 
+
+11: 𝛽 𝑚𝑎𝑥 ← max 𝑖 ∈ C (𝛽 𝑖 )
+
+12: P𝑟𝑒𝑠ℎ𝑎𝑟𝑑 ← ComputeReshardCost ( ® 𝑇 𝑃, ®𝐶𝑃, 𝐾, 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 , 𝐷𝑃 )
+
+13: 𝑇 𝑖𝑡𝑒𝑟 ← T S
+
+
+
+𝐾, {𝜏 𝑖,𝑝 }, 𝛽 𝑚𝑎𝑥 
+
+
+
++ P 𝑟𝑒𝑠ℎ𝑎𝑟𝑑 
+
+14: 𝑇ℎ𝑟𝑜𝑢𝑔ℎ𝑝𝑢𝑡 ← ( 𝐷𝑃 · 𝐾 )/ 𝑇 𝑖𝑡𝑒𝑟 
+
+15: if 𝑇ℎ𝑟𝑜𝑢𝑔ℎ𝑝𝑢𝑡 > 𝑀𝑎𝑥𝑇ℎ𝑟𝑜𝑢𝑔ℎ𝑝𝑢𝑡 then 
+
+16: 𝑀𝑎𝑥𝑇ℎ𝑟𝑜𝑢𝑔ℎ𝑝𝑢𝑡 ← 𝑇ℎ𝑟𝑜𝑢𝑔ℎ𝑝𝑢𝑡 
+
+17: 𝐶 ∗ ← 𝐶 ℎ𝑤 
+
+18: return 𝐶 ∗
+
+homogeneous, consisting of repeated layers with similar structure. Entrain therefore treats each modality component 
+
+𝑖 ∈ C as an independent unimodal partitioning problem, which is well-studied [ 17 , 39 , 54 ]. A 1D dynamic program uses the layer-wise costs evaluated under the chosen 𝑇 𝑃 𝑖 
+
+and 𝐶𝑃 𝑖 to partition the modality component into 𝑃𝑃 𝑖 stages, minimizing the maximum stage latency [54]. Let 𝐹 𝑖 (ℓ, 𝑝 ) denote the minimum bottleneck latency when the first ℓ layers of modality component 𝑖 are partitioned into 𝑝 stages. The recurrence is: 
+
+𝐹 𝑖 (ℓ, 𝑝 ) = min   
+
+> 0≤ℓ′<ℓ
+
+max 𝐹 𝑖 (ℓ′, 𝑝 − 1),
+
+> ℓ
+
+∑︁ 
+
+> 𝑗 =ℓ′+1
+
+𝑇 𝑗,𝑖 
+
+!
+
+, (1) with base case 𝐹 𝑖 (ℓ, 1) = Íℓ𝑗 =1 𝑇 𝑗,𝑖 . Let 𝜏 𝑖,𝑝 denote the latency of stage 𝑝 in the optimal partition of modality component 
+
+𝑖 ; the per-component bottleneck is 𝛽 𝑖 = max 1≤𝑝 ≤𝑃𝑃 𝑖 𝜏 𝑖,𝑝 =
+
+𝐹 𝑖 (𝐿 𝑖 , 𝑃𝑃 𝑖 ). Backtracking recovers both the stage latencies 
+
+𝜏 𝑖,𝑝 and the layer-to-stage mapping for execution. 
+
+Inter-Module Balancing. These per-component optima are only local. When independently optimized modality compo-nents are combined into a heterogeneous pipeline, discrepan-cies in latency of pipeline stages across components directly translate to pipeline bubbles. Given the shared microbatch count 𝐾 = 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 /( 𝐷𝑃 · 𝜇 ), where 𝜇 is the microbatch size, Entrain evaluates each valid factorization using the stage-latency set {𝜏 𝑖,𝑝 } and the the slowest stage latency across all components 𝛽 𝑚𝑎𝑥 = max 𝑖 ∈ C 𝛽 𝑖 . Here, TS denotes the Mini   
+
+> Batch
+> Global
+> Batch
+> Partition to minibatches …
+> 18x 36x
+
+(a) An example of a minibatch after the global batch is partitioned. MB 1 MB 2 MB 6 MB 3    
+
+> 3x 3x 2x 4x
+> MB 4 MB 5
+> 3x 3x
+
+(b) Stratified sample assignment to microbatches focusing on balanc-ing encoder workload (§5.1). MB 3 MB 2 MB 6 MB 1           
+
+> 3x 3x 2x 4x
+> MB 4 MB 5
+> 3x 3x
+> Defer Defer Defer
+> 6x 6x 6x 6x 6x 6x
+
+(c) Pairwise deferral optimization to balance LLM workload. Micro-batches are reordered (§5.2). 
+
+Figure 8. The hierarchical microbatch assignment algorithm. The number of boxes represents the amount of workload of each sample, where green boxes are for encoder workload and orange boxes are for LLM workload. 
+
+analytical iteration time of pipeline schedule S [54]: 
+
+TS
+
+ 𝐾, {𝜏 𝑖,𝑝 }, 𝛽 𝑚𝑎𝑥 
+
+ =∑︁  
+
+> 𝑖 ∈ C
+> 𝑃𝑃 𝑖
+
+∑︁ 
+
+> 𝑝 =1
+
+𝜏 𝑖,𝑝 + ( 𝐾 − 1)𝛽 𝑚𝑎𝑥 . (2) When adjacent modality components use different tensor-or context-parallel degrees, Entrain models the resulting communication overhead at their boundaries as a resharding cost P𝑟𝑒𝑠ℎ𝑎𝑟𝑑 . The total iteration time thus includes P𝑟𝑒𝑠ℎ𝑎𝑟𝑑 .The selected configuration maximizes the resulting end-to-end training throughput. This decomposition keeps the search tractable. For each component 𝑖 , the search enumerates only valid spatial fac-torizations satisfying 𝑇 𝑃 𝑖 × 𝐶𝑃 𝑖 × 𝑃𝑃 𝑖 = 𝑀 𝑖 , where 𝑀 𝑖 is the per-replica GPU budget for component 𝑖 , rather than brute-forcing arbitrary parallel dimensions. 
+
+5 Hierarchical Microbatch Assignment 
+
+Section 3 described how Entrain distributes the global batch across replicas. However, the harder challenge arises when each replica’s minibatch is partitioned into microbatches for pipeline parallelism. The small number of samples per micro-batch amplifies individual workload variance, and encoder and LLM stages exhibit independent workload distributions that cannot be balanced simultaneously. Figure 8 shows that encoder and LLM workloads are highly variable between microbatches and how hierarchical microbatch assignment balances the workload. See Appendix C how these micro-batches are executed in 1F1B pipeline schedule. 
+
+> 6
+
+Algorithm 3 Hierarchical microbatch assignment. 
+
+Input: Global batch 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 , Data Parallel degree 𝐷𝑃 ,number of microbatches 𝐾 
+
+Output: Encoder microbatches Menc , LLM micro-batches MLLM 
+
+# Section 3: DP-level sample assignment to replicas  
+
+> 1:
+
+Sort 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 by 𝑤 encoder ,𝑖 in descending order  
+
+> 2:
+
+Assign samples to each replica; let 𝑆 denote samples assigned to this replica # Section 5.1: stratified sample assignment to microbatches  
+
+> 3:
+
+𝐾 eff ← min  𝐾, Í 𝑖 𝑤 encoder ,𝑖 /𝑤 encoder ,max 
+
+   
+
+> 4:
+
+Partition 𝑆 into 𝑆 c and 𝑆 f by LLM workload  
+
+> 5:
+
+Sort 𝑆 c and 𝑆 f by 𝑤 encoder ,𝑖 in descending order  
+
+> 6:
+
+Assign 𝑤 encoder of 𝑆 c then 𝑆 f to Menc via Min-Max greedy # Section 5.2: pairwise deferral optimization  
+
+> 7:
+
+Sort microbatches in Menc by 𝑤 LLM in descending order  
+
+> 8:
+
+Partition into 𝑆 ol (top 𝐾 /2) and 𝑆 ul (bottom 𝐾 /2) 
+
+> 9:
+
+for each pair (𝑖, 𝑗 ) where 𝑖 ∈ 𝑆 ol and 𝑗 ∈ 𝑆 ul do  
+
+> 10:
+
+𝑆 deferred ← SubsetSumDynamicProgramming (𝑖, 𝑗 ) 
+
+> 11:
+
+𝑉 𝑖,𝑗 ← CalcBottleneck (𝑆 deferred , 𝑖, 𝑗 ) # Equation 3  
+
+> 12:
+
+𝐿 ← [ 𝑤 LLM ,𝑖 for 𝑖 ∈ 𝑆 ol ] 
+
+> 13:
+
+𝑇 ∗, P ← BottleneckMatch (𝑉 , 𝐿, 𝑆 ol , 𝑆 ul ) 
+
+> 14:
+
+Reorder microbatches in Menc into interleaved pairs 
+
+(𝑜𝑙 0, 𝑢𝑙 0, 𝑜𝑙 1, 𝑢𝑙 1, . . . ) per P 
+
+> 15:
+
+Assign LLM workload of corresponding samples in Menc to 
+
+MLLM , deferring samples specified by P 
+
+> 16:
+
+return Menc , MLLM 
+
+Entrain resolves this by adopting a producer-consumer strategy : it exploits the pipeline buffer between the encoders (producers) and the LLM (consumer) as a workload vari-ability absorber. Instead of always enforcing equal sample counts per microbatch across both stages, Entrain decouples their schedules through a two-step hierarchical assignment, as depicted in Figure 8. In the first step, stratified sample assignment balances encoder execution time while laying the groundwork for the subsequent deferral (§5.1). In the sec-ond step, pairwise deferral optimization shifts residual LLM workload across microbatches to balance the LLM execution time without disturbing the encoder schedule (§5.2). Algo-rithm 3 summarizes the hierarchical microbatch assignment algorithm. The backward pass, however, inherently reverses the data dependency; the encoder backward pass requires gradients from the LLM, thus deferral widens this latency gap for de-ferred samples. Entrain handles this through split-backward processing and eager forward scheduling (§5.3). If the model has multiple modality encoders (e.g., Omni-modal models [ 1 , 26 , 47 ]), merging the modality encoders into a single unified encoder module allows hierarchical microbatch assignment to be applied. 
+
+5.1 Stratified Sample Assignment to Microbatches 
+
+Entrain assigns samples to microbatches using a stratified strategy that balances encoder execution time while ensuring each microbatch retains sufficient fine-grained samples for the subsequent deferral phase. Before assignment, Entrain determines the effective num-ber of microbatches 𝐾 eff to use (line 3). As each sample’s computation is indivisible across microbatches, a single sam-ple with the maximum encoder workload 𝑤 encoder ,max sets a lower bound on any microbatch’s encoder workload. If 𝐾 is too large, this microbatch is dominated by 𝑤 encoder ,max while the remaining 𝐾 − 1 microbatches would be significantly lighter. In this case, even though 𝐾 is given by the user, En-train reduces 𝐾 to 𝐾 eff so that each microbatch has workload close to 𝑤 encoder ,max . If other samples’ workload sum is large enough to create 𝐾 − 1 microbatches with similar or larger workload, Entrain uses the user’s 𝐾 as 𝐾 eff .After determining the effective number of microbatches, Entrain assigns samples to 𝐾 eff microbatches. Samples are first partitioned into a coarse-grained set 𝑆 𝑐 with high LLM workload and a fine-grained set 𝑆 𝑓 with low LLM workload (line 4), then assigned to microbatches sequentially. Within each set, samples are sorted by 𝑤 encoder ,𝑖 in descending order (line 5) and assigned to microbatches via a Min-Max greedy heuristic on encoder workload (line 6). Figure 8b illustrates the result of assigning samples in Figure 8a to microbatches by applying the stratified sample assignment. The total en-coder workload is 18 units, almost evenly distributed across 6 microbatches with 3 units each on average. We do not consider the LLM workload balancing in this phase, so the microbatches are balanced only on the encoder workload. Unlike traditional pipeline parallelism, Entrain allows micro-batch sample counts to vary, prioritizing encoder balance over count uniformity. The partition into 𝑆 𝑐 and 𝑆 𝑓 is to facilitate the deferral phase. Without this partition, the greedy – which is blind to LLM workload – may leave some microbatches with only high-LLM-workload samples, starving them of the low-LLM-workload units needed for deferral and preventing defer-ral from balancing LLM workload. By separating samples into 𝑆 𝑐 and 𝑆 𝑓 upfront, every microbatch is guaranteed to receive 𝑆 𝑓 samples, ensuring pairwise deferral always has units available to shift and balance LLM workload delicately. This sequential two-subset assignment does not break the encoder balancing guarantee. The greedy always assigns to the least-loaded microbatch and each subset is indepen-dently sorted in decreasing order of encoder workload, thus the combined assignment is a valid longest processing time (LPT) list scheduling run, which by Graham’s theorem yields a makespan within (2 − 1/𝐾 ) times optimal, where 𝐾 is the number of microbatches 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 /( 𝐷𝑃 · 𝜇 ) [12].                              
+
+> 7MB 2 MB 1 MB 5 MB 3 MB 6 MB 4
+> SUL
+> MB 2 MB 1 MB 5
+> SOL
+> MB 3 MB 6 MB 4 (a) Dividing a set of microbatches to an overloaded set ( 𝑆 𝑜𝑙 ) and an underloaded set ( 𝑆 𝑢𝑙 ). MB3
+> MB4
+> MB6
+> MB1 MB2 MB5
+> MB3: 6
+> MB1: 5
+> MB4: 6
+> MB1: 3
+> MB6: 6
+> MB1: 6
+> MB3: 6
+> MB2: 6
+> MB4: 6
+> MB2: 4
+> MB6: 7
+> MB2: 6
+> MB3: 6
+> MB5: 8
+> MB4: 6
+> MB5: 6
+> MB6: 9
+> MB5: 6
+> (b) Computed deferral set 𝑆 deferred for microbatch 𝑖 and 𝑗 and LLM workload 𝑤 LLM ,𝑖 and 𝑤 LLM ,𝑗 after deferral. SOL SUL
+> MB 2
+> MB 1
+> MB 5
+> 6
+> 6
+> 8
+> 6
+> 6
+> 6
+> 6
+> 7
+> 9
+> MB 3
+> MB 6
+> MB 4
+> (c) A bipartite graph G ( 𝑆 ol , 𝑆 ul , 𝑉 ). Edges with 𝑉 𝑖,𝑗 >𝑇 are represented as grey dotted lines. Bold lines represent the matching P.
+
+Figure 9. A visualization of pairwise deferral optimization with microbatches in Figure 8b. 
+
+5.2 Pairwise Deferral Optimization 
+
+After stratified sample assignment, Entrain balances LLM execution time across microbatches by deferring selected sample’s LLM computation from overloaded microbatches to underloaded ones, leaving the encoder schedule intact. After deferral, microbatches are paired and reordered so that each overloaded microbatch is immediately followed by its underloaded partner, and selected samples’ LLM workload is shifted between each pair. This pairwise reordering minimizes peak activation buffer memory. Deferred samples must re-tain their encoder activations until the LLM processes them, and placing the underloaded partner immediately after its overloaded counterpart bounds the buffering duration to a single microbatch interval. Figure 8c demonstrates the result of applying the pairwise deferral optimization to the micro-batches in Figure 8b. The encoder workload is not affected by the deferral, while the LLM workload is evenly distributed across microbatches with 6 units each. The core challenge is that the two decisions required for deferral are tightly coupled: which microbatches to pair, and which specific samples to transfer within each pair. Entrain therefore formulates deferral as a bottleneck assignment prob-lem that co-optimizes both decisions to minimize the maxi-mum LLM execution time across all microbatches. The so-lution proceeds in three steps: finding the optimal subset of samples to defer for every candidate pair (Optimal defer-ral set calculation), aggregating these into a bottleneck cost matrix (Bottleneck cost formulation), and determining the globally optimal pairing (Bottleneck matching optimization). Figure 9 visualizes the deferral optimization. 
+
+Optimal deferral set calculation. Entrain sorts the 𝐾 mi-crobatches by LLM workload and partitions them into an overloaded set 𝑆 ol (top 𝐾 /2) and an underloaded set 𝑆 ul (bot-tom 𝐾 /2), as shown in Figure 9a (line 8). For each candidate pair (𝑖, 𝑗 ) where 𝑖 ∈ 𝑆 ol and 𝑗 ∈ 𝑆 ul , Entrain identifies the sub-set 𝑆 deferred of samples in microbatch 𝑖 as an optimal deferral set between the two microbatches (line 10). The total LLM workload of 𝑆 deferred is closest to the target transfer amount 
+
+𝛿 = (𝑤 LLM ,𝑖 − 𝑤 LLM ,𝑗 )/ 2. Figure 9b tabulates the resulting 
+
+𝑆 deferred s and post-deferral LLM workloads. Finding this sub-set is an instance of the subset sum problem, which Entrain solves with a discretized dynamic programming: a table 𝐷 of size 𝑤 ′ (the total rounded LLM workload of the overloaded microbatch) is queried for the sum 𝑘 ∗ that minimizes the residual |𝛿 − 𝑘 ∗ |, identifying the optimal 𝑆 deferred . This runs in pseudo-polynomial time 𝑂 (𝑁 ol × 𝑤 ′), where 𝑁 ol is the number of samples in the overloaded microbatch. 
+
+Bottleneck cost formulation. With 𝑆 deferred determined for every candidate pair, Entrain builds a bottleneck cost matrix 𝑉 and a standalone cost vector 𝐿 . 𝑉 𝑖,𝑗 is the minimum bottleneck LLM execution time achievable when microbatch 
+
+𝑖 ∈ 𝑆 ol defers 𝑆 deferred to microbatch 𝑗 ∈ 𝑆 ul (line 11): 
+
+𝑉 𝑖,𝑗 = max (𝑤 LLM ,𝑖 − 𝑤 deferred ,𝑖 , 𝑤 LLM ,𝑗 + 𝑤 deferred ,𝑖 ) (3) 
+
+𝐿 𝑖 is the cost of microbatch 𝑖 ∈ 𝑆 ol if it remains unpaired, i.e., 
+
+𝐿 𝑖 = 𝑤 LLM ,𝑖 (line 12). 𝐿 is used in the bottleneck matching to determine whether a microbatch’s LLM workload is high enough to require deferral, or it if can execute within budget on its own. 
+
+Bottleneck matching optimization. Given 𝑉 and 𝐿 , En-train finds the minimum feasible threshold 𝑇 ∗ via Bottle-neckMatch (line 13). 𝑇 ∗ is the smallest value in 𝑉 ∪ 𝐿 such that every microbatch can complete LLM execution within 
+
+𝑇 ∗ either by deferring LLM workload to an underloaded part-ner, or by executing alone without deferral. Since feasibility is monotone (if 𝑇 is feasible, any larger 𝑇 is also feasible), binary search over the at most 𝑂 (𝐾 2) candidates in 𝑉 ∪ 𝐿 
+
+efficiently finds 𝑇 ∗. For each candidate 𝑇 , Entrain constructs a restricted bipartite graph G( 𝑆 ol , 𝑆 ul , 𝑉 ) with edges only where 𝑉 𝑖,𝑗 ≤ 𝑇 , and verifies feasibility via DFS-based bipar-tite matching on critical microbatches. Figure 9c illustrates the bipartite graph. Non-critical microbatches ( 𝐿 𝑖 ≤ 𝑇 ∗) are arbitrarily assigned to remaining 𝑆 ul members with no defer-ral. Each feasibility check costs 𝑂 (𝐸 √𝐾 ) where 𝐸 is the edge count of G; given the small 𝐾 , the total overhead is negligible.                       
+
+> 8Encoder Forward Encoder Backward LLM Forward LLM Backward 1
+> 1
+> 11
+> 1
+> 12
+> 2
+> 2
+> 23
+> 3
+> 33
+> 3
+> 3456
+> 4
+> 4
+> 5
+> 5
+> 6
+> 56
+> 45
+> 5
+> 6
+> 62
+> 6
+> 1
+> 2
+> 3
+> 2
+> 4
+> 4
+> PP
+> Stage
+> Latency Gap (a) Backward passes of the encoder stage for microbatches deferring LLM workload are delayed until the gradients from the LLM backward pass are available. 1
+> 1
+> 11
+> 1
+> 12
+> 2
+> 2
+> 3
+> 3
+> 33
+> 3
+> 3456
+> 4
+> 4
+> 5
+> 5
+> 6
+> 56
+> 45
+> 5
+> 65’ 21’
+> 21’
+> 1’ 2
+> 43’
+> 43’ 65’
+> 5’ 61
+> 2
+> 3
+> (b) Split-backward processing allows the encoder backward pass to be executed immediately after getting the gradients from the LLM backward pass. 𝑛 ′refers to deferred samples in backward pass.
+
+Figure 10. Visualization of pipeline parallelism schedule of microbatches in Figure 8c with and without backward depen-dency optimization. 
+
+The algorithm returns 𝑇 ∗ and the complete matching P. Mi-crobatches are then arranged into an interleaved execution sequence (𝑜𝑙 0, 𝑢𝑙 0, 𝑜𝑙 1, 𝑢𝑙 1, . . . ) per P (line 15), with matched pairs transferring selected samples’ LLM workload from the overloaded to the immediately following underloaded micro-batch. 
+
+5.3 Optimizing Backward Pass Dependency 
+
+Our scheduling strategy focuses on optimizing the forward pass. However, in pipeline parallel training, the backward pass introduces strict reverse dependencies: the gradients for the encoder cannot be computed until the corresponding gradients from the LLM are available. Deferring the LLM workload inherently delays the completion of their forward pass, and as a result, the generation of gradients for these deferred samples is also delayed. This creates a latency gap 
+
+for the encoder backward pass, as shown in Figure 10a. After completing its forward pass for microbatch 𝑖 , the encoder stage expects gradients for a whole microbatch 𝑖 to return. If some LLM workload in the microbatch is deferred to mi-crobatch 𝑖 + 1, the encoder faces a potential pipeline stall waiting for the delayed gradients to arrive. 
+
+The split-backward processing. To prevent this delay from stalling the encoder backward pass, we modify the execution logic to support split-backward processing. Since the sched-uler is deterministic, the encoder is aware of which specific samples within the microbatch 𝑖 will be deferred during the LLM forward pass. When the backward pass for microbatch 
+
+𝑖 is scheduled, the encoder does not wait for the complete set of gradients. Instead, it immediately executes the backward pass for the non-deferred samples. The backward pass for the deferred samples is also deferred until their gradients arrive from the LLM backward pass. Figure 10b shows the pipeline parallelism schedule with split-backward processing. 
+
+Eager forward pass execution. Even with split-backward processing, the backward pass workload increases later in the iteration because of the deferred samples. To accommo-date this back-loaded computation, we must reserve com-pute capacity in the later microbatches. We achieve this by scheduling forward passes as eagerly as possible. While the standard 1F1B schedule executes only 𝑠 −𝑖 +1 forward passes in the initial warm-up phase (where 𝑠 is the number of stages and 𝑖 is the stage index starting from 1) as in Figure 10a be-fore entering the steady phase of interleaving one forward and one backward pass, we execute as many forward passes as memory constraints allow before switching to the steady phase. This eager execution reduces the number of forward passes required in the middle of the iteration, effectively yielding time slots that compute nodes can use to process the backward pass of deferred samples. This makes Entrain more friendly to more advanced pipeline parallelism techniques, such as zero-bubble pipeline paral-lelism (ZBPP) [ 35 ], which recommends executing the for-ward passes as eagerly as possible. 
+
+Numerical correctness. With the split-backward process-ing, the number of backward passes – and naturally the num-ber of gradient accumulations – increases. In low-precision training (e.g., BF16, FP8, or NVFP4 [ 5, 34 , 38 ]), such an increased number of gradient accumulations theoretically heightens the risk of numerical instability and swamping. However, this amplified accumulation depth is structurally unavoidable in large-scale distributed training. Many re-search papers have proposed algorithmic safeguards to solve this issue and thus it is no longer a destabilizing factor. The proposed algorithms, such as stochastic rounding (SR) [ 7 ], Kahan Summation [ 51 ], or mixed precision with higher pre-cision for gradients [ 34 ], effectively neutralize the negative impact of increased number of gradient accumulations, en-suring convergence. 
+
+6 Implementation 
+
+Entrain is implemented on top of PyTorch, Cornstarch [ 16 ], and HuggingFace Transformers [ 45 ] in Python. Entrain adds batch sizer and macroscopic profiler to derive the static model-parallel configuration and uses Cornstarch’s multi-modal 4D parallelization capability to partition the model and distribute it to GPUs accordingly. Entrain exploits Corn-starch’s multimodal 4D parallel execution capability to run distributed training, with the following modifications. 
+
+Microbatch scheduler. We replace DistributedSampler with Entrain sampler that sorts samples and assigns them to the microbatches. Deferral optimization is also executed at this point with estimated workload cost. Executing deferral opti-mization at the scheduler level allows Entrain to be compati-ble with sequence packing. Sequence packing is effective to reduce padding overhead, thus widely used [ 4, 19 , 43 , 50 , 53 ]. By running deferral optimization before packing sequences                       
+
+> 9Table 1. Parallel configuration of Entrain and the baselines and execution setup. For all frameworks, TP=2, CP=1, and DP=4. E.PP and L.PP represent encoder pipeline parallel degree and LLM pipeline parallel degree, respectively. * indicates DIP colocates vision and LLM stages to the same pipeline stage.
+> SynthChartNet DistTrain DIP Entrain Execution Setup Profiling Size 14256 Global Batch 512 512 512 Qwen2Vision Llama3-1b E.PP 48* 5L.PP 48* 3Qwen2Vision Llama3-3b E.PP 58* 4L.PP 38* 4
+
+and sending deferral information together with the packed microbatches, the pipeline execution engine can track the deferred samples within the packed microbatches. 
+
+Pipeline execution engine. We modified the existing 1F1B [ 29 ]and Zero-Bubble Pipeline Parallelism [ 35 ] pipeline schedule to support deferral optimization. The execution engine re-ceives deferral information from the scheduler along with the microbatches before executing each iteration, and exe-cutes the pipeline schedule. During the execution, the engine temporarily stores deferred activations and tracks the de-ferred sub-microbatches to ensure all deferred samples are properly processed in the backward pass. 
+
+7 Evaluation 
+
+We evaluate Entrain on a variety of datasets and models and compare it against DistTrain and DIP. We summarize the results as follows: 
+
+• Entrain outperforms the baselines in end-to-end training throughput by up to 1.40 × (§7.2). 
+
+• Entrain’s proposed macroscopic profiling paradigm effec-tively estimates the workload ratio between modalities and provides a stable parallel configuration (§7.3). 
+
+• Entrain’s hierarchical microbatch assignment and defer-ral optimization stabilize the workload variability across microbatches by up to 10.6 × (§7.4). 
+
+7.1 Experimental Setup Cluster setup. We evaluate Entrain using 16 NVIDIA A40-48GB GPUs on 4 nodes. Each node has 4 NVIDIA A40 GPUs and a NVIDIA Mellanox ConnectX-6 200Gbps Infiniband adaptor. The four GPUs in a node are connected in pairs using NVLink and connected to the node via PCIe 4.0. To emulate a larger cluster, we exploit the fact that data-parallel replicas synchronize only at the end of each iteration. We execute one DP replica at a time using TP, PP, and CP on real hardware (16 GPUs) and execute 4 replicas sequentially. The iteration time is taken as the maximum across the 4 executions, mirroring the all-reduce barrier to synchronize gradients. All experiments use this emulated 64-GPU setup. 
+
+Datasets and models. We evaluate Entrain using Hugging-Face FineVision dataset [44]. It is a multimodal dataset that contains more than 20 million samples of image and text pairs, where samples are collected from over 200 datasets. We pick 4 subdatasets from the FineVision dataset – Syn-thChartNet [ 31 ], ChartQA [ 28 ], CocoQA [ 37 ], and LLaVA-150k [ 25 ] – that have distinct data distributions. We show SynthChartNet data in the main text because it is the most variable, and other datasets are shown in Appendices. For models, we run various sizes of vision-language mod-els (VLMs) using Qwen2.5Vision vision transformer [ 41 ] to process various resolutions of images natively and Llama3 [ 2](1b and 3b parameters) for text processing. 
+
+Baselines. We compare Entrain to the following baselines: 1. DistTrain [ 52 ]: DistTrain reorders samples to mitigate the data heterogeneity problem. 2. DIP [ 48 ]: DIP introduces decoupled modality scheduling to address heterogeneity and variability in multimodal training workloads. We run 4D parallelism with different parallel configurations between Entrain and the baselines. Table 1 shows the parallel configurations (See Appendix D for parallel configurations on other datasets). DistTrain profiles 1 sample to derive a parallel configuration, while DIP profiles 1 microbatch (4 samples) to derive its parallel configuration. We use micro-batch size 4 and global batch size 512. Although Entrain supports both 1F1B and ZBPP schedules, we use 1F1B for Entrain in evaluation. 
+
+7.2 End-to-End Training Performance Training throughput. Figure 11 shows end-to-end train-ing performance of Entrain and the baselines using various datasets and models. The main performance improvement of Entrain over the baselines comes from two factors. First, En-train’s macroscopic profiling based parallel configuration is close to the optimal parallel, removing fragmented pipeline bubbles across modality pipeline stages. Second, Entrain’s hierarchical microbatch assignment balances the workload between microbatches, which is not possible with static mi-crobatch partitioning. Combined, Entrain achieves up to 1.40 × faster end-to-end training throughput. We also visu-alize one iteration of the pipeline schedule of Entrain and the baselines in Figure 12. Entrain shows balanced workload distribution between modalities and microbatches. 
+
+Memory consumption. Figure 13 shows the memory con-sumption of the baselines and Entrain for SynthChartNet dataset on Qwen2.5Vision+Llama3-3b VLM. Entrain’s de-ferral optimization temporarily stores encoder activations in the pipeline buffer and thus requires more memory than 
+
+> 10
+
+DistTrain DIP Entrain SynthChartNet ChartQA CocoQA LLaVA-150K 
+
+> 0.0
+> 5.0
+> 10.0
+> 15.0
+> 20.0
+> Iteration time (s)
+
+(a) Qwen2.5Vision+Llama3-1b SynthChartNet ChartQA CocoQA LLaVA-150K 
+
+> 0.0
+> 5.0
+> 10.0
+> 15.0
+> 20.0
+> 25.0
+> Iteration time (s)
+
+(b) Qwen2.5Vision+Llama3-3b 
+
+Figure 11. End-to-end training performance of Entrain and the baselines. Encoder Forward Encoder Backward LLM Forward LLM Backward Stage 7 
+
+> Stage 6
+> Stage 5
+> Stage 4
+> Stage 3
+> Stage 2
+> Stage 1
+> Stage 0
+
+(a) DistTrain pipeline schedule visualization. Stage 7 
+
+> Stage 6
+> Stage 5
+> Stage 4
+> Stage 3
+> Stage 2
+> Stage 1
+> Stage 0
+
+(b) DIP pipeline schedule visualization. Stage 7 
+
+> Stage 6
+> Stage 5
+> Stage 4
+> Stage 3
+> Stage 2
+> Stage 1
+> Stage 0
+
+(c) Entrain pipeline schedule visualization. 
+
+Figure 12. Pipeline schedule visualization of En-train and the baselines on SynthChartNet dataset on Qwen2.5Vision+Llama3-3b VLM. 
+
+non-deferral pipeline schedules. However, increased mem-ory consumption is minuscule because pairwise schedule only holds encoder activations for up to a single microbatch interval, and activation memory is very small compared to the total memory consumption. Rather, more balanced workload distribution between modalities and microbatches makes Entrain’s memory consumption more stable than the baselines, as shown in Figure 13c. DistTrain (Figure 13a), even though it follows 1F1B as Entrain, shows much more Rank 0     
+
+> Rank 1
+> Rank 2
+> Rank 3
+> Rank 4
+> Rank 5
+> Rank 6
+> Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> 14.0
+> Memory (GB)
+
+(a) Memory consumption of DistTrain pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> 14.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> 14.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 13. Memory consumption of different schedules for SynthChartNet dataset on Qwen2.5Vision+Llama3-3b VLM. 
+
+Table 2. Workload ratios in Bernoulli trials of SynthChartNet dataset in Qwen2.5Vision+Llama3-3b VLM using 16 GPUs. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 10:6, 9:7, 8:8, 7:9, 6:10 4 9:7, 8:8, 7:9 16 9:7, 8:8, 7:9 64 8:8 256 8:8 memory variability than Entrain due to imbalanced work-load distribution, ending up with much higher peak memory consumption. Meanwhile, DIP’s scheduling processes all modality encoder forward passes before executing the LLM, and starts modality encoder backward pass after all LLM execution is done, as shown in Figure 2c. This requires much more memory ( ∼12GB in rank 7) than DistTrain and Entrain to maintain encoder activations until they are freed during encoder backward pass, as shown in Figure 13b. See Appen-dix E for memory consumption of other configurations. 
+
+7.3 Analysis of Macroscopic Profiling 
+
+We analyze how the macroscopic profiling affects deriva-tion of the workload ratio and parallel configuration. We draw 𝑘 = 59 batches – providing 95% confidence level with 
+
+𝑝 𝑒𝑟𝑟𝑜𝑟 = 5% – with different batch sizes from the datasets and compute the workload ratio between modalities for each batch using the cost model and the metadata of the samples. 
+
+11 Qwen2Vision+Llama-1B Qwen2Vision+Llama-3B   
+
+> 0
+> 10000
+> 20000
+> 30000
+> Iteration Time (ms)
+> 7:1
+> 1.66x
+> 6:2
+> 1.16x
+> 5:3 4:4
+> 1.04x
+> 3:5
+> 1.18x
+> 5:3
+> 1.26x
+> 4:4 3:5
+> 1.07x
+> 2:6
+> 1.16x
+> 1:7
+> 1.85x
+
+Figure 14. Sensitivity analysis on SynthChartNet dataset. Ra-tios are encoder-to-LLM workload ratios. 
+
+Table 3. Standard deviation (std) of forward time of modalities in different pipeline schedules and datasets.                                        
+
+> Synth ChartNet ChartQA CocoQA Llava-150k Vision DistTrain 208.07 61.34 22.82 17.98 DIP 102.13 73.42 28.79 14.82 Entrain 19.60 15.23 22.11 8.11
+> Llama 1b DistTrain 77.92 61.34 22.82 17.98 DIP 37.45 73.42 28.79 14.82 Entrain 18.79 15.23 22.11 8.11
+> LLama 3b DistTrain 164.55 35.44 5.37 32.92 DIP 84.36 40.56 7.77 33.27 Entrain 40.24 25.72 5.52 31.66
+
+Table 2 shows the workload ratios shown in Bernoulli trials for SynthChartNet dataset on Qwen2.5Vision+Llama3-3b VLM. Across all datasets, smaller batch sizes show more vari-ability in the workload ratio, which leads to more variability in GPU allocation to the modalities. Depending on which samples are drawn, smaller batch sizes may allocate GPUs to the encoder and the LLM in different proportions (e.g., 10:6 or 6:10), while the true dataset workload ratio mean is 1.27:1. Different trial data are shown in Appendix F. 
+
+Sensitivity analysis to macroscopic profiling quality. 
+
+To demonstrate the impact of parallel configuration quality on performance, we profile Entrain under varying parallel configurations, with results shown in Figure 14 (Appendix G for other datasets). The throughput of Entrain drops signifi-cantly by 85% if a bad parallel configuration is used, while the parallel configuration derived from the macroscopic pro-filing with profiling size 256 – the black bars – is the best. 
+
+7.4 Effect of Hierarchical Microbatch Assignment to Variability 
+
+We evaluate how modality workload fluctuates across mi-crobatches due to data variability, and how much the defer-ral optimization mitigates the imbalance. Figure 15 shows the variability of forward time of each modality in VLMs (Qwen2.5Vision, LLama3-1b, and LLama3-3b) across micro-batches in SynthChartNet dataset (Appendix H for other datasets). Each microbatch’s forward time is computed as DistTrain DIP Entrain 5 10 15 20 25 30              
+
+> Microbatch index
+> 250
+> 500
+> 750
+> Forward time (ms)
+> (a) Qwen2.5Vision forward time variability across microbatches. 510 15 20 25 30
+> Microbatch index
+> 100
+> 200
+> Forward time (ms)
+> (b) Llama3-1b forward time variability across microbatches. 510 15 20 25 30
+> Microbatch index
+> 200
+> 400
+> Forward time (ms)
+> (c) Llama3-3b forward time variability across microbatches.
+
+Figure 15. Variability of modality forward time across micro-batches in SynthChartNet dataset on VLMs. Each line repre-sents a DP replica. 
+
+the sum of forward time of all corresponding pipeline stages. DistTrain’s heuristic microbatch reordering algorithm fo-cuses on mitigating pipeline bubbles from the holistic view, hence it fails to address the data variability between micro-batches and shows high variability in both vision and LLM forward time. Entrain shows both vision and LLM forward time much more stable than the baselines. More details in numerical values are shown in Table 3. Low variability in vision forward time is due to the stratified sample assign-ment in the first phase of deferral optimization. We do not statically assign samples to have homogeneous number of samples per microbatch, but assign different number of sam-ples to each microbatch to balance the encoder workload. Encoder workload-focused assignment breaks the balance of LLM workload, but the deferral optimization mitigates the imbalance. Because Entrain defers LLM workload as atomi-cally – not partitioning a sample into multiple chunks and deferring only a part of the sample – the deferral does not fully address the imbalance. Yet, the deferral optimization still mitigates the imbalance significantly. 
+
+> 12
+
+8 Related Work 
+
+Large-scale distributed training. Driven by the scaling law [ 18 ], distributed training frameworks such as Megatron-LM [ 30 ], DeepSpeed [ 36 ], Colossal-AI [ 21 ], and TorchTi-tan [ 23 ] have enabled 1T+-parameter model training [ 3 , 49 ]. As the focus shifts toward larger datasets and longer con-texts [ 14 ], context parallelism has been proposed to distribute long sequences across GPUs [2, 13, 22, 42, 43]. 
+
+Distributed multimodal LLM training. DistMM [ 15 ] is among the earliest works on distributed multimodal training, targeting CLIP-like models without LLM backbones. Dist-Train [ 52 ], Optimus [ 8 ], Cornstarch [ 16 ], and DIP [ 48 ] tackle the heterogeneity between modality encoders and the LLM backbone; Cornstarch additionally handles structural charac-teristics such as frozen parameters and non-causal attention. None of these systems, however, fully addresses dataset vari-ability at both the profiling and execution granularities. 
+
+Dataset heterogeneity and variability. HotSPa [ 10 ] and ByteScale [ 9 ] address sequence length variability in uni-modal LLM training via dynamic parallelism reconfiguration, but assume a single axis of variability. In MLLM training, each modality follows its own independent distribution yet is coupled within each sample, making the inter-modality workload ratio chaotic at fine granularities. DistTrain [ 52 ]reorders samples to reduce pipeline bubbles but remains oblivious to intra-sample modality coupling; DIP [ 48 ] in-terleaves encoder and LLM pipeline stages but incurs high memory overhead from retained activations. These works overlook that the modality workload ratio converges to a stable mean at global batch scale, a property that neither demands dynamic reconfiguration nor can be captured by micro-level profiling. 
+
+9 Conclusion 
+
+In this paper, we presented Entrain, a distributed MLLM training framework that addresses both heterogeneity and variability in multimodal training workloads. Entrain coun-ters the intuition that dynamic model-parallel configuration is necessary for MLLMs with data variability by demonstrat-ing that at the macroscopic scale, the aggregate workload ratio between modalities reliably converges to a stable con-stant. Entrain also addresses the fundamental limitation of variability at the microscopic scale by proposing a hierar-chical microbatch assignment algorithm that defers excess workload within each iteration, stabilizing execution time across microbatches. Entrain outperforms the baselines in end-to-end training throughput by up to 1.40 ×, reducing workload variability across microbatches by up to 10.6 ×.
+
+References 
+
+[1] Inclusion AI and Ant Group. 2025. Ming-Omni: A Unified Multimodal Model for Perception and Generation. arXiv:2506.09344 [cs.AI] https: //arxiv.org/abs/2506.09344 
+
+[2] Meta AI. 2024. The Llama 3 Herd of Models. https://arxiv.org/abs/ 2407.21783 
+
+[3] Meta AI. 2025. The Llama 4 herd: The beginning of a new era of natively multimodal AI innovation. https://ai.meta.com/blog/llama-4-multimodal-intelligence/ . [Accessed Feb 08, 2026]. [4] Yushi Bai, Xin Lv, Jiajie Zhang, Yuze He, Ji Qi, Lei Hou, Jie Tang, Yuxiao Dong, and Juanzi Li. 2024. LongAlign: A Recipe for Long Context Alignment of Large Language Models. In EMNLP 24 . https: //aclanthology.org/2024.findings-emnlp.74/ 
+
+[5] Brian Chmiel, Maxim Fishman, Ron Banner, and Daniel Soudry. 2025. FP4 All the Way: Fully Quantized Training of Large Language Models. In NeurIPS 25 . https://neurips.cc/virtual/2025/loc/san-diego/poster/ 116331 
+
+[6] Weiwei Chu, Xinfeng Xie, Jiecao Yu, Jie Wang, Amar Phanishayee, Chunqiang Tang, Yuchen Hao, Jianyu Huang, Mustafa Ozdal, Jun Wang, Vedanuj Goswami, Naman Goyal, Abhishek Kadian, Andrew Gu, Chris Cai, Feng Tian, Xiaodong Wang, Min Si, Pavan Balaji, Ching-Hsiang Chu, and Jongsoo Park. 2025. Scaling Llama 3 Training with Ef-ficient Parallelism Strategies. In ISCA 25 . doi: 10.1145/3695053.3731410 
+
+[7] Matteo Croci, Massimiliano Fasi, Nicholas J. Higham, Theo Mary, and Mantas Mikaitis. [n. d.]. Stochastic Rounding: implementa-tion, error analysis and applications. Royal Society Open Sci-ence ([n. d.]). arXiv:https://royalsocietypublishing.org/rsos/article-pdf/doi/10.1098/rsos.211631/998073/rsos.211631.pdf doi: 10.1098/rsos. 211631 
+
+[8] Weiqi Feng, Yangrui Chen, Shaoyu Wang, Yanghua Peng, Haibin Lin, and Minlan Yu. 2025. Optimus: Accelerating Large-Scale Multi-Modal LLM Training by Bubble Exploitation. In ATC 25 .[9] Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. 2025. ByteScale: Communication-Efficient Scaling of LLM Training with a 2048K Context Length on 16384 GPUs. In SIGCOMM 25 . https://doi.org/10.1145/3718958.3754352 
+
+[10] Hao Ge, Fangcheng Fu, Haoyang Li, Xuanyu Wang, Sheng Lin, Yujie Wang, Xiaonan Nie, Hailin Zhang, Xupeng Miao, and Bin Cui. 2024. Enabling Parallelism Hot Switching for Efficient Training of Large Language Models. In SOSP 24 . doi: 10.1145/3694715.3695969 
+
+[11] Google. 2023. Gemini: A Family of Highly Capable Multimodal Models. arXiv:2312.11805 [cs.CL] https://arxiv.org/abs/2312.11805 
+
+[12] Ronald Lewis Graham. 1969. Bounds on Multiprocessing Timing Anomalies. SIAM J. Appl. Math. 17, 2 (1969), 416–429. https://doi.org/ 10.1137/0117039 
+
+[13] Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Ying-tong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. 2024. LoongTrain: Efficient Training of Long-Sequence LLMs with Head-Context Parallelism. https://arxiv.org/abs/2406.18485 
+
+[14] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, Tom Henni-gan, Eric Noland, Katie Millican, George van den Driessche, Bog-dan Damoc, Aurelia Guy, Simon Osindero, Karen Simonyan, Erich Elsen, Jack W. Rae, Oriol Vinyals, and Laurent Sifre. 2022. Training Compute-Optimal Large Language Models. arXiv:2203.15556 [cs.CL] 
+
+https://arxiv.org/abs/2203.15556 
+
+[15] Jun Huang, Zhen Zhang, Shuai Zheng, Feng Qin, and Yida Wang. 2024. DISTMM: Accelerating Distributed Multimodal Model Training. In 
+
+NSDI 24 . https://www.usenix.org/conference/nsdi24/presentation/ huang 
+
+[16] Insu Jang, Runyu Lu, Nikhil Bansal, Ang Chen, and Mosharaf Chowd-hury. 2025. Efficient Distributed MLLM Training with Cornstarch. 
+
+> 13
+
+arXiv:2503.11367 [cs.DC] https://arxiv.org/abs/2503.11367 
+
+[17] Insu Jang, Zhenning Yang, Zhen Zhang, Xin Jin, and Mosharaf Chowd-hury. 2023. Oobleck: Resilient Distributed Training of Large Models Using Pipeline Templates. In SOSP 23 . doi: 10.1145/3600006.3613152 
+
+[18] Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Ben-jamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. 2020. Scaling Laws for Neural Language Mod-els. arXiv:2001.08361 [cs.LG] https://arxiv.org/abs/2001.08361 
+
+[19] Matej Kosec, Mario Michael Krell, Sergio P. Perez, and Andrew Fitzgib-bon. 2022. Efficient Sequence Packing without Cross-contamination: Accelerating Large Language Models without Impacting Performance. 
+
+https://arxiv.org/abs/2107.02027 
+
+[20] Bo Li, Yuanhan Zhang, Dong Guo, Renrui Zhang, Feng Li, Hao Zhang, Kaichen Zhang, Peiyuan Zhang, Yanwei Li, Ziwei Liu, and Chunyuan Li. 2025. LLaVA-OneVision: Easy Visual Task Transfer. TMLR 25 (2025). 
+
+https://openreview.net/forum?id=zKv8qULV6n 
+
+[21] Shenggui Li, Hongxin Liu, Zhengda Bian, Jiarui Fang, Haichen Huang, Yuliang Liu, Boxiang Wang, and Yang You. 2023. Colossal-AI: A Unified Deep Learning System For Large-Scale Parallel Training. In ICPP 23 .doi: 10.1145/3605573.3605613 
+
+[22] Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. 2023. Sequence Parallelism: Long Sequence Training from System Perspective. In ACL 23 . doi: 10.18653/v1/2023.acl-long.134 
+
+[23] Wanchao Liang, Tianyu Liu, Less Wright, Will Constable, Andrew Gu, Chien-Chin Huang, Iris Zhang, Wei Feng, Howard Huang, Junjie Wang, Sanket Purandare, Gokul Nadathur, and Stratos Idreos. 2025. TorchTi-tan: One-stop PyTorch native solution for production ready LLM pre-training. In ICLR 25 . https://openreview.net/forum?id=SFN6Wm7YBI 
+
+[24] Haotian Liu, Chunyuan Li, Yuheng Li, and Yong Jae Lee. 2024. Im-proved Baselines with Visual Instruction Tuning. In CVPR 24 . 26296– 26306. [25] Haotian Liu, Chunyuan Li, Qingyang Wu, and Yong Jae Lee. 2023. Visual Instruction Tuning. In NIPS 23 . https://proceedings.neurips. cc/paper_files/paper/2023/file/6dcf277ea32ce3288914faf369fe6de0-Paper-Conference.pdf 
+
+[26] Zuyan Liu, Yuhao Dong, Jiahui Wang, Ziwei Liu, Winston Hu, Jiwen Lu, and Yongming Rao. 2025. Ola: Pushing the Frontiers of Omni-Modal Language Model. arXiv:2502.04328 [cs.CV] https://arxiv.org/ abs/2502.04328 
+
+[27] Haoyu Lu, Wen Liu, Bo Zhang, Bingxuan Wang, Kai Dong, Bo Liu, Jingxiang Sun, Tongzheng Ren, Zhuoshu Li, Hao Yang, Yaofeng Sun, Chengqi Deng, Hanwei Xu, Zhenda Xie, and Chong Ruan. 2024. DeepSeek-VL: Towards Real-World Vision-Language Understanding. arXiv:2403.05525 [cs.AI] https://arxiv.org/abs/2403.05525 
+
+[28] Ahmed Masry, Do Xuan Long, Jia Qing Tan, Shafiq Joty, and Ena-mul Hoque. 2022. ChartQA: A Benchmark for Question Answer-ing about Charts with Visual and Logical Reasoning. In ACL 22 .
+
+https://aclanthology.org/2022.findings-acl.177/ 
+
+[29] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R. Devanur, Gregory R. Ganger, Phillip B. Gibbons, and Matei Zaharia. 2019. PipeDream: generalized pipeline parallelism for DNN training. In SOSP 19 . doi: 10.1145/3341301.3359646 
+
+[30] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGres-ley, Mostofa Patwary, Vijay Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, Amar Phanishayee, and Matei Zaharia. 2021. Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM. In SC 21 . doi: 10.1145/3458817. 3476209 
+
+[31] Ahmed Nassar, Matteo Omenetti, Maksym Lysak, Nikolaos Livathinos, Christoph Auer, Lucas Morin, Rafael Teixeira de Lima, Yusik Kim, A. Said Gurbuz, Michele Dolfi, and Peter W. J. Staar. 2025. SmolDocling: An ultra-compact vision-language model for end-to-end multi-modal document conversion. In ICCV 25 . 21972–21983. [32] OpenAI. 2024. GPT-4o System Card. arXiv:2410.21276 [cs.CL] https: //arxiv.org/abs/2410.21276 
+
+[33] OpenAI. 2026. OpenAI GPT-5 System Card. arXiv:2601.03267 [cs.CL] 
+
+https://arxiv.org/abs/2601.03267 
+
+[34] Houwen Peng, Kan Wu, Yixuan Wei, Guoshuai Zhao, Yuxiang Yang, Ze Liu, Yifan Xiong, Ziyue Yang, Bolin Ni, Jingcheng Hu, Ruihang Li, Miaosen Zhang, Chen Li, Jia Ning, Ruizhe Wang, Zheng Zhang, Shuguang Liu, Joe Chau, Han Hu, and Peng Cheng. 2023. FP8-LM: Training FP8 Large Language Models. arXiv:2310.18313 [cs.LG] https: //arxiv.org/abs/2310.18313 
+
+[35] Penghui Qi, Xinyi Wan, Guangxing Huang, and Min Lin. 2024. Zero Bubble (Almost) Pipeline Parallelism. In ICLR 24 . https://openreview. net/forum?id=tuzTN0eIO5 
+
+[36] Jeff Rasley, Samyam Rajbhandari, Olatunji Ruwase, and Yuxiong He. 2020. DeepSpeed: System Optimizations Enable Training Deep Learn-ing Models with Over 100 Billion Parameters. In KDD 20 . doi: 10.1145/ 3394486.3406703 
+
+[37] Mengye Ren, Ryan Kiros, and Richard Zemel. 2015. Explor-ing Models and Data for Image Question Answering. In NIPS 15 . https://proceedings.neurips.cc/paper_files/paper/2015/file/ 831c2f88a604a07ca94314b56a4921b8-Paper.pdf 
+
+[38] Xiao Sun, Jungwook Choi, Chia-Yu Chen, Naigang Wang, Swagath Venkataramani, Vijayalakshmi (Viji) Srinivasan, Xiaodong Cui, Wei Zhang, and Kailash Gopalakrishnan. 2019. Hybrid 8-bit Floating Point (HFP8) Training and Inference for Deep Neural Networks. In 
+
+NeurIPS 19 . https://proceedings.neurips.cc/paper_files/paper/2019/ file/65fc9fb4897a89789352e211ca2d398f-Paper.pdf 
+
+[39] Colin Unger, Zhihao Jia, Wei Wu, Sina Lin, Mandeep Baines, Carlos Efrain Quintero Narvaez, Vinay Ramakrishnaiah, Nirmal Prajapati, Pat McCormick, Jamaludin Mohd-Yusof, Xi Luo, Dheevatsa Mudigere, Jongsoo Park, Misha Smelyanskiy, and Alex Aiken. 2022. Unity: Ac-celerating DNN Training Through Joint Optimization of Algebraic Transformations and Parallelization. In OSDI 22 . USENIX Association, Carlsbad, CA, 267–284. https://www.usenix.org/conference/osdi22/ presentation/unger 
+
+[40] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Ł ukasz Kaiser, and Illia Polosukhin. 2017. Attention is All you Need. In NIPS 17 .[41] Peng Wang, Shuai Bai, Sinan Tan, Shijie Wang, Zhihao Fan, Jinze Bai, Keqin Chen, Xuejing Liu, Jialin Wang, Wenbin Ge, Yang Fan, Kai Dang, Mengfei Du, Xuancheng Ren, Rui Men, Dayiheng Liu, Chang Zhou, Jingren Zhou, and Junyang Lin. 2024. Qwen2-VL: Enhancing Vision-Language Model’s Perception of the World at Any Resolution. arXiv:2409.12191 [cs.CV] https://arxiv.org/abs/2409.12191 
+
+[42] Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. 2025. FlexSP: Accelerating Large Language Model Training via Flexible Sequence Parallelism. In ASPLOS 25 . doi: 10.1145/3676641.3715998 
+
+[43] Zheng Wang, Anna Cai, Xinfeng Xie, Zaifeng Pan, Yue Guan, Weiwei Chu, Jie Wang, Shikai Li, Jianyu Huang, Chris Cai, Yuchen Hao, and Yufei Ding. 2025. WLB-LLM: workload-balanced 4D parallelism for large language model training. In OSDI 25 . https://www.usenix.org/ conference/osdi25/presentation/wang-zheng 
+
+[44] Luis Wiedmann, Orr Zohar, Amir Mahla, Xiaohan Wang, Rui Li, Thibaud Frere, Leandro von Werra, Aritra Roy Gosthipaty, and An-drés Marafioti. 2025. FineVision: Open Data Is All You Need. https: //arxiv.org/abs/2510.17269 
+
+[45] Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Remi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Syl-vain Gugger, Mariama Drame, Quentin Lhoest, and Alexander Rush. 2020. Transformers: State-of-the-Art Natural Language Processing. In 
+
+EMNLP 20 .
+
+> 14
+
+[46] Zhiyu Wu, Xiaokang Chen, Zizheng Pan, Xingchao Liu, Wen Liu, Damai Dai, Huazuo Gao, Yiyang Ma, Chengyue Wu, Bingxuan Wang, Zhenda Xie, Yu Wu, Kai Hu, Jiawei Wang, Yaofeng Sun, Yukun Li, Yishi Piao, Kang Guan, Aixin Liu, Xin Xie, Yuxiang You, Kai Dong, Xingkai Yu, Haowei Zhang, Liang Zhao, Yisong Wang, and Chong Ruan. 2024. DeepSeek-VL2: Mixture-of-Experts Vision-Language Mod-els for Advanced Multimodal Understanding. arXiv:2412.10302 [cs.CV] 
+
+https://arxiv.org/abs/2412.10302 
+
+[47] Jin Xu, Zhifang Guo, Hangrui Hu, Yunfei Chu, Xiong Wang, Jinzheng He, Yuxuan Wang, Xian Shi, Ting He, Xinfa Zhu, Yuanjun Lv, Yongqi Wang, Dake Guo, He Wang, Linhan Ma, Pei Zhang, Xinyu Zhang, Hongkun Hao, Zishan Guo, Baosong Yang, Bin Zhang, Ziyang Ma, Xipin Wei, Shuai Bai, Keqin Chen, Xuejing Liu, Peng Wang, Mingkun Yang, Dayiheng Liu, Xingzhang Ren, Bo Zheng, Rui Men, Fan Zhou, Bowen Yu, Jianxin Yang, Le Yu, Jingren Zhou, and Junyang Lin. 2025. Qwen3-Omni Technical Report. arXiv:2509.17765 [cs.CL] https://arxiv. org/abs/2509.17765 
+
+[48] Zhenliang Xue, Hanpeng Hu, Xing Chen, Yimin Jiang, Yixin Song, Zeyu Mi, Yibo Zhu, Daxin Jiang, Yubin Xia, and Haibo Chen. 2026. DIP: Efficient Large Multimodal Model Training with Dynamic Interleaved Pipeline. In ASPLOS 26 . doi: 10.1145/3779212.3790154 
+
+[49] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025. Qwen3 Technical Report. arXiv:2505.09388 [cs.CL] https: //arxiv.org/abs/2505.09388 
+
+[50] Yongqiang Yao, Jingru Tan, Kaihuan Liang, Feizhao Zhang, Jiahao Hu, Shuo Wu, Yazhe Niu, Ruihao Gong, Dahua Lin, and Ningyi Xu. 2025. Hierachical Balance Packing: Towards Efficient Supervised Fine-tuning for Long-Context LLM. In NeurIPS 25 . https://openreview.net/ forum?id=6BHDre6WQW 
+
+[51] Jinbin Zhang, Nasib Ullah, Erik Schultheis, and Rohit Babbar. 2025. ELMO : Efficiency via Low-precision and Peak Memory Optimization in Large Output Spaces. In ICML 25 . https://openreview.net/forum? id=d6CTIPrTTC 
+
+[52] Zili Zhang, Yinmin Zhong, Yimin Jiang, Hanpeng Hu, Jianjian Sun, Zheng Ge, Yibo Zhu, Daxin Jiang, and Xin Jin. 2025. DistTrain: Ad-dressing Model and Data Heterogeneity with Disaggregated Training for Multimodal Large Language Models. In SIGCOMM 25 . https: //doi.org/10.1145/3718958.3750472 
+
+[53] Siyan Zhao, Daniel Mingyi Israel, Guy Van den Broeck, and Aditya Grover. 2025. Prepacking: A Simple Method for Fast Prefilling and Increased Throughput in Large Language Models. In AISTATS 25 . https: //openreview.net/forum?id=LBVD4krAq2 
+
+[54] Lianmin Zheng, Zhuohan Li, Hao Zhang, Yonghao Zhuang, Zhifeng Chen, Yanping Huang, Yida Wang, Yuanzhong Xu, Danyang Zhuo, Eric P. Xing, Joseph E. Gonzalez, and Ion Stoica. 2022. Alpa: Au-tomating Inter- and Intra-Operator Parallelism for Distributed Deep Learning. In OSDI 22 . https://www.usenix.org/conference/osdi22/ presentation/zheng-lianmin 
+
+> 15
+
+A Termination Proof for the Loop 
+
+This appendix proves that the loop in Algorithm 1 terminates in finitely many iterations. 
+
+Setup. Let each training sample 𝑖 contribute a workload vector w𝑖 = (𝑤 encoder ,𝑖 , 𝑤 LLM ,𝑖 ), where 𝑤 encoder ,𝑖 and 𝑤 LLM ,𝑖 
+
+are the workloads of the vision encoder and LLM for that sample (following the notation of Section 5). Project w𝑖 onto the scalar workload ratio: 
+
+𝑟 𝑖 = 𝑤 encoder ,𝑖 
+
+𝑤 encoder ,𝑖 + 𝑤 LLM ,𝑖 
+
+∈ [0, 1] (4) which governs the proportional GPU allocation. Let 𝜈 𝑊 =
+
+E[𝑟 𝑖 ] denote the population mean. Each iteration of the al-gorithm draws 𝑛 independent and identically distributed samples and computes the sample mean ¯𝑟 𝑛 .
+
+Termination proof. Since 𝑟 𝑖 ∈ [ 0, 1] are i.i.d. bounded ran-dom variables, the Strong Law of Large Numbers guarantees that the sample mean converges to the true mean with prob-ability 1: 
+
+¯𝑟 𝑛 −→ 𝜈 𝑊 as 𝑛 → ∞ . (5) The proportional GPU allocation function 𝑄 (·) is piecewise constant: it rounds the continuous ratio to the nearest inte-ger split, producing a finite number of breakpoints in [0, 1].Let 𝑑 > 0 denote the distance from 𝜈 𝑊 to the nearest break-point. This is positive as long as 𝜈 𝑊 does not fall exactly on a breakpoint, which holds for any continuously-valued workload distribution. By Equation 5, there exists a finite threshold 𝑛 ∗ such that for all 𝑛 ≥ 𝑛 ∗, every independently drawn batch of size 
+
+𝑛 satisfies |¯𝑟 𝑛 − 𝜈 𝑊 | < 𝑑 , and hence produces the same allocation 𝑄 (¯𝑟 𝑛 ) = 𝑄 (𝜈 𝑊 ). Therefore, once 𝑛 reaches 𝑛 ∗, all 
+
+𝑘 Bernoulli validation draws agree with the reference batch, 
+
+IsStable = True , and the loop returns. The loop terminates in finitely many doublings. 
+
+Convergence rate. The above argument does not specify the value of 𝑛 ∗. Under the Central Limit Theorem approxi-mation, one can show 𝑛 ∗ ≤ ( 6 𝜎 𝑝𝑜𝑝 /𝑑 )2, at which point the probability of any single batch producing a different allo-cation falls to ≈ 0.0000002% . In practice, the Bernoulli test passes at batch sizes far smaller than this bound, as shown empirically in Appendix F. 
+
+B Probabilistic Proof of Configuration Stability 
+
+This appendix formalizes the guarantee used in Section 4.2. The argument has two steps. Section B.1 bounds the prob-ability that a random profiling batch of size 𝑛 yields a con-figuration different from the observed reference allocation. Section B.2 then shows that the same decision remains valid for any larger batch size 𝑏 ≥ 𝑛 , in particular the runtime global batch size 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 , because the workload-ratio estima-tor concentrates as batch size grows. 
+
+B.1 Bounding the Error Rate at Batch Size 𝑛 
+
+Let 𝐶 𝑟𝑒 𝑓 denote the discrete allocation returned by the first reference batch of size 𝑛 under the chosen data-parallel de-gree 𝐷𝑃 . For each subsequent independent validation batch of size 𝑛 , let 𝐶 𝑛 denote the allocation returned by the same procedure. Define the failure event as 𝐶 𝑛 ≠ 𝐶 𝑟𝑒 𝑓 , and let 
+
+𝑝 𝑒𝑟𝑟𝑜𝑟 = Pr (𝐶 𝑛 ≠ 𝐶 𝑟𝑒 𝑓 | 𝐶 𝑟𝑒 𝑓 ) (6) be the probability that a fresh size-𝑛 batch yields a different allocation than the observed reference allocation. After fixing the reference batch, running the procedure on 
+
+𝑘 additional independent validation batches gives 𝑘 Bernoulli trials. The probability of observing zero failures is: 
+
+Pr (0 errors in 𝑘 trials ) = (1 − 𝑝 𝑒𝑟𝑟𝑜𝑟 )𝑘 (7) For observing zero failures to constitute significant evi-dence against an error rate of 𝑝 𝑒𝑟𝑟𝑜𝑟 , we require (1−𝑝 𝑒𝑟𝑟𝑜𝑟 )𝑘 ≤
+
+𝛼 . Solving the boundary case for the minimum number of trials: 
+
+𝑘 =
+
+ ln (𝛼 )
+
+ln (1 − 𝑝 𝑒𝑟𝑟𝑜𝑟 )
+
+
+
+(8) Therefore, observing identical configurations across 𝑘 in-dependent validation trials allows the system to state with confidence 1 − 𝛼 that a random batch of size 𝑛 will differ from the observed reference allocation 𝐶 𝑟𝑒 𝑓 with probability at most 𝑝 𝑒𝑟𝑟𝑜𝑟 . For example, with 𝛼 = 0.05 and 𝑝 𝑒𝑟𝑟𝑜𝑟 = 0.05 ,the required number of trials is 𝑘 ≈ 59 .
+
+B.2 Lifting the Guarantee from 𝑛 to Larger Batch Sizes 
+
+Section B.1 only certifies stability for random profiling batches of size 𝑛 relative to the observed reference allocation 𝐶 𝑟𝑒 𝑓 .However, the configuration is used at training time for larger global batches, so we must show that the same decision re-mains valid at those larger scales. Let each sample 𝑖 contribute a workload vector w𝑖 =
+
+(𝑤 encoder ,𝑖 , 𝑤 LLM ,𝑖 ). Let 𝜇 = E[w𝑖 ] and Σ = Cov (w𝑖 ). For any batch size 𝑏 ≥ 𝑛 , the estimated macroscopic workload ratio is derived from the sample mean 
+
+¯w𝑏 = 1
+
+𝑏 
+
+> 𝑏
+
+∑︁ 
+
+> 𝑖 =1
+
+w𝑖 . (9) Assuming independent and identically distributed sampling, its covariance scales as Cov ( ¯w𝑏 ) = 1
+
+𝑏 Σ. (10) Thus, the estimator becomes more concentrated as 𝑏 grows. Now consider the mapping from the continuous work-load ratio to a discrete configuration. Because GPUs are indivisible, this mapping partitions the workload space into piecewise-constant decision regions. Let 𝑉 (𝐶 𝑟𝑒 𝑓 ) denote the region that maps to the observed reference allocation 𝐶 𝑟𝑒 𝑓 .        
+
+> 16 Encoder Forward Encoder Backward LLM Forward LLM Backward MB 1 MB 2 MB 3 MB 4 MB 5 MB 6 GPU 2
+> GPU 1
+> GPU 0
+
+(a) Pipeline schedule without pairwise deferral optimization. Micro-batches have static (two) number of samples. MB 3 MB 2 MB 6 MB 1 MB 4 MB 5  
+
+> Defer Defer Defer GPU 2
+> GPU 1
+> GPU 0
+
+(b) Pipeline schedule with pairwise deferral optimization. 
+
+Figure 16. Comparison of 3-stage pipeline parallel schedule without and with pairwise deferral optimization. 
+
+From the binomial argument in Section B.1, the estima-tor at batch size 𝑛 already lands in this region with high probability: 
+
+Pr ( ¯w𝑛 ∈ 𝑉 (𝐶 𝑟𝑒 𝑓 ) | 𝐶 𝑟𝑒 𝑓 ) ≥ 1 − 𝑝 𝑒𝑟𝑟𝑜𝑟 . (11) Because proportional allocation maps continuous work-load ratios to integer GPU counts via rounding, each decision region 𝑉 (𝐶 𝑟𝑒 𝑓 ) is a convex polytope. Moreover, the high suc-cess rate established above implies that the population mean 
+
+𝜇 lies in the interior of 𝑉 (𝐶 𝑟𝑒 𝑓 ): if 𝜇 were outside or near the boundary of 𝑉 (𝐶 𝑟𝑒 𝑓 ), the size-𝑛 estimator would frequently land outside the region, contradicting the Bernoulli test. For any 𝑏 ≥ 𝑛 , the estimator ¯w𝑏 shares the same mean 𝜇 
+
+but has strictly smaller covariance Σ/𝑏 ⪯ Σ/𝑛 . Because 𝜇 lies in the interior of the convex region 𝑉 (𝐶 𝑟𝑒 𝑓 ), concentrating more tightly around 𝜇 can only increase the probability of remaining in 𝑉 (𝐶 𝑟𝑒 𝑓 ). The allocation selected from profiling batches of size 𝑛 therefore remains valid for any larger batch size, including the runtime global batch size 𝐵 𝑔𝑙𝑜𝑏𝑎𝑙 and, as a limiting case, the full dataset size 𝑁 .Once a modest profiling batch size 𝑛 is large enough that repeated random draws agree on the same discrete allocation, averaging over any larger batch only reinforces that decision. 
+
+C Pipeline Schedule with Pairwise Deferral Optimization 
+
+Figure 16 shows the pipeline parallel schedule with 3 pipeline stages without and with pairwise deferral optimization. One stage and two stages are assigned to vision and LLM, respec-tively, since total workload ratio is 1:2 (18:36). After pairwise deferral optimization, some LLM workloads are shifted to 
+
+Table 4. Parallel configurations of Entrain and the baselines on various datasets. 
+
+DistTrain/DIP/Entrain LLaVA-150k ChartQA CocoQA Qwen2Vision Llama3-1b E.PP 5/8/4 5/8/5 4/8/5 L.PP 3/8/4 3/8/3 4/8/3 Qwen2Vision Llama3-3b E.PP 4/8/3 4/8/4 4/8/3 L.PP 4/8/5 4/8/4 4/8/5 Rank 0     
+
+> Rank 1
+> Rank 2
+> Rank 3
+> Rank 4
+> Rank 5
+> Rank 6
+> Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> Memory (GB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain-1F1B pipeline schedule. 
+
+Figure 17. SynthChartNet on Qwen2.5Vision+Llama3-1b VLM. 
+
+the follow-up microbatches, resulting in a more balanced pipeline schedule. Pairwise deferral only happens in LLM, thus the encoder schedule remains unchanged. 
+
+D Parallel Configurations 
+
+Table 1 shows the parallel configuration of Entrain and the baselines on Qwen2.5Vision + Llama3-1b VLM and Qwen2.5Vision + Llama3-3b VLM. Note that for DIP, vision stages and LLM stages are colocated. 
+
+E Pipeline Schedule Memory Consumption 
+
+E.1 Qwen2.5Vision + Llama3-1b 
+
+Figure 17, Figure 18, Figure 19, and Figure 20 show the pipeline schedule memory consumption of SynthChartNet, LLaVA-150k, ChartQA, and CocoQA datasets on Qwen2.5Vision + Llama3-1b VLM. 
+
+> 17
+
+Rank 0 
+
+Rank 1 
+
+Rank 2 
+
+Rank 3 
+
+Rank 4 
+
+Rank 5 
+
+Rank 6 
+
+Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> Memory (GB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 18. LLaVA-150k on Qwen2.5Vision+Llama3-1b VLM. Rank 0 
+
+Rank 1 
+
+Rank 2 
+
+Rank 3 
+
+Rank 4 
+
+Rank 5 
+
+Rank 6 
+
+Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> Memory (GB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 19. ChartQA on Qwen2.5Vision+Llama3-1b VLM. 
+
+E.2 Qwen2.5Vision + Llama3-3b 
+
+Figure 21, Figure 22, Figure 23 show the pipeline schedule memory consumption of LLaVA-150k, ChartQA, and Co-coQA datasets on Qwen2.5Vision + Llama3-3b VLM. Rank 0 
+
+Rank 1 
+
+Rank 2 
+
+Rank 3 
+
+Rank 4 
+
+Rank 5 
+
+Rank 6 
+
+Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> Memory (GB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 20. CocoQA on Qwen2.5Vision+Llama3-1b VLM. Rank 0 
+
+Rank 1 
+
+Rank 2 
+
+Rank 3 
+
+Rank 4 
+
+Rank 5 
+
+Rank 6 
+
+Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2,000
+> 4,000
+> 6,000
+> 8,000
+> Allocated Memory (MB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 21. LLaVA-150k on Qwen2.5Vision+Llama3-1b VLM. 
+
+F Workload Ratios in Bernoulli Trials 
+
+F.1 Qwen2.5Vision + Llama3-1b 
+
+Table 5, Table 6, Table 7, and Table 8 show the workload ratios in Bernoulli trials of SynthChartNet, LLaVA-150k, ChartQA, and CocoQA datasets using Qwen2.5Vision + Llama3-1b. 
+
+18 Rank 0 
+
+Rank 1 
+
+Rank 2 
+
+Rank 3 
+
+Rank 4 
+
+Rank 5 
+
+Rank 6 
+
+Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2,000
+> 4,000
+> 6,000
+> 8,000
+> 10,000
+> 12,000
+> Allocated Memory (MB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 2.0
+> 4.0
+> 6.0
+> 8.0
+> 10.0
+> 12.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 22. ChartQA on Qwen2.5Vision+Llama3-1b VLM. Rank 0 
+
+Rank 1 
+
+Rank 2 
+
+Rank 3 
+
+Rank 4 
+
+Rank 5 
+
+Rank 6 
+
+Rank 7 Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1,000
+> 2,000
+> 3,000
+> 4,000
+> 5,000
+> 6,000
+> 7,000
+> Allocated Memory (MB)
+
+(a) Memory consumption of 1F1B pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> Memory (GB)
+
+(b) Memory consumption of DIP pipeline schedule. Iteration 0 Iteration 1 Iteration 2 Iteration 3 Iteration 4 
+
+> 1.0
+> 2.0
+> 3.0
+> 4.0
+> 5.0
+> 6.0
+> 7.0
+> Memory (GB)
+
+(c) Memory consumption of Entrain pipeline schedule. 
+
+Figure 23. CocoQA on Qwen2.5Vision+Llama3-1b VLM. 
+
+Table 5. Workload ratios in Bernoulli trials of SynthChartNet dataset using Qwen2.5Vision + Llama3-1b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 11:5, 10:6, 9:7 4 11:5, 10:6, 9:7 16 11:5, 10:6 64 10:6 256 10:6 
+
+Table 6. Workload ratios in Bernoulli trials of LLaVA-150k dataset using Qwen2.5Vision + Llama3-1b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 10:6, 9:7, 8:8 4 10:6, 9:7, 8:8 16 9:7, 8:8 64 9:7 256 9:7 
+
+Table 7. Workload ratios in Bernoulli trials of ChartQA dataset using Qwen2.5Vision + Llama3-1b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 10:6, 9:7 4 10:6, 9:7 16 10:6 64 10:6 256 10:6 
+
+Table 8. Workload ratios in Bernoulli trials of CocoQA dataset using Qwen2.5Vision + Llama3-1b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 10:6, 9:7 4 10:6, 9:7 16 10:6 64 10:6 256 10:6 
+
+F.2 Qwen2.5Vision + Llama3-3b 
+
+Table 9, Table 10, and Table 11 show the workload ratios in Bernoulli trials of LLaVA-150k, ChartQA, and CocoQA datasets using Qwen2.5Vision + Llama3-3b. 
+
+Table 9. Workload ratios in Bernoulli trials of LLaVA-150k dataset using Qwen2.5Vision + Llama3-3b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 7:9, 6:10, 5:11 4 7:9, 6:10 16 7:9, 6:10 64 7:9, 6:10 256 7:9 
+
+19 Table 10. Workload ratios in Bernoulli trials of ChartQA dataset using Qwen2.5Vision + Llama3-3b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 8:8, 7:9 4 8:8 16 8:8 64 8:8 256 8:8 
+
+Table 11. Workload ratios in Bernoulli trials of CocoQA dataset using Qwen2.5Vision + Llama3-3b. 
+
+Batch Size Trial Pass Ratios Shown (Vision:LLM) 1 8:8, 7:9 4 8:8 16 8:8 64 8:8 256 8:8 
+
+G Sensitivity Analysis 
+
+Figure 24, Figure 25, and Figure 26 show the sensitivity anal-ysis of the profiling batch size on LLaVA-150k, ChartQA, and CocoQA datasets. Qwen2Vision+Llama-1B Qwen2Vision+Llama-3B 
+
+> 0
+> 5000
+> 10000
+> 15000
+> Iteration Time (ms)
+
+6:2 
+
+1.27x 
+
+5:3 
+
+1.09x 
+
+4:4 3:5 
+
+1.10x 
+
+2:6 
+
+1.27x 
+
+5:3 
+
+1.35x 
+
+4:4 
+
+1.14x 
+
+3:5 2:6 
+
+1.02x 
+
+1:7 
+
+1.53x 
+
+Figure 24. Sensitivity analysis of the profiling batch size on LLaVA-150k dataset. Qwen2Vision+Llama-1B Qwen2Vision+Llama-3B 
+
+> 0
+> 10000
+> 20000
+> 30000
+> Iteration Time (ms)
+
+7:1 
+
+1.66x 
+
+6:2 
+
+1.17x 
+
+5:3 4:4 
+
+0.96x 
+
+5:3 
+
+1.17x 
+
+4:4 3:5 
+
+0.94x 
+
+2:6 
+
+1.07x 
+
+1:7 
+
+1.62x 
+
+Figure 25. Sensitivity analysis of the profiling batch size on ChartQA dataset. Qwen2Vision+Llama-1B Qwen2Vision+Llama-3B 
+
+> 0
+> 5000
+> 10000
+> 15000
+> Iteration Time (ms)
+
+7:1 
+
+1.50x 
+
+6:2 
+
+1.07x 
+
+5:3 4:4 
+
+1.03x 
+
+3:5 
+
+1.16x 
+
+5:3 
+
+1.14x 
+
+4:4 
+
+1.04x 
+
+3:5 2:6 
+
+1.13x 
+
+1:7 
+
+1.76x 
+
+Figure 26. Sensitivity analysis of the profiling batch size on CocoQA dataset. 
+
+H Variability of Modality Forward Time Across Microbatches 
+
+Figure 27, Figure 28, and Figure 29 show the variability of modality forward time across microbatches in LLaVA-150k, ChartQA, and CocoQA datasets. 5 10 15 20 25 30 
+
+> Microbatch index
+> 100
+> 150
+> 200
+> Forward time (ms)
+
+(a) Qwen2.5Vision on LLaVA-150k dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 100
+> 120
+> Forward time (ms)
+
+(b) Llama3-1b on LLaVA-150k dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 200
+> 250
+> 300
+> Forward time (ms)
+
+(c) Llama3-3b on LLaVA-150k dataset. 
+
+Figure 27. Variability of modality forward time across micro-batches in LLaVA-150k dataset. 
+
+20 5 10 15 20 25 30 
+
+> Microbatch index
+> 200
+> 400
+> Forward time (ms)
+
+(a) Qwen2.5Vision on ChartQA dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 50
+> 100
+> 150
+> Forward time (ms)
+
+(b) Llama3-1b on ChartQA dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 100
+> 200
+> 300
+> 400
+> Forward time (ms)
+
+(c) Llama3-3b on ChartQA dataset. 
+
+Figure 28. Variability of modality forward time across micro-batches in ChartQA dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 100
+> 200
+> Forward time (ms)
+
+(a) Qwen2.5Vision on CocoQA dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 60
+> 70
+> 80
+> Forward time (ms)
+
+(b) Llama3-1b on CocoQA dataset. 5 10 15 20 25 30 
+
+> Microbatch index
+> 150
+> 200
+> 250
+> 300
+> Forward time (ms)
+
+(c) Llama3-3b on CocoQA dataset. 
+
+Figure 29. Variability of modality forward time across micro-batches in CocoQA dataset. 
+
+21
