@@ -6,41 +6,28 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-29
-- 运行时间：2026-05-29 20:59:44 UTC
+- 最新运行日期：2026-05-30
+- 运行时间：2026-05-30 20:17:38 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：6
-- 速读区：0
+- 本次总论文数：2
+- 精读区：1
+- 速读区：1
 
 ### 今日简报（AI）
-今日研究聚焦大规模训练与联邦学习前沿，深度剖析了两篇顶会论文。
-最值得关注的是异步多向流水线并行（AMDP）可大幅提升训练效率，以及通过表征层差异检测联邦学习异常客户端的新方法。
-建议后续读者优先实验AMDP的流水线调度策略，并关注表征差异指标在安全聚合中的应用。
-- 详情：[/202605/29/README](/202605/29/README)
+今日精读联邦学习鲁棒性理论，速览十亿级近邻检索存内协同设计。  
+精读揭示降维方案可同时提升鲁棒性并给出收敛保证，速读展示图索引与存算一体的工程结合潜力。  
+建议读者跟进联邦学习中的对抗降维前沿，或探索存内近似检索的工业落地路径。
+- 详情：[/202605/30/README](/202605/30/README)
 
 ### 精读区论文标签
-1. [AMDP: Asynchronous Multi-Directional Pipeline Parallelism for Large-Scale Models Training](/202605/29/2605.29664v1-amdp-asynchronous-multi-directional-pipeline-parallelism-for-large-scale-models-training)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：提出异步多方向流水线并行，缓解大规模训练中的参数不匹配问题
-2. [Detecting Atypical Clients in Federated Learning via Representation-Level Divergence](/202605/29/2605.22266v1-detecting-atypical-clients-in-federated-learning-via-representation-level-divergence)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：提出轻量级几何信号，通过测量本地训练对激活诱导分割的改变来检测联邦学习中的非典型客户端，提升分布式训练鲁棒性。
-3. [Totoro$^+$: An Adaptive and Scalable Edge Federated Learning System](/202605/29/2605.26323v1-totoro-an-adaptive-and-scalable-edge-federated-learning-system)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：采用基于分布式哈希表的点对点架构的去中心化联邦学习系统
-4. [FedMPT: Federated Multi-label Prompt Tuning of Vision-Language Models](/202605/29/2605.28347v1-fedmpt-federated-multi-label-prompt-tuning-of-vision-language-models)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：联邦多标签提示微调，利用因果方法解决去中心化训练中的虚假相关性问题
-5. [Fairness-Aware Federated Learning with Trajectory Shapley Value](/202605/29/2605.30336v1-fairness-aware-federated-learning-with-trajectory-shapley-value)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：提出基于轨迹Shapley值的自适应聚合方法FedTSV，以改善联邦学习分布式训练的公平性与稳定性。
-6. [Understanding and Reducing Metadata-Driven Host Overheads in Sampling-Based GNN Training](/202605/29/2605.29346v1-understanding-and-reducing-metadata-driven-host-overheads-in-sampling-based-gnn-training)  
+1. [Dimensionality Reduction for Robust Federated Learning: A Theoretical Analysis and Convergence Guarantee](/202605/30/2605.28335v1-dimensionality-reduction-for-robust-federated-learning-a-theoretical-analysis-and-convergence-guarantee)  
    标签：评分：8.0/10、query:mlsys
-   evidence：减少GNN训练中元数据驱动的主机开销和GPU-CPU同步，提升GPU资源利用率
+   evidence：提出降维方法加速联邦学习中的鲁棒聚合
 
 ### 速读区论文标签
-- 本次无速读推荐。
+1. [Co-Designing Graph-based Approximate Nearest Neighbor Search at Billion Scale for Processing-in-Memory](/202605/30/2605.25522v1-co-designing-graph-based-approximate-nearest-neighbor-search-at-billion-scale-for-processing-in-memory)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：面向存内计算的十亿级图近似最近邻搜索协同设计，AI核心原语
 
 
 <div class="dpr-home-promo-card">
