@@ -6,37 +6,38 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-05-31
-- 运行时间：2026-05-31 21:05:25 UTC
+- 最新运行日期：2026-06-01
+- 运行时间：2026-06-01 23:12:16 UTC
 - 运行状态：成功
-- 本次总论文数：5
-- 精读区：4
+- 本次总论文数：6
+- 精读区：5
 - 速读区：1
 
 ### 今日简报（AI）
-1) 今日精读两篇高分论文，探讨校园GPU自愿共享的回收感知协议与将大模型解耦为稀疏骨干和记忆模块的知识卸载方法。  
-2) 最值得关注的是ReclaimNet如何通过协议设计回收空闲GPU，以及Knowledge Offloading将稠密LLM拆分为稀疏骨干加可插拔记忆模块的分解思路。  
-3) 建议普通读者跟踪这些轻量级协作共享与模型压缩方案，它们有望降低大模型部署门槛，并催生更多校园算力池化实践。
-- 详情：[/202605/31/README](/202605/31/README)
+今日精读联邦学习与LLM推理加速前沿，聚焦局部强化微调解耦训练与零气泡流水线推测解码两大突破；最值得关注的方向是流水线并行下实现高精度、无停顿的推测解码，以及联邦场景中通过解耦训练显著降低通信成本。建议读者从这两篇高分精读切入，优先理解它们如何分别解决分布式训练通信开销与自回归解码的延迟瓶颈。
+- 详情：[/202606/01/README](/202606/01/README)
 
 ### 精读区论文标签
-1. [ReclaimNet: Reclaim-Aware Network Protocols for Voluntary GPU Sharing on Campus](/202605/31/2605.28872v1-reclaimnet-reclaim-aware-network-protocols-for-voluntary-gpu-sharing-on-campus)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：提出针对校园自愿GPU共享的回收感知网络协议，包含调度与迁移机制，直接解决GPU集群资源管理问题。
-2. [Knowledge Offloading: Decomposing LLMs into Sparse Backbones and Memory Modules](/202605/31/2605.29075v1-knowledge-offloading-decomposing-llms-into-sparse-backbones-and-memory-modules)  
+1. [Decoupled Training with Local Reinforcement Fine-Tuning in Federated Learning](/202606/01/2605.27900v1-decoupled-training-with-local-reinforcement-fine-tuning-in-federated-learning)  
    标签：评分：9.0/10、query:mlsys
-   evidence：将大语言模型分解为稀疏骨干和记忆模块的框架，属于系统级机器学习架构设计。
-3. [Efficient Test-Time Finetuning of LLMs via Convex Reconstruction and Gradient Caching](/202605/31/2605.30337v1-efficient-test-time-finetuning-of-llms-via-convex-reconstruction-and-gradient-caching)  
+   evidence：提出FedDTL，一种VLM联邦学习框架，解耦编码器以解决分布式训练挑战
+2. [Speculative Pipeline Decoding: Higher-Accruacy and Zero-Bubble Speculation via Pipeline Parallelism](/202606/01/2605.30852v1-speculative-pipeline-decoding-higher-accruacy-and-zero-bubble-speculation-via-pipeline-parallelism)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：利用流水线并行加速大语言模型推测解码，实现零气泡
+3. [PrunePath: Towards Highly Structured Sparse Language Models](/202606/01/2605.28283v1-prunepath-towards-highly-structured-sparse-language-models)  
    标签：评分：8.0/10、query:mlsys
-   evidence：提出了一种基于凸重构与梯度缓存的LLM高效测试时微调方法，提升推理期适应效率。
-4. [Revisiting CPUs for Protein Folding: Xeon-Based Acceleration of AlphaFold2](/202605/31/biorxiv-10-64898-2026-05-27-728222-v1-revisiting-cpus-for-protein-folding-xeon-based-acceleration-of-alphafold2)  
+   evidence：结构化稀疏框架，实现硬件高效的语言模型推理
+4. [Reducing the GPU Memory Bottleneck with Lossless Compression for ML -- Extended](/202606/01/2605.30728v1-reducing-the-gpu-memory-bottleneck-with-lossless-compression-for-ml----extended)  
    标签：评分：8.0/10、query:mlsys
-   evidence：针对Intel Xeon CPU优化AlphaFold2流水线，使用AMX加速
+   evidence：用于机器学习张量传输的无损压缩，减少GPU内存瓶颈
+5. [On Efficient Scaling of GNNs via IO-Aware Layers Implementations](/202606/01/2605.31500v1-on-efficient-scaling-of-gnns-via-io-aware-layers-implementations)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：开发IO感知的GPU内核用于GNN层，解决PyTorch Geometric等框架的低效问题，直接影响深度学习框架设计。
 
 ### 速读区论文标签
-1. [ConMoE: Expert-Pool Consolidation via Prototype Reassignment for MoE Compression](/202605/31/2605.29350v1-conmoe-expert-pool-consolidation-via-prototype-reassignment-for-moe-compression)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：无训练的原型重分配压缩MoE模型，减少部署内存
+1. [elasticAI.explorer: Towards a Unified End-to-End Framework for Hardware-Aware Neural Architecture Search](/202606/01/2605.30019v1-elasticaiexplorer-towards-a-unified-end-to-end-framework-for-hardware-aware-neural-architecture-search)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：硬件感知NAS的可扩展框架，解耦搜索空间与实现
 
 
 <div class="dpr-home-promo-card">
