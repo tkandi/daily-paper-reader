@@ -6,38 +6,52 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-01
-- 运行时间：2026-06-01 23:12:16 UTC
+- 最新运行日期：2026-06-02
+- 运行时间：2026-06-02 23:12:52 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：5
-- 速读区：1
+- 本次总论文数：10
+- 精读区：6
+- 速读区：4
 
 ### 今日简报（AI）
-今日精读联邦学习与LLM推理加速前沿，聚焦局部强化微调解耦训练与零气泡流水线推测解码两大突破；最值得关注的方向是流水线并行下实现高精度、无停顿的推测解码，以及联邦场景中通过解耦训练显著降低通信成本。建议读者从这两篇高分精读切入，优先理解它们如何分别解决分布式训练通信开销与自回归解码的延迟瓶颈。
-- 详情：[/202606/01/README](/202606/01/README)
+今日精读联邦学习的两项突破：降维理论给出鲁棒收敛保证，Local MixVR 摆脱通信与样本的强绑定。  
+值得关注降维在非IID环境下的实用性，以及混合专家模型（MoE）从简单混合走向结构聚合的范式升级。  
+建议先从 Local MixVR 的通信解耦入手，同步追踪 MoE 结构优化在稀疏激活中的落地潜力。
+- 详情：[/202606/02/README](/202606/02/README)
 
 ### 精读区论文标签
-1. [Decoupled Training with Local Reinforcement Fine-Tuning in Federated Learning](/202606/01/2605.27900v1-decoupled-training-with-local-reinforcement-fine-tuning-in-federated-learning)  
+1. [Dimensionality Reduction for Robust Federated Learning: A Theoretical Analysis and Convergence Guarantee](/202606/02/2605.28335v2-dimensionality-reduction-for-robust-federated-learning-a-theoretical-analysis-and-convergence-guarantee)  
    标签：评分：9.0/10、query:mlsys
-   evidence：提出FedDTL，一种VLM联邦学习框架，解耦编码器以解决分布式训练挑战
-2. [Speculative Pipeline Decoding: Higher-Accruacy and Zero-Bubble Speculation via Pipeline Parallelism](/202606/01/2605.30852v1-speculative-pipeline-decoding-higher-accruacy-and-zero-bubble-speculation-via-pipeline-parallelism)  
+   evidence：提出联邦学习中用于鲁棒聚合的降维方法并提供理论保证
+2. [Local MixVR: Breaking the Communication-Sample Dependence in Distributed Learning](/202606/02/2606.01128v1-local-mixvr-breaking-the-communication-sample-dependence-in-distributed-learning)  
    标签：评分：9.0/10、query:mlsys
-   evidence：利用流水线并行加速大语言模型推测解码，实现零气泡
-3. [PrunePath: Towards Highly Structured Sparse Language Models](/202606/01/2605.28283v1-prunepath-towards-highly-structured-sparse-language-models)  
+   evidence：首个消除通信-样本依赖的分布式方法，通信复杂度仅随工作节点数扩展
+3. [elasticAI.explorer: Towards a Unified End-to-End Framework for Hardware-Aware Neural Architecture Search](/202606/02/2605.30019v2-elasticaiexplorer-towards-a-unified-end-to-end-framework-for-hardware-aware-neural-architecture-search)  
    标签：评分：8.0/10、query:mlsys
-   evidence：结构化稀疏框架，实现硬件高效的语言模型推理
-4. [Reducing the GPU Memory Bottleneck with Lossless Compression for ML -- Extended](/202606/01/2605.30728v1-reducing-the-gpu-memory-bottleneck-with-lossless-compression-for-ml----extended)  
+   evidence：基于YAML搜索空间定义的硬件感知NAS可扩展框架
+4. [Canonicalized Stable-List Replay for Private Federated Continual Learning over Language-Model Embeddings](/202606/02/2606.00426v1-canonicalized-stable-list-replay-for-private-federated-continual-learning-over-language-model-embeddings)  
    标签：评分：8.0/10、query:mlsys
-   evidence：用于机器学习张量传输的无损压缩，减少GPU内存瓶颈
-5. [On Efficient Scaling of GNNs via IO-Aware Layers Implementations](/202606/01/2605.31500v1-on-efficient-scaling-of-gnns-via-io-aware-layers-implementations)  
+   evidence：提出一种解决无序回放列表的私有联邦持续学习方法
+5. [Boosting Multimodal Federated Learning via Chained Modality Optimization](/202606/02/2606.01856v1-boosting-multimodal-federated-learning-via-chained-modality-optimization)  
    标签：评分：8.0/10、query:mlsys
-   evidence：开发IO感知的GPU内核用于GNN层，解决PyTorch Geometric等框架的低效问题，直接影响深度学习框架设计。
+   evidence：提出链式模态优化联邦学习框架以缓解模态竞争
+6. [Closing the Alignment-Maturity Gap in Federated Prototype Learning](/202606/02/2606.02172v1-closing-the-alignment-maturity-gap-in-federated-prototype-learning)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：FedSAP框架稳定了基于原型的联邦学习，解决分布式训练中的分布偏移
 
 ### 速读区论文标签
-1. [elasticAI.explorer: Towards a Unified End-to-End Framework for Hardware-Aware Neural Architecture Search](/202606/01/2605.30019v1-elasticaiexplorer-towards-a-unified-end-to-end-framework-for-hardware-aware-neural-architecture-search)  
+1. [SCOPE: Cost-Efficient Model Selection for Compound AI Systems under Quality Constraints](/202606/02/2606.00774v1-scope-cost-efficient-model-selection-for-compound-ai-systems-under-quality-constraints)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：提出复合AI系统中成本高效的大语言模型选择方法，平衡质量与成本
+2. [DAG-MoE: From Simple Mixture to Structural Aggregation in Mixture-of-Experts](/202606/02/2606.01062v1-dag-moe-from-simple-mixture-to-structural-aggregation-in-mixture-of-experts)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：提出MoE的结构化聚合方法，提升大语言模型的可扩展性
+3. [DOT-MoE: Differentiable Optimal Transport for MoEfication](/202606/02/2606.01666v1-dot-moe-differentiable-optimal-transport-for-moefication)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：使用最优传输将稠密大语言模型转化为MoE的新框架，涉及机器学习系统设计
+4. [Threshold-Based Exclusive Batching for LLM Inference](/202606/02/2606.00516v1-threshold-based-exclusive-batching-for-llm-inference)  
    标签：评分：6.0/10、query:mlsys
-   evidence：硬件感知NAS的可扩展框架，解耦搜索空间与实现
+   evidence：基于阈值的LLM推理批处理优化GPU资源使用
 
 
 <div class="dpr-home-promo-card">
