@@ -6,52 +6,40 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-02
-- 运行时间：2026-06-02 23:12:52 UTC
+- 最新运行日期：2026-06-03
+- 运行时间：2026-06-03 21:59:24 UTC
 - 运行状态：成功
-- 本次总论文数：10
-- 精读区：6
-- 速读区：4
+- 本次总论文数：6
+- 精读区：4
+- 速读区：2
 
 ### 今日简报（AI）
-今日精读联邦学习的两项突破：降维理论给出鲁棒收敛保证，Local MixVR 摆脱通信与样本的强绑定。  
-值得关注降维在非IID环境下的实用性，以及混合专家模型（MoE）从简单混合走向结构聚合的范式升级。  
-建议先从 Local MixVR 的通信解耦入手，同步追踪 MoE 结构优化在稀疏激活中的落地潜力。
-- 详情：[/202606/02/README](/202606/02/README)
+今日聚焦大模型推理与训练的稳定性优化：NetKV 提出解耦式 LLM 推理的网络感知实例选择，GNMR 用运行时稳定性控制降低低精度训练崩溃风险。  
+最值得关注的两个方向：一是如何让分布式推理的 KV 缓存调度贴近网络拓扑，二是如何在不牺牲精度的前提下动态守卫训练收敛。  
+建议读者优先阅读 NetKV 的解耦调度思路，若关注训练成本可补看 GNMR 的混合精度稳定策略。
+- 详情：[/202606/03/README](/202606/03/README)
 
 ### 精读区论文标签
-1. [Dimensionality Reduction for Robust Federated Learning: A Theoretical Analysis and Convergence Guarantee](/202606/02/2605.28335v2-dimensionality-reduction-for-robust-federated-learning-a-theoretical-analysis-and-convergence-guarantee)  
+1. [NetKV: Network-Aware Decode Instance Selection for Disaggregated LLM Inference](/202606/03/2606.03910v1-netkv-network-aware-decode-instance-selection-for-disaggregated-llm-inference)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：NetKV利用网络感知调度优化分离式LLM推理中的GPU集群资源管理。
+2. [GNMR: Runtime Stability Control for Low-Precision Large Language Model Training](/202606/03/2606.00539v1-gnmr-runtime-stability-control-for-low-precision-large-language-model-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：提出联邦学习中用于鲁棒聚合的降维方法并提供理论保证
-2. [Local MixVR: Breaking the Communication-Sample Dependence in Distributed Learning](/202606/02/2606.01128v1-local-mixvr-breaking-the-communication-sample-dependence-in-distributed-learning)  
+   evidence：用于低精度大语言模型训练稳定性的轻量级控制器
+3. [HASTE: Hardware-Aware Dynamic Sparse Training for Large Output Spaces](/202606/03/2606.01117v1-haste-hardware-aware-dynamic-sparse-training-for-large-output-spaces)  
    标签：评分：9.0/10、query:mlsys
-   evidence：首个消除通信-样本依赖的分布式方法，通信复杂度仅随工作节点数扩展
-3. [elasticAI.explorer: Towards a Unified End-to-End Framework for Hardware-Aware Neural Architecture Search](/202606/02/2605.30019v2-elasticaiexplorer-towards-a-unified-end-to-end-framework-for-hardware-aware-neural-architecture-search)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：基于YAML搜索空间定义的硬件感知NAS可扩展框架
-4. [Canonicalized Stable-List Replay for Private Federated Continual Learning over Language-Model Embeddings](/202606/02/2606.00426v1-canonicalized-stable-list-replay-for-private-federated-continual-learning-over-language-model-embeddings)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：提出一种解决无序回放列表的私有联邦持续学习方法
-5. [Boosting Multimodal Federated Learning via Chained Modality Optimization](/202606/02/2606.01856v1-boosting-multimodal-federated-learning-via-chained-modality-optimization)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：提出链式模态优化联邦学习框架以缓解模态竞争
-6. [Closing the Alignment-Maturity Gap in Federated Prototype Learning](/202606/02/2606.02172v1-closing-the-alignment-maturity-gap-in-federated-prototype-learning)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：FedSAP框架稳定了基于原型的联邦学习，解决分布式训练中的分布偏移
+   evidence：硬件感知动态稀疏训练解决极端多标签分类的内存计算瓶颈
+4. [FedMTFI: Feature Importance Based Optimized Multi Teacher Knowledge Distillation in Heterogeneous Federated Learning Environment](/202606/03/2606.01607v1-fedmtfi-feature-importance-based-optimized-multi-teacher-knowledge-distillation-in-heterogeneous-federated-learning-environment)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：结合多教师知识蒸馏与特征重要性以提升异构联邦学习性能
 
 ### 速读区论文标签
-1. [SCOPE: Cost-Efficient Model Selection for Compound AI Systems under Quality Constraints](/202606/02/2606.00774v1-scope-cost-efficient-model-selection-for-compound-ai-systems-under-quality-constraints)  
+1. [Continual Model Routing in Evolving Model Hubs](/202606/03/2605.28577v1-continual-model-routing-in-evolving-model-hubs)  
    标签：评分：7.0/10、query:mlsys
-   evidence：提出复合AI系统中成本高效的大语言模型选择方法，平衡质量与成本
-2. [DAG-MoE: From Simple Mixture to Structural Aggregation in Mixture-of-Experts](/202606/02/2606.01062v1-dag-moe-from-simple-mixture-to-structural-aggregation-in-mixture-of-experts)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：提出MoE的结构化聚合方法，提升大语言模型的可扩展性
-3. [DOT-MoE: Differentiable Optimal Transport for MoEfication](/202606/02/2606.01666v1-dot-moe-differentiable-optimal-transport-for-moefication)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：使用最优传输将稠密大语言模型转化为MoE的新框架，涉及机器学习系统设计
-4. [Threshold-Based Exclusive Batching for LLM Inference](/202606/02/2606.00516v1-threshold-based-exclusive-batching-for-llm-inference)  
+   evidence：将演进模型中心中的持续模型路由形式化，以扩展到数千个专家的模型选择。
+2. [SuperValid: Capability-Aligned OOD Validation for Generalizable Downstream Scaling](/202606/03/2605.28179v1-supervalid-capability-aligned-ood-validation-for-generalizable-downstream-scaling)  
    标签：评分：6.0/10、query:mlsys
-   evidence：基于阈值的LLM推理批处理优化GPU资源使用
+   evidence：SuperValid合成能力对齐的OOD验证数据改进缩放律预测，优化大规模模型训练。
 
 
 <div class="dpr-home-promo-card">
