@@ -6,46 +6,34 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-04
-- 运行时间：2026-06-04 20:50:33 UTC
+- 最新运行日期：2026-06-05
+- 运行时间：2026-06-05 21:55:58 UTC
 - 运行状态：成功
-- 本次总论文数：8
-- 精读区：6
-- 速读区：2
+- 本次总论文数：4
+- 精读区：1
+- 速读区：3
 
 ### 今日简报（AI）
-今日拆解8篇前沿论文，重点深挖流水线并行理论与临床AI能效调度两大突破。  
-最值得关注：PipeDream流水线并行首次建立系统性理论框架，Night-Window批处理则证明错峰调度可将GPU碳排降低40%而不损伤模型性能。  
-建议开发者从SIGMA流式图划分入手，体验分布式图训练的新平衡范式，同时警惕分布式训练可能带来的算力治理风险。
-- 详情：[/202606/04/README](/202606/04/README)
+今天精读了一篇满分论文《Learned Subspace Compression for Communication-Efficient Pipeline Parallelism》，并速读了三篇分别关于长上下文融合、去中心化双层优化与大模型路由的工作。  
+最值得关注的是将学习型子空间压缩用于流水线并行通信优化的新范式，它几乎无损地大幅压缩了通信量。  
+建议关注模型并行训练效率的开发者，可复现该压缩思路，普通读者也可留意此类方法对降低大模型部署成本的潜在影响。
+- 详情：[/202606/05/README](/202606/05/README)
 
 ### 精读区论文标签
-1. [Demystifying Pipeline Parallelism: First Theory for PipeDream](/202606/04/2606.03498v1-demystifying-pipeline-parallelism-first-theory-for-pipedream)  
+1. [Learned Subspace Compression for Communication-Efficient Pipeline Parallelism](/202606/05/2606.05484v1-learned-subspace-compression-for-communication-efficient-pipeline-parallelism)  
    标签：评分：10.0/10、query:mlsys
-   evidence：首次为PipeDream流水线并行提供理论收敛保证
-2. [Night-Window Batching versus Carbon-Aware Scheduling for Clinical AI GPU Workloads](/202606/04/2606.01766v1-night-window-batching-versus-carbon-aware-scheduling-for-clinical-ai-gpu-workloads)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：比较13种GPU调度规则用于临床AI工作负载，包含碳感知和夜间批处理，直接针对资源调度目标。
-3. [DriftSched: Adaptive QoS-Aware Scheduling under Runtime Token Drift for Multi-Tenant GPU Inference](/202606/04/2606.02982v1-driftsched-adaptive-qos-aware-scheduling-under-runtime-token-drift-for-multi-tenant-gpu-inference)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：面向LLM推理服务的自适应QoS感知GPU调度
-4. [CXL-ClusterSim: Modeling CXL-based Disaggregated Memory Cluster for Pooling and Sharing using gem5 and SST](/202606/04/2605.27745v1-cxl-clustersim-modeling-cxl-based-disaggregated-memory-cluster-for-pooling-and-sharing-using-gem5-and-sst)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于设计基于CXL内存解耦的AI基础设施的仿真工具
-5. [GreenGNN: Energy-Aware Windowed Communication Optimization for Distributed GNN Training](/202606/04/2606.02916v1-greengnn-energy-aware-windowed-communication-optimization-for-distributed-gnn-training)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：GreenGNN通过窗口化训练并利用邻居采样的时间局部性来降低通信能耗。
-6. [Multi-Segment Attention: Enabling Efficient KV-Cache Management for Faster Large Language Model Serving](/202606/04/2606.02964v1-multi-segment-attention-enabling-efficient-kv-cache-management-for-faster-large-language-model-serving)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：面向LLM服务的计算延迟感知KV缓存管理
+   evidence：学习子空间压缩减少大语言模型管道并行通信
 
 ### 速读区论文标签
-1. [SIGMA: A Versatile Streaming Graph Partitioner for Vertex- and Edge-Balanced Distributed GNN Training](/202606/04/2606.03519v1-sigma-a-versatile-streaming-graph-partitioner-for-vertex--and-edge-balanced-distributed-gnn-training)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：SIGMA是支持顶点和边划分的多目标流式图划分器，用于分布式GNN训练优化。
-2. [Does Distributed Training Undermine Compute Governance?](/202606/04/2605.29359v1-does-distributed-training-undermine-compute-governance)  
+1. [Soft-NBCE: Entropy-Weighted Chunk Fusion for Long-Context](/202606/05/2606.01101v1-soft-nbce-entropy-weighted-chunk-fusion-for-long-context)  
    标签：评分：7.0/10、query:mlsys
-   evidence：分析分布式训练算法如何通过聚合硬件规避算力治理，与分布式训练框架直接相关
+   evidence：通过软块融合改进长上下文LLM推理，降低注意力复杂度
+2. [S$^3$LDBO: A Snapshot Single-Loop Algorithm for Decentralized Bilevel Optimization](/202606/05/2605.31311v1-s3ldbo-a-snapshot-single-loop-algorithm-for-decentralized-bilevel-optimization)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：Snapshot-SLDBO是一种去中心化双层优化算法，通过快照机制间歇跳过昂贵导数计算。
+3. [Learning to Route LLMs from Implicit Cost-Performance Preferences via Meta-Learning](/202606/05/2606.06178v1-learning-to-route-llms-from-implicit-cost-performance-preferences-via-meta-learning)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：个性化LLM路由的元学习方法，通过平衡成本与性能实现高效GPU资源利用
 
 
 <div class="dpr-home-promo-card">
