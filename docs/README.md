@@ -6,34 +6,43 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-07
-- 运行时间：2026-06-07 20:19:42 UTC
+- 最新运行日期：2026-06-08
+- 运行时间：2026-06-08 20:54:58 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：3
-- 速读区：1
+- 本次总论文数：7
+- 精读区：5
+- 速读区：2
 
 ### 今日简报（AI）
-今日精读2篇高分论文，聚焦大模型训练与推理效率优化。  
-最值得关注的是去中心化优化器DECA（9.0）在Non-IID数据上的全参数微调突破，以及RedKnot（9.0）通过KV缓存复用大幅降低长上下文推理成本。  
-普通读者可先从这两篇高评分工作入手，理解分布式训练部署与长序列服务如何让大模型更省钱、更易落地。
-- 详情：[/202606/07/README](/202606/07/README)
+今日精选「消除非可扩展开销让LLM推理真正走出阿姆达尔死胡同」与「MOSAIC动态调度多智能体」两篇高分文章，直击推理效率与智能体协同瓶颈。  
+最值得跟进的结论是：通过剔除KV缓存、通信等不可扩展环节，推理吞吐可逼近线性扩展；而MOSAIC用自适应聚合与并发调度，将多智能体协作开销压到接近单次推理。  
+想降本增效的读者，先别急着换硬件——这两项工作提供的系统层优化思路，比堆显卡更省钱。
+- 详情：[/202606/08/README](/202606/08/README)
 
 ### 精读区论文标签
-1. [DECA: Decentralizing Block-Wise Adam for Efficient LLM Full-Parameter Fine-Tuning on Non-IID Data](/202606/07/2606.03209v1-deca-decentralizing-block-wise-adam-for-efficient-llm-full-parameter-fine-tuning-on-non-iid-data)  
+1. [Scaling LLM Inference Beyond Amdahl`s Limits via Eliminating Non-Scalable Overheads](/202606/08/2606.01927v1-scaling-llm-inference-beyond-amdahls-limits-via-eliminating-non-scalable-overheads)  
    标签：评分：9.0/10、query:mlsys
-   evidence：去中心化的LLM全参数微调，采用分块Adam处理非独立同分布数据
-2. [RedKnot: Efficient Long-Context LLM Serving with Head-Aware KV Reuse and SegPagedAttention](/202606/07/2606.06256v1-redknot-efficient-long-context-llm-serving-with-head-aware-kv-reuse-and-segpagedattention)  
+   evidence：Albireo并行推理系统通过重叠调度I/O与计算提高张量并行最优度
+2. [MOSAIC: Efficient Mixture-of-Agent Scheduling via Adaptive Aggregation and Inference Concurrency](/202606/08/2606.03014v1-mosaic-efficient-mixture-of-agent-scheduling-via-adaptive-aggregation-and-inference-concurrency)  
    标签：评分：9.0/10、query:mlsys
-   evidence：解决大语言模型服务中KV缓存瓶颈，是AI基础设施的核心问题
-3. [Global Unknown Estimation: A Statistical Framework for Wireless Distributed Learning](/202606/07/2606.02891v1-global-unknown-estimation-a-statistical-framework-for-wireless-distributed-learning)  
+   evidence：面向多智能体混合工作负载的GPU调度框架，减少空闲并提升吞吐
+3. [Towards Serverless Semi-Decentralized Federated Learning with Heterogeneous Optimizers](/202606/08/2606.06687v1-towards-serverless-semi-decentralized-federated-learning-with-heterogeneous-optimizers)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：提出无服务器半去中心化联邦学习用于集群构建，推动分布式训练框架发展。
+4. [SCALE: Scalable Cross-Attention Learning with Extrapolation for Agentic Workflow Scheduling](/202606/08/2606.06820v1-scale-scalable-cross-attention-learning-with-extrapolation-for-agentic-workflow-scheduling)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：面向异构集群上大模型智能体工作流的深度强化学习调度器，能泛化到未见过的集群规模
+5. [ANNS-AMP: Accelerating Approximate Nearest Neighbor Search via Adaptive Mixed-Precision Computing](/202606/08/2606.07156v1-anns-amp-accelerating-approximate-nearest-neighbor-search-via-adaptive-mixed-precision-computing)  
    标签：评分：8.0/10、query:mlsys
-   evidence：用于无线分布式学习中模型聚合的统计框架
+   evidence：为LLM和推荐系统中的关键操作近似最近邻搜索设计自适应混合精度框架与加速器
 
 ### 速读区论文标签
-1. [Value-and-Structure Alignment for Routing-Consistent Quantization of Mixture-of-Experts Models](/202606/07/2606.05688v1-value-and-structure-alignment-for-routing-consistent-quantization-of-mixture-of-experts-models)  
+1. [LLM Compression with Jointly Optimizing Architectural and Quantization choices](/202606/08/2606.04063v1-llm-compression-with-jointly-optimizing-architectural-and-quantization-choices)  
    标签：评分：7.0/10、query:mlsys
-   evidence：提出MoE专用的量化方法，保持路由一致性，推动ML系统部署
+   evidence：联合优化架构与混合精度量化以实现LLM的高效压缩和部署
+2. [Skip a Layer or Loop It? Learning Program-of-Layers in LLMs](/202606/08/2606.06574v1-skip-a-layer-or-loop-it-learning-program-of-layers-in-llms)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：用于高效推理的动态LLM层执行程序
 
 
 <div class="dpr-home-promo-card">
