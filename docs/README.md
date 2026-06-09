@@ -6,43 +6,43 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-08
-- 运行时间：2026-06-08 20:54:58 UTC
+- 最新运行日期：2026-06-09
+- 运行时间：2026-06-09 21:23:50 UTC
 - 运行状态：成功
 - 本次总论文数：7
 - 精读区：5
 - 速读区：2
 
 ### 今日简报（AI）
-今日精选「消除非可扩展开销让LLM推理真正走出阿姆达尔死胡同」与「MOSAIC动态调度多智能体」两篇高分文章，直击推理效率与智能体协同瓶颈。  
-最值得跟进的结论是：通过剔除KV缓存、通信等不可扩展环节，推理吞吐可逼近线性扩展；而MOSAIC用自适应聚合与并发调度，将多智能体协作开销压到接近单次推理。  
-想降本增效的读者，先别急着换硬件——这两项工作提供的系统层优化思路，比堆显卡更省钱。
-- 详情：[/202606/08/README](/202606/08/README)
+今日精读两篇满分论文，聚焦打破异步流水线并行的“气泡”与资源感知的计算通信重叠，速读则跟踪了极低比特量化和智能批次选择。
+最值得关注：通过约束权重不一致性实现无阻塞的异步流水线，以及根据资源动态调度通信与计算重叠，可大幅提升多GPU训练效率。
+下次实践建议：若你正为大模型训练的速度瓶颈发愁，务必关注有界不一致性流水线与通信重叠的合体方案，它们或许就是下一波提效的关键。
+- 详情：[/202606/09/README](/202606/09/README)
 
 ### 精读区论文标签
-1. [Scaling LLM Inference Beyond Amdahl`s Limits via Eliminating Non-Scalable Overheads](/202606/08/2606.01927v1-scaling-llm-inference-beyond-amdahls-limits-via-eliminating-non-scalable-overheads)  
+1. [Breaking the Bubble: Asynchronous Pipeline Parallel Training with Bounded Weight Inconsistency](/202606/09/2606.07881v1-breaking-the-bubble-asynchronous-pipeline-parallel-training-with-bounded-weight-inconsistency)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：提出PACI，一种无气泡的异步流水线并行方法，可控制权重不一致
+2. [Resource-aware Computation-Communication Overlap for multi-GPU ML Workloads](/202606/09/2606.09200v1-resource-aware-computation-communication-overlap-for-multi-gpu-ml-workloads)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：通过共享内存占用塑形和提升通信优先级实现资源感知的计算-通信重叠，直接优化GPU资源调度与管理
+3. [FlashCP: Load-Balanced Communication-Efficient Context Parallelism for LLM Training](/202606/09/2606.08476v1-flashcp-load-balanced-communication-efficient-context-parallelism-for-llm-training)  
    标签：评分：9.0/10、query:mlsys
-   evidence：Albireo并行推理系统通过重叠调度I/O与计算提高张量并行最优度
-2. [MOSAIC: Efficient Mixture-of-Agent Scheduling via Adaptive Aggregation and Inference Concurrency](/202606/08/2606.03014v1-mosaic-efficient-mixture-of-agent-scheduling-via-adaptive-aggregation-and-inference-concurrency)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：面向多智能体混合工作负载的GPU调度框架，减少空闲并提升吞吐
-3. [Towards Serverless Semi-Decentralized Federated Learning with Heterogeneous Optimizers](/202606/08/2606.06687v1-towards-serverless-semi-decentralized-federated-learning-with-heterogeneous-optimizers)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：提出无服务器半去中心化联邦学习用于集群构建，推动分布式训练框架发展。
-4. [SCALE: Scalable Cross-Attention Learning with Extrapolation for Agentic Workflow Scheduling](/202606/08/2606.06820v1-scale-scalable-cross-attention-learning-with-extrapolation-for-agentic-workflow-scheduling)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：面向异构集群上大模型智能体工作流的深度强化学习调度器，能泛化到未见过的集群规模
-5. [ANNS-AMP: Accelerating Approximate Nearest Neighbor Search via Adaptive Mixed-Precision Computing](/202606/08/2606.07156v1-anns-amp-accelerating-approximate-nearest-neighbor-search-via-adaptive-mixed-precision-computing)  
+   evidence：用于大规模长上下文LLM训练的负载均衡与通信高效上下文并行框架
+4. [Semantic Quorum Assurance: Collective Certification for Non-Deterministic AI Infrastructure](/202606/09/2606.08021v1-semantic-quorum-assurance-collective-certification-for-non-deterministic-ai-infrastructure)  
    标签：评分：8.0/10、query:mlsys
-   evidence：为LLM和推荐系统中的关键操作近似最近邻搜索设计自适应混合精度框架与加速器
+   evidence：引入语义仲裁保证，一种新型控制平面，用于安全可靠的非确定性AI基础设施操作，扩展了经典共识以进行意图安全性认证。
+5. [AlignFed: Alignment-Aware Asynchronous Federated Fine-Tuning for Large Language Models in Heterogeneous Edge Environments](/202606/09/2606.08197v1-alignfed-alignment-aware-asynchronous-federated-fine-tuning-for-large-language-models-in-heterogeneous-edge-environments)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：面向大语言模型的异步联邦微调框架，解决边缘环境中的掉队与异构问题
 
 ### 速读区论文标签
-1. [LLM Compression with Jointly Optimizing Architectural and Quantization choices](/202606/08/2606.04063v1-llm-compression-with-jointly-optimizing-architectural-and-quantization-choices)  
+1. [Minimizing the Hidden Cost of Scales: Graph-Guided Ultra-Low-Bit Quantization for Large Language Models](/202606/09/2606.05429v1-minimizing-the-hidden-cost-of-scales-graph-guided-ultra-low-bit-quantization-for-large-language-models)  
    标签：评分：7.0/10、query:mlsys
-   evidence：联合优化架构与混合精度量化以实现LLM的高效压缩和部署
-2. [Skip a Layer or Loop It? Learning Program-of-Layers in LLMs](/202606/08/2606.06574v1-skip-a-layer-or-loop-it-learning-program-of-layers-in-llms)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：用于高效推理的动态LLM层执行程序
+   evidence：针对大语言模型的超低位量化框架减少隐藏扩展代价，提升部署效率
+2. [Minibatch Selection via Partition Matroid Constrained Gradient Matching](/202606/09/2606.07954v1-minibatch-selection-via-partition-matroid-constrained-gradient-matching)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：提出PartitionSel小批量选择方法，通过划分拟阵约束梯度匹配优化大规模模型训练中的数据利用。
 
 
 <div class="dpr-home-promo-card">
