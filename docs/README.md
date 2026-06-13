@@ -6,34 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-12
-- 运行时间：2026-06-12 21:26:20 UTC
+- 最新运行日期：2026-06-13
+- 运行时间：2026-06-13 21:10:16 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：2
-- 速读区：2
+- 本次总论文数：1
+- 精读区：1
+- 速读区：0
 
 ### 今日简报（AI）
-今日深入剖析分布式训练仿真与联邦学习理论两大前沿，兼顾自动化机器学习与持续学习领域速览。  
-最值得关注的是ASTRA-sim 3.0以高保真GPU和基础设施建模将分布式仿真推向新高度，而Range Penalization则为联邦优化带来全新理论视角。  
-建议读者从高精度系统仿真与训练目标惩罚设计入手，探索更可靠的大规模模型训练实践。
-- 详情：[/202606/12/README](/202606/12/README)
+今日精读满分论文，破解异构加速器如何高效调度多个实时深度神经网络难题。  
+Terastal提出层级变体调度，让不同加速器按层粒度协同，同时保障实时性与高吞吐。  
+建议关注该方法在自动驾驶与混合AI推理场景下的实际部署验证。
+- 详情：[/202606/13/README](/202606/13/README)
 
 ### 精读区论文标签
-1. [ASTRA-sim 3.0: Next-Level Distributed Machine Learning Simulations via High-Fidelity GPU and Infrastructure Modeling](/202606/12/2606.10440v1-astra-sim-30-next-level-distributed-machine-learning-simulations-via-high-fidelity-gpu-and-infrastructure-modeling)  
+1. [Terastal: Layer-Variant-based Scheduling for Real-Time Multi-DNN Workloads on Heterogeneous Accelerators](/202606/13/2606.06818v1-terastal-layer-variant-based-scheduling-for-real-time-multi-dnn-workloads-on-heterogeneous-accelerators)  
    标签：评分：10.0/10、query:mlsys
-   evidence：高保真分布式机器学习基础设施和GPU通信仿真器
-2. [Range Penalization: Theoretical Insights with Applications in Federated Learning](/202606/12/2606.10916v1-range-penalization-theoretical-insights-with-applications-in-federated-learning)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：联邦学习中的范围正则化方法，用于分布式模型训练
+   evidence：针对异构加速器上的多DNN负载，提出基于层变体的实时调度框架
 
 ### 速读区论文标签
-1. [MLEvolve: A Self-Evolving Framework for Automated Machine Learning Algorithm Discovery](/202606/12/2606.06473v1-mlevolve-a-self-evolving-framework-for-automated-machine-learning-algorithm-discovery)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：用于自动化机器学习算法设计的自进化多智能体框架
-2. [Federated continual learning: A comprehensive survey on lifelong and privacy-preserving learning over distributed and non-stationary data](/202606/12/2606.11272v1-federated-continual-learning-a-comprehensive-survey-on-lifelong-and-privacy-preserving-learning-over-distributed-and-non-stationary-data)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：联邦持续学习的综合综述，涉及分布式训练与系统挑战。
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
