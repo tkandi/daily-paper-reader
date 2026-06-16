@@ -6,43 +6,43 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-15
-- 运行时间：2026-06-15 22:22:19 UTC
+- 最新运行日期：2026-06-16
+- 运行时间：2026-06-16 23:01:20 UTC
 - 运行状态：成功
 - 本次总论文数：7
-- 精读区：4
-- 速读区：3
+- 精读区：5
+- 速读区：2
 
 ### 今日简报（AI）
-今日聚焦复合AI系统的设计方法论与边缘-云-空间连续体中的运行时模型选择，辅以图数据剪枝、优化器与单细胞数据基础设施速读。
-最值得关注的方向是分布式复合AI系统的性能权衡管理，以及SLO驱动的边缘-云-空间运行时模型选择框架。
-普通读者可优先阅读《Design Methodology and Performance Trade-offs Management for Distributed and Compound AI Systems》这篇满分精读论文，把握复合AI系统落地的核心权衡思路。
-- 详情：[/202606/15/README](/202606/15/README)
+今日精读7篇论文，聚焦分布式训练通信与长上下文并行效率突破。  
+满分研究揭示：CXL侧低比特梯度聚合可大幅压缩通信量，子空间混合方法实现带宽高效的上下文并行训练。  
+建议读者重点关注CXL在分布式训练中的应用趋势及长上下文模型的高效并行策略。
+- 详情：[/202606/16/README](/202606/16/README)
 
 ### 精读区论文标签
-1. [Design Methodology and Performance Trade-offs Management for Distributed and Compound AI Systems](/202606/15/2606.14350v1-design-methodology-and-performance-trade-offs-management-for-distributed-and-compound-ai-systems)  
+1. [NEURON-Fabric: CXL-Side Low-Bit Gradient Aggregation for Distributed Training](/202606/16/2606.15045v1-neuron-fabric-cxl-side-low-bit-gradient-aggregation-for-distributed-training)  
    标签：评分：10.0/10、query:mlsys
-   evidence：面向分布式和复合AI系统的系统中心设计方法论
-2. [PLAIground: SLO-Driven Runtime Model Selection for Compound AI Systems in the Edge-Cloud-Space Continuum](/202606/15/2606.14356v1-plaiground-slo-driven-runtime-model-selection-for-compound-ai-systems-in-the-edge-cloud-space-continuum)  
+   evidence：分布式训练的CXL端低比特梯度聚合
+2. [Mixtures of Subspaces for Bandwidth Efficient Context Parallel Training](/202606/16/2606.16384v1-mixtures-of-subspaces-for-bandwidth-efficient-context-parallel-training)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：提出一种压缩方法，用于去中心化环境中通信高效的上下文并行训练
+3. [Service-Induced Congestion in Memory-Constrained LLM Serving](/202606/16/2606.15555v1-service-induced-congestion-in-memory-constrained-llm-serving)  
    标签：评分：9.0/10、query:mlsys
-   evidence：面向边缘-云-空间连续体的复合AI系统SLO驱动运行时模型选择框架
-3. [Federated Learning for Feature Generalization with Convex Constraints](/202606/15/2606.14416v1-federated-learning-for-feature-generalization-with-convex-constraints)  
+   evidence：建立内存受限LLM服务中由键值缓存增长引起的拥塞和驱逐模型
+4. [Conflict-Aware Federated Fine-Tuning of Large Language Models with Mixture-of-Experts](/202606/16/2606.15625v1-conflict-aware-federated-fine-tuning-of-large-language-models-with-mixture-of-experts)  
    标签：评分：9.0/10、query:mlsys
-   evidence：带凸约束的联邦学习方法，提升分布式训练特征泛化能力
-4. [MUFFLe: Efficient Model Update Compression via Generalized Deduplication for Federated Learning](/202606/15/2606.14354v1-muffle-efficient-model-update-compression-via-generalized-deduplication-for-federated-learning)  
+   evidence：提出面向LLM的联邦微调方法，使用MoE解决分布式训练中的客户端冲突。
+5. [From Tokens to Regions: CUDA-Sensitive Instruction Tuning for GPU Kernel Generation](/202606/16/2606.16231v1-from-tokens-to-regions-cuda-sensitive-instruction-tuning-for-gpu-kernel-generation)  
    标签：评分：8.0/10、query:mlsys
-   evidence：通过广义去重实现联邦学习的通信高效模型更新压缩
+   evidence：提出CUDA敏感指令微调，改进基于LLM的GPU内核生成，是AI基础设施的关键任务。
 
 ### 速读区论文标签
-1. [Selecting Samples on Graphs: A Unified Dataset Pruning Framework for Lossless Training Acceleration](/202606/15/2606.12913v1-selecting-samples-on-graphs-a-unified-dataset-pruning-framework-for-lossless-training-acceleration)  
+1. [Decoupling Inference from State Updates in Low-Latency Feature Engines via Probabilistic Thinning](/202606/16/2606.16981v1-decoupling-inference-from-state-updates-in-low-latency-feature-engines-via-probabilistic-thinning)  
    标签：评分：7.0/10、query:mlsys
-   evidence：基于图的数据库修剪框架，实现无损训练加速，降低训练成本
-2. [Gefen: Optimized Stochastic Optimizer](/202606/15/2606.13894v1-gefen-optimized-stochastic-optimizer)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：内存高效优化器Gefen降低训练内存占用约8倍，支持更大模型
-3. [Cellfm-datasets: A Unified Data Infrastructure for Single-Cell and Spatial Transcriptomics Foundation Model Pretraining](/202606/15/biorxiv-10-64898-2026-06-11-731508-v1-cellfm-datasets-a-unified-data-infrastructure-for-single-cell-and-spatial-transcriptomics-foundation-model-pretraining)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：面向细胞基础模型分布式预训练的统一数据基础设施
+   evidence：通过概率稀释解耦流式机器学习管道中的推理与状态持久化，提升系统效率
+2. [PreLort: Prefix-Nested LoRA for Federated Fine-Tuning under Rank Heterogeneity](/202606/16/2606.15963v1-prelort-prefix-nested-lora-for-federated-fine-tuning-under-rank-heterogeneity)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：具有秩异构性的大语言模型联邦微调
 
 
 <div class="dpr-home-promo-card">
