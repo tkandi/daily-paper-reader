@@ -6,43 +6,49 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-16
-- 运行时间：2026-06-16 23:01:20 UTC
+- 最新运行日期：2026-06-17
+- 运行时间：2026-06-17 20:58:39 UTC
 - 运行状态：成功
-- 本次总论文数：7
-- 精读区：5
-- 速读区：2
+- 本次总论文数：9
+- 精读区：6
+- 速读区：3
 
 ### 今日简报（AI）
-今日精读7篇论文，聚焦分布式训练通信与长上下文并行效率突破。  
-满分研究揭示：CXL侧低比特梯度聚合可大幅压缩通信量，子空间混合方法实现带宽高效的上下文并行训练。  
-建议读者重点关注CXL在分布式训练中的应用趋势及长上下文模型的高效并行策略。
-- 详情：[/202606/16/README](/202606/16/README)
+今日重点研读了6篇系统与模型论文并速览3篇前沿进展，聚焦GPU异构利用与多智能体调度。
+满分精读《Tangram》通过巧妙隐藏GPU异构性大幅提升LLM并行效率，次高分《Maestro》则为LLM驱动的多智能体系统首次提出负载感知的跨集群调度。
+建议优先吸收Tangram的异构抽象思路，再结合SoftMoE的软路由设计，探索更灵活的LLM扩展方案。
+- 详情：[/202606/17/README](/202606/17/README)
 
 ### 精读区论文标签
-1. [NEURON-Fabric: CXL-Side Low-Bit Gradient Aggregation for Distributed Training](/202606/16/2606.15045v1-neuron-fabric-cxl-side-low-bit-gradient-aggregation-for-distributed-training)  
+1. [Tangram: Hiding GPU Heterogeneity for Efficient LLM Parallelization](/202606/17/2606.16907v1-tangram-hiding-gpu-heterogeneity-for-efficient-llm-parallelization)  
    标签：评分：10.0/10、query:mlsys
-   evidence：分布式训练的CXL端低比特梯度聚合
-2. [Mixtures of Subspaces for Bandwidth Efficient Context Parallel Training](/202606/16/2606.16384v1-mixtures-of-subspaces-for-bandwidth-efficient-context-parallel-training)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：提出一种压缩方法，用于去中心化环境中通信高效的上下文并行训练
-3. [Service-Induced Congestion in Memory-Constrained LLM Serving](/202606/16/2606.15555v1-service-induced-congestion-in-memory-constrained-llm-serving)  
+   evidence：隐藏GPU异构性以实现高效LLM并行化
+2. [Maestro: Workload-Aware Cross-Cluster Scheduling for LLM-Based Multi-Agent Systems](/202606/17/2606.12950v1-maestro-workload-aware-cross-cluster-scheduling-for-llm-based-multi-agent-systems)  
    标签：评分：9.0/10、query:mlsys
-   evidence：建立内存受限LLM服务中由键值缓存增长引起的拥塞和驱逐模型
-4. [Conflict-Aware Federated Fine-Tuning of Large Language Models with Mixture-of-Experts](/202606/16/2606.15625v1-conflict-aware-federated-fine-tuning-of-large-language-models-with-mixture-of-experts)  
+   evidence：面向LLM多智能体系统的跨集群工作负载感知调度
+3. [GF-DiT: Scheduling Parallelism for Diffusion Transformer Serving](/202606/17/2606.13501v1-gf-dit-scheduling-parallelism-for-diffusion-transformer-serving)  
    标签：评分：9.0/10、query:mlsys
-   evidence：提出面向LLM的联邦微调方法，使用MoE解决分布式训练中的客户端冲突。
-5. [From Tokens to Regions: CUDA-Sensitive Instruction Tuning for GPU Kernel Generation](/202606/16/2606.16231v1-from-tokens-to-regions-cuda-sensitive-instruction-tuning-for-gpu-kernel-generation)  
+   evidence：根据工作负载动态调整DiT服务的GPU并行度
+4. [Tying the Loop -- Tied Expert Layers in Mixture-of-Experts Language Models](/202606/17/2606.16825v1-tying-the-loop----tied-expert-layers-in-mixture-of-experts-language-models)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：降低MoE大语言模型内存占用的架构修改
+5. [Sensing-Native Over-the-Air Federated Learning](/202606/17/2606.17117v1-sensing-native-over-the-air-federated-learning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：提出CUDA敏感指令微调，改进基于LLM的GPU内核生成，是AI基础设施的关键任务。
+   evidence：利用梯度统计量实现零开销分布式感知的空中联邦学习
+6. [KANLib -- An Modular, Extensible and Fast Kolmogorov-Arnold Network Implementation](/202606/17/2606.17927v1-kanlib----an-modular-extensible-and-fast-kolmogorov-arnold-network-implementation)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：为KAN架构提供了一个模块化、可扩展且高效的软件框架，类似于深度学习框架设计
 
 ### 速读区论文标签
-1. [Decoupling Inference from State Updates in Low-Latency Feature Engines via Probabilistic Thinning](/202606/16/2606.16981v1-decoupling-inference-from-state-updates-in-low-latency-feature-engines-via-probabilistic-thinning)  
+1. [A solvable model for unsupervised federated learning](/202606/17/2606.13045v1-a-solvable-model-for-unsupervised-federated-learning)  
    标签：评分：7.0/10、query:mlsys
-   evidence：通过概率稀释解耦流式机器学习管道中的推理与状态持久化，提升系统效率
-2. [PreLort: Prefix-Nested LoRA for Federated Fine-Tuning under Rank Heterogeneity](/202606/16/2606.15963v1-prelort-prefix-nested-lora-for-federated-fine-tuning-under-rank-heterogeneity)  
+   evidence：教师-多学生场景下联邦学习的理论分析模型
+2. [SoftMoE: Soft Differentiable Routing for Mixture-of-Experts in LLMs](/202606/17/2606.17952v1-softmoe-soft-differentiable-routing-for-mixture-of-experts-in-llms)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：用于优化专家分配的可微分软路由
+3. [SemPiper: Interactive Code Synthesis for Semantic Operators in Machine Learning Pipelines](/202606/17/2606.14361v1-sempiper-interactive-code-synthesis-for-semantic-operators-in-machine-learning-pipelines)  
    标签：评分：6.0/10、query:mlsys
-   evidence：具有秩异构性的大语言模型联邦微调
+   evidence：集成LLM驱动语义算子的新型ML流水线编程模型
 
 
 <div class="dpr-home-promo-card">
