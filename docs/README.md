@@ -6,26 +6,34 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-18
-- 运行时间：2026-06-18 22:23:25 UTC
+- 最新运行日期：2026-06-19
+- 运行时间：2026-06-19 20:45:08 UTC
 - 运行状态：成功
-- 本次总论文数：2
-- 精读区：1
-- 速读区：1
+- 本次总论文数：4
+- 精读区：2
+- 速读区：2
 
 ### 今日简报（AI）
-今日精读高赞论文《Pulse》，探索用自动流水线并行加速大型扩散模型训练；可关注其如何破解扩散模型从单GPU到多节点的扩展难题。若对训练效率感兴趣，不妨直接翻看Pulse的流水线调度策略与实验对比。
-- 详情：[/202606/18/README](/202606/18/README)
+1) 今天深挖了苹果神经网络引擎的Python直算方案与注意力蒸馏的极致加速，顺便瞥见训练隐形监控与扩散模型专家拆解新思路。  
+2) 最值得看：ANEForge 让你在 Apple Neural Engine 上用纯 Python 获得高性能计算；StreamKL 则给出极简内存的 KL 散度加速注意力蒸馏。  
+3) 建议普通读者亲身体验一下 ANEForge 的本地推理加速，或把 StreamKL 的轻量蒸馏思路放进自己的模型压缩管线里看看。
+- 详情：[/202606/19/README](/202606/19/README)
 
 ### 精读区论文标签
-1. [Pulse: Training Acceleration for Large Diffusion Models with Automatic Pipeline Parallelism](/202606/18/2606.19163v1-pulse-training-acceleration-for-large-diffusion-models-with-automatic-pipeline-parallelism)  
+1. [ANEForge: Python for direct computation on the Apple Neural Engine](/202606/19/2606.17090v1-aneforge-python-for-direct-computation-on-the-apple-neural-engine)  
    标签：评分：9.0/10、query:mlsys
-   evidence：针对大型扩散模型的自动流水线并行训练策略
+   evidence：Python包，无需CoreML直接编程苹果神经引擎，将惰性张量图编译为单一ANE程序
+2. [StreamKL: Fast and Memory-Efficient KL Divergence for Boosting Attention Distillation](/202606/19/2606.20005v1-streamkl-fast-and-memory-efficient-kl-divergence-for-boosting-attention-distillation)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：面向大规模训练优化的内存高效GPU原语
 
 ### 速读区论文标签
-1. [Schattor: Schatten-family methods for deep learning optimization](/202606/18/2606.15702v1-schattor-schatten-family-methods-for-deep-learning-optimization)  
+1. [Detecting Hidden ML Training With Zero-Overhead Telemetry](/202606/19/2606.19262v1-detecting-hidden-ml-training-with-zero-overhead-telemetry)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：用于集群管理的GPU工作负载监控
+2. [MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers](/202606/19/2606.15615v1-moeca-aligning-feature-reuse-with-expert-decomposition-in-diffusion-transformers)  
    标签：评分：6.0/10、query:mlsys
-   evidence：提出基于Schatten范数的自适应优化器族，统一SGD和Muon
+   evidence：提出细粒度缓存框架，通过专家分支级特征重用，提升混合专家扩散Transformer的推理效率，推进ML系统效能。
 
 
 <div class="dpr-home-promo-card">
