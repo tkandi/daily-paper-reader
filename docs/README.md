@@ -6,34 +6,37 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-19
-- 运行时间：2026-06-19 20:45:08 UTC
+- 最新运行日期：2026-06-20
+- 运行时间：2026-06-20 20:53:07 UTC
 - 运行状态：成功
-- 本次总论文数：4
+- 本次总论文数：5
 - 精读区：2
-- 速读区：2
+- 速读区：3
 
 ### 今日简报（AI）
-1) 今天深挖了苹果神经网络引擎的Python直算方案与注意力蒸馏的极致加速，顺便瞥见训练隐形监控与扩散模型专家拆解新思路。  
-2) 最值得看：ANEForge 让你在 Apple Neural Engine 上用纯 Python 获得高性能计算；StreamKL 则给出极简内存的 KL 散度加速注意力蒸馏。  
-3) 建议普通读者亲身体验一下 ANEForge 的本地推理加速，或把 StreamKL 的轻量蒸馏思路放进自己的模型压缩管线里看看。
-- 详情：[/202606/19/README](/202606/19/README)
+今日聚焦联邦学习前沿，精读两篇顶会论文，速读三篇边缘智能方案。  
+最值得关注：用最优传输对齐单次联邦分布（8.0分）与 LoRA 边缘微调内存压缩技术（8.0分）。  
+建议深入了解分布偏移鲁棒对齐和资源受限下的高效微调策略，启发端侧联邦部署。
+- 详情：[/202606/20/README](/202606/20/README)
 
 ### 精读区论文标签
-1. [ANEForge: Python for direct computation on the Apple Neural Engine](/202606/19/2606.17090v1-aneforge-python-for-direct-computation-on-the-apple-neural-engine)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：Python包，无需CoreML直接编程苹果神经引擎，将惰性张量图编译为单一ANE程序
-2. [StreamKL: Fast and Memory-Efficient KL Divergence for Boosting Attention Distillation](/202606/19/2606.20005v1-streamkl-fast-and-memory-efficient-kl-divergence-for-boosting-attention-distillation)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：面向大规模训练优化的内存高效GPU原语
+1. [Distribution Alignment for One-Shot Federated Learning via Optimal Transport](/202606/20/2606.16655v1-distribution-alignment-for-one-shot-federated-learning-via-optimal-transport)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：用于一次性联邦学习的最优传输对齐以处理分布偏移
+2. [Techniques for Peak Memory Reduction for LoRA Fine-tuning of LLMs on Edge Devices](/202606/20/2606.19528v1-techniques-for-peak-memory-reduction-for-lora-fine-tuning-of-llms-on-edge-devices)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：通过量化、检查点、softmax近似等内存缩减技术，在边缘设备上实现LLM微调
 
 ### 速读区论文标签
-1. [Detecting Hidden ML Training With Zero-Overhead Telemetry](/202606/19/2606.19262v1-detecting-hidden-ml-training-with-zero-overhead-telemetry)  
+1. [Towards Modality-imbalanced Federated Graph Learning: A Data Synthesis-based Approach](/202606/20/2606.20382v1-towards-modality-imbalanced-federated-graph-learning-a-data-synthesis-based-approach)  
    标签：评分：7.0/10、query:mlsys
-   evidence：用于集群管理的GPU工作负载监控
-2. [MoECa: Aligning Feature Reuse with Expert Decomposition in Diffusion Transformers](/202606/19/2606.15615v1-moeca-aligning-feature-reuse-with-expert-decomposition-in-diffusion-transformers)  
+   evidence：用于分布式图训练的联邦学习方法
+2. [An affordable hardware-aware neural architecture search for deploying convolutional neural networks on ultra-low-power computing platforms](/202606/20/2606.16290v1-an-affordable-hardware-aware-neural-architecture-search-for-deploying-convolutional-neural-networks-on-ultra-low-power-computing-platforms)  
    标签：评分：6.0/10、query:mlsys
-   evidence：提出细粒度缓存框架，通过专家分支级特征重用，提升混合专家扩散Transformer的推理效率，推进ML系统效能。
+   evidence：硬件感知神经架构搜索协同设计神经网络与硬件约束，针对超低功耗微控制器
+3. [MonaVec: A Training-Free Embedded Vector Search Kernel for Edge and Offline AI Systems](/202606/20/2606.19458v1-monavec-a-training-free-embedded-vector-search-kernel-for-edge-and-offline-ai-systems)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：用于边缘AI基础设施的向量搜索内核
 
 
 <div class="dpr-home-promo-card">
