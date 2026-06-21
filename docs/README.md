@@ -6,37 +6,37 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-20
-- 运行时间：2026-06-20 20:53:07 UTC
+- 最新运行日期：2026-06-21
+- 运行时间：2026-06-21 21:28:40 UTC
 - 运行状态：成功
 - 本次总论文数：5
 - 精读区：2
 - 速读区：3
 
 ### 今日简报（AI）
-今日聚焦联邦学习前沿，精读两篇顶会论文，速读三篇边缘智能方案。  
-最值得关注：用最优传输对齐单次联邦分布（8.0分）与 LoRA 边缘微调内存压缩技术（8.0分）。  
-建议深入了解分布偏移鲁棒对齐和资源受限下的高效微调策略，启发端侧联邦部署。
-- 详情：[/202606/20/README](/202606/20/README)
+今日精读2篇高分论文，聚焦大模型推理加速与分布式学习前沿。  
+最值得关注的是：用时空专家预取榨干MoE推理效率，以及量子环全归约同时提升通信与隐私。  
+想跟上下一代LLM系统优化，建议从这两条技术路线切入深挖。
+- 详情：[/202606/21/README](/202606/21/README)
 
 ### 精读区论文标签
-1. [Distribution Alignment for One-Shot Federated Learning via Optimal Transport](/202606/20/2606.16655v1-distribution-alignment-for-one-shot-federated-learning-via-optimal-transport)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：用于一次性联邦学习的最优传输对齐以处理分布偏移
-2. [Techniques for Peak Memory Reduction for LoRA Fine-tuning of LLMs on Edge Devices](/202606/20/2606.19528v1-techniques-for-peak-memory-reduction-for-lora-fine-tuning-of-llms-on-edge-devices)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：通过量化、检查点、softmax近似等内存缩减技术，在边缘设备上实现LLM微调
+1. [A Spatio-Temporal Expert Prefetching Framework for Efficient MoE-based LLM Inference](/202606/21/2606.15453v1-a-spatio-temporal-expert-prefetching-framework-for-efficient-moe-based-llm-inference)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：通过时空专家预取框架减少MoE推理中的加载开销
+2. [Quantum ring all-reduce: communication and privacy advantages for distributed learning](/202606/21/2606.20344v1-quantum-ring-all-reduce-communication-and-privacy-advantages-for-distributed-learning)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：提出量子环形all-reduce以实现高效的分布式训练通信
 
 ### 速读区论文标签
-1. [Towards Modality-imbalanced Federated Graph Learning: A Data Synthesis-based Approach](/202606/20/2606.20382v1-towards-modality-imbalanced-federated-graph-learning-a-data-synthesis-based-approach)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：用于分布式图训练的联邦学习方法
-2. [An affordable hardware-aware neural architecture search for deploying convolutional neural networks on ultra-low-power computing platforms](/202606/20/2606.16290v1-an-affordable-hardware-aware-neural-architecture-search-for-deploying-convolutional-neural-networks-on-ultra-low-power-computing-platforms)  
+1. [Beyond Weights and Gradients: A Taxonomy of Federated Learning Messages](/202606/21/2606.16891v1-beyond-weights-and-gradients-a-taxonomy-of-federated-learning-messages)  
    标签：评分：6.0/10、query:mlsys
-   evidence：硬件感知神经架构搜索协同设计神经网络与硬件约束，针对超低功耗微控制器
-3. [MonaVec: A Training-Free Embedded Vector Search Kernel for Edge and Offline AI Systems](/202606/20/2606.19458v1-monavec-a-training-free-embedded-vector-search-kernel-for-edge-and-offline-ai-systems)  
+   evidence：提出了联邦学习消息的分类体系，与分布式训练通信框架相关。
+2. [Federated Bilevel Performative Prediction](/202606/21/2606.19734v1-federated-bilevel-performative-prediction)  
    标签：评分：6.0/10、query:mlsys
-   evidence：用于边缘AI基础设施的向量搜索内核
+   evidence：提出处理表演性的联邦双层优化算法，属于分布式训练方法
+3. [AutoZyme: An Autonomous Agentic Framework to Optimize Bioinformatics Software](/202606/21/biorxiv-10-64898-2026-06-12-731250-v1-autozyme-an-autonomous-agentic-framework-to-optimize-bioinformatics-software)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：用于自动软件优化的代理框架，可应用于AI基础设施
 
 
 <div class="dpr-home-promo-card">
