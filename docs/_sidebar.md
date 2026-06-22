@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-06-22 <!--dpr-date:20260622-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202606/22/2606.19898v1-query-aware-routing-for-filtered-approximate-nearest-neighbors-search" data-sidebar-item="{&quot;title&quot;: &quot;Query-aware Routing for Filtered Approximate Nearest Neighbors Search&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2606.19898v1-query-aware-routing-for-filtered-approximate-nearest-neighbors-search&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;mlsys&quot;}], &quot;evidence&quot;: &quot;向量数据库中过滤近似最近邻搜索的查询感知路由，属于AI基础设施&quot;}">Query-aware Routing for Filtered Approximate Nearest Neighbors Search</a>
   * 2026-06-21 <!--dpr-date:20260621-->
     * 精读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202606/21/2606.15453v1-a-spatio-temporal-expert-prefetching-framework-for-efficient-moe-based-llm-inference" data-sidebar-item="{&quot;title&quot;: &quot;A Spatio-Temporal Expert Prefetching Framework for Efficient MoE-based LLM Inference&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2606.15453v1-a-spatio-temporal-expert-prefetching-framework-for-efficient-moe-based-llm-inference&quot;, &quot;score&quot;: &quot;9.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;mlsys&quot;}], &quot;evidence&quot;: &quot;通过时空专家预取框架减少MoE推理中的加载开销&quot;}">A Spatio-Temporal Expert Prefetching Framework for Efficient MoE-based LLM Inference</a>
