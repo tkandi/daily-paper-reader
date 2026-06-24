@@ -6,44 +6,41 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-23
-- 运行时间：2026-06-23 22:19:57 UTC
+- 最新运行日期：2026-06-24
+- 运行时间：2026-06-24 21:58:48 UTC
 - 运行状态：成功
-- 本次总论文数：8
-- 精读区：6
-- 速读区：2
+- 本次总论文数：7
+- 精读区：4
+- 速读区：3
 
 ### 今日简报（AI）
-今日深度解读大模型效率，精读Transformer微调能耗屋顶线模型与CTR推理双层并行框架。最值关注：微调能耗可精准建模，稀疏注意力即插即用降低长上下文成本。建议将能耗评估纳入模型选型，并尝试稀疏路由在实际长文本任务中的效果。
-- 详情：[/202606/23/README](/202606/23/README)
+聚焦大模型低成本部署与生成式AI加速：今天精读了两篇关于异构Spot GPU集群成本优化和扩散并行加速视觉生成LLM强化学习的高分研究。最值得看的方向是利用动态Spot资源将LLM推理成本大幅压低，以及用训练辅助生成和扩散并行加速解耦强化学习。建议关注云服务资源调度策略和扩散式训练加速，尤其对多模态生成项目有明显落地价值。
+- 详情：[/202606/24/README](/202606/24/README)
 
 ### 精读区论文标签
-1. [The Energy Consumption of Transformer Fine-Tuning: A Roofline-Inspired Scaling Model](/202606/23/2606.23546v1-the-energy-consumption-of-transformer-fine-tuning-a-roofline-inspired-scaling-model)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：开发了受屋顶线启发的缩放模型，预测多GPU Transformer训练的能耗，捕捉张量并行和数据并行效应。
-2. [DPIFrame: A Dual-Level Parallelism Acceleration Framework for CTR Model Inference](/202606/23/2606.21101v1-dpiframe-a-dual-level-parallelism-acceleration-framework-for-ctr-model-inference)  
+1. [ShuntServe: Cost-Efficient LLM Serving on Heterogeneous Spot GPU Clusters](/202606/24/2606.18600v1-shuntserve-cost-efficient-llm-serving-on-heterogeneous-spot-gpu-clusters)  
    标签：评分：9.0/10、query:mlsys
-   evidence：首个双层并行框架，用于在GPU上加速CTR模型推理，具备模块内和模块间并行及高效多表查找。
-3. [SwarmX: Agentic Scheduling for Low-Latency Agentic Systems](/202606/23/2606.21401v1-swarmx-agentic-scheduling-for-low-latency-agentic-systems)  
+   evidence：通过异构竞价GPU集群的互补可用性模式实现高性价比的大模型服务调度。
+2. [Accelerating Disaggregated RL for Visual Generative LLMs with Diffusion-Based Parallelism and Trainer-Assisted Generation](/202606/24/2606.24369v1-accelerating-disaggregated-rl-for-visual-generative-llms-with-diffusion-based-parallelism-and-trainer-assisted-generation)  
    标签：评分：9.0/10、query:mlsys
-   evidence：使用神经预测器的GPU-CPU集群智能体调度系统
-4. [Breaking chains with trees: Deep learning with $\mathcal{O}(\log N)$ parallel time complexity](/202606/23/2606.21497v1-breaking-chains-with-trees-deep-learning-with-mathcalolog-n-parallel-time-complexity)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：提出分层块局部学习，实现并行深度学习的对数时间复杂度
-5. [Recency/Frequency Adaptive KV Caching for Large Language Model Serving](/202606/23/2606.21238v1-recencyfrequency-adaptive-kv-caching-for-large-language-model-serving)  
+   evidence：提出面向视觉生成大模型的解耦式强化学习训练系统，采用扩散并行
+3. [Priority-Aware Learning-Unlearning Correction for Dynamic Decentralized LoRA Fine-Tuning](/202606/24/2606.22878v1-priority-aware-learning-unlearning-correction-for-dynamic-decentralized-lora-fine-tuning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：自适应的KV缓存管理提升LLM推理服务缓存命中率与延迟
-6. [FlowTrain: Flow-Based Decoupled Training for Industrial-Grade Vision-Language Models](/202606/23/2606.23087v1-flowtrain-flow-based-decoupled-training-for-industrial-grade-vision-language-models)  
+   evidence：去中心化联邦学习LoRA微调中的动态校正属于分布式训练方法
+4. [Towards Federated Long-Tailed Graph Learning: An Energy-Guided Dual Decoupling Approach](/202606/24/2606.24237v1-towards-federated-long-tailed-graph-learning-an-energy-guided-dual-decoupling-approach)  
    标签：评分：8.0/10、query:mlsys
-   evidence：提出基于流的解耦训练框架，将VLM训练重构为统一内存池上的生产者-消费者数据流。
+   evidence：提出用于联邦图学习的FedEPD，一种处理长尾数据的分布式训练算法
 
 ### 速读区论文标签
-1. [Federated learning with heavy-tailed gradient noise and communication noise: a variance-reduction based algorithm](/202606/23/2606.22466v1-federated-learning-with-heavy-tailed-gradient-noise-and-communication-noise-a-variance-reduction-based-algorithm)  
+1. [ReRAM-aware Model Finetuning addressing I-V Non-linearity and Retention Errors](/202606/24/2606.17471v1-reram-aware-model-finetuning-addressing-i-v-non-linearity-and-retention-errors)  
    标签：评分：7.0/10、query:mlsys
-   evidence：提出用于联邦学习的方差缩减算法以处理重尾噪声
-2. [SpotAttention: Plug-In Block-Sparse Routing for Pretrained Long-Context Transformers](/202606/23/2606.22874v1-spotattention-plug-in-block-sparse-routing-for-pretrained-long-context-transformers)  
+   evidence：提出硬件感知微调方法，解决ReRAM非理想性，实现鲁棒DNN部署
+2. [Nautilus: A Verifiable Hierarchical Federated Learning Framework for Vehicular-Edge-Cloud Systems](/202606/24/2606.23017v1-nautilus-a-verifiable-hierarchical-federated-learning-framework-for-vehicular-edge-cloud-systems)  
    标签：评分：7.0/10、query:mlsys
-   evidence：轻量级选择器附加在冻结的预训练Transformer上，估计注意力并挑选top-K键，降低二次预填充和缓存成本。
+   evidence：提出一个可验证的分层联邦学习框架，包含面向车-边-云系统的多维资源感知调度
+3. [Semi-asynchronous Federated Learning in Flower: Framework Extension and Performance Assessment](/202606/24/2606.24230v1-semi-asynchronous-federated-learning-in-flower-framework-extension-and-performance-assessment)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：扩展Flower联邦学习框架，引入半异步训练以应对客户端异构性
 
 
 <div class="dpr-home-promo-card">
