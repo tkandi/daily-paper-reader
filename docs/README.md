@@ -6,46 +6,34 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-28
-- 运行时间：2026-06-28 21:30:58 UTC
+- 最新运行日期：2026-06-29
+- 运行时间：2026-06-29 21:37:04 UTC
 - 运行状态：成功
-- 本次总论文数：8
-- 精读区：5
-- 速读区：3
+- 本次总论文数：4
+- 精读区：2
+- 速读区：2
 
 ### 今日简报（AI）
-今日聚焦AI系统效率：从训练集群的防崩溃妙招到MoE模型推理的异步加速。  
-最值得看的是给万卡集群装上“共振安全阀”（预调度准则）和把MoE预填充拆细了异步跑的通路设计。  
-下一步建议关注异构NPU上的稀疏计算与通信优化，它们正成为大模型落地的关键拼图。
-- 详情：[/202606/28/README](/202606/28/README)
+今天我们聚焦大模型灵活推理与联邦学习，精读了两篇高质量论文：一项提出动态稀疏方案让LLM在资源受限时高效运行，另一项用哈希投影加速联邦推荐模型。  
+最值得关注的是端到端动态稀疏能实时适配算力，而MoE模型内部的嵌套剪枝也提供了多场景统一优化思路。  
+如果对落地感兴趣，不妨从动态稀疏和混合精度优化入手，它们是当前降本增效的热点方向。
+- 详情：[/202606/29/README](/202606/29/README)
 
 ### 精读区论文标签
-1. [A Pre-Dispatch Resonance Safety Criterion for AI Training Clusters](/202606/28/2606.22096v1-a-pre-dispatch-resonance-safety-criterion-for-ai-training-clusters)  
+1. [End-to-End Dynamic Sparsity for Resource-Adaptive LLM Inference](/202606/29/2606.27743v1-end-to-end-dynamic-sparsity-for-resource-adaptive-llm-inference)  
    标签：评分：9.0/10、query:mlsys
-   evidence：推导出闭式预调度安全准则以避免AI训练集群中电网共振
-2. [ASAP: A Disaggregated and Asynchronous Inference System for MoE Prefill](/202606/28/2606.22541v1-asap-a-disaggregated-and-asynchronous-inference-system-for-moe-prefill)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：解耦异步推理系统消除 MoE 预填充服务中的同步停顿
-3. [Subspace-Constrained Federated Learning with Low-Rank Adaptation](/202606/28/2606.22724v1-subspace-constrained-federated-learning-with-low-rank-adaptation)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：联邦学习结合低秩适应解决客户端局部更新间的几何错位问题。
-4. [Cache-Resident LLM Inference in GB-Scale Last-Level Caches](/202606/28/2606.25353v1-cache-resident-llm-inference-in-gb-scale-last-level-caches)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：驻留缓存执行模型利用GB级末级缓存减少数据移动并提升LLM推理吞吐
-5. [EGG: An Expert-Guided Agent Framework for Kernel Generation](/202606/28/2606.26758v1-egg-an-expert-guided-agent-framework-for-kernel-generation)  
+   evidence：LLM推理动态稀疏化以适应云资源波动
+2. [Federated Hash Projected Latent Factor Learning](/202606/29/2606.26192v1-federated-hash-projected-latent-factor-learning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：提出专家引导的LLM框架，自动生成面向大语言模型的高性能GPU内核
+   evidence：将哈希学习集成到联邦学习中，提出通信高效的分布式训练新方法。
 
 ### 速读区论文标签
-1. [NeutronSparse: Coordinating Heterogeneous Engines for Sparse Matrix Multiplication on NPUs](/202606/28/2606.22482v1-neutronsparse-coordinating-heterogeneous-engines-for-sparse-matrix-multiplication-on-npus)  
+1. [FlexMoE: One-for-All Nested Intra-Expert Pruning for MoE Language Models](/202606/29/2606.27866v1-flexmoe-one-for-all-nested-intra-expert-pruning-for-moe-language-models)  
    标签：评分：7.0/10、query:mlsys
-   evidence：协调NPU上稀疏矩阵乘法的异构引擎以提升AI加速器效率
-2. [Quantization in Federated Learning: Methods, Challenges and Future Directions](/202606/28/2606.26822v1-quantization-in-federated-learning-methods-challenges-and-future-directions)  
+   evidence：面向MoE大模型的嵌套专家内剪枝以支持灵活部署预算
+2. [SEADA: An efficient methodology for optimizing mixed-precision DNNs on multi-precision spatial architectures](/202606/29/2606.27884v1-seada-an-efficient-methodology-for-optimizing-mixed-precision-dnns-on-multi-precision-spatial-architectures)  
    标签：评分：7.0/10、query:mlsys
-   evidence：联邦学习量化综述提升分布式训练效率
-3. [BitNet Text Embeddings](/202606/28/2606.25674v1-bitnet-text-embeddings)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：极低位宽框架降低LLM嵌入推理成本和存储开销，用于大规模部署
+   evidence：混合精度DNN在多精度空间架构上的映射优化方法
 
 
 <div class="dpr-home-promo-card">
