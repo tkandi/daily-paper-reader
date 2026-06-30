@@ -6,34 +6,31 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-29
-- 运行时间：2026-06-29 21:37:04 UTC
+- 最新运行日期：2026-06-30
+- 运行时间：2026-06-30 22:09:51 UTC
 - 运行状态：成功
-- 本次总论文数：4
-- 精读区：2
+- 本次总论文数：3
+- 精读区：1
 - 速读区：2
 
 ### 今日简报（AI）
-今天我们聚焦大模型灵活推理与联邦学习，精读了两篇高质量论文：一项提出动态稀疏方案让LLM在资源受限时高效运行，另一项用哈希投影加速联邦推荐模型。  
-最值得关注的是端到端动态稀疏能实时适配算力，而MoE模型内部的嵌套剪枝也提供了多场景统一优化思路。  
-如果对落地感兴趣，不妨从动态稀疏和混合精度优化入手，它们是当前降本增效的热点方向。
-- 详情：[/202606/29/README](/202606/29/README)
+今日精选三篇前沿论文，重点精读满分成果 SMART-MIG，其提出强化学习驱动的可扩展、节能 GPU 调度框架。
+最值得关注的方向：用成本感知的动态专家分配提升多设备 MoE 推理效率，以及通过推理记忆维持多智能体扩展的稳定表现。
+建议读者跟进智能调度与大规模模型推理中的资源优化实践，尤其关注 GPU 利用率和能耗的平衡设计。
+- 详情：[/202606/30/README](/202606/30/README)
 
 ### 精读区论文标签
-1. [End-to-End Dynamic Sparsity for Resource-Adaptive LLM Inference](/202606/29/2606.27743v1-end-to-end-dynamic-sparsity-for-resource-adaptive-llm-inference)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：LLM推理动态稀疏化以适应云资源波动
-2. [Federated Hash Projected Latent Factor Learning](/202606/29/2606.26192v1-federated-hash-projected-latent-factor-learning)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：将哈希学习集成到联邦学习中，提出通信高效的分布式训练新方法。
+1. [SMART-MIG: A Learning Framework for Scalable and Energy-Efficient GPU Scheduling](/202606/30/2606.29775v1-smart-mig-a-learning-framework-for-scalable-and-energy-efficient-gpu-scheduling)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：提出基于学习的框架用于在线GPU分区与调度，实现高能效集群管理
 
 ### 速读区论文标签
-1. [FlexMoE: One-for-All Nested Intra-Expert Pruning for MoE Language Models](/202606/29/2606.27866v1-flexmoe-one-for-all-nested-intra-expert-pruning-for-moe-language-models)  
+1. [Beyond Uniform Experts: Cost-Aware Expert Execution for Efficient Multi-Device MoE Inference](/202606/30/2606.29982v1-beyond-uniform-experts-cost-aware-expert-execution-for-efficient-multi-device-moe-inference)  
    标签：评分：7.0/10、query:mlsys
-   evidence：面向MoE大模型的嵌套专家内剪枝以支持灵活部署预算
-2. [SEADA: An efficient methodology for optimizing mixed-precision DNNs on multi-precision spatial architectures](/202606/29/2606.27884v1-seada-an-efficient-methodology-for-optimizing-mixed-precision-dnns-on-multi-precision-spatial-architectures)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：混合精度DNN在多精度空间架构上的映射优化方法
+   evidence：提出硬件引导的运行时框架CAEE，实现成本感知专家执行以优化多设备MoE推理
+2. [ReM-MoA: Reasoning Memory Sustains Mixture-of-Agents Scaling](/202606/30/2606.24437v1-rem-moa-reasoning-memory-sustains-mixture-of-agents-scaling)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：增强记忆的MoA框架通过推理记忆和路由维持LLM推理扩展
 
 
 <div class="dpr-home-promo-card">
