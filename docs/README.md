@@ -6,31 +6,31 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-06-30
-- 运行时间：2026-06-30 22:09:51 UTC
+- 最新运行日期：2026-07-01
+- 运行时间：2026-07-01 22:07:54 UTC
 - 运行状态：成功
 - 本次总论文数：3
-- 精读区：1
-- 速读区：2
+- 精读区：2
+- 速读区：1
 
 ### 今日简报（AI）
-今日精选三篇前沿论文，重点精读满分成果 SMART-MIG，其提出强化学习驱动的可扩展、节能 GPU 调度框架。
-最值得关注的方向：用成本感知的动态专家分配提升多设备 MoE 推理效率，以及通过推理记忆维持多智能体扩展的稳定表现。
-建议读者跟进智能调度与大规模模型推理中的资源优化实践，尤其关注 GPU 利用率和能耗的平衡设计。
-- 详情：[/202606/30/README](/202606/30/README)
+今日精读两篇边缘联邦学习前沿，高分论文聚焦“通信-计算流水线并行”与“抗遗忘的专家路由”。  
+最值得关注的方向：边缘网络中动态调整分割点的自适应训练，以及用 Fisher 信息指导专家分配来解决联邦持续学习的灾难性遗忘。  
+建议从业者优先阅读 AC²P²SL，它提出的流水线加速策略对降低跨设备训练延迟有立竿见影的启发。
+- 详情：[/202607/01/README](/202607/01/README)
 
 ### 精读区论文标签
-1. [SMART-MIG: A Learning Framework for Scalable and Energy-Efficient GPU Scheduling](/202606/30/2606.29775v1-smart-mig-a-learning-framework-for-scalable-and-energy-efficient-gpu-scheduling)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：提出基于学习的框架用于在线GPU分区与调度，实现高能效集群管理
+1. [AC$^2$P$^2$SL: Adaptive Communication-Computation Pipeline Parallel Split Learning over Edge Networks](/202607/01/2606.31276v1-ac2p2sl-adaptive-communication-computation-pipeline-parallel-split-learning-over-edge-networks)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：实现通信与计算重叠的流水线并行拆分学习框架
+2. [Fisher-Routed Mixture of Experts for Federated Class-Incremental Learning](/202607/01/2606.28835v1-fisher-routed-mixture-of-experts-for-federated-class-incremental-learning)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：基于Fisher信息路由的联邦类增量学习混合专家算法
 
 ### 速读区论文标签
-1. [Beyond Uniform Experts: Cost-Aware Expert Execution for Efficient Multi-Device MoE Inference](/202606/30/2606.29982v1-beyond-uniform-experts-cost-aware-expert-execution-for-efficient-multi-device-moe-inference)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：提出硬件引导的运行时框架CAEE，实现成本感知专家执行以优化多设备MoE推理
-2. [ReM-MoA: Reasoning Memory Sustains Mixture-of-Agents Scaling](/202606/30/2606.24437v1-rem-moa-reasoning-memory-sustains-mixture-of-agents-scaling)  
+1. [FedXDS: Leveraging Model Attribution Methods to counteract Data Heterogeneity in Federated Learning](/202607/01/2606.31742v1-fedxds-leveraging-model-attribution-methods-to-counteract-data-heterogeneity-in-federated-learning)  
    标签：评分：6.0/10、query:mlsys
-   evidence：增强记忆的MoA框架通过推理记忆和路由维持LLM推理扩展
+   evidence：利用XAI解决联邦学习中的数据异质性问题，联邦学习是一种分布式训练方法
 
 
 <div class="dpr-home-promo-card">
