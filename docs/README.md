@@ -6,31 +6,31 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-01
-- 运行时间：2026-07-01 22:07:54 UTC
+- 最新运行日期：2026-07-02
+- 运行时间：2026-07-02 21:46:51 UTC
 - 运行状态：成功
 - 本次总论文数：3
 - 精读区：2
 - 速读区：1
 
 ### 今日简报（AI）
-今日精读两篇边缘联邦学习前沿，高分论文聚焦“通信-计算流水线并行”与“抗遗忘的专家路由”。  
-最值得关注的方向：边缘网络中动态调整分割点的自适应训练，以及用 Fisher 信息指导专家分配来解决联邦持续学习的灾难性遗忘。  
-建议从业者优先阅读 AC²P²SL，它提出的流水线加速策略对降低跨设备训练延迟有立竿见影的启发。
-- 详情：[/202607/01/README](/202607/01/README)
+今日精读联邦学习与LLM推理优化两篇高分论文，速读AI工作流查询优化新作。  
+最值得关注：随机网络蒸馏可实现联邦学习客户端自动分簇，而覆盖度驱动的KV缓存淘汰能显著提升大模型推理效率。  
+建议在实际系统开发中，重点关注动态分簇的训练稳定性，以及不同缓存策略对模型输出质量的微妙影响。
+- 详情：[/202607/02/README](/202607/02/README)
 
 ### 精读区论文标签
-1. [AC$^2$P$^2$SL: Adaptive Communication-Computation Pipeline Parallel Split Learning over Edge Networks](/202607/01/2606.31276v1-ac2p2sl-adaptive-communication-computation-pipeline-parallel-split-learning-over-edge-networks)  
+1. [Discovering Collaboration from Novelty: Random Network Distillation for Clustered Federated Learning](/202607/02/2606.30499v1-discovering-collaboration-from-novelty-random-network-distillation-for-clustered-federated-learning)  
    标签：评分：9.0/10、query:mlsys
-   evidence：实现通信与计算重叠的流水线并行拆分学习框架
-2. [Fisher-Routed Mixture of Experts for Federated Class-Incremental Learning](/202607/01/2606.28835v1-fisher-routed-mixture-of-experts-for-federated-class-incremental-learning)  
+   evidence：使用随机网络蒸馏作为新颖性信号的轻量级聚类联邦学习方法
+2. [Coverage-Driven KV Cache Eviction for Efficient and Improved Inference of LLM](/202607/02/2606.29563v1-coverage-driven-kv-cache-eviction-for-efficient-and-improved-inference-of-llm)  
    标签：评分：8.0/10、query:mlsys
-   evidence：基于Fisher信息路由的联邦类增量学习混合专家算法
+   evidence：KV缓存淘汰策略减少LLM推理内存开销
 
 ### 速读区论文标签
-1. [FedXDS: Leveraging Model Attribution Methods to counteract Data Heterogeneity in Federated Learning](/202607/01/2606.31742v1-fedxds-leveraging-model-attribution-methods-to-counteract-data-heterogeneity-in-federated-learning)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：利用XAI解决联邦学习中的数据异质性问题，联邦学习是一种分布式训练方法
+1. [Query-Centric Optimization of AI Workflows via Approximate Query Processing and Proxy Models](/202607/02/2607.00254v1-query-centric-optimization-of-ai-workflows-via-approximate-query-processing-and-proxy-models)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：通过数据库技术减少昂贵模型调用优化AI工作流
 
 
 <div class="dpr-home-promo-card">
