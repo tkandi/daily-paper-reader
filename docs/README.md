@@ -6,40 +6,28 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-03
-- 运行时间：2026-07-03 21:49:26 UTC
+- 最新运行日期：2026-07-04
+- 运行时间：2026-07-04 21:14:24 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：5
+- 本次总论文数：2
+- 精读区：1
 - 速读区：1
 
 ### 今日简报（AI）
-今日精读满分文本到视频训练效率新作《Arachne》和LLM稀疏通信优化《SCAPE》，速读一篇联邦学习新方法。  
-最值得看：级联编排能大幅降低视频生成成本，极端稀疏通信可让大模型训练在高效率下仍保持高精度。  
-建议关注自动化级联策略如何降低多模态生成门槛，或尝试将稀疏通信思路引入你的分布式训练任务。
-- 详情：[/202607/03/README](/202607/03/README)
+精读稀疏联邦学习新架构，速览去中心化AI的信用分配难题。  
+最值得关注：用熵正则化门控在极少量数据下自动剪枝模型的思路，以及全委托合作社中的值约束信用传递。  
+建议留意联邦学习与多智能体激励的交叉动向，这两条线正快速汇合。
+- 详情：[/202607/04/README](/202607/04/README)
 
 ### 精读区论文标签
-1. [Arachne: Orchestrating Cascades for Efficient Text-to-Video Model Training](/202607/03/2607.01701v1-arachne-orchestrating-cascades-for-efficient-text-to-video-model-training)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：用于高效大规模文本到视频模型训练的细粒度计算单元训练框架
-2. [SCAPE: Accurate and Efficient LLM Training with Extreme Sparse Communication](/202607/03/2607.01678v1-scape-accurate-and-efficient-llm-training-with-extreme-sparse-communication)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：通过梯度稀疏化实现LLM训练的高效通信分布式优化器
-3. [Understanding the Robustness of Distributed Self-Supervised Learning Frameworks Against Non-IID Data](/202607/03/2607.02447v1-understanding-the-robustness-of-distributed-self-supervised-learning-frameworks-against-non-iid-data)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：对分布式自监督学习框架在非IID数据下的鲁棒性进行理论分析，这是分布式训练的关键挑战。
-4. [Approximate Nearest Neighbor Search with Graph Range Filters](/202607/03/2607.00727v1-approximate-nearest-neighbor-search-with-graph-range-filters)  
+1. [Entropy-Regularized Probabilistic Gates for Sparse Model Discovery in Scarce-Data Federated Learning](/202607/04/2607.00275v1-entropy-regularized-probabilistic-gates-for-sparse-model-discovery-in-scarce-data-federated-learning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：向量数据库是AI基础设施核心；提出DLH实现图范围过滤器下的近似最近邻搜索
-5. [Class-Grouped Normalized Momentum and Faster Hyperparameter Exploration to Tackle Class Imbalance in Federated Learning](/202607/03/2607.01474v1-class-grouped-normalized-momentum-and-faster-hyperparameter-exploration-to-tackle-class-imbalance-in-federated-learning)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：联邦学习优化器通过类分组归一化动量解决类别不平衡
+   evidence：联邦学习中基于熵正则化概率门的稀疏模型发现
 
 ### 速读区论文标签
-1. [Federated Learning with Energy-Based Structured Probabilistic Inference](/202607/03/2606.30161v1-federated-learning-with-energy-based-structured-probabilistic-inference)  
+1. [Towards Value-Constrained Credit Assignment in Fully Delegated AI Cooperatives](/202607/04/2606.28217v1-towards-value-constrained-credit-assignment-in-fully-delegated-ai-cooperatives)  
    标签：评分：6.0/10、query:mlsys
-   evidence：使用条件随机场优化联邦学习中的客户端聚合权重
+   evidence：去中心化遍历学习中的价值条件梯度过滤用于AI合作体
 
 
 <div class="dpr-home-promo-card">
