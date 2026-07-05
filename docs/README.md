@@ -6,28 +6,27 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-04
-- 运行时间：2026-07-04 21:14:24 UTC
+- 最新运行日期：2026-07-05
+- 运行时间：2026-07-05 21:25:31 UTC
 - 运行状态：成功
 - 本次总论文数：2
-- 精读区：1
-- 速读区：1
+- 精读区：0
+- 速读区：2
 
 ### 今日简报（AI）
-精读稀疏联邦学习新架构，速览去中心化AI的信用分配难题。  
-最值得关注：用熵正则化门控在极少量数据下自动剪枝模型的思路，以及全委托合作社中的值约束信用传递。  
-建议留意联邦学习与多智能体激励的交叉动向，这两条线正快速汇合。
-- 详情：[/202607/04/README](/202607/04/README)
+今日速读两篇前沿论文，聚焦AI系统的协作效率与个性化学习。值得关注的是《SP-CACW》提出的收敛感知加权法，能解决自私客户端在联邦学习中的公平性难题；另一篇展示代理驱动接口如何简化基因分析流程。建议读者若从事分布式训练或生物信息自动化，可深入关注这些将“智能调度”嵌入协作框架的方案。
+- 详情：[/202607/05/README](/202607/05/README)
 
 ### 精读区论文标签
-1. [Entropy-Regularized Probabilistic Gates for Sparse Model Discovery in Scarce-Data Federated Learning](/202607/04/2607.00275v1-entropy-regularized-probabilistic-gates-for-sparse-model-discovery-in-scarce-data-federated-learning)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：联邦学习中基于熵正则化概率门的稀疏模型发现
+- 本次无精读推荐。
 
 ### 速读区论文标签
-1. [Towards Value-Constrained Credit Assignment in Fully Delegated AI Cooperatives](/202607/04/2606.28217v1-towards-value-constrained-credit-assignment-in-fully-delegated-ai-cooperatives)  
+1. [SP-CACW: Convergence-Aware Client Weighting for Selfish Personalized Learning](/202607/05/2606.29322v1-sp-cacw-convergence-aware-client-weighting-for-selfish-personalized-learning)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：联邦学习中的分布式训练个性化客户端加权方法
+2. [Client-server interfaces enable efficient agent-driven variant calling](/202607/05/biorxiv-10-64898-2026-06-25-734665-v1-client-server-interfaces-enable-efficient-agent-driven-variant-calling)  
    标签：评分：6.0/10、query:mlsys
-   evidence：去中心化遍历学习中的价值条件梯度过滤用于AI合作体
+   evidence：将深度学习变异检测工具重构为客户端-服务器系统，以便LLM智能体自动化
 
 
 <div class="dpr-home-promo-card">
