@@ -1,6 +1,9 @@
 * <a class="dpr-sidebar-root-link" href="#/">首页</a>
 * <a class="dpr-sidebar-root-link dpr-sidebar-noactive-link" href="javascript:void(0)" data-dpr-hash="#/tutorial/README">使用教程</a>
 * Daily Papers
+  * 2026-07-06 <!--dpr-date:20260706-->
+    * 速读区
+      * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202607/06/2606.31331v1-expected-gain-based-escalation-in-vertical-federated-learning" data-sidebar-item="{&quot;title&quot;: &quot;Expected Gain-based Escalation in Vertical Federated Learning&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2606.31331v1-expected-gain-based-escalation-in-vertical-federated-learning&quot;, &quot;score&quot;: &quot;6.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;mlsys&quot;}], &quot;evidence&quot;: &quot;垂直联邦学习推理中通过预期增益路由减少通信和计算开销&quot;}">Expected Gain-based Escalation in Vertical Federated Learning</a>
   * 2026-07-05 <!--dpr-date:20260705-->
     * 速读区
       * <a class="dpr-sidebar-item-link dpr-sidebar-item-structured" href="#/202607/05/2606.29322v1-sp-cacw-convergence-aware-client-weighting-for-selfish-personalized-learning" data-sidebar-item="{&quot;title&quot;: &quot;SP-CACW: Convergence-Aware Client Weighting for Selfish Personalized Learning&quot;, &quot;link&quot;: &quot;https://arxiv.org/abs/2606.29322v1-sp-cacw-convergence-aware-client-weighting-for-selfish-personalized-learning&quot;, &quot;score&quot;: &quot;7.0&quot;, &quot;tags&quot;: [{&quot;kind&quot;: &quot;query&quot;, &quot;label&quot;: &quot;mlsys&quot;}], &quot;evidence&quot;: &quot;联邦学习中的分布式训练个性化客户端加权方法&quot;}">SP-CACW: Convergence-Aware Client Weighting for Selfish Personalized Learning</a>
