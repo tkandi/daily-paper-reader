@@ -1,0 +1,773 @@
+Title: Direct Model State Migration for Elastic Training of Large Language Models
+
+URL Source: https://arxiv.org/pdf/2607.04749v1
+
+Published Time: Tue, 07 Jul 2026 03:16:06 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# Direct Model State Migration for Elastic Training of Large Language Models 
+
+Weijian Liu 1,2, Mingzhen Li 1,2∗, Rui Kang 3, Chen Sun 3, Guangming Tan 1,2, Weile Jia 1,2∗
+
+SKLP, Institute of Computing Technology, CAS 1
+
+University of Chinese Academy of Sciences 2
+
+Huawei Technologies Co., Ltd. 3
+
+Abstract —Large language model (LLM) training shall adapt to dynamic resources in shared clusters to tackle the elastic-ity, including passive preemption and optimistic scaling. State migration across device sets is required when altering the hybrid-parallel configuration due to dynamic resources. Existing solutions rely on checkpoint-based mechanisms, which persist complete states to storage for resuming with re-assigned re-sources, forcing all GPUs to stall when transferring model states. Despite optimization efforts, checkpoint-based solutions incur prohibitive latency (tens to hundreds of seconds) due to data movement across memory hierarchies and disregard for GPU-resident state locality. We propose ETC, a checkpoint-free state migration framework for elastic hybrid-parallel LLM training. We exploit the state locality to minimize inter-GPU data movement, replacing persistence with direct device-to-device communication. We leverage the cost matrix abstraction to quantify data movement between parallel configurations and find the optimal migration sketch through a cost-matrix-driven approach. Besides, we eliminate node fragmentation through communication coalescing. Integrated with Megatron-LM, ETC reduces migration overhead by 2.33 × to 6.37 × compared to checkpoint-based solutions across diverse parallel configurations. By enabling efficient migration, ETC unlocks practical elastic training in production environments. 
+
+I. I NTRODUCTION 
+
+Large language models (LLM), based on the transformer architecture, have emerged as foundational models driving di-verse applications. However, training these models incurs sub-stantial computational and memory demands. To achieve state-of-the-art performance in quality and sample efficiency [1], contemporary LLMs are progressively scaled up in model size. The immense computational demands and prolonged execution times of LLM training necessitate deployment on shared large-scale clusters, where hybrid-parallel training jobs are submitted to the cluster job scheduler. In shared clusters, the GPU resources visible to a long-running training job do not remain static. Job arrivals, job completions, quota reclaiming, and scheduler-driven realloca-tion can continuously reshape the device set assigned to a running job. Therefore, elastic hybrid-parallel training should be prepared to migrate model state whenever the available device set changes, rather than assuming a fixed cluster parti-tion throughout the entire training process. To achieve better resource utilization, a training job should scale in/out when fluctuating GPU resources become available due to cluster load change, and the scheduler should frequently reconcile the GPU allocation among jobs in a proactive manner (i.e., preemption and scaling), especially on shared clusters [2]– [4] that co-locates inference jobs and training jobs. Therefore, state migration—the process of transferring model states when moving a training job from device set A to device set B—is essential for hybrid-parallel training jobs, especially those deployed in shared clusters. 
+
+Standard solutions of state migration for a hybrid-parallel training job predominantly rely on the checkpointing mech-anism , which checkpoints complete states (parameters, opti-mizer states, etc.) to persistent storage before migration and then resumes from the states after the restart. If the parallel configuration (i.e., pipeline/tensor-parallel dimension) should be altered according to dynamic resources, the state should be resharded to match the new parallel configuration before resuming. Unfortunately, checkpointing and resharding reside on the critical path of the training loop. Consequently, frequent migrations triggered by elastic training force all participating GPUs to stall computation during the lengthy checkpointing, leading to significant resource under-utilization. Recently, many efforts have attempted to reduce check-pointing overhead. A common practice is to leverage DRAM for intermediate persistence, where the checkpoint is then transferred from DRAM to storage asynchronously [5]–[9]. Based on that, PCcheck [6] splits the checkpoint into chunks to enable concurrent chunk persistence with multiple threads; Gemini [9] presents a placement strategy to maximize failure recovery and a traffic scheduling algorithm to avoid the inter-ference of checkpoint traffic on model training; Tenplex [10] focuses on dynamic parallelism transformation through an in-memory file system and RDMA. Besides, Check-N-Run [11] performs differential checkpointing on values and leverages quantization to reduce checkpoint size. Oobleck [12] exploits inherent redundancy of the replicated model states through pipeline templates for fast recovery. Despite these optimiza-tion efforts, checkpoint-based migration remains fundamen-tally costly. Even the state-of-the-art techniques still incur substantial latency (often tens to hundreds of seconds [6], [10]) because they inevitably involve moving massive amounts of state tensors across the memory hierarchy (e.g., GPU memory →host DRAM →disk). As demonstrated in Figure 1 ,this process suffers from the bandwidth limitations of storage devices, and disregards the crucial state locality residing in GPU memory , necessitating the expensive transfer and persistence of the entire model state. 
+
+> arXiv:2607.04749v1 [cs.DC] 6 Jul 2026
+
+To overcome above issues, we propose ETC, a checkpoint-free state migration framework with minimal data move-ment guarantee for elastic hybrid-parallel LLM training. ETC can migrate the model states of a hybrid-parallel config-uration (e.g., data/pipeline/tensor parallel) to the states of another configuration (denoted as reconfiguration). Unlike other checkpoint-based migrations, all migrations in ETC are completely through inter-device communication with no need of any heavy I/O persistence, considering the common practice of equipping state-of-the-art GPUs (or NPUs) with high-bandwidth interconnects. The key idea of ETC is exploiting the model state locality to keep more states in-place, so as to minimize the data movement during migration. Note that ETC can be integrated with automatic parallel frameworks (e.g., Alpa [13], Unity [14], AutoDDL [15]), as ETC switches model states according to the timely generated configurations efficiently, which together optimize the holistic process of elastic hybrid-parallel training. ETC provides a collective communication primitive for the state migration of hybrid-parallel reconfiguration. The primi-tive takes the current & previous parallel configuration, and model state as input (§III), and then derives the cost matrix to describe data movement (i.e., quantity of model states requir-ing transmission) between current ranks and previous ranks (§III-B for pipeline parallel and §III-C for tensor/data parallel) and derive coarse-grained migration sketch, and then gener-ates the fine-grained device-to-device communication instruc-tions for migration (§III-D), and then performs resource de-fragmentation through additional migration operators passed to the execution engine (§III-E). We also coalesce the migration instructions to avoid the redundant indirect communications. Specifically, the key contributions are as follows:  
+
+> •
+
+We formalize a cost matrix to represent the data move-ment across devices, and employ a cost-matrix-driven approach to minimize the data movement globally.  
+
+> •
+
+We design the execution engine to transform the coarse-grained migration sketch into fine-grained Send , Recv ,and Refer instructions.  
+
+> •
+
+We propose a virtual rank allocator, which decouples the virtual and physical process ranks to eliminate resource fragmentation. It guarantees sustained training efficiency, resource occupancy, and minimized data movement.  
+
+> •
+
+We deploy ETC in Megatron-LM to enable the elas-tic training of hybrid-parallel transformer-based models. Evaluation results show that ETC can accelerate the model state migration under various model sizes and parallel configurations. II. M OTIVATION 
+
+A. Hybrid-Parallel LLM Training 
+
+Efficient LLM training requires hybrid-parallelism—the combination of data, tensor, pipeline, and other paral-lelisms [13], [16]–[19]. A large-scale training job should be broken down into sub-tasks and then assigned to multiple devices for parallel execution, thereby balancing computation, GPU GPU        
+
+> CPU DRAM
+> CPU DRAM
+> Disk / PFS
+> save load PCIe save load I/O
+> Direct Bidirectional NVLink/RDMA transfer
+> (a) Traditional CKPT-based Migration (b) IO-free CKPT-based Migration (c) Ours: Direct Migration
+> GPU GPU
+> CPU DRAM
+> CPU DRAM
+> save load PCIe
+> Disk / PFS (Bypassed)
+> RDMA
+> GPU GPU
+> Disk / PFS (Bypassed)
+> CPU DRAM (Bypassed)
+> Fig. 1. Comparing checkpointing-based migrations and ETC.
+
+memory, and communication among devices. Currently, the LLM training jobs are executed in fixed degree of parallelism (DoP), and they follow the fixed parallel configuration dur-ing training. 1) Data parallel (DP) [16], [17]: It splits the training data into multiple mini-batches. Each device loads a complete model replica, computes gradients of mini-batch, and synchronizes gradients with Allreduce for model update. 
+
+2) Pipeline parallel (PP) [20], [21]: It partitions the model layers into multiple stages, where each device is responsible for one or more stages. And a mini-batch is split into micro-batches and then processed in a pipeline manner. In PP, each device sends/receives intermediate tensors to/from its neighbor using peer-to-peer (P2P) communications. 3) Tensor parallel (TP) [18], [22]: It shards the model parameters at tensor level, and places each shard on a device. When a full parameter or activation tensor is required, TP uses collective communica-tions to reassemble the full tensor from corresponding shards.                                        
+
+> TABLE I COMPARISON ACROSS DIFFERENT STATE MIGRATION APPROACHES .
+> Method I/O-Free Path Data Movement
+> Megatron-LM [18] ✗GPU ⇆DRAM ⇆Disk full+full TorchElastic [23] ✗GPU ⇆Disk full+ ✗(on DP) PcCheck [6] ✗GPU ⇆DRAM ⇆PMEM full+full Varuna [24] ✗GPU ⇆Disk (on PP) full+diff EasyScale [25] ✗GPU ⇆Disk full+ ✗(on DP) ByteCkpt [26] ✗GPU ⇆DRAM ⇆Disk full+/ Oobleck [12] ✓GPU ⇆GPU (on PP) /+diff Tenplex [10] ✓GPU ⇆DRAM full+diff ETC (ours) ✓GPU ⇆GPU (always) /+diff
+> Note: In Data Movement column, ①+②indicates ①in persistence and
+> ②in state resharding. “full” represents full states, “diff” represents differential states, ✗represents no support, and “/” represents no need.
+
+B. Demands of State Migration under Resource Fluctuation 
+
+LLM training relies on large-scale GPU clusters and fea-tures a training cycle that spans several days to several months. During this process, the resource fluctuation is common on shared clusters, and dynamic resource changes for jobs are inevitable. Public traces from Aurora supercomputer show that these disturbances are frequent at the job-event level. In January 2026 alone, the cluster records 32,256/32,249 GPU job starts/ends. Figure 2 provides the minute-level start/end events of GPU jobs (i.e., 1.4 events/min on average) and Fig. 2. Minute-level GPU-job events of Aurora supercomputer in January 2026. Data is collected from public logs (https://reports.alcf.anl.gov/data/au rora.html). 
+
+shows that job fluctuation affects long-running training jobs persistently. Besides, the training/development clusters also exhibit diurnal patterns, and the cluster schedulers usually adopt the minute-level scheduling cycles (e.g., 60s) [27]. For hybrid-parallel jobs, such fluctuation can force migrations. These cluster-level fluctuations reach training jobs through several common triggers: 1) Preemption. High-priority jobs can take GPU resources from low-priority running jobs [28]. For instance, when co-locating inference jobs and training jobs in a shared cluster [2]–[4], training jobs can be pre-empted by inference jobs to meet strict service-level objectives (SLO) [29], [30]. Even in training clusters [25], [31], atraining job can be easily preempted due to constant resource revocation. Because the cluster scheduler tends to allocate the currently idle GPUs (but belonging to other users’ quota) to the running jobs, when other users submit jobs, these GPUs are reclaimed and the corresponding jobs are preempted. As for spot instances [12], [24], [32], the jobs are more likely to be preempted. For example, a 24-hour trace on AWS EC2 suffers from 127 preemptions [32]. 2) Scaling. To guarantee the strict latency SLO, GPU resources are commonly over-provisioned for inference jobs when tackling bursting inference requests (up to 50 × than the average [33]). It leads to resource under-utilization during off-peak hours [34]–[36]. To saturate GPU resources, training jobs should scale out swiftly to utilize idle GPUs, although they would be preempted or proactively scale in to avoid interference against inference jobs. 
+
+C. Opportunity: Minimize Data Movement in State Migration 
+
+The change of device number must modify the parallel configuration and thus disrupts the collaborative logic among devices, which causes the state migration of training jobs. Therefore, to adapt to stage migration, standard solutions usually rely on the checkpointing mechanism (the process of checkpoint–reshard–resume) [37], [38]. However, as shown in Table I, they suffer from huge data movement overhead over migration, hindering their adaptation to frequent-migration scenarios. Specifically, 1) Checkpointing enforces the persistence through I/O, including both directly persisting to disk and redirecting to disk from CPU DRAM. In that scenario, the data movement can be the full model state (i.e., a replica of parameters and optimizer states). While the approaches targeting migration within the limited parallel con-figurations (e.g., Varuna focus on pipeline dimension) should also persist the partial state. 2) When changing hybrid-parallel configurations, existing approaches perform state transforma-tion (i.e., reshard) on persisted checkpointing files, leading to additional access to the full model state. 3) The state locality is usually ignored because of unawareness of the device ranks. Consequently, they fail to transmit the differential states. 
+
+Therefore, to enable efficient state migration, we should try to minimize the data movement. We turn to a checkpoint-free approach by keeping model state in GPU memory and performing reconfiguration with inter-GPU connections. 
+
+Closely related to our study is Oobleck [12] and Ten-plex [10]. However, Oobleck only support migration among pipeline templates, while it sacrifices the job’s fine-grained control over the parallelism, rendering it inadequate for general-purpose migration across arbitrary device sets; and Tenplex employs an in-memory file system for persistence and differential resharding, but still requires transferring full model states with CPU DRAM. III. ETC D ESIGN 
+
+A. Overview 
+
+ETC is a model state migration framework containing the collective communication primitive for various hybrid-parallel training frameworks. ETC can migrate model states during the hybrid-parallel reconfiguration. The design principle of ETC is to exploit the locality of model states and eliminate the redundant data movement across devices. Unlike all the other works, ETC does not require persistent storage and can directly migrate from one hybrid-parallel state to another, which enables rapid model state migration. In addition, ETC can retain the original process context and reuse the context, enabling rapid resumption. As illustrated in Figure 3, a user submits a LLM training job to the cluster. Once execution, the job will obtain a hybrid-parallel training state. When a migration occurs, this training state is denoted as the prev state , and ETC is notified with the target state after migration, denoted as curr state . Both states are mainly determined by the hybrid-parallel configurations. In step 1, we calculate the migration cost matrix between two states. Through the cost matrix, we can obtain the pairwise data movement overhead for any process pair in prev state 
+
+and curr state . And we can then derive the optimal migration sketch with minimal data movement. In step 2, we leverage the execution engine to emit the coarse-grained migration operators of the migration sketch. It ultimately executes the direct state migration across GPUs through the fine-grained inter-GPU communication instructions we designed. In step 3, we employ a virtual rank allocator to provide us more flex-ibility to adjust the roles of devices. It can help perform node de-fragmentation that appears in checkpoint-free migration. The de-fragmentation is also represented through migration operators and passed to the execution engine. Additionally, the execution engine proactively performs communication coalescing to further minimize the data movement. ETC is implemented based on Megatron-LM, and it can be ported to other training frameworks, benefiting from the abstracted LLM Job   
+
+> GPU:0 GPU:i
+> GPU:j GPU:n
+
+Cost Matrix                      
+
+> W0
+> W0
+> ′𝐶 00 𝐶 01 𝐶 0…𝐶 0𝑛
+> 𝐶 10 𝑪 𝒎𝒊𝒏 𝐶 1…𝐶 1𝑛
+> 𝐶 ...0𝐶 ...1𝐶 …...𝐶 ...𝑛
+> 𝐶 𝑚0 𝐶 𝑚1 𝐶 𝑚 ...𝐶 𝑚𝑛
+> W1W…Wn
+> W1
+> ′
+> W…
+> ′
+> Wm
+> ′
+> Parallelization Rank (logical )
+> Device To Workload
+> GPU:0 GPU:1
+> GPU:n -1
+> GPU:j GPU:j+1
+> GPU:m -1GPU:m
+> Curr Training State
+> 𝑅 0
+> 𝑅 𝑚 −1
+> Virtual
+> Rank
+> 𝑪 𝒎𝒊𝒏 :Solving the Migration
+> Sketch Based on Cost Matrix
+
+Virtual Rank Allocator 
+
+Execution Engine      
+
+> Device Rank ( physical )
+> Refer/Send/ Recv Instruction
+> Refer/Send/ Recv Instruction
+> Refer Refer Send Recv
+> Prev
+> State
+> Curr
+> State
+> P2P
+
+User      
+
+> Prev
+> Curr
+> i
+> i
+> i
+> ji
+> Dynamic Resources Each process executes its own instruction list
+> Migration
+> Operator
+> Init Step
+> Prev Training State
+> GPU:n
+> Allocated with
+> more GPUs Fig. 3. Design overview of ETC.
+
+workload, migration sketch, virtual rank, and coarse-grained migration operators. 
+
+B. Cost-Matrix Driven Migration 
+
+Cost Matrix: Quantity the Data Movement between Parallel Configurations. During state migration, the states need to be redistributed across devices. Specifically, the states are resharded and then transferred from one device to another, where we denote the inter-device communication volume as 
+
+data movement . Therefore, we propose the cost matrix to quantify the data movement. Cost matrix is derived from the difference of workloads among all process pairs ⟨a,b ⟩,where a / b represents the process rank of the hybrid-parallel configuration before / after migration. 0 1 2 3                           
+
+> 4567Prev State
+> 8910 11
+> 12 13 14 15
+> Rank:0
+> Rank:1
+> Rank:2
+> Rank:3
+> 0123
+> 4567
+> Curr State 8910 11
+> 12 13 14 15
+> Rank:0
+> Rank:1
+> 4488
+> 8844
+> calc cost(C:0,[P:0,P:1,P:2,P:3])
+> calc cost(C:1,[P:0,P:1,P:2,P:3])
+> Migration Operator(C:1 , P:2)
+
+Capture  State 
+
+Calc Cost  Matrix 
+
+3 Output  Migration  Sketch 
+
+2
+
+1        
+
+> (PP:1)
+> (PP:0)
+> (PP:0)
+> (PP:1)
+> (PP:2)
+> (PP:3)
+> Example: From PP 4 to PP 2
+> Migration Operator(C:0 , P:0) < C:0 , P:0 >
+> < C:1 , P:2 >
+> PP:0
+> PP:1
+> PP:1 PP:0 PP:2 PP:3
+> Migration Sketch
+> Solve assignment pro -
+> blem of process pairing
+> Fig. 4. Cost-matrix driven migration. An example of reconfiguring the PP size from 4 to 2 of 16 transformer layers.
+
+As shown in Figure 4, we first capture the state information (including prev state and curr state ) residing on each process (①). According to the captured states, we express the logical 
+
+workload of the processes in both states. Note that workload is the abstracted representation of tensors, and each item in workload represents a tensor in each process (e.g., [0] 
+
+represents the first transformer layer, and [0.a] represents the first TP slice of the first transformer layer). Then we build the cost matrix C ∈ ZM ×N , where the row indices represent the ranks in the curr state (M ranks in total), and the column indices represent the ranks in the prev state (N
+
+ranks in total) ( ②). Note that in hybrid-parallel scenarios, the ranks can also be expressed as tuple of ranks in all parallel dimensions (e.g., P0T1 represents rank 0 in PP and rank 1 in TP). Each element ci,j in the cost matrix is derived through ci,j = len (curr i) − len (curr i ∩ prev j ) , where curr i
+
+represents the workload list in curr state and prev j represents the workload list in prev state . Therefore, ci,j can quantify the data movement required to transform previous rank j to current rank i.We provide a example of reconfiguring a model (containing 16 transformer layers) from PP4 to PP2 in Figure 4. At prev state , there are 4 devices participating, where each holds 4 transformer layers, the workload of rank 0 is [0,1,2,3] . When migration, only 2 devices are needed to continue the training. In this scenario, each device should hold 8 transformer layers and the workload of rank 0 is [0,1,2,3,4,5,6,7] . The c0,0 can be derived by comparing the workloads, and its value is 4.Note that the cost matrix should be synchronized across all devices, so that each device can recognize its responsibility and perform migration in a decentralized manner. Besides, in hybrid-parallel training frameworks that follow the static model state partition rules (e.g., Megatron-LM partitions ten-sors evenly in PP and TP dimension), each device can derive its workload following these rules and calculate global cost matrix locally, which helps to avoid synchronization overhead. 
+
+Migration Sketch: Pairing Current and Previous Processes through Cost Matrix. By exploiting the cost matrix, we pair the processes in prev state with the processes in curr state , so as to maximize the reuse of the previous process context and thus minimize the data movement. The migration sketch is a series of migration operators on process pairs (e.g., 
+
+⟨a,b ⟩), which can be translated into fine-grained migration instructions and executed by the execution engine (§III-D). Note that the migration operator for process pair ⟨a,b ⟩ should transform process b of prev state into process a in curr state . The process pairing can be formulated as an assignment problem. cij denotes the cost when the i-th process in curr state is associated with the j-th process in prev state . We define the indicator variable xij as: 
+
+xij =
+
+(
+
+1, if the i-th rank is paired to the j-th rank 
+
+0, otherwise (1) We try to minimize the total data movement among all process pairs, so that the objective function is as follows: 
+
+min 
+
+> m
+
+X
+
+> i=1
+> n
+
+X
+
+> j=1
+
+cij xij (2) When the process number of curr state is larger than that of prev state (i.e., M > N ), there are two constraints (Equation 3). a) Each process in the prev state must be paired with one process in the curr state ; and b) Each process in curr state can be paired with at most one process in prev state .
+
+(Pmi=1 xij = 1 , ∀j = 1 , 2, . . . , n ▷ Constraint a) 
+
+Pnj=1 xij ≤ 1, ∀i = 1 , 2, . . . , m ▷ Constraint b) (3) When the process number of curr state is not larger than that of prev state (i.e., M ≤ N ), there are two constraints (Equation 4). a) Each process in prev state must be paired with at most one process in curr state ; and b) Each process in curr state must be paired with one process in prev state .
+
+(Pmi=1 xij ≤ 1, ∀j = 1 , 2, . . . , n ▷ Constraint a) 
+
+Pnj=1 xij = 1 , ∀i = 1 , 2, . . . , m ▷ Constraint b) (4) The assignment problem of process pairing can be effi-ciently solved using a non-standard Hungarian algorithm [39], as illustrated in Algorithm 1. The input to the algorithm is the cost matrix C ∈ ZM ×N , and the output is the migration sketch (i.e., a series of process pairs). In the hybrid-parallel reconfiguration scenarios, M and N are usually not equal. To adopt the Hungarian algorithm, the cost matrix is padded to a square matrix with zeros (line 3). Then, we call the Hungarian algorithm in the SciPy * package to obtain the process pairs (line 5). Its time complexity is O(k3) for a k × k cost matrix. However, in our cost matrix, k is usually less than 1,024, because ETC just need to cover the PP dimension ( ≤ 16 ) and TP dimension ( ≤ 16 ), and thus the solving time is just tens of milliseconds on a standard server (refer to §III-C for details). Note that the solving time is much less than a training iteration. Finally, we remove the processes involved in the padding part from the process pairs (line 6–8). The output (process pairs) is the optimal migration sketch. 
+
+Algorithm 1 Generate migration sketch via process pairing.                                                         
+
+> Input: cost matrix: C∈ZM×N
+> Output: migration sketch: sketch
+> 1: function SOLVE COST MATRIX (C)2: M, N ←rows (C), cols (C),k←max( M, N )
+> 3: Zero-padding matrix Cto the size of k×k
+> 4: # Call Hungarian algorithm 5: pairs ←Hungarian (C)▷Solving
+> 6: for pair ⟨i,j ⟩in pairs do
+> 7: if i≥M or j ≥Nthen
+> 8: Drop pair ⟨i,j ⟩from pairs
+> 9: sketch ←pairs ▷Derive the migration sketch
+> 10: return sketch
+
+C. Extend Cost Matrix to Hybrid-Parallel 
+
+Workload Abstraction and Cost Matrix of TP. A one-dimensional (e.g., PP) workload can be represented by a single integer (e.g., [0] ), and a multi-dimensional (e.g., PP + TP) workload should describe the logical workloads of multiple dimensions in a similar manner. Unlike PP, TP does not 
+
+> *Hungarian algorithm in SciPy package. https://docs.scipy.org/doc/scipy /reference/generated/scipy.optimize.linear sum assignment.html
+
+have an inherent layer structure for partitioning and indexing. Therefore, we further extend the workload for TP. We use the least common multiple (LCM) of TP size in prev state 
+
+and TP size in curr state to determine the total workload in TP dimension, so that the workload of a TP rank (e.g., rank 0 in a TP=4 group) can be represented by a single alphabet (e.g., [a] of [a,b,c,d] ). Then the cost matrix of TP can be derived by differentiating the workloads in prev state and curr state through ci,j = len (curr i) − len (curr i ∩ prev j ), which is similar to PP (refer to §III-B). 
+
+Merge the Cost Matrices of PP and TP. Under the PP+TP scenario, as a process has individual ranks in PP group and TP group (e.g., P0T0 ), the workload is represented by the nested PP workload and TP workload (e.g., [0.a, 1.a] ). Once we derive the individual cost matrices of PP and TP, we should merge them into a monolithic cost matrix. For each cost matrix, there is a maximum cost value in the process pairs where the two workloads have no intersection at all. Two processes can intersect in the TP dimension only if they also intersect in the PP dimension; equivalently, no TP intersection implies no PP intersection. For brevity, we set the priority of PP to be higher than that of TP during the merging. We can merge cost values dimension by dimension. 1) If the cost of the high-priority dimension equals the maximum value of the cost matrix for that dimension (denoted as max ), it indicates that there is no intersection at all between the process pair, so that the merged cost is equal to max . 2) If we reach the cost matrix of the lowest-priority dimension, a coefficient is returned, which equals the cost divided by the maximum cost of this dimension. This coefficient is then passed back dimension by dimension for multiplication. An example is illustrated in Figure 5. 
+
+DP Dimension. There is no need to capture DP in the merged cost matrix. Different from PP/TP, DP replicates the model and the replicas are either kept or discarded during reconfiguration, which has no data movement. Besides, we isolate the PP/TP processes under different DP ranks. If two processes have different DP ranks, even if their workloads on PP/TP are the same, we regard the difference between the workloads to be infinite. Because there is inherent load balance among different DP replicas, where the migration of PP/TP processes is completely identical. If we create data movement across DP replicas, the load balance tends to be broken. When increasing DP size during reconfiguration, we insert a series of process-to-process migration operators to the migration sketch, where each PP/TP process in existing DP groups sends all model states to its counterpart in new DP groups. And the source groups are selected in a round-robin manner to ensure the load balance among existing DP groups. 
+
+Fault-tolerance through DP. Since each DP group contains a complete and synchronized model state, DP groups can be regarded as replicas of each other for fault tolerance. When the dimension of DP is d, ETC can accommodate at least 
+
+d − 1 hardware failures simultaneously. When a certain device fails, the workload on the failed device can be obtained from other DP groups via the the PP/TP ranks. And we append the corresponding migration operator to the migration sketch. 
+
+Hybrid-Parallel Migration Sketch. After obtaining the multi-dimensional cost matrix, we can derive the migration sketch, the solving procedure is similar to that in §III-B. Unlike the one-dimensional migration sketch, the cost matrix index of the hybrid-parallel migration sketch is combinations of multiple dimensions (e.g., P0T0 ). Meanwhile, the migration sketch within existing DP group is identical. Generate  PP Cost Matrix                                                                                                                  
+
+> ( PP4 To PP6 )
+> Generate TP Cost
+> Matrix ( TP2 To TP4 )
+> PP:0 PP:1 PP:2 PP:3
+> PP:0 0444
+> PP:1 2244
+> PP:2 4044
+> PP:3 4404
+> PP:4 4422
+> PP:5 4440
+> TP:0 TP:1
+> TP:0 01
+> TP:1 01
+> TP:2 10
+> TP:3 10
+> P0T0 P0T1 P1T0 P1T1 P2T0 P2T1 P3T0 P3T1
+> P0T0 04444444
+> P0T1 04444444
+> P0T2 40444444
+> P0T3 40444444
+> ①DP :if Reconfiguration then Do PP
+> else Cost All Zero
+> ②PP :if PP cost < Max Cost then Do TP
+> else retun PP Cost
+> ③TP :return TP Cost / LCM * PP Cost
+> in the same DP group
+> Calc Cost Matrix Rules of Merging
+> Cost Matrices
+> ……
+> PP:0 PP:1
+> PP:0 04Merged Cost Matrix
+> 0444
+> 4044
+> TP:0 TP:1
+> TP:0 01
+> TP:2 10
+> ⨉
+> Rule ②
+> Details of Merging
+> Max PP Cost = 4
+
+Fig. 5. Merging PP cost matrix and TP cost matrix. An example: PP changes from 4 to 6 and TP changes from 2 to 4 simultaneously. 
+
+D. Execution Engine of Migration Sketches 
+
+The execution engine is responsible for executing the mi-gration sketch generated above. Basically, it transforms the coarse-grained migration operators in the sketch into fine-grained migration instructions, and then executes the instruc-tions for the final migration. For Migration Operator(< C:j , P:i >) in Migration Sketch 1.Input                    
+
+> Locate Layer index
+> of PP
+> 2. Derive Fine -grained Instructions from Coarse -grained Operators
+> Prev Rank i
+> Workload
+> 0.a
+> 0.b
+> 0.c
+> Step 1: Workload Comparison
+> s
+> Curr Rank j
+> Workload
+> 0.a
+> 0.b
+> 1.a
+> Intersection
+> &Difference
+> Compare
+> Curr Rank
+> Prev Rank
+> Process Pair Refer Inst.
+> Send Inst.
+> Recv Inst.
+> Step 2: Instruction Generation Meta Model
+> (Indexing & Slicing) 0.a/0.b
+> 0.c
+> In Place
+> 1.a
+> Send
+> Recv
+> Determine Index
+> Calculate Slice
+> Index of TP
+> On Dynamic
+> Resources
+> 3. Execute Inst.
+> Simultaneousl y
+> Emit Instructions till
+> All Instruction Lists are Empty
+> Migration
+> Complete
+> Send
+> Recv
+> Send
+> Recv
+> Refer
+
+Fig. 6. Execution Engine of ETC. 
+
+Migration Instructions. We design three migration instruc-tions including Send , Recv , and Refer . Each instruction takes the source process id sid , destination process id did ,workload type wt , and workload id wid as the input. Each process pair in the migration sketch can be transformed into one or more instructions. Specifically, as for a process pair 
+
+⟨curr, prev ⟩, 1) if a workload is not in curr process but in 
+
+prev state , it will be packed into a Send instruction; 2) if a workload is in curr process but not in prev state , it will be packed into a Recv instruction; 3) if a workload is both in 
+
+curr process and in prev process, it will be packed into Refer 
+
+instruction and stay in place. Note that Refer only binds the workload to the new state, requiring no data movement. It is necessary to migrate model parameters, optimizer states and other states. Therefore, we provide the workload type wt variable in migration instructions, and maintain the mapping relationship between the logical workload to different workload types, so that the instructions are compatible to migrate these workload types. The states can be packed to the instructions when Send and then unpacked to update the corresponding state after migration. 
+
+Meta Model for Indexing TP Slices. Given a nested workload (e.g., [0.a] ), we can locate the transformer layer with the PP index (e.g., 0), but we cannot locate the TP slices, because we lack the information that which dimension of the high-dimension tensor is sliced by TP. Therefore, we initialize a meta model in PyTorch’s meta device, which maintains only the tensor shapes without actually loading the actual tensors into memory. The TP size of the meta model is set to 1. By differentiating the tensor shapes of the meta model and that in prev state , we can help identifying how the TP dimension is partitioned. For example, if there is a tensor dimension sat-isfying meta model dim / prev model dim == prev TP size ,this dimension is sliced, and the slice shape corresponding to the logical workload can calculated as meta model dim / LCM(curr TP size, prev TP size) .
+
+Execution Flow. The complete execution flow is illustrated in Figure 6. For each coarse-grained migration operator ⟨curr:j, prev:i ⟩ in the migration sketch, the execution engine compares the logical workloads of process i in the prev state and process 
+
+j in the curr state . Then the migration instructions including 
+
+Send , Recv , and Refer are generated with above three rules 
+
+1)2)3) . Then the device derives the index of the tensor slice corresponding to the workload based on the meta model and the workload type wt . At this time, the migration instructions are recorded into an instruction list on each device. With all migration instructions in the migration sketch are ready, all devices emit their instruction lists simultaneously till empty. To prevent prev states and curr states from coexisting, we use state chunking to migrate states in sequential chunks with on-demand buffer allocation, and eager release of source-side state to promptly free source-side tensors after each round. 
+
+E. Virtual Rank Allocator for Resource De-fragmentation 
+
+When performing hybrid-parallel reconfiguration with ETC, we find the issue of resource fragmentation. Because ETC reuses the process contexts for better locality, the devices are not restarted with a new placement but only assigned with new ranks. There are two categories of resource fragmentation. 
+
+1) Occupancy-level. As shown in Figure 7(a), when scaling in the PP size, some devices are occupied while others stay idle. From the cluster scheduler’s perspective, incoming jobs are infeasible to be assigned to nodes with good occupancy. 
+
+2) Efficiency-level. As shown in Figure 7(b), when the PP size and TP size of a job change simultaneously or the TP size scales out, the cross-node TP groups may arise. This leads to inefficiency in collective communications. Node:0   
+
+> Previous State
+> 0.ab, 1.ab, 2.ab 0
+> 0.cd, 1.cd, 2.cd 1
+> 3.ab, 4.ab, 5.ab 2
+> 3.cd, 4.cd, 5.cd 3
+> Node:1
+> 6.ab, 7.ab, 8.ab 4
+> 6.cd, 7.cd, 8.cd 5
+> 9.ab, 10.ab, 11.ab 6
+> 9.cd, 10.cd, 11.cd 7
+> Node:0
+> Current State
+> 0.a, 1.a 0
+> 0.c, 1.c 2
+> 4.a, 5.a 8
+> 4.c, 5.c 10
+> Node:1
+> 6.a, 7.a 12
+> 6.c, 7.c 14
+> 10.a, 11.a 20
+> 10.c, 11.c 22
+> Node:4
+> 0.b, 1.b 1
+> 0.d, 1.d 3
+> 4.b, 5.b 9
+> 4.d, 5.d 11
+> Node:5
+> 6.b, 7.b 13
+> 6.d, 7.d 15
+> 10.b, 11.b 21
+> 10.d, 11.d 23
+> Node:2
+> 2.a, 3.a 4
+> 2.b, 3.b 5
+> 2.c, 3.c 6
+> 2.d, 3.d 7
+> Node:4
+> 8.a, 9.a 16
+> 8.b, 9.b 17
+> 8.c, 9.c 18
+> 8.d, 9.d 19
+> 2
+> 2
+> 1
+> 1
+> 3
+> 3
+> 3
+> 3
+> Node:0
+> Previous State
+> 0, 1, 2 0
+> 3, 4, 5 1
+> 6, 7, 8 2
+> 9, 10, 11 3
+> Node:1
+> 12, 13, 14 4
+> 15, 16, 17 5
+> 18, 19, 20 6
+> 21, 22, 23 7
+> Node:0
+> 0, 1, 2, 3, 4, 5 0
+> 1
+> 6, 7, 8, 9, 10, 11 2
+> 3
+> Node:1
+> 4
+> 5
+> 6
+> 7
+> 12, 13, 14, 15, 16, 17
+> 18, 19, 20, 21, 22, 23
+> 1
+> 1
+> 1
+> 1
+> 22
+> 3
+> 3
+> 3
+> 3
+> 3
+> Cuerrent State
+> 3
+> (a) (b)
+
+Fig. 7. De-fragmentation and coalescing. (a) Occupancy-level. (b) Efficiency-level. The arrows ①②③ represent communication of state migration, de-fragmentation, and their coalescence, respectively. 
+
+To avoid resource fragmentation, we propose virtual rank allocator . It isolates the virtual rank within the hybrid-parallel grid and the physical rank within the allocated devices, and manages the mapping between virtual ranks and physical ranks. Through remapping physical devices with new virtual ranks, it can directly change the roles of physical devices. The remapping can also be represented as migration operators. 
+
+Placement-Aware Remapping. The key idea to resolve node fragmentation is to adjust the workload on the fragmented nodes through placement-aware remapping. The details are shown in Algorithm 2. For occupancy-level de-fragmentation, the remapping is illustrated by defragmentation for occupancy function. Its in-put includes the world size of prev state pw , the world size of curr state cw , and the pairing relationship p2c between the previous processes and the current processes generated from the cost matrix. And the device number in a node is n. First, we obtain the placement of processes, pN odes , cN odes , in both prev state and curr state (line 3–4). If a process is dropped after migration, its id is set to -1. All indices in curr nodes 
+
+corresponding to -1 represent idle devices (line 4), and the rest are occupied devices. We pair the idle devices in order with the occupied device in reverse order, continuing this process sequentially for all remaining devices (line 5–9), so that we can populate the migration operators through pairing. For efficiency-level de-fragmentation, the remapping is il-lustrated by defragmentation for efficiency function. In com-mon practice, the TP group should be placed inside a node for optimal collective communication. First, we iterate through all process ids in the curr state , which is the target place-ment recording the optimal placement on physical devices (line 12). The loads records the placement after state migration (line 15), which contains the efficiency-level fragmentation. The inconsistent node pairs of target and loads are marked as fragmentation (line 16). The process pairs are generated though the processes in fragmentation nodes, which are then passed to the migration operators (line 17–20). 
+
+Communication Coalescing. To eliminate the redundant data movement, the migration operators of state migration (§III-B and §III-C) and de-fragmentation can be coalesced when the execution engine generates instructions. As shown in Figure 7, the state migration is marked by arrow ①, the de-fragmentation 
+
+Algorithm 2 Placement-Aware Remapping. 
+
+Input: prev world size: pw , curr world size: cw , pairs: p2c, nDevice: n
+
+Output: migration operators: mo 
+
+1: function DEFRAGMENTATION FOR OCCUPANCY (pw , cw , p2c, n)2: # Record the process placement 3: pNodes = [[range(i, i+ n)] for i in range(1, pw ,n)] 4: cNodes = [[p2c.get(id, -1) for id in node] for node in pNodes] 5: # Find the indices of idle and occupied devices 6: iter idle = iter([i for i, x in enumerate(cNodes) if x == -1]) 7: iter occu = iter([i for i, x in enumerate(cNodes) if x != -1]).reversed() 8: while iter idle and iter occu are not meeted do 
+
+9: mo .append( ⟨iter idle.next(), iter occu.next() ⟩)10: function DEFRAGMENTATION FOR EFFICIENCY (pw , cw , p2c, n)11: # Generate optimal process placement 12: target = [[range(i, i+ n)] for i in range(1, cw ,n)] 13: # Record current process placement 14: devices = [[range(i, i+n)] for i in range(1, pw, n)] 15: loads = [[p2c.get(id) for id in node] for node in devices] 16: frag nodes = [(a, b) for a,b in zip(targets, loads) if a != b] 17: for [pNode, cNode] in frag nodes do 
+
+18: for pProc,cProc in zip(pNode, cNode) do 
+
+19: if pProc != cProc then 
+
+20: mo .append( ⟨pProc,cProc ⟩)
+
+is marked by arrow ②. If ① sends the workload w from device 
+
+i to device k, and ① sends the workload w from process k
+
+to process j, then the execution engine coalesces these two instructions into sending the workload w from process i to process j. The coalesced instructions are marked by arrow ③.The Recv instructions are coalesced in the same way. IV. E VALUATION 
+
+A. Experimental Setup 
+
+Clusters. We use two different clusters for evaluation. a) 
+
+Cluster-A is equipped with 32 nodes connected with 4 × 100 
+
+Gb/s RoCE network, and each node contains 4 Nvidia GPUs (40GB, without NVLink). b) Cluster-B is equipped with 4 nodes connected with 4 × 200 Gb/s InfiniBand network, and each node contains 8 Nvidia GPUs (80GB, with NVLink). 
+
+Models and Datasets. We evaluate ETC on GPT3 models. We carefully tune the hyper-parameters to saturate the GPU resources: 1) the number of transformer layers is set to be divisible by the PP dimensions before and after migration; 2) 
+
+the hidden size is set to be divisible by TP dimensions before and after migration. We train the models using OpenWebText dataset. Baselines. We compare ETC with four checkpoint-based approaches (i.e., Megatron, Megatron-Dist [37], EasyCkpt [8], and Fastest–their fastest combination) and a dynamic state management library (i.e., Tenplex [10]). 
+
+1) Megatron – the default checkpointing approach. As for reconfiguration, an extra convert script is used to reshard the checkpoint to another hybrid-parallel configuration. 
+
+2) Megatron-Dist – an improved version of 1) . It enables distributed asynchronous saving and loading of the check-point. Moreover, it performs state resharding when loading the checkpoint, and the convert script in 1) is omitted. 
+
+3) EasyCkpt – an on-premise in-memory checkpointing. It caches the state in host memory and persists it to disk after many training steps. The convert script in 1) is required. 
+
+4) Fastest-baseline (FB) – To represent the fastest checkpoint-based baseline, we pick the least times of reshard , and 
+
+save /load phases from above baselines. 
+
+5) Tenplex – a state management library designed for LLM training. It supports dynamic parallelism transformation through an in-memory file system. 
+
+B. Comparison with Checkpoint-based Approaches 
+
+Under various scenarios of hybrid-parallel reconfiguration, we evaluate the model state migration time of ETC and the checkpoint-based approaches. We train GPT3-32B model on Cluster-A. The hidden size is 3072, and the transformer layer number is 36. In the scenario of reconfiguring PP8TP1 to PP16TP1, since neither 8 nor 16 is divisible by 36, we set the transformer layer number to 32. Experimental results are shown in Table II. Since EasyCkpt does not optimize the reshard and load phases, we have merged EasyCkpt and Megatron in these columns. Compared with checkpoint-based baselines , ETC achieves superior performance across all reconfigurations. In the save phase, Megatron-Dist and EasyCkpt achieve 6.52 × and 11.24 × on average compared to Megatron, be-cause Megatron-Dist adopts distributed I/O to save, and Easy-Ckpt just offloads the checkpoint to host memory. In the 
+
+reshard and load phase, Megatron-Dist shows 21.34 ×–60.22 × speedup compared to Megatron and EasyCkpt. This is because it fuses the two phases to eliminate redundant I/O, and it adopts distributed I/O to load the checkpoint to host memory. With ”Fastest-baseline (FB)”, we combine EasyCkpt’s advan-tage in save and Megatron-Dist’s advantage in reshard 
+
+and load . However, ETC still achieves 2.33 ×–6.37 × speedup than FB. This is because: 1) with ETC, the model state is completed within the GPU memory, the checkpoint persistence and offloading is completely eliminated. 2) ETC directly sends and receives the model state with inter-GPU communication, which usually has higher bandwidth than offloading and I/O. 
+
+3) the model state resharding of ETC is inherently parallel and leverages locality to minimize the data movement. 
+
+C. Comparison with the State Management Library Tenplex 
+
+We compare ETC with Tenplex on Cluster-B. For fair comparison, the model configurations (i.e., GPT3-2.7B and GPT3-6.7B) and the scenarios of hybrid-parallel reconfig-uration are consistent with the open-source repository of Tenplex. The reconfigurations involve the scaling in TP, PP, and DP. We compare the Tenplex and Tenplex-Central modes, where Tenplex has distributed state management between State Transformer instances on different nodes and Tenplex-Central performs all model state resharding at the central node. As shown in Figure 8, ETC achieves 4.79 × and 10.74 ×
+
+speedup compared to Tenplex and Tenplex-Central, respec-tively. This is attributed to two reasons. First, ETC maintains the cost matrix to represent the data movement and solves the cost matrix to generate the migration instructions with minimal data movement overhead. Second, ETC transfers the model state from GPU to GPU directly, while Tenplex still adopts a checkpoint-based design. PP2TP4/               
+
+> PP2TP8/
+> (2.7B)
+> PP2TP4/
+> PP2TP8/
+> (6.7B)
+> PP2TP4/
+> PP4TP4/
+> (2.7B)
+> PP2TP4/
+> PP4TP4/
+> (6.7B)
+> PP2TP4DP1/
+> PP2TP4DP2
+> (2.7B)
+> PP2TP4DP1/
+> PP2TP4DP2
+> (6.7B)
+> 0
+> 2500
+> 5000
+> 7500
+> 10000
+> 12500
+> Time (ms)
+> 7.64x 10.44x 6.47x 8.00x 13.89x 18.00x
+> 2.33x 2.61x 1.26x
+> 1.40x 2.26x 4.01x
+> 1.00x 1.00x
+> 1.00x
+> 1.00x
+> 1.00x
+> 1.00x
+> TP Scale-out PP Scale-out DP Scale-out
+> ETC Tenplex Tenplex-Central
+> Fig. 8. Comparison between ETC and Tenplex. Y-axis represents the time(ms) of state migration, and x-axis represents different reconfiguration scenarios.
+
+D. Benefits of Communication Coalescing 
+
+We evaluate the benefits brought by coalescing the commu-nication in migration and de-fragmentation stages. We adopt the hybrid-parallel reconfigurations, including 1) scale in PP, 
+
+2) scale out TP, and 3) scale them simultaneously. We also set different transformer layers ( l) and hidden sizes ( h). As shown in Figure 9, the coalesced communication achieves 2.43 × speedup on average compared to the two-stage communication. In the first three scenarios, we keep the same parallel configuration and increase the transformer layer number from 32 to 128. With the total parameters increase, the time required for two stages is on the rise. However, the communication time after coalescing is almost the same as the time of state migration. This is because the primary ability of communication coalescing is to change the destination to which the workload is sent. According to our observation, the communication coalescing does not alter the maximum communication volume across devices throughout the whole hybrid-parallel reconfiguration. 
+
+E. Performance Improvement After De-fragmentation 
+
+To demonstrate the utilization after resource de-fragmentation, we design an experiment on Cluster-A, where each node has 4 GPUs. The training job of GPT3-64B changes from PP16TP1 to PP8TP1, where the number of GPUs is reduced by half. As shown in Figure 10, before TABLE II PERFORMANCE COMPARISON OF ETC WITH THE CHECKPOINT -BASED APPROACHES .
+
+Reconfiguration Method Mem Type Save Ckpt (ms) Reshard (ms) Load Ckpt (ms) Total Time (ms) 
+
+Prev: PP8TP1 Curr: PP16TP1 Megatron Disk 11270.02 126405.59 5603.03 143278.63 EasyCkpt CPU Mem 719.50 132728.12 Megatron-Dist Disk 3267.21 6185.45 9452.66 Fastest Baseline CPU Mem 719.50 3637.74 4357.24 
+
+ETC (ours) GPU Mem \ 1500.88 \ 1500.88 
+
+Prev: PP4TP2 Curr: PP4TP4 Megatron Disk 10347.99 228887.45 6837.16 246072.60 EasyCkpt CPU Mem 961.69 236686.30 Megatron-Dist Disk 1406.73 7925.20 9331.93 Fastest Baseline CPU Mem 961.69 7480.16 8441.85 
+
+ETC (ours) GPU Mem \ 1464.20 \ 1464.20 
+
+Prev: PP4TP4 Curr: PP4TP2 Megatron Disk 10939.93 438597.94 5551.02 455088.89 EasyCkpt CPU Mem 1036.85 445185.81 Megatron-Dist Disk 1816.75 8320.76 10137.51 Fastest Baseline CPU Mem 1036.85 7540.86 8577.71 
+
+ETC (ours) GPU Mem \ 1347.83 \ 1347.83 
+
+Prev: PP4TP2 Curr: PP6TP4 Megatron Disk 13791.80 241625.13 7228.64 262645.57 EasyCkpt CPU Mem 1034.46 249888.23 Megatron-Dist Disk 1662.15 9882.39 11544.54 Fastest Baseline CPU Mem 1034.46 9254.7 10289.16 
+
+ETC (ours) GPU Mem \ 4425.39 \ 4425.39 
+
+Prev: PP6TP4 Curr: PP4TP2 Megatron Disk 9127.24 481885.34 6943.09 497955.67 EasyCkpt CPU Mem 962.63 489791.06 Megatron-Dist Disk 1210.80 8117.31 9328.11 Fastest Baseline CPU Mem 962.63 7869.14 8831.77 
+
+ETC (ours) GPU Mem \ 3577.33 \ 3577.33 
+
+Prev: PP4TP2DP3 Curr: PP4TP8DP1 Megatron Disk 11298.80 231999.41 9414.73 252712.94 EasyCkpt CPU Mem 1475.39 243516.26 Megatron-Dist Disk 1747.25 11241.13 12988.38 Fastest Baseline CPU Mem 1475.39 10969.26 12444.66 
+
+ETC (ours) GPU Mem \ 4396.12 \ 4396.12 PP16TP1/    
+
+> PP8TP1
+> (l32h2048)
+> PP16TP1/
+> PP8TP1
+> (l64h2048)
+> PP16TP1/
+> PP8TP1
+> (l128h2048)
+> PP8TP2/
+> PP8TP4
+> (l64h2048)
+> PP8TP2/
+> PP8TP4
+> (l64h3072)
+> PP8TP2/
+> PP8TP4
+> (l64h4096)
+> PP4TP2/
+> PP6TP4
+> (l48h3072)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> Time (ms)
+> 1.00x
+> 1.00x
+> 1.00x
+> 1.00x
+> 1.00x
+> 1.00x
+> 1.00x
+> 2.77x 3.36x
+> 3.44x
+> 2.27x
+> 2.14x
+> 1.81x
+> 1.25x
+> migration de-fragmentation coalescing
+
+Fig. 9. Communication time of migration instructions, de-fragmentation instructions, and the coalesced instructions. 
+
+de-fragmentation, 2 GPUs in each node are occupied and the others are idle, making it impossible to release resources on a node-by-node basis. After the node de-fragmentation of ETC, the occupied GPUs are concentrated in two nodes. To demonstrate the performance improvement after de-fragmentation, we design an experiment on Cluster-B. The training job of GPT3-64B changes from PP4TP2 to PP4TP4. From PP4TP2 to PP4TP4 reconfiguration, the number of GPUs doubles. However, before de-fragmentation, the per-iteration time of the model increases. After de-fragmentation of ETC, the per-iteration time decreases by 26.7% by lever-aging the NVLink in TP communication. fragmented node fragmented node fragmented node fragmented node       
+
+> fully occupied fully occupied idle node idle node
+> fully occupied fully occupied fully occupied fully occupied
+
+Fig. 10. Memory usage per GPU when changing from PP16TP1 to PP8TP1. Y-axis represents the maximum allocated memory, and x-axis represents different GPUs. The labels on the x-axis are in the format of NxDy, indicating the y-th device in node x.
+
+F. Scalability 
+
+To demonstrate the scalability of ETC, we analyze time breakdown of ETC under various hybrid-parallel reconfigu-rations on Cluster-A. We divide the entire elastic migration into 5 parts: 1) cost matrix , which includes the genera-tion of cost matrix and the coarse-grained migration sketch; 
+
+2) execution , which performs the fine-grained migration instructions through the execution engine; 3) build group ,which represents reconstructing a global communication group with re-assigned devices; and 4) others , which includes the other modules, such as the meta model. Among them, 1)2)4) belong to the state migration of ETC. And build group 
+
+relies on the training framework implementation (e.g., PyTorch and Megatron) and the hardware configuration (e.g., network and GPU topology), and its time varies significantly. For example, on Cluster-B, the time to construct a communication group with 4 nodes (32 GPUs) is around 1.5s, while on Cluster-A, the time with the 32 GPUs is around 3.0s. As shown in Figure 11, we perform experiments where PP 
+
+× TP ranges from 8 to 64, which covers the common ranges in Megatron-LM repository. It is obvious that the time of 
+
+cost matrix is almost negligible (7.54ms on average). And 
+
+execution accounts for a larger proportion of time, because of communication. The time of execution is affected by three factors: 1) the size of the model parameters; 2) the network topology; and 3) the complexity of migration sketch. Factors 1) and 2) are quite intuitive, and factor 3) explains why the execution time for PP4TP2/PP6TP4 is slightly longer. In this migration, both PP size and TP size are changed. It leads to a more complex migration sketch, where some devices need to sequentially execute Recv and Send instructions. cost matrix execution build group others 
+
+> PP4TP2/PP4TP4 PP4TP2/PP4TP8 PP4TP2/PP6TP4 PP8TP2/PP8TP4 PP8TP2/PP8TP8
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> 6000
+> Time (ms)
+
+Fig. 11. Time breakdown of ETC. 
+
+G. Memory Footprint and Accuracy Analysis 
+
+We conduct a case study on a GPT3-6.7B model. The initial configuration is PP8TP1 on 2 nodes of Cluster-A. At iteration 20, elastic migration is triggered to expand the training job to 4 nodes with a configuration PP16TP1. We profile the GPU memory allocation on rank 0 throughout the migration process and record the training loss across 100 iterations. Figure 12 shows the normalized GPU memory during migration, with all values normalized to the PP8 steady-state. The memory footprint exhibits three distinct phases. 
+
+1) Peak phase: Upon triggering migration, communication buffers are allocated for receiving resharded model parameters (1.11 ×). As optimizer states are migrated via ETC in apipelined manner, the co-residence of previous and current states causes a transient peak of 1.25 ×. ETC reduces the peak to one optimizer component at a time, avoiding doubling all states. 2) Cleanup phase: When communication completes, the previous PP8 states are freed (0.59 ×), and the new PP16 model/optimizer is reconstructed (0.82 ×). (3) PP16 steady state: The final memory is 33% lower than PP8, as doubling the pipeline depth halves the per-rank layer count. Figure 13 presents the training loss over 100 iterations with elastic migration at iteration 20. Two observations confirm the correctness of our approach. First, the loss curve shows no spike or discontinuity at the migration boundary, the loss transitions seamlessly from PP8 to PP16, Second, after transitioning to PP16, the loss continues to decrease, following the same convergence trend. By ensuring that all optimizer states and model parameters are transferred with bit-exact fidelity, and keeping the global batch size and learning rate consistent during migration, ETC achieves elastic migration without any significant impact on loss. 0 2 4 6 8 10 12 14  
+
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> 1.4
+> Normalized Memory
+> Elastic Scaling (PP8 PP16)
+> Migration Start (1.00x)
+> Model Buf Alloc (1.11x)
+> Comm Done (1.07x)
+> Prev State Freed (0.59x)
+> PP16 Model Created (0.82x)
+> PP16 Ready (0.67x)
+> PP8 Training (1.00x)
+> PP16 Training (0.67x)
+> Allocated
+> Reserved Peak Mem (1.25x)
+
+Fig. 12. Memory footprint under elastic migration (PP8 →PP16). 0 20 40 60 80 100   
+
+> 7
+> 8
+> 9
+> 10
+> 11
+> Elastic Training Loss
+> PP8 Training PP16 Training
+> Before Elastic (PP8)
+> After Elastic (PP16)
+> Elastic Migration (PP8 PP16)
+> Elastic Migration Done
+
+Fig. 13. Loss curve. Elastic migration happens at 20-th iteration (PP8 →PP16). 
+
+V. R ELATED WORKS 
+
+Elastic Training. It allows a job to continue its training procedure under varying resources. TorchElastic [23] and Horovod Elastic [40] support elastic training and fault toler-ance mainly on the number of participating worker processes (e.g., one worker per GPU), and thus their native imple-mentation only supports elasticity on data parallel. Based on them, hybrid-parallel training frameworks, such as Megatron-LM [18] and DeepSpeed [19], can also support elastic train-ing, but need developers to tackle the job states with either checkpoint-based approach (e.g., PcCheck [6], ByteCheck-point [26]) or checkpoint-free migration approach (e.g., this paper). KungFu [41] and Pollux [42] support adjusting the hyper-parameters (e.g., batch sizes) of elastic training jobs to enable various scheduling policies. EasyScale [25] enables efficient and accuracy-consistent elastic training but only focuses on data parallel. Varuna [24] allows elasticity on pipeline dimension while requiring users to specify the cutting points on models. Oobleck [12] focuses on fault tolerance but provides limited elasticity by pre-defined pipeline templates. In contrast, ETC focuses on the time-consuming state migration of hybrid-parallel reconfiguration, which is frequent in the elastic training scenario. 
+
+Auto Parallelization. With the given resources and target models, searching for the optimal hybrid-parallel configuration is difficult. Alpa [13] partitions the compute cluster into meshes, assigns model stages to meshes, and orchestrates the inter- and intra-operator operation passes. Unity [14] repre-sents the parallel optimizations and algebraical transformations as graph substitutions in the computation graph of distributed training, and adopts a hierarchical search algorithm. And ETC can help the training job to efficiently migrate to the searched hybrid-parallel configurations. VI. C ONCLUSION 
+
+With ETC, we demonstrate the success of checkpoint-free model state migration for elastic hybrid-parallel LLM training. Compared to the checkpoint-based migrations, ETC performs inter-GPU communications without any I/O persistence. We try the best to keep model state in place, exploit a unique cost matrix to minimize the data movement during migration, and avoid resource fragmentation through communication coalesc-ing, enabling second-level migrations especially on clusters co-locating inference and training jobs. In the future, we hope that ETC will make the elastic training more practical in production environments for cluster utilization. REFERENCES [1] J. Kaplan, S. McCandlish, T. Henighan, T. B. Brown, B. Chess, R. Child, S. Gray, A. Radford, J. Wu, and D. Amodei, “Scaling laws for neural language models,” 2020. [Online]. Available: https://doi.org/10.48550/arXiv.2001.08361 [2] J. Wang, Y. Wang, M. Han, and R. Chen, “Colocating ml inference and training with fast gpu memory handover,” in 2025 USENIX Annual Technical Conference (USENIX ATC 25) . Boston, MA: USENIX Association, Jul. 2025. [Online]. Available: https: //www.usenix.org/conference/atc25/presentation/wang-jiali [3] Z. Bai, Z. Zhang, Y. Zhu, and X. Jin, “PipeSwitch: Fast pipelined context switching for deep learning applications,” in 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) . USENIX Association, Nov. 2020, pp. 499–514. [Online]. Available: https://www.usenix.org/conference/osdi20/presentation/bai [4] F. Strati, X. Ma, and A. Klimovic, “Orion: Interference-aware, fine-grained gpu sharing for ml applications,” in Proceedings of the Nineteenth European Conference on Computer Systems , ser. EuroSys ’24. New York, NY, USA: Association for Computing Machinery, 2024, p. 1075–1092. [Online]. Available: https://doi.org/10.1145/3627 703.3629578 [5] J. Mohan, A. Phanishayee, and V. Chidambaram, “CheckFreq: Frequent, Fine-Grained DNN checkpointing,” in 19th USENIX Conference on File and Storage Technologies (FAST 21) . USENIX Association, Feb. 2021, pp. 203–216. [Online]. Available: https: //www.usenix.org/conference/fast21/presentation/mohan [6] F. Strati, M. Friedman, and A. Klimovic, “Pccheck: Persistent concurrent checkpointing for ml,” in Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 , ser. ASPLOS ’25. New York, NY, USA: Association for Computing Machinery, 2025, p. 811–827. [Online]. Available: https://doi.org/10.1145/3669940.3707255 [7] A. Group, “Dlrover flash checkpoint saves the megatron-lm checkpoint in seconds,” https://github.com/intelligent-machine-learning/dlrover. [8] Alibaba, “Use easyckpt to save and resume foundation model trainings,” https://www.alibabacloud.com/help/en/pai/user-guide/easyckpt. [9] Z. Wang, Z. Jia, S. Zheng, Z. Zhang, X. Fu, T. S. E. Ng, and Y. Wang, “Gemini: Fast failure recovery in distributed training with in-memory checkpoints,” in Proceedings of the 29th Symposium on Operating Systems Principles , ser. SOSP ’23. New York, NY, USA: Association for Computing Machinery, 2023, p. 364–381. [Online]. Available: https://doi.org/10.1145/3600006.3613145 [10] M. Wagenl¨ ander, G. Li, B. Zhao, L. Mai, and P. Pietzuch, “Tenplex: Dynamic parallelism for deep learning using parallelizable tensor collections,” in Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles , ser. SOSP ’24. New York, NY, USA: Association for Computing Machinery, 2024, p. 195–210. [Online]. Available: https://doi.org/10.1145/3694715.3695975 [11] A. Eisenman, K. K. Matam, S. Ingram, D. Mudigere, R. Krishnamoorthi, K. Nair, M. Smelyanskiy, and M. Annavaram, “Check-N-Run: acheckpointing system for training deep learning recommendation models,” in 19th USENIX Symposium on Networked Systems Design and Implementation (NSDI 22) . Renton, WA: USENIX Association, Apr. 2022, pp. 929–943. [Online]. Available: https: //www.usenix.org/conference/nsdi22/presentation/eisenman [12] I. Jang, Z. Yang, Z. Zhang, X. Jin, and M. Chowdhury, “Oobleck: Resilient distributed training of large models using pipeline templates,” in Proceedings of the 29th Symposium on Operating Systems Principles , ser. SOSP ’23. New York, NY, USA: Association for Computing Machinery, 2023, p. 382–395. [Online]. Available: https://doi.org/10.1145/3600006.3613152 [13] L. Zheng, Z. Li, H. Zhang, Y. Zhuang, Z. Chen, Y. Huang, Y. Wang, Y. Xu, D. Zhuo, E. P. Xing, J. E. Gonzalez, and I. Stoica, “Alpa: Automating inter- and intra-operator parallelism for distributed deep learning,” in 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . Carlsbad, CA: USENIX Association, Jul. 2022, pp. 559–578. [Online]. Available: https://www.usenix.org/conference/osdi22/presentation/zheng-lianmin [14] C. Unger, Z. Jia, W. Wu, S. Lin, M. Baines, C. E. Q. Narvaez, V. Ramakrishnaiah, N. Prajapati, P. McCormick, J. Mohd-Yusof, X. Luo, D. Mudigere, J. Park, M. Smelyanskiy, and A. Aiken, “Unity: Accelerating DNN training through joint optimization of algebraic transformations and parallelization,” in 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . Carlsbad, CA: USENIX Association, Jul. 2022, pp. 267–284. [Online]. Available: https://www.usenix.org/conference/osdi22/presentation/unger [15] J. Chen, S. Li, R. Guo, J. Yuan, and T. Hoefler, “Autoddl: Automatic distributed deep learning with near-optimal bandwidth cost,” IEEE Transactions on Parallel and Distributed Systems ,vol. 35, no. 8, pp. 1331–1344, 2024. [Online]. Available: https: //doi.org/10.1109/TPDS.2024.3397800 [16] S. Li, Y. Zhao, R. Varma, O. Salpekar, P. Noordhuis, T. Li, A. Paszke, J. Smith, B. Vaughan, P. Damania, and S. Chintala, “Pytorch distributed: experiences on accelerating data parallel training,” Proc. VLDB Endow. , vol. 13, no. 12, p. 3005–3018, aug 2020. [Online]. Available: https://doi.org/10.14778/3415478.3415530 [17] S. Rajbhandari, J. Rasley, O. Ruwase, and Y. He, “Zero: memory optimizations toward training trillion parameter models,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , ser. SC ’20. IEEE Press, 2020. [Online]. Available: https://doi.org/10.48550/arXiv.1910.02054 [18] M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B. Catanzaro, “Megatron-lm: Training multi-billion parameter language models using model parallelism,” arXiv preprint arXiv:1909.08053 ,2019. [Online]. Available: https://doi.org/10.48550/arXiv.1909.08053 [19] J. Rasley, S. Rajbhandari, O. Ruwase, and Y. He, “Deepspeed: System optimizations enable training deep learning models with over 100 billion parameters,” in Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining , ser. KDD ’20. New York, NY, USA: Association for Computing Machinery, 2020, p. 3505–3506. [Online]. Available: https://doi.org/10.1145/3394486.3406703 [20] S. Li and T. Hoefler, “Chimera: efficiently training large-scale neural networks with bidirectional pipelines,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , ser. SC ’21. New York, NY, USA: Association for Computing Machinery, 2021. [Online]. Available: https://doi.org/10.1145/3458817.3476145 [21] DeepSeek-AI, “Deepseek-v3 technical report,” 2024. [Online]. Available: https://doi.org/10.48550/arXiv.2412.19437 [22] V. A. Korthikanti, J. Casper, S. Lym, L. McAfee, M. Andersch, M. Shoeybi, and B. Catanzaro, “Reducing activation recomputation in large transformer models,” in Proceedings of Machine Learning and Systems , D. Song, M. Carbin, and T. Chen, Eds., vol. 5. Curan, 2023, pp. 341–353. [Online]. Available: https://doi.org/10.48550/arXiv.2205. 05198 [23] PyTorch, “PyTorch Elastic,” https://docs.pytorch.org/elastic/latest/. [24] S. Athlur, N. Saran, M. Sivathanu, R. Ramjee, and N. Kwatra, “Varuna: scalable, low-cost training of massive deep learning models,” in Proceedings of the Seventeenth European Conference on Computer Systems , ser. EuroSys ’22. New York, NY, USA: Association for Computing Machinery, 2022, p. 472–487. [Online]. Available: https://doi.org/10.1145/3492321.3519584 [25] M. Li, W. Xiao, H. Yang, B. Sun, H. Zhao, S. Ren, Z. Luan, X. Jia, Y. Liu, Y. Li, W. Lin, and D. Qian, “Easyscale: Elastic training with consistent accuracy and improved utilization on gpus,” in Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis , ser. SC ’23. New York, NY, USA: Association for Computing Machinery, 2023. [Online]. Available: https://doi.org/10.1145/3581784.3607054 [26] B. Wan, M. Han, Y. Sheng, Y. Peng, H. Lin, M. Zhang, Z. Lai, M. Yu, J. Zhang, Z. Song, X. Liu, and C. Wu, “ByteCheckpoint: A unified checkpointing system for large foundation model development,” in 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) . Philadelphia, PA: USENIX Association, Apr. 2025, pp. 559–578. [Online]. Available: https://www.usenix.org/conference/nsdi25/presentation/wan-borui [27] S. Jayaram Subramanya, D. Arfeen, S. Lin, A. Qiao, Z. Jia, and G. R. Ganger, “Sia: Heterogeneity-aware, goodput-optimized ml-cluster scheduling,” in Proceedings of the 29th Symposium on Operating Systems Principles , ser. SOSP ’23. New York, NY, USA: Association for Computing Machinery, 2023, p. 642–657. [Online]. Available: https://doi.org/10.1145/3600006.3613175 [28] S. J. Park, J. Fried, S. Kim, M. Alizadeh, and A. Belay, “Efficient strong scaling through burst parallel training,” in Proceedings of Machine Learning and Systems 2022, MLSys 2022, Santa Clara, CA, USA, August 29 - September 1, 2022 , D. Marculescu, Y. Chi, and C.-J. Wu, Eds. mlsys.org, 2022. [Online]. Available: https://doi.org/10.48550/arXiv.2112.10065 [29] Y. Mei, Y. Zhuang, X. Miao, J. Yang, Z. Jia, and R. Vinayak, “Helix: Serving large language models over heterogeneous gpus and network via max-flow,” in Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 , ser. ASPLOS ’25. New York, NY, USA: Association for Computing Machinery, 2025, p. 586–602. [Online]. Available: https://doi.org/10.1145/3669940.3707215 [30] K. Zhu, Y. Gao, Y. Zhao, L. Zhao, G. Zuo, Y. Gu, D. Xie, T. Tang, Q. Xu, Z. Ye, K. Kamahori, C.-Y. Lin, Z. Wang, S. Wang, A. Krishnamurthy, and B. Kasikci, “Nanoflow: Towards optimal large language model serving throughput,” in 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . Boston, MA: USENIX Association, Jul. 2025. [Online]. Available: https://www.usenix.org/conference/osdi25/presentation/zhu-kan [31] W. Xiao, S. Ren, Y. Li, Y. Zhang, P. Hou, Z. Li, Y. Feng, W. Lin, and Y. Jia, “AntMan: Dynamic scaling on GPU clusters for deep learning,” in 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) . USENIX Association, Nov. 2020, pp. 533–548. [Online]. Available: https://www.usenix.org/conference/osdi 20/presentation/xiao [32] J. Thorpe, P. Zhao, J. Eyolfson, Y. Qiao, Z. Jia, M. Zhang, R. Netravali, and G. H. Xu, “Bamboo: Making preemptible instances resilient for affordable training of large DNNs,” in 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) . Boston, MA: USENIX Association, Apr. 2023, pp. 497–513. [Online]. Available: https://www.usenix.org/conference/nsdi23/presentation/thorpe [33] Z. Li, L. Zheng, Y. Zhong, V. Liu, Y. Sheng, X. Jin, Y. Huang, Z. Chen, H. Zhang, J. E. Gonzalez, and I. Stoica, “AlpaServe: Statistical multiplexing with model parallelism for deep learning serving,” in 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23) . Boston, MA: USENIX Association, Jul. 2023, pp. 663–679. [Online]. Available: https://www.usenix.org/c onference/osdi23/presentation/li-zhouhan [34] M. Shahrad, R. Fonseca, I. Goiri, G. Chaudhry, P. Batum, J. Cooke, E. Laureano, C. Tresness, M. Russinovich, and R. Bianchini, “Serverless in the wild: Characterizing and optimizing the serverless workload at a large cloud provider,” in 2020 USENIX Annual Technical Conference (USENIX ATC 20) . USENIX Association, Jul. 2020, pp. 205–218. [Online]. Available: https://dl.acm.org/doi/10.5555/3489146.3489160 [35] L. Wen, M. Xu, A. N. Toosi, and K. Ye, “Temposcale: Acloud workloads prediction approach integrating short-term and long-term information,” in 2024 IEEE 17th International Conference on Cloud Computing (CLOUD) , 2024, pp. 183–193. [Online]. Available: https://doi.org/10.48550/arXiv.2405.12635 [36] M. Eriksen, K. Veeraraghavan, Y. Abdulghani, A. Birchall, P.-Y. Chou, R. Cornew, A. Kabiljo, R. K. S., M. Lieuw, J. Meza, S. Michelson, T. Rohloff, H. Russell, J. Qin, and C. Tang, “Global capacity management with flux,” in 17th USENIX Symposium on Operating Systems Design and Implementation, OSDI 2023, Boston, MA, USA, July 10-12, 2023 , R. Geambasu and E. Nightingale, Eds. USENIX Association, 2023, pp. 589–606. [Online]. Available: https://www.usenix.org/conference/osdi23/presentation/eriksen [37] Nvidia, “Dist Checkpointing Package of Megatron Core,” https://docs.n vidia.com/megatron-core/developer-guide/latest/api-guide/dist checkpo inting.html. [38] PyTorch, “PyTorch Distributed Checkpoint (DCP),” https://docs.pytorch .org/tutorials/recipes/distributed checkpoint recipe.html. [39] D. F. Crouse, “On implementing 2d rectangular assignment algorithms,” 
+
+IEEE Transactions on Aerospace and Electronic Systems , vol. 52, no. 4, pp. 1679–1696, 2016. [Online]. Available: https://doi.org/10.110 9/TAES.2016.140952 [40] Horovod, “Horovod Elastic,” https://horovod.readthedocs.io/en/latest/e lastic include.html. [41] L. Mai, G. Li, M. Wagenl¨ ander, K. Fertakis, A.-O. Brabete, and P. Pietzuch, “KungFu: Making training in distributed machine learning adaptive,” in 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) . USENIX Association, Nov. 2020, pp. 937–954. [Online]. Available: https://www.usenix.org/conference/osdi 20/presentation/mai [42] A. Qiao, S. K. Choe, S. J. Subramanya, W. Neiswanger, Q. Ho, H. Zhang, G. R. Ganger, and E. P. Xing, “Pollux: Co-adaptive cluster scheduling for goodput-optimized deep learning,” in 15th USENIX Symposium on Operating Systems Design and Implementation (OSDI 21) . USENIX Association, Jul. 2021, pp. 1–18. [Online]. Available: https://www.usenix.org/conference/osdi21/presentation/qiao
