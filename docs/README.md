@@ -6,28 +6,43 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-12
-- 运行时间：2026-07-12 21:11:32 UTC
+- 最新运行日期：2026-07-13
+- 运行时间：2026-07-13 21:35:39 UTC
 - 运行状态：成功
-- 本次总论文数：2
-- 精读区：1
+- 本次总论文数：7
+- 精读区：6
 - 速读区：1
 
 ### 今日简报（AI）
-今日精读联邦学习中对抗标签倾斜的预算感知数据增强策略，并速览了存内计算下兼顾压缩与鲁棒性的推理加速方案。  
-最值得关注的是“合成数据生成的位置远比数量关键”这一反直觉结论，精准调控分布能以极低成本显著提升联邦模型性能。  
-建议从本文的隐私增强思路延伸，查阅近期联邦学习与边缘计算融合的基准评测。
-- 详情：[/202607/12/README](/202607/12/README)
+今日拆解了分布式AI训练的效能瓶颈，从异步RL解耦调度到无线联邦学习的设备协作，一次看清资源优化的关键路径。  
+最值得关注的方向：双向资源调度使大模型RL后训练效率翻番；设备聚类与链路增强让弱网联邦学习也能稳定收敛。  
+动手建议：不妨将这类细粒度调度与激活稀疏化技术结合，为边缘端部署更轻快的智能系统。
+- 详情：[/202607/13/README](/202607/13/README)
 
 ### 精读区论文标签
-1. [WHERE to Generate Matters: Budget-Aware Synthetic Augmentation for Label Skewed Federated Learning](/202607/12/2607.06616v1-where-to-generate-matters-budget-aware-synthetic-augmentation-for-label-skewed-federated-learning)  
+1. [Bidirectional Resource Scheduling for Disaggregated and Asynchronous RL Post-Training](/202607/13/2607.09207v1-bidirectional-resource-scheduling-for-disaggregated-and-asynchronous-rl-post-training)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：针对解耦强化学习后训练的资源调度提升GPU集群利用率
+2. [Wireless Decentralized Federated Learning via Device Clustering and Inter-Cluster Link Enhancement](/202607/13/2607.08797v1-wireless-decentralized-federated-learning-via-device-clustering-and-inter-cluster-link-enhancement)  
    标签：评分：9.0/10、query:mlsys
-   evidence：提出在联邦学习中处理标签倾斜的预算感知合成数据增强方法，是重要的分布式训练技术。
+   evidence：无线去中心化联邦学习通过设备聚类和链路增强减少通信错误，解决分布式训练瓶颈。
+3. [BlockServe: Block-Grained Continuous Batching for High-Throughput Diffusion LLM Serving](/202607/13/2607.08930v1-blockserve-block-grained-continuous-batching-for-high-throughput-diffusion-llm-serving)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：针对扩散LLM服务的块粒度连续批处理和调度，以减少尾部延迟并提高吞吐量。
+4. [A Survey on the Green Development of Large Models: From Resource-Efficient Architectures to Hardware-Software Co-Design](/202607/13/2607.09084v1-a-survey-on-the-green-development-of-large-models-from-resource-efficient-architectures-to-hardware-software-co-design)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：综述了大模型绿色发展的资源高效架构与软硬件协同设计
+5. [Collate: Collaborative Neural Network Learning for Latency-Critical Edge Systems](/202607/13/2607.08013v1-collate-collaborative-neural-network-learning-for-latency-critical-edge-systems)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：面向延迟关键边缘系统的协同训练框架
+6. [STEEL: Sparsity-Aware Fused Attention for Energy-Efficient Long-Sequence Inference on AMD's XDNA NPU](/202607/13/2607.09385v1-steel-sparsity-aware-fused-attention-for-energy-efficient-long-sequence-inference-on-amds-xdna-npu)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：在NPU上实现高效注意力机制，用于高能效推理
 
 ### 速读区论文标签
-1. [CRIMP: Compact & Reliable DNN Inference on In-Memory Processing via Crossbar-Aligned Compression and Non-ideality Adaptation](/202607/12/2607.08015v1-crimp-compact--reliable-dnn-inference-on-in-memory-processing-via-crossbar-aligned-compression-and-non-ideality-adaptation)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：提出交叉杆对齐压缩与非理想适应技术，用于内存处理加速器上的高效DNN推理，贡献于ML系统设计。
+1. [Sensitivity-Aware Thresholding and Token Routing for Activation Sparsification in Large Language Models](/202607/13/2607.08991v1-sensitivity-aware-thresholding-and-token-routing-for-activation-sparsification-in-large-language-models)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：针对大语言模型高效推理的激活稀疏化与令牌路由
 
 
 <div class="dpr-home-promo-card">
