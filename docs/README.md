@@ -6,43 +6,40 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-13
-- 运行时间：2026-07-13 21:35:39 UTC
+- 最新运行日期：2026-07-14
+- 运行时间：2026-07-14 21:45:48 UTC
 - 运行状态：成功
-- 本次总论文数：7
-- 精读区：6
-- 速读区：1
+- 本次总论文数：6
+- 精读区：3
+- 速读区：3
 
 ### 今日简报（AI）
-今日拆解了分布式AI训练的效能瓶颈，从异步RL解耦调度到无线联邦学习的设备协作，一次看清资源优化的关键路径。  
-最值得关注的方向：双向资源调度使大模型RL后训练效率翻番；设备聚类与链路增强让弱网联邦学习也能稳定收敛。  
-动手建议：不妨将这类细粒度调度与激活稀疏化技术结合，为边缘端部署更轻快的智能系统。
-- 详情：[/202607/13/README](/202607/13/README)
+今日精读工业视觉边缘推理性能评测与AMD AI NPU可视化开发环境，速览联邦学习与LLM缓存优化，聚焦模型落地效率。  
+高评分《Benchmarking Edge Inference Strategies》揭示了不同部署策略在工业场景下的显著性能差异，而《IRONSmith》为AI引擎提供了低门槛设计工具。  
+若关注技术选型，建议从边缘推理基准入手；若涉NPU开发，可先体验数据流可视化设计。
+- 详情：[/202607/14/README](/202607/14/README)
 
 ### 精读区论文标签
-1. [Bidirectional Resource Scheduling for Disaggregated and Asynchronous RL Post-Training](/202607/13/2607.09207v1-bidirectional-resource-scheduling-for-disaggregated-and-asynchronous-rl-post-training)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：针对解耦强化学习后训练的资源调度提升GPU集群利用率
-2. [Wireless Decentralized Federated Learning via Device Clustering and Inter-Cluster Link Enhancement](/202607/13/2607.08797v1-wireless-decentralized-federated-learning-via-device-clustering-and-inter-cluster-link-enhancement)  
+1. [Benchmarking Edge Inference Strategies for Deep Learning Models in Industrial Machine Vision](/202607/14/2607.11356v1-benchmarking-edge-inference-strategies-for-deep-learning-models-in-industrial-machine-vision)  
    标签：评分：9.0/10、query:mlsys
-   evidence：无线去中心化联邦学习通过设备聚类和链路增强减少通信错误，解决分布式训练瓶颈。
-3. [BlockServe: Block-Grained Continuous Batching for High-Throughput Diffusion LLM Serving](/202607/13/2607.08930v1-blockserve-block-grained-continuous-batching-for-high-throughput-diffusion-llm-serving)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：针对扩散LLM服务的块粒度连续批处理和调度，以减少尾部延迟并提高吞吐量。
-4. [A Survey on the Green Development of Large Models: From Resource-Efficient Architectures to Hardware-Software Co-Design](/202607/13/2607.09084v1-a-survey-on-the-green-development-of-large-models-from-resource-efficient-architectures-to-hardware-software-co-design)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：综述了大模型绿色发展的资源高效架构与软硬件协同设计
-5. [Collate: Collaborative Neural Network Learning for Latency-Critical Edge Systems](/202607/13/2607.08013v1-collate-collaborative-neural-network-learning-for-latency-critical-edge-systems)  
+   evidence：对比评测PyTorch、ONNX Runtime、OpenVINO和TensorRT在边缘推理场景的性能
+2. [IRONSmith: A Visual Dataflow Design Environment for AMD Ryzen AI NPUs](/202607/14/2607.10944v1-ironsmith-a-visual-dataflow-design-environment-for-amd-ryzen-ai-npus)  
    标签：评分：8.0/10、query:mlsys
-   evidence：面向延迟关键边缘系统的协同训练框架
-6. [STEEL: Sparsity-Aware Fused Attention for Energy-Efficient Long-Sequence Inference on AMD's XDNA NPU](/202607/13/2607.09385v1-steel-sparsity-aware-fused-attention-for-energy-efficient-long-sequence-inference-on-amds-xdna-npu)  
+   evidence：为AI基础设施中的NPU编程提供可视化数据流设计环境
+3. [HermesHFL: Incentive-Compatible Hierarchical Federated Unlearning for Dynamic LLM Fine-Tuning](/202607/14/2607.11528v1-hermeshfl-incentive-compatible-hierarchical-federated-unlearning-for-dynamic-llm-fine-tuning)  
    标签：评分：8.0/10、query:mlsys
-   evidence：在NPU上实现高效注意力机制，用于高能效推理
+   evidence：提出面向大语言模型微调的层次化联邦学习框架，支持遗忘学习
 
 ### 速读区论文标签
-1. [Sensitivity-Aware Thresholding and Token Routing for Activation Sparsification in Large Language Models](/202607/13/2607.08991v1-sensitivity-aware-thresholding-and-token-routing-for-activation-sparsification-in-large-language-models)  
+1. [FedOPAL: One-Shot Federated Learning via Analytic Visual Prompt Tuning](/202607/14/2607.08368v1-fedopal-one-shot-federated-learning-via-analytic-visual-prompt-tuning)  
    标签：评分：7.0/10、query:mlsys
-   evidence：针对大语言模型高效推理的激活稀疏化与令牌路由
+   evidence：通过解析视觉提示调优的一次性联邦学习，最小化通信轮次
+2. [MemDecay: Region-Aware KV Cache Eviction for Efficient LLM Agent Inference](/202607/14/2607.10582v1-memdecay-region-aware-kv-cache-eviction-for-efficient-llm-agent-inference)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：KV缓存淘汰实现高效LLM推理，减少内存瓶颈
+3. [Enhanced Byzantine-Robust Federated Learning Via Truncated-Quadratic Loss for Heterogeneous Data](/202607/14/2607.10970v1-enhanced-byzantine-robust-federated-learning-via-truncated-quadratic-loss-for-heterogeneous-data)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：提出了一种用于分布式联邦学习的鲁棒聚合规则。
 
 
 <div class="dpr-home-promo-card">
