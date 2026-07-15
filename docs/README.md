@@ -6,40 +6,35 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-14
-- 运行时间：2026-07-14 21:45:48 UTC
+- 最新运行日期：2026-07-15
+- 运行时间：2026-07-15 21:36:20 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：3
-- 速读区：3
+- 本次总论文数：4
+- 精读区：4
+- 速读区：0
 
 ### 今日简报（AI）
-今日精读工业视觉边缘推理性能评测与AMD AI NPU可视化开发环境，速览联邦学习与LLM缓存优化，聚焦模型落地效率。  
-高评分《Benchmarking Edge Inference Strategies》揭示了不同部署策略在工业场景下的显著性能差异，而《IRONSmith》为AI引擎提供了低门槛设计工具。  
-若关注技术选型，建议从边缘推理基准入手；若涉NPU开发，可先体验数据流可视化设计。
-- 详情：[/202607/14/README](/202607/14/README)
+今日精读双9分论文，聚焦稀疏注意力在长上下文与硬件推理上的极致优化。  
+最值得关注方向：利用高维特性设计融合索引-TopK算子，以及通过搜索-内核协同实现可落地的N:M稀疏推理。  
+建议读者可结合具体GPU架构，追踪这些稀疏模式在生成式模型中的实测加速效果。
+- 详情：[/202607/15/README](/202607/15/README)
 
 ### 精读区论文标签
-1. [Benchmarking Edge Inference Strategies for Deep Learning Models in Industrial Machine Vision](/202607/14/2607.11356v1-benchmarking-edge-inference-strategies-for-deep-learning-models-in-industrial-machine-vision)  
+1. [LiteTopK: Exploiting the Curse of Dimensionality for a Fused Indexer-TopK Kernel in Long-Context Sparse Attention](/202607/15/2607.11976v1-litetopk-exploiting-the-curse-of-dimensionality-for-a-fused-indexer-topk-kernel-in-long-context-sparse-attention)  
    标签：评分：9.0/10、query:mlsys
-   evidence：对比评测PyTorch、ONNX Runtime、OpenVINO和TensorRT在边缘推理场景的性能
-2. [IRONSmith: A Visual Dataflow Design Environment for AMD Ryzen AI NPUs](/202607/14/2607.10944v1-ironsmith-a-visual-dataflow-design-environment-for-amd-ryzen-ai-npus)  
+   evidence：提出高效的 GPU 融合 Indexer-TopK 核，用于大语言模型的稀疏注意力，减少内存流量和同步开销
+2. [Realizable N:M Sparse Transformer Inference via Search-Kernel Co-Design](/202607/15/2607.12505v1-realizable-nm-sparse-transformer-inference-via-search-kernel-co-design)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：协同设计稀疏 CUDA 核和稀疏配置，实现 ViT 在 GPU 上的高效推理，获得实际加速
+3. [Automated Tensor Scheduling for Hybrid CPU-GPU LLM Inference on Consumer Devices](/202607/15/2607.10183v2-automated-tensor-scheduling-for-hybrid-cpu-gpu-llm-inference-on-consumer-devices)  
    标签：评分：8.0/10、query:mlsys
-   evidence：为AI基础设施中的NPU编程提供可视化数据流设计环境
-3. [HermesHFL: Incentive-Compatible Hierarchical Federated Unlearning for Dynamic LLM Fine-Tuning](/202607/14/2607.11528v1-hermeshfl-incentive-compatible-hierarchical-federated-unlearning-for-dynamic-llm-fine-tuning)  
+   evidence：面向消费级设备的混合CPU-GPU张量级推理卸载
+4. [WSqD: A Horizon-Free Learning Rate Schedule for Large Model Training](/202607/15/2607.10959v1-wsqd-a-horizon-free-learning-rate-schedule-for-large-model-training)  
    标签：评分：8.0/10、query:mlsys
-   evidence：提出面向大语言模型微调的层次化联邦学习框架，支持遗忘学习
+   evidence：提出无训练时长依赖的学习率调度方案，优化大模型训练
 
 ### 速读区论文标签
-1. [FedOPAL: One-Shot Federated Learning via Analytic Visual Prompt Tuning](/202607/14/2607.08368v1-fedopal-one-shot-federated-learning-via-analytic-visual-prompt-tuning)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：通过解析视觉提示调优的一次性联邦学习，最小化通信轮次
-2. [MemDecay: Region-Aware KV Cache Eviction for Efficient LLM Agent Inference](/202607/14/2607.10582v1-memdecay-region-aware-kv-cache-eviction-for-efficient-llm-agent-inference)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：KV缓存淘汰实现高效LLM推理，减少内存瓶颈
-3. [Enhanced Byzantine-Robust Federated Learning Via Truncated-Quadratic Loss for Heterogeneous Data](/202607/14/2607.10970v1-enhanced-byzantine-robust-federated-learning-via-truncated-quadratic-loss-for-heterogeneous-data)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：提出了一种用于分布式联邦学习的鲁棒聚合规则。
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
