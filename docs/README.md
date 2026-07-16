@@ -6,35 +6,40 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-15
-- 运行时间：2026-07-15 21:36:20 UTC
+- 最新运行日期：2026-07-16
+- 运行时间：2026-07-16 21:25:46 UTC
 - 运行状态：成功
-- 本次总论文数：4
+- 本次总论文数：6
 - 精读区：4
-- 速读区：0
+- 速读区：2
 
 ### 今日简报（AI）
-今日精读双9分论文，聚焦稀疏注意力在长上下文与硬件推理上的极致优化。  
-最值得关注方向：利用高维特性设计融合索引-TopK算子，以及通过搜索-内核协同实现可落地的N:M稀疏推理。  
-建议读者可结合具体GPU架构，追踪这些稀疏模式在生成式模型中的实测加速效果。
-- 详情：[/202607/15/README](/202607/15/README)
+今日精读两篇重磅研究，带你看去中心化大模型训练与MoE推理的硬件革新。  
+《Agora》提出无需许可的全民协作预训练，让互联网规模训练成为可能；《HCRMap》则用热感知映射大幅提升3.5D芯片上混合专家的推理效率。  
+想跟上下一代AI协作与节能推理的趋势，不妨从这两篇入手。
+- 详情：[/202607/16/README](/202607/16/README)
 
 ### 精读区论文标签
-1. [LiteTopK: Exploiting the Curse of Dimensionality for a Fused Indexer-TopK Kernel in Long-Context Sparse Attention](/202607/15/2607.11976v1-litetopk-exploiting-the-curse-of-dimensionality-for-a-fused-indexer-topk-kernel-in-long-context-sparse-attention)  
+1. [Agora: Collective and Permissionless Internet-Scale Pretraining of Large Language Models](/202607/16/2607.13332v1-agora-collective-and-permissionless-internet-scale-pretraining-of-large-language-models)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：在异构GPU上通过互联网链接进行流水线并行模型分片
+2. [HCRMap: Pressure-Aware Hot-Expert Residency Mapping for 3.5D MoE Chiplet Inference](/202607/16/2607.11586v1-hcrmap-pressure-aware-hot-expert-residency-mapping-for-35d-moe-chiplet-inference)  
    标签：评分：9.0/10、query:mlsys
-   evidence：提出高效的 GPU 融合 Indexer-TopK 核，用于大语言模型的稀疏注意力，减少内存流量和同步开销
-2. [Realizable N:M Sparse Transformer Inference via Search-Kernel Co-Design](/202607/15/2607.12505v1-realizable-nm-sparse-transformer-inference-via-search-kernel-co-design)  
+   evidence：在多芯粒系统中进行压力感知的专家副本管理
+3. [PFAdapter: Hierarchical LoRA Decomposition for Personalized Federated MLLMs](/202607/16/2607.12111v1-pfadapter-hierarchical-lora-decomposition-for-personalized-federated-mllms)  
    标签：评分：9.0/10、query:mlsys
-   evidence：协同设计稀疏 CUDA 核和稀疏配置，实现 ViT 在 GPU 上的高效推理，获得实际加速
-3. [Automated Tensor Scheduling for Hybrid CPU-GPU LLM Inference on Consumer Devices](/202607/15/2607.10183v2-automated-tensor-scheduling-for-hybrid-cpu-gpu-llm-inference-on-consumer-devices)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：面向消费级设备的混合CPU-GPU张量级推理卸载
-4. [WSqD: A Horizon-Free Learning Rate Schedule for Large Model Training](/202607/15/2607.10959v1-wsqd-a-horizon-free-learning-rate-schedule-for-large-model-training)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：提出无训练时长依赖的学习率调度方案，优化大模型训练
+   evidence：提出PFAdapter方法，用于多模态大模型的个性化联邦微调，降低分布式训练通信开销。
+4. [Constraint-Driven Model Optimization: An Industry Framework for Selecting Compression and Acceleration Techniques in Modern Machine Learning Systems](/202607/16/2607.13735v1-constraint-driven-model-optimization-an-industry-framework-for-selecting-compression-and-acceleration-techniques-in-modern-machine-learning-systems)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：用于生产ML系统中选择压缩/加速技术的框架,解决系统架构和工程问题。
 
 ### 速读区论文标签
-- 本次无速读推荐。
+1. [Federated Low-Rank Koopman Learning for Multivariate Time-Series Anomaly Detection in IoT Systems](/202607/16/2607.08978v1-federated-low-rank-koopman-learning-for-multivariate-time-series-anomaly-detection-in-iot-systems)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：面向分布式物联网异常检测的联邦学习框架，解决通信与计算约束问题。
+2. [Mixed-Timescale Differential Coding for Downlink Model Broadcast in Wireless Federated Learning](/202607/16/2607.13119v1-mixed-timescale-differential-coding-for-downlink-model-broadcast-in-wireless-federated-learning)  
+   标签：评分：6.0/10、query:mlsys
+   evidence：混合时间尺度差分编码，用于无线联邦学习中高效广播全局模型
 
 
 <div class="dpr-home-promo-card">
