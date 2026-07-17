@@ -6,40 +6,37 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-16
-- 运行时间：2026-07-16 21:25:46 UTC
+- 最新运行日期：2026-07-17
+- 运行时间：2026-07-17 21:33:20 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：4
+- 本次总论文数：5
+- 精读区：3
 - 速读区：2
 
 ### 今日简报（AI）
-今日精读两篇重磅研究，带你看去中心化大模型训练与MoE推理的硬件革新。  
-《Agora》提出无需许可的全民协作预训练，让互联网规模训练成为可能；《HCRMap》则用热感知映射大幅提升3.5D芯片上混合专家的推理效率。  
-想跟上下一代AI协作与节能推理的趋势，不妨从这两篇入手。
-- 详情：[/202607/16/README](/202607/16/README)
+1) 今日聚焦GPU算力的效率与可靠性，从重思评估范式到长上下文训练突破。
+2) 最值得关注：不要预测，要优先排序的GPU可靠性新思路，以及固定GPU预算下突破200万tokens的长上下文强化学习方法。
+3) 如果你在做大模型训练或集群运维，强烈建议精读这两篇，它们可能帮你省下真金白银的硬件成本。
+- 详情：[/202607/17/README](/202607/17/README)
 
 ### 精读区论文标签
-1. [Agora: Collective and Permissionless Internet-Scale Pretraining of Large Language Models](/202607/16/2607.13332v1-agora-collective-and-permissionless-internet-scale-pretraining-of-large-language-models)  
+1. [Don't Predict, Prioritize: Rethinking GPU Reliability Assessment](/202607/17/2607.15115v1-dont-predict-prioritize-rethinking-gpu-reliability-assessment)  
    标签：评分：10.0/10、query:mlsys
-   evidence：在异构GPU上通过互联网链接进行流水线并行模型分片
-2. [HCRMap: Pressure-Aware Hot-Expert Residency Mapping for 3.5D MoE Chiplet Inference](/202607/16/2607.11586v1-hcrmap-pressure-aware-hot-expert-residency-mapping-for-35d-moe-chiplet-inference)  
+   evidence：重新思考大规模AI基础设施中的GPU可靠性评估，提出以优先级排序取代预测
+2. [LongStraw: Long-Context RL Beyond 2M Tokens under a Fixed GPU Budget](/202607/17/2607.14952v1-longstraw-long-context-rl-beyond-2m-tokens-under-a-fixed-gpu-budget)  
    标签：评分：9.0/10、query:mlsys
-   evidence：在多芯粒系统中进行压力感知的专家副本管理
-3. [PFAdapter: Hierarchical LoRA Decomposition for Personalized Federated MLLMs](/202607/16/2607.12111v1-pfadapter-hierarchical-lora-decomposition-for-personalized-federated-mllms)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：提出PFAdapter方法，用于多模态大模型的个性化联邦微调，降低分布式训练通信开销。
-4. [Constraint-Driven Model Optimization: An Industry Framework for Selecting Compression and Acceleration Techniques in Modern Machine Learning Systems](/202607/16/2607.13735v1-constraint-driven-model-optimization-an-industry-framework-for-selecting-compression-and-acceleration-techniques-in-modern-machine-learning-systems)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：用于生产ML系统中选择压缩/加速技术的框架,解决系统架构和工程问题。
+   evidence：LongStraw是一种面向长上下文RL后训练的执行栈，在固定GPU预算下优化内存与计算。
+3. [Continual Learning with Elastic Regularization and Synthetic Replay for Federated MLLM Fine-Tuning](/202607/17/2607.12112v1-continual-learning-with-elastic-regularization-and-synthetic-replay-for-federated-mllm-fine-tuning)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：提出联邦持续学习框架用于多模态大模型微调，解决分布式训练中的遗忘问题。
 
 ### 速读区论文标签
-1. [Federated Low-Rank Koopman Learning for Multivariate Time-Series Anomaly Detection in IoT Systems](/202607/16/2607.08978v1-federated-low-rank-koopman-learning-for-multivariate-time-series-anomaly-detection-in-iot-systems)  
+1. [Dysco: Dynamic Subspace Boosting to Mitigate LoRA Interference in Federated Learning](/202607/17/2607.14367v1-dysco-dynamic-subspace-boosting-to-mitigate-lora-interference-in-federated-learning)  
+   标签：评分：7.0/10、query:mlsys
+   evidence：Dysco通过动态子空间分配缓解联邦LoRA聚合中的干扰，改善分布式训练稳定性。
+2. [Empirical Analysis of GPU Frequency Behavior Under ML Workloads](/202607/17/2607.08307v1-empirical-analysis-of-gpu-frequency-behavior-under-ml-workloads)  
    标签：评分：6.0/10、query:mlsys
-   evidence：面向分布式物联网异常检测的联邦学习框架，解决通信与计算约束问题。
-2. [Mixed-Timescale Differential Coding for Downlink Model Broadcast in Wireless Federated Learning](/202607/16/2607.13119v1-mixed-timescale-differential-coding-for-downlink-model-broadcast-in-wireless-federated-learning)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：混合时间尺度差分编码，用于无线联邦学习中高效广播全局模型
+   evidence：分析ML负载下GPU频率缩放行为，揭示核间依赖挑战独立时延假设。
 
 
 <div class="dpr-home-promo-card">
