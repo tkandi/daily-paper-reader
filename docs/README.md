@@ -6,40 +6,26 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-18
-- 运行时间：2026-07-18 21:29:42 UTC
+- 最新运行日期：2026-07-19
+- 运行时间：2026-07-19 21:01:23 UTC
 - 运行状态：成功
-- 本次总论文数：6
-- 精读区：2
-- 速读区：4
+- 本次总论文数：1
+- 精读区：1
+- 速读区：0
 
 ### 今日简报（AI）
-今日精读聚焦LLM系统优化：零拷贝分布式KV缓存编排如何实现多智能体高效协作，以及GPU tile级仿真如何加速软硬件协同设计。  
-两大高价值方向：一是用零拷贝技术大幅降低智能体间通信开销，二是通过细粒度GPU仿真提前探索未来硬件的推理极限。  
-建议读者将零拷贝缓存策略应用到实时多智能体场景，或借助tile仿真框架验证下一代芯片的部署方案。
-- 详情：[/202607/18/README](/202607/18/README)
+今日精读CPU推理加速新作，ExaGEMM用寄存器内关联计算撬动低比特矩阵乘法的性能天花板。  
+核心结论：通过将多位累加映射到寄存器内并行位运算，该框架显著提升了整数/混合精度GEMM效率，尤其适合边缘场景。  
+建议读者关注其开源实现，动手验证在自家模型上的加速比，并与IR-Drop结合的低功耗方案横向对比。
+- 详情：[/202607/19/README](/202607/19/README)
 
 ### 精读区论文标签
-1. [[AAFLOW+] Stateful Operator Abstraction with Zero-Copy Distributed KV Cache Orchestration for Multi-Agent Workflows](/202607/18/2607.10987v1-aaflow-stateful-operator-abstraction-with-zero-copy-distributed-kv-cache-orchestration-for-multi-agent-workflows)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：分布式KV缓存编排提升LLM多智能体推理效率
-2. [GPU-Tile-Sim: A Tile-Centric GPU Simulation Framework for LLM Hardware-Software Co-Design](/202607/18/2607.11262v1-gpu-tile-sim-a-tile-centric-gpu-simulation-framework-for-llm-hardware-software-co-design)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：用于LLM硬件-软件协同设计的GPU模拟框架
+1. [ExaGEMM: Exploration Framework for CPU-Driven ML Inference via Associative In-Register Computing for Low-Bit GEMM](/202607/19/2607.14622v1-exagemm-exploration-framework-for-cpu-driven-ml-inference-via-associative-in-register-computing-for-low-bit-gemm)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：面向低比特GEMM的CPU驱动ML推理硬件-软件协同设计
 
 ### 速读区论文标签
-1. [SmartRAG: Native Graph-Based RAG for Mobile Device](/202607/18/2607.14661v1-smartrag-native-graph-based-rag-for-mobile-device)  
-   标签：评分：7.0/10、query:mlsys
-   evidence：提出了一种设备端模块化框架用于LLM助手
-2. [Learning Partition Trees for Nearest Neighbor Search](/202607/18/2607.09909v1-learning-partition-trees-for-nearest-neighbor-search)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：学习划分树针对特定查询分布优化最近邻搜索
-3. [Score-Only Distillation for Compact Dense Retrieval](/202607/18/2607.11465v1-score-only-distillation-for-compact-dense-retrieval)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：将大型检索模型蒸馏为紧凑模型以实现高效服务
-4. [Cluster with Auctions for Vector Search](/202607/18/2607.13728v1-cluster-with-auctions-for-vector-search)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：联合学习均衡划分与神经网络探测用于向量搜索
+- 本次无速读推荐。
 
 
 <div class="dpr-home-promo-card">
