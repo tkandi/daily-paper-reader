@@ -18,23 +18,35 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-19
-- 运行时间：2026-07-19 21:01:23 UTC
+- 最新运行日期：2026-07-20
+- 运行时间：2026-07-20 20:43:00 UTC
 - 运行状态：成功
-- 本次总论文数：1
-- 精读区：1
+- 本次总论文数：5
+- 精读区：5
 - 速读区：0
 
 ### 今日简报（AI）
-今日精读CPU推理加速新作，ExaGEMM用寄存器内关联计算撬动低比特矩阵乘法的性能天花板。  
-核心结论：通过将多位累加映射到寄存器内并行位运算，该框架显著提升了整数/混合精度GEMM效率，尤其适合边缘场景。  
-建议读者关注其开源实现，动手验证在自家模型上的加速比，并与IR-Drop结合的低功耗方案横向对比。
-- 详情：[/202607/19/README](/202607/19/README)
+今日精读5篇前沿研究，聚焦视觉-语言-动作模型的服务化后训练与GPU集合通信的极致延迟优化。  
+JoyNexus提出多租户服务框架，显著降低VLA模型后训练门槛；《Every Microsecond Matters》则揭秘如何将GPU通信延迟逼近硬件物理极限。  
+建议机器人系统开发者优先体验JoyNexus的架构简化，而性能敏感场景可深入GPU通信优化细节。
+- 详情：[/202607/20/README](/202607/20/README)
 
 ### 精读区论文标签
-1. [ExaGEMM: Exploration Framework for CPU-Driven ML Inference via Associative In-Register Computing for Low-Bit GEMM](/202607/19/2607.14622v1-exagemm-exploration-framework-for-cpu-driven-ml-inference-via-associative-in-register-computing-for-low-bit-gemm)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：面向低比特GEMM的CPU驱动ML推理硬件-软件协同设计
+1. [JoyNexus: Service-Oriented Multi-Tenant Post-Training for VLA Models](/202607/20/2607.16074v1-joynexus-service-oriented-multi-tenant-post-training-for-vla-models)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：提供多租户后训练服务，解耦资源分配以提高GPU利用率
+2. [Every Microsecond Matters: Achieving Near Speed-of-Light Latency in GPU Collectives](/202607/20/2607.16100v1-every-microsecond-matters-achieving-near-speed-of-light-latency-in-gpu-collectives)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：针对大语言模型推理将GPU集合通信延迟优化至接近硬件极限
+3. [Adaptive Fault Injection Planning for Multi-Layer Self-Healing AI Infrastructure](/202607/20/2607.16161v1-adaptive-fault-injection-planning-for-multi-layer-self-healing-ai-infrastructure)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：面向GPU加速器AI基础设施多层自愈的故障注入
+4. [PagedWeight: Efficient MoE LLM Serving with Dynamic Quality-Aware Weight Quantization](/202607/20/2607.16184v1-pagedweight-efficient-moe-llm-serving-with-dynamic-quality-aware-weight-quantization)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：动态量化平衡GPU内存与精度的MoE大模型服务
+5. [FVAttn: Adaptive Sparse Attention with Runtime Load Balancing for Video Generation](/202607/20/2607.16190v1-fvattn-adaptive-sparse-attention-with-runtime-load-balancing-for-video-generation)  
+   标签：评分：9.0/10、query:mlsys
+   evidence：多GPU序列并行下自适应稀疏注意力的分布式执行优化
 
 ### 速读区论文标签
 - 本次无速读推荐。
