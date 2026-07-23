@@ -18,28 +18,34 @@
 </div>
 
 ## 每次日报
-- 最新运行日期：2026-07-22
-- 运行时间：2026-07-22 21:41:26 UTC
+- 最新运行日期：2026-07-23
+- 运行时间：2026-07-23 21:43:32 UTC
 - 运行状态：成功
-- 本次总论文数：2
-- 精读区：1
+- 本次总论文数：4
+- 精读区：3
 - 速读区：1
 
 ### 今日简报（AI）
-今日精读 WAR（工作负载感知的智能体强化学习同步 rollout 机制），速读边缘分布式学习在数据感知不完美条件下的研究。  
-核心结论：WAR 让同步 RL 的采样效率不再被“短板”拖累，能智能分配负载；边缘学习论文指出数据感知误差会显著影响协同训练。  
-如果想自己动手，不妨先跑一个同步多智能体环境，试试按实时算力动态调整采集比例，感受负载感知的威力。
-- 详情：[/202607/22/README](/202607/22/README)
+今日精读两篇高分论文，聚焦昇腾集群全参数微调 DeepSeek-V4 与点云神经渲染的分布式同步优化。  
+最值得关注：SLAI T-Rex 首证国产超算可高效完成千亿语言模型后训练，Odin 则以基元级同步大幅提升分布式渲染质量。  
+建议读者结合这两项工作，审视从模型训练到实时渲染的国产软硬件协同进展。
+- 详情：[/202607/23/README](/202607/23/README)
 
 ### 精读区论文标签
-1. [WAR: Workload-Aware Rollouts for Synchronous Agentic Reinforcement Learning](/202607/22/2607.17299v1-war-workload-aware-rollouts-for-synchronous-agentic-reinforcement-learning)  
+1. [SLAI T-Rex: Full-Parameter Post-training of the DeepSeek-V4 Family on Ascend SuperPOD](/202607/23/2607.20145v1-slai-t-rex-full-parameter-post-training-of-the-deepseek-v4-family-on-ascend-superpod)  
+   标签：评分：10.0/10、query:mlsys
+   evidence：在昇腾超节点上对万亿参数模型进行全参数后训练，优化并行策略与通信
+2. [Odin: Primitive-Level Synchronization for Distributed Point-Based Neural Rendering](/202607/23/2607.19893v1-odin-primitive-level-synchronization-for-distributed-point-based-neural-rendering)  
    标签：评分：9.0/10、query:mlsys
-   evidence：工作负载感知回滚系统，通过联合优化解码与调度加速同步智能体强化学习训练
+   evidence：分布式点基神经渲染训练系统，采用基元级同步替代全局屏障
+3. [Multi-level context Modeling for consistent expert selection in Mixture-of-Experts](/202607/23/2607.16427v1-multi-level-context-modeling-for-consistent-expert-selection-in-mixture-of-experts)  
+   标签：评分：8.0/10、query:mlsys
+   evidence：改进MoE架构中的专家选择以提升模型可扩展性
 
 ### 速读区论文标签
-1. [Distributed Edge Learning under Imperfect Data Sensing](/202607/22/2607.18649v1-distributed-edge-learning-under-imperfect-data-sensing)  
+1. [ANNLib: A Development Framework for Efficient Approximate Nearest Neighbor Search](/202607/23/2607.17582v1-annlib-a-development-framework-for-efficient-approximate-nearest-neighbor-search)  
    标签：评分：6.0/10、query:mlsys
-   evidence：不完美数据感知下分布式边缘学习收敛分析
+   evidence：一个用于构建高性能近似最近邻搜索系统的编程框架，应用于现代深度学习流水线
 
 
 <div class="dpr-home-promo-card dpr-home-panel">
