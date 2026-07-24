@@ -1,45 +1,108 @@
-<div class="dpr-home-notice-card">
-  <h3 class="dpr-home-notice-title">🚀 Start Here</h3>
-  <ul class="dpr-home-notice-list">
-    <li><a href="#/tutorial/README">使用教程</a></li>
-  </ul>
+<div class="dpr-home-notice-card dpr-home-panel">
+  <div class="dpr-home-notice-header dpr-home-panel-header">
+    <h3 class="dpr-home-notice-title">公告与更新</h3>
+    <a class="dpr-home-notice-tutorial" href="#/tutorial/README">使用教程 <span aria-hidden="true">›</span></a>
+  </div>
+  <div class="dpr-home-notice-entry">
+    <time class="dpr-home-notice-date" datetime="2026-07-20">07.20</time>
+    <div>
+      <strong class="dpr-home-notice-entry-title">反馈功能上线</strong>
+      <span class="dpr-home-notice-entry-summary">新增反馈功能，欢迎大家踊跃反馈各种建议，我们会第一时间查看并协调处理。</span>
+    </div>
+  </div>
+  <div class="dpr-home-notice-entry">
+    <time class="dpr-home-notice-date" datetime="2026-07-19">07.19</time>
+    <div>
+      <strong class="dpr-home-notice-entry-title">首页新增社区统计</strong>
+      <span class="dpr-home-notice-entry-summary">现在可以看到今天看论文的人数和项目加入人数。</span>
+    </div>
+  </div>
+  <div class="dpr-home-site-stats" data-dpr-site-stats hidden aria-live="polite">
+    <span>今天有 <strong class="dpr-home-site-stat-value" data-dpr-daily-readers>--</strong> 人在看论文</span>
+    <span class="dpr-home-site-stat-separator" aria-hidden="true">·</span>
+    <span>昨天有 <strong class="dpr-home-site-stat-value" data-dpr-yesterday-readers>--</strong> 人在看论文</span>
+    <span class="dpr-home-site-stat-separator" aria-hidden="true">·</span>
+    <span>已有 <strong class="dpr-home-site-stat-value" data-dpr-fork-count>--</strong> 人加入 Daily Paper Reader</span>
+    <span class="dpr-home-history">
+      <button type="button" class="dpr-home-history-trigger" data-dpr-history-trigger aria-label="查看最近 14 天阅读趋势"><span aria-hidden="true">🔍</span></button>
+      <span class="dpr-home-history-popover" data-dpr-history-popover role="tooltip">
+        <span class="dpr-home-history-header">近 14 天阅读趋势</span>
+        <span class="dpr-home-history-meta">
+          <span data-dpr-history-range>--</span>
+          <span>峰值 <strong data-dpr-history-peak>--</strong></span>
+        </span>
+        <span class="dpr-home-history-chart" data-dpr-history-chart></span>
+      </span>
+    </span>
+  </div>
 </div>
 
-## 每次日报
-- 最新运行日期：2026-07-23
-- 运行时间：2026-07-23 21:43:32 UTC
-- 运行状态：成功
-- 本次总论文数：4
-- 精读区：3
-- 速读区：1
+<div class="dpr-home-dashboard-grid">
+<section class="dpr-home-dashboard-card dpr-home-report-card">
+  <div class="dpr-home-dashboard-header">
+    <div>
+      <span class="dpr-home-dashboard-kicker">2026-07-24</span>
+      <h3 class="dpr-home-dashboard-title">今日汇总</h3>
+    </div>
+    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
+  </div>
+  <dl class="dpr-home-dashboard-stats">
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+  </dl>
+  <p class="dpr-home-dashboard-body">最近更新：2026-07-24 21:40:51 UTC<br>状态：成功</p>
+</section>
+<section class="dpr-home-dashboard-card dpr-home-brief-card">
+  <div class="dpr-home-dashboard-header">
+    <div>
+      <span class="dpr-home-dashboard-kicker">合并后生成</span>
+      <h3 class="dpr-home-dashboard-title">今日简报</h3>
+    </div>
+    <strong class="dpr-home-dashboard-count">AI</strong>
+  </div>
+  <div class="dpr-home-dashboard-body">
+<p>今日深度剖析分布式训练两大加速秘籍：流水线梯度编码与受控周期同步。</p>
+<p>最亮眼的结论是，流水线化梯度编码能近乎零冗余地消除落后节点瓶颈，而周期同步的精细化控制则让计算通信重叠达到新的效率平衡。</p>
+<p>下一步建议读者先把握流水线编码如何在高延迟集群中实现低开销容错，再对比受控同步方案在小规模弹性训练中的落地快慢。</p>
+  </div>
+</section>
+<section class="dpr-home-dashboard-card dpr-home-deep-card">
+  <div class="dpr-home-dashboard-header">
+    <div>
+      <span class="dpr-home-dashboard-kicker">今日累计</span>
+      <h3 class="dpr-home-dashboard-title">精读推荐</h3>
+    </div>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
+  </div>
+  <div class="dpr-home-dashboard-body">
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Pipelined Gradient Coding">Pipelined Gradient Coding</span></li><li><span class="dpr-home-dashboard-paper-title" title="Controlled Periodic Synchronization for Efficient Data-Parallel Training">Controlled Periodic Synchronization for Efficient Data-Parallel Training</span></li></ul>
+  </div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+</section>
+<section class="dpr-home-dashboard-card dpr-home-skim-card">
+  <div class="dpr-home-dashboard-header">
+    <div>
+      <span class="dpr-home-dashboard-kicker">今日累计</span>
+      <h3 class="dpr-home-dashboard-title">速读推荐</h3>
+    </div>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
+  </div>
+  <div class="dpr-home-dashboard-body">
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs">Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Towards Privacy-Preserving Federated Prompt Tuning under Data Heterogeneity: A Subspace-Decomposed Expert Approach">Towards Privacy-Preserving Federated Prompt Tuning under Data Heterogeneity: A Subspace-Decomposed Expert Approach</span></li></ul>
+  </div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+</section>
+</div>
 
-### 今日简报（AI）
-今日精读两篇高分论文，聚焦昇腾集群全参数微调 DeepSeek-V4 与点云神经渲染的分布式同步优化。  
-最值得关注：SLAI T-Rex 首证国产超算可高效完成千亿语言模型后训练，Odin 则以基元级同步大幅提升分布式渲染质量。  
-建议读者结合这两项工作，审视从模型训练到实时渲染的国产软硬件协同进展。
-- 详情：[/202607/23/README](/202607/23/README)
-
-### 精读区论文标签
-1. [SLAI T-Rex: Full-Parameter Post-training of the DeepSeek-V4 Family on Ascend SuperPOD](/202607/23/2607.20145v1-slai-t-rex-full-parameter-post-training-of-the-deepseek-v4-family-on-ascend-superpod)  
-   标签：评分：10.0/10、query:mlsys
-   evidence：在昇腾超节点上对万亿参数模型进行全参数后训练，优化并行策略与通信
-2. [Odin: Primitive-Level Synchronization for Distributed Point-Based Neural Rendering](/202607/23/2607.19893v1-odin-primitive-level-synchronization-for-distributed-point-based-neural-rendering)  
-   标签：评分：9.0/10、query:mlsys
-   evidence：分布式点基神经渲染训练系统，采用基元级同步替代全局屏障
-3. [Multi-level context Modeling for consistent expert selection in Mixture-of-Experts](/202607/23/2607.16427v1-multi-level-context-modeling-for-consistent-expert-selection-in-mixture-of-experts)  
-   标签：评分：8.0/10、query:mlsys
-   evidence：改进MoE架构中的专家选择以提升模型可扩展性
-
-### 速读区论文标签
-1. [ANNLib: A Development Framework for Efficient Approximate Nearest Neighbor Search](/202607/23/2607.17582v1-annlib-a-development-framework-for-efficient-approximate-nearest-neighbor-search)  
-   标签：评分：6.0/10、query:mlsys
-   evidence：一个用于构建高性能近似最近邻搜索系统的编程框架，应用于现代深度学习流水线
-
-
-<div class="dpr-home-promo-card">
-  <h3 class="dpr-home-promo-title">💬 社区与支持</h3>
-  <ul class="dpr-home-promo-list">
-    <li>欢迎 Star / Fork / Issue / PR</li>
-    <li>QQ群：583867967（欢迎交流，已有：1151人）</li>
-  </ul>
+<div class="dpr-home-promo-card dpr-home-panel">
+  <div class="dpr-home-panel-header">
+    <h3 class="dpr-home-promo-title">社区与支持</h3>
+  </div>
+  <p class="dpr-home-promo-copy">欢迎通过 Star、Fork、Issue 或 PR 一起完善 Daily Paper Reader。</p>
+  <div class="dpr-home-promo-meta">
+    <span>QQ群 <strong>583867967</strong></span>
+    <span class="dpr-home-promo-separator" aria-hidden="true">·</span>
+    <span>已有 <strong>1,491</strong> 人参与交流</span>
+  </div>
 </div>
