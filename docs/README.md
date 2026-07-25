@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-07-24</span>
+      <span class="dpr-home-dashboard-kicker">2026-07-25</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-07-24 21:40:51 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-07-25 21:23:33 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日深度剖析分布式训练两大加速秘籍：流水线梯度编码与受控周期同步。</p>
-<p>最亮眼的结论是，流水线化梯度编码能近乎零冗余地消除落后节点瓶颈，而周期同步的精细化控制则让计算通信重叠达到新的效率平衡。</p>
-<p>下一步建议读者先把握流水线编码如何在高延迟集群中实现低开销容错，再对比受控同步方案在小规模弹性训练中的落地快慢。</p>
+<p>今日聚焦高效推理与端侧学习的硬件-算法协同设计，从6篇论文中精读2篇高分前沿成果。</p>
+<p>最值得关注：针对贝叶斯推理的硬件优先部署方案，与RISC-V单核上实现Float16端侧训练的软硬协同路径。</p>
+<p>建议关注端侧训练的朋友，可沿RISC-V生态追踪轻量级学习的落地进展。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -76,7 +76,7 @@
     <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Pipelined Gradient Coding">Pipelined Gradient Coding</span></li><li><span class="dpr-home-dashboard-paper-title" title="Controlled Periodic Synchronization for Efficient Data-Parallel Training">Controlled Periodic Synchronization for Efficient Data-Parallel Training</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="A Hardware-oriented Approach for Efficient Bayesian Inference Computation and Deployment">A Hardware-oriented Approach for Efficient Bayesian Inference Computation and Deployment</span></li><li><span class="dpr-home-dashboard-paper-title" title="Hardware-Software Co-Design for Float16 On-Device Training on RISC-V Single-Core">Hardware-Software Co-Design for Float16 On-Device Training on RISC-V Single-Core</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs">Adaptive Depth Sparse Framework: Similarity-Driven Resource Allocation for Pre-Trained LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Towards Privacy-Preserving Federated Prompt Tuning under Data Heterogeneity: A Subspace-Decomposed Expert Approach">Towards Privacy-Preserving Federated Prompt Tuning under Data Heterogeneity: A Subspace-Decomposed Expert Approach</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="BRIM: Workload-Balanced Dual-Sided Bit-Serial Sparse Inference Accelerator">BRIM: Workload-Balanced Dual-Sided Bit-Serial Sparse Inference Accelerator</span></li><li><span class="dpr-home-dashboard-paper-title" title="Convergence-Latency-Aware Adaptive Modulation and Resource Allocation in RIS-Assisted Wireless Federated Learning">Convergence-Latency-Aware Adaptive Modulation and Resource Allocation in RIS-Assisted Wireless Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="PyroDash: Cost-Efficient Token-Level Small-Large Language Model Collaborative Inference">PyroDash: Cost-Efficient Token-Level Small-Large Language Model Collaborative Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
 </section>
 </div>
 
