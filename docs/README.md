@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-07-26</span>
+      <span class="dpr-home-dashboard-kicker">2026-07-27</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-07-26 21:20:39 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-07-27 21:26:33 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦联邦学习轻量微调与模型服务共置优化，精读两篇高分论文。</p>
-<p>最值得关注联邦轻量微调满分方案，以及通过干扰感知共置提升服务效率的思路。</p>
-<p>对边缘AI部署感兴趣的读者，可优先阅读这两篇，理解如何平衡模型精度与资源开销。</p>
+<p>今日聚焦AI基础设施优化：精读异构AI工作负载的Agentic调度方案与Tile级GPU性能模型，速览端侧LLM推理省内存、自适应路由与稀疏注意力技术。</p>
+<p>智能调度与细粒度GPU分析正成为突破异构计算效率的关键，Agentic CPU-GPU调度（9.0分）和首原理Tile模型（8.0分）提供了全新视角。</p>
+<p>建议关注将调度决策与模型内存/计算优化联动，在手机、边缘设备上落地更高效的AI推理体验。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Federated Lightweight Fine-Tuning">Federated Lightweight Fine-Tuning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Roomie: Interference-Aware Colocation for Efficient Model Serving">Roomie: Interference-Aware Colocation for Efficient Model Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Fine-grained Computation-Communication Overlap via Tile-level Signaling and Scheduling for Mixture-of-Experts">Fine-grained Computation-Communication Overlap via Tile-level Signaling and Scheduling for Mixture-of-Experts</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Agentic CPU-GPU Scheduling for Heterogeneous AI Workloads">Agentic CPU-GPU Scheduling for Heterogeneous AI Workloads</span></li><li><span class="dpr-home-dashboard-paper-title" title="TileSight: A First-Principles Tile-Centric Analytical GPU Performance Model from Cores to Clusters">TileSight: A First-Principles Tile-Centric Analytical GPU Performance Model from Cores to Clusters</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ThRIve: Thermally Robust CNN Inference via Low-Rank Adaptation in Heterogeneous PIM Architectures">ThRIve: Thermally Robust CNN Inference via Low-Rank Adaptation in Heterogeneous PIM Architectures</span></li><li><span class="dpr-home-dashboard-paper-title" title="QScheduler: Adaptive Gradient Sampling for Zeroth-Order On-Device Training on INT8 NPUs">QScheduler: Adaptive Gradient Sampling for Zeroth-Order On-Device Training on INT8 NPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Autonomous Collaborative Learning Among an Ensemble of Tsetlin Machines with Consensus-Based Inference">Autonomous Collaborative Learning Among an Ensemble of Tsetlin Machines with Consensus-Based Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SelectInfer: Selective Neuron Loading and Computation for On-Device LLMs">SelectInfer: Selective Neuron Loading and Computation for On-Device LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="VDAR-Router: Adaptive LLMs Routing via Verbalized Query Difficulty Analysis Retrieval">VDAR-Router: Adaptive LLMs Routing via Verbalized Query Difficulty Analysis Retrieval</span></li><li><span class="dpr-home-dashboard-paper-title" title="RIS-Kernel: A Model-Agnostic Architecture for Long-Context LLM Inference via Sparse Attention">RIS-Kernel: A Model-Agnostic Architecture for Long-Context LLM Inference via Sparse Attention</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
 </div>
 

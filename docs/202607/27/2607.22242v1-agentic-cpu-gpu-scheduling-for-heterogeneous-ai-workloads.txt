@@ -1,0 +1,648 @@
+Title: Agentic CPU-GPU Scheduling for Heterogeneous AI Workloads
+
+URL Source: https://arxiv.org/pdf/2607.22242v1
+
+Published Time: Mon, 27 Jul 2026 00:50:47 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Agentic CPU-GPU Scheduling for Heterogeneous AI Workloads 
+
+# Tianxi Lu 
+
+Brown University Providence, Rhode Island, USA tianxi_lu@brown.edu 
+
+# Sherief Reda 
+
+Brown University Providence, Rhode Island, USA sherief_reda@brown.edu 
+
+## Abstract 
+
+Agentic AI systems compose heterogeneous tool workloads on shared GPU/CPU infrastructure, yet existing frameworks assign all GPU-capable tools to the GPU by default. We profile 19 AI tools across GPU and CPU and find that 11 are GPU-preferred, 4 are am-biguous, 1 is CPU-preferred, due to PCIe transfer dominance, and 3 are device-neutral, establishing that blanket GPU-first scheduling is suboptimal. We formulate device scheduling as assigning each tool to one of three options—immediate GPU execution, queued GPU execution, or CPU offload—under a VRAM budget, and identify two runtime factors that cause end-to-end latency to diverge from static profiles: GPU utilization contention and VRAM capacity contention. We present an agentic scheduler that pairs an LLM agent with an algorithmic runtime monitor, where the monitor expands what the LLM can observe—via running averages, symmetric reprobing, swap reprobing, and exploration hints—without ever prescribing which mapping to adopt. Across 13 scenarios spanning serial execu-tion, parallel contention, and memory-constrained execution, the agentic scheduler reaches the brute-force optimal mapping in all 13 scenarios, matching the best classical baseline on mapping accuracy while avoiding bandit-style exploration over complete mappings, and outperforming HEFT, StarPU, and the all-GPU policy while requiring zero offline training. 
+
+## CCS Concepts 
+
+• Hardware → Parallel architectures ; • Computer systems or-ganization → Heterogeneous (hybrid) systems ; • Computing methodologies → Scheduling .
+
+## Keywords 
+
+heterogeneous scheduling, agentic AI, LLM-based scheduling, GPU memory management, runtime monitoring, DAG execution 
+
+## 1 Introduction 
+
+Modern agentic AI systems organize computation as multi-step workflows centered around large language models (LLMs), which invoke external tools to accomplish complex tasks [ 4, 13 , 31 ]. These tools span diverse functionality, including deep-learning inference, vector search, data processing, and external APIs. Across such work-flows, tool executions form a directed pipeline whose end-to-end latency critically depends on how individual tools are mapped to underlying hardware. Despite this diversity, existing orchestration frameworks such as LangGraph and LangChain adopt a uniform GPU-first policy, placing all GPU-capable tools on the GPU. This raises a fundamen-tal systems question: how should heterogeneous tools be scheduled across CPU and GPU to minimize end-to-end latency? The problem is non-trivial because (i) tools have heterogeneous profiles—compute-bound models favor GPUs while I/O-bound tools favor CPUs; (ii) concurrent GPU execution causes contention that deviates from isolated profiles; and (iii) limited VRAM imposes a hard capacity constraint that expands the decision space beyond binary place-ment. Existing scheduling approaches are insufficient to address these challenges. Static heuristics (e.g., HEFT [ 28 ] or bandit-based meth-ods such as UCB1 [ 2]) rely on fixed or locally updated estimates and fail to capture global interactions under contention. Learning-based approaches such as reinforcement-learning device place-ment [ 1 , 18 , 19 , 21 ] require substantial offline training and strug-gle to generalize across workloads with diverse tool compositions. Meanwhile, modern agentic systems already employ an LLM as a central planner that decomposes tasks, selects tools, and determines execution order. This naturally extends to device scheduling, where the LLM can reason about placement decisions based on per-tool performance characteristics. However, LLM-based scheduling alone is insufficient, particu-larly in the presence of contention and memory constraints. To address this, we design an agentic scheduler that combines an LLM with a runtime monitor. The LLM performs high-level reasoning over device mappings, while the monitor provides dynamic feed-back by measuring execution under contention, probing alternative placements, and exposing information beyond static profiles. This co-design enables effective scheduling without requiring offline training. This paper makes the following contributions. 
+
+• We formalize heterogeneous scheduling for agentic work-flows as a DAG-based optimization problem, where each tool invocation is mapped to CPU or GPU under precedence and GPU memory constraints to minimize end-to-end latency. 
+
+• We profile 19 AI tools with real-world datasets across CPU and GPU, identifying four distinct scheduling zones and showing that the commonly used GPU-first policy is often suboptimal. 
+
+• We design an agentic scheduler that integrates an LLM with a runtime monitor. The LLM determines the scheduling of in-voked tools, while the monitor provides dynamic feedback to expand the LLM’s observation space, enabling the scheduler to escape local optima without offline training. 
+
+• We evaluate our system on 13 scenarios against four base-lines (HEFT, UCB1, StarPU, and all-GPU). Our approach reaches the brute-force-optimal mapping in all 13 scenarios, matching UCB1 on mapping accuracy while avoiding its ex-ploration over complete mappings and outperforming HEFT, StarPU, and all-GPU. The remainder of this paper is organized as follows. Section 2 mo-tivates and formulates the scheduling problem. Section 3 presents     
+
+> 1arXiv:2607.22242v1 [cs.DC] 24 Jul 2026 A
+> B
+> C
+> D
+> A (GPU) C (GPU) D (GPU)
+> B (GPU)
+> B (CPU) D (CPU)
+> A (GPU) C (GPU)
+> Tool DAG
+> Schedule 1 (All on GPU)
+> Schedule 2 (DAG-aware)
+> GPU:
+> CPU:
+> GPU:
+> E2E
+
+Figure 1: Motivating example of heterogeneous placement for an agentic workflow. End-to-end time is measured from the start of Tool A to the completion of Tool D. A naive GPU-first policy may serialize execution under GPU contention, while a dependency-aware placement improves parallelism and reduces latency. The example shows CPU/GPU placement only; our full formulation further distinguishes immediate GPU execution from queued GPU execution under a VRAM budget. 
+
+the design of our agentic scheduler. Section 4 evaluates the sys-tem against classical baselines. Section 6 discusses related work, Section 5 discusses limitations, and Section 7 concludes. 
+
+## 2 Motivation 2.1 Problem Formulation 
+
+We model an agentic workflow as a directed acyclic graph (DAG) 
+
+𝐺 = (𝑉 , 𝐸 ), where each node 𝑣 ∈ 𝑉 represents a tool invocation and each edge (𝑢, 𝑣 ) ∈ 𝐸 denotes a data dependency: task 𝑣 can start only after task 𝑢 completes. Each task is assigned to one of three execution modes: 
+
+𝑎 𝑣 ∈ A = {cpu , gpu_now , gpu_queue }.
+
+The cpu mode executes the task on CPU and consumes no GPU resources. The gpu_now mode executes the task immediately on GPU once its dependencies are satisfied, so its model and interme-diate state occupy GPU memory during execution. The gpu_queue 
+
+mode also executes the task on GPU, but the task is deferred to a serialized GPU queue. Queued tasks do not reserve VRAM while waiting; instead, they pay an additional load-in or queuing over-head when they are later admitted to the GPU. Figure 1 illustrates how different placements over these modes can yield substantially different end-to-end latency for the same DAG. Let 𝜏 (𝑣, 𝑎 𝑣 ) denote the latency of task 𝑣 under execution mode 
+
+𝑎 𝑣 , including any load-in or queuing overhead for gpu_queue . A placement 𝜋 : 𝑉 → A is feasible only if it respects the DAG dependencies and the GPU memory budget. Specifically, for any time 𝑡 , the total VRAM footprint of tasks actively executing in 
+
+gpu_now mode cannot exceed the GPU capacity 𝑀 :∑︁    
+
+> 𝑣 ∈ G now (𝑡 )
+
+𝑚 (𝑣 ) ≤ 𝑀, 
+
+where Gnow (𝑡 ) is the set of tasks assigned to gpu_now that are active at time 𝑡 , and 𝑚 (𝑣 ) is the VRAM footprint of task 𝑣 . Tasks assigned to gpu_queue are admitted sequentially and therefore do not contribute to this simultaneous gpu_now VRAM footprint while waiting. The end-to-end latency of a workflow is the wall-clock time from workflow launch to the completion of its final output. Let 𝐶 𝑣 denote the completion time of task 𝑣 under placement 𝜋 and schedule 𝑆 .Since workflow outputs correspond to sink nodes of the DAG, we define 
+
+𝑇 e2e (𝐺, 𝜋, 𝑆 ) = max    
+
+> 𝑣 ∈Sink (𝐺 )
+
+𝐶 𝑣 .
+
+The scheduling objective is therefore 
+
+min  
+
+> 𝜋,𝑆
+
+𝑇 e2e (𝐺, 𝜋, 𝑆 ),
+
+subject to dependency feasibility and GPU-memory feasibility. This formulation captures the central trade-off in agentic hetero-geneous execution. Assigning more tasks to gpu_now may reduce isolated task latency, but can increase GPU contention or exceed the VRAM budget. Assigning a task to gpu_queue preserves GPU execu-tion without reserving VRAM while waiting, but introduces load-in and queuing overhead. Assigning a task to cpu avoids GPU pressure altogether, but may be slower for GPU-preferred tools. Even with-out the gpu_queue option, this problem generalizes precedence-constrained heterogeneous scheduling with resource-capacity con-straints, which is known to be NP-hard. The additional queued-GPU mode further expands the placement space, motivating a scheduler that can reason about both static profiles and runtime feedback. 
+
+## 2.2 Workload Landscape 
+
+The tools that comprise modern agentic pipelines span a wide range of computational profiles. At one end of the spectrum, deep-learning inference models such as ResNet-50 [ 10 ], BERT [ 8], DistilBERT [ 26 ], Whisper [ 24 ], CLIP [ 23 ], TrOCR [ 15 ], and Llama 3.2 [ 9] perform heavily parallelizable operations (convolution, self-attention) that achieve order-of-magnitude speedups on GPU. At the other end, tools such as document parsers, log analyzers, and HTTP API wrap-pers execute purely sequential or I/O-bound code that derives no benefit from GPU parallelism. Between these extremes lie tools whose optimal device depends on runtime conditions: tabular ag-gregation kernels, image-resizing pipelines, and vector-search rou-tines that achieve modest GPU speedups under isolation but may be penalized by contention when sharing the GPU with heavier workloads. We profile 19 such tools on an NVIDIA RTX A5500 GPU paired with an AMD EPYC 7713 CPU (Table 1). Based on the GPU speedup ratio 𝑠 = 𝑇 cpu /𝑇 gpu , tools fall into four scheduling zones: GPU-preferred ( 𝑠 > 5×, 11 tools), ambiguous ( 0.5 ≤ 𝑠 ≤ 5×, 4 tools), CPU-preferred ( 𝑠 < 0.5×, 1 tool whose GPU time is 97.5% PCIe transfer), and device-neutral ( 𝑠 ≈ 1×, 3 tools lacking GPU implementations). This distribution confirms that while the majority of tools do benefit from GPU execution, a non-trivial fraction does not, and a blanket GPU-first policy will misplace them. 
+
+## 2.3 Runtime Factors that Alter the Static Profile 
+
+In a real agentic workflow, tools rarely execute in isolation. Two orthogonal runtime factors cause end-to-end latency to diverge from isolated-profile predictions: GPU utilization contention and VRAM capacity contention. 
+
+> 2
+
+Table 1: The 19-tool library, profiled in isolation on NVIDIA RTX A5500 + AMD EPYC 7713. GPU and CPU execution times are the median of 30 runs. VRAM is the peak GPU memory allocated during isolated execution. Load is the one-time model load-in cost paid when a tool is launched via gpu_queue ; the rightmost column reports the resulting single-shot speedup CPU / ( GPU + Load ), which collapses below 1× for almost every tool once load cost is amortized over a single invocation.                                                                                                                                               
+
+> Isolated profiling gpu_queue
+> Tool Workload GPU (ms) CPU (ms) Speedup VRAM (MB) Load (ms) Speedup sentiment DistilBERT-SST2 [26, 27] 7450 64 ×316 1022 0.44 ×
+> bert_base BERT-base NLI [8, 30] 13 892 69 ×486 481 1.81 ×
+> distilbert DistilBERT-MNLI [26, 30] 7456 65 ×314 1079 0.42 ×
+> reranker Cross-encoder [8, 20, 25] 8440 55 ×170 739 0.59 ×
+> minilm_l6 MiniLM-L6 embed [20, 29] 5280 56 ×128 8890 0.03 ×
+> llama_3b Llama-3.2-3B gen. [9] 768 19465 25 ×6440 5278 3.22 ×
+> resnet50 ResNet-50 CNN [7, 10] 8216 27 ×150 7699 0.03 ×
+> clip CLIP ViT-B/32 [23] 12 221 18 ×656 2944 0.07 ×
+> whisper_base Whisper-Base ASR [22, 24] 35 473 14 ×442 1792 0.26 ×
+> llama_1b Llama-3.2-1B gen. [9] 447 8482 19 ×2484 2519 2.86 ×
+> ocr TrOCR handwriting [15] 176 1386 8×248 3244 0.40 ×
+> groupby Scatter-add agg. 295×61 183 0.05 ×
+> image_resize Bilinear resize 417 4×340 4008 <0.01 ×
+> audio_features STFT + MFCC 0.8 22×25 364 <0.01 ×
+> vector_search Top-𝑘 sim. [11, 20] 18 43 2×3106 14701 <0.01 ×
+> doc_merger Embedding reduction 39 14 0.4 ×692 1218 0.01 ×
+> web_search HTTP API call 128 127 1.0 ×–––log_analyzer Apache log parse 641 638 1.0 ×–––pdf_parser PDF text extract 681.3 ×–––VRAM is the peak GPU memory measured during isolated single-tool execution (model weights + activations + cuBLAS workspace); concurrent execution may share workspace and produce a lower aggregate footprint than the per-tool sum. “–” denotes the three neutral tools (last three rows), which have no GPU-specific implementation.
+
+Table 2: Per-tool latency (ms) in scenario S5. Isolated is the profiled single-tool time; All-GPU places all four tools on GPU concurrently; Oracle offloads vector_search_x15 to CPU. Δ1 is All-GPU vs. Isolated; Δ2 is Oracle vs. All-GPU. Workloads are scenario-amplified; numbers are not directly comparable to Table 1. 
+
+Tool Isol. (ms) All-GPU (ms) Δ1
+
+Oracle (ms) Δ2
+
+ocr_x2 370 988 +167% 812 −18% 
+
+whisper_x4 136 270 +99% 171 −37% 
+
+vector_search_x15 277 397 +43% 706 ∗ +78% 
+
+image_resize_x30 145 508 +250% 286 −44% 
+
+E2E – 988 – 812 −18% 
+
+> ∗Runs on CPU under oracle mapping.
+
+Factor A: GPU utilization contention. Concurrent GPU tools com-pete for streaming multiprocessors, memory bandwidth, and dis-patch queues; per-tool latency can exceed the isolated GPU time by a factor of two or more, while CPU latency is unaffected. Table 2 shows this in scenario S5: placing four GPU-preferred tools on GPU concurrently inflates per-tool latency by 43–250% above isolated profiles, and end-to-end latency reaches 2.7× the isolated upper bound. The oracle mapping offloads vector_search_x15 to CPU: 
+
+vector_search_x15 itself becomes 78% slower, but the three re-maining tools gain 18–44% relief and end-to-end latency falls from 988 to 812 ms. The correct decision follows the contention struc-ture, not any one tool’s isolated profile. Here, Oracle denotes an offline brute-force reference: the feasible mapping with the lowest measured end-to-end latency among all mappings enumerated by exhaustive search. 
+
+Factor B: VRAM capacity contention. When the aggregate mem-ory footprint of concurrent GPU tools exceeds available VRAM, the all-GPU mapping is infeasible rather than merely suboptimal—the later-loading tool triggers out-of-memory. A third option becomes useful: gpu_queue , in which a tool defers execution until the con-current phase completes and then runs alone on the now-free GPU. The Load column of Table 1 shows gpu_queue is not free: for a tool invoked once per DAG, the load cost typically dominates, pushing the single-shot speedup below 1× for all but one tool. The scheduler must therefore choose gpu_queue or cpu on a tool-by-tool basis. Each factor alone is sufficient to invalidate a static mapping, and neither is visible to a scheduler that sees only isolated profiles— motivating a scheduler that observes runtime feedback. 
+
+## 3 Proposed Agentic Scheduler Design 
+
+The agentic scheduler comprises three components that interact in a closed loop (Figure 2). The offline profiler measures each tool’s CPU latency, GPU latency, model load time, and GPU memory footprint, and stores the results as structured tool cards. The LLM scheduler consumes these cards together with runtime feedback and emits a device mapping for the next execution round. The runtime monitor observes execution outcomes, updates latency estimates under the current contention regime, and, when memory pressure is active, exposes bounded what-if measurements to the LLM. The monitor is progressively activated. In simple serial settings, the profiling cards are usually sufficient and the monitor records only execution history. Under Factor A, GPU utilization contention, the monitor replaces isolated latency estimates with running aver-ages measured under actual concurrent execution. Under Factor B, VRAM capacity contention, it additionally runs bounded reprobes and swap reprobes to reveal feasible alternatives involving gpu_now ,
+
+> 3
+
+Figure 2: System architecture. The offline profiler generates tool cards; the LLM scheduler selects a device mapping; the runtime monitor feeds back measured latency, feasibility, and bounded what-if probes for subsequent scheduling rounds. 
+
+gpu_queue , and cpu . Thus, the system uses measurement only when static profiles become unreliable. 
+
+## 3.1 Tool Profiling 
+
+Each of the 19 base tools is profiled in isolation, measuring CPU execution time, GPU execution time, model load time, and GPU memory footprint when applicable. We run each tool 30 times per device and report the median. The tools execute on public datasets, including ImageNet [ 7 ], SST-2 [ 27 ], MNLI [ 30 ], LibriSpeech [ 22 ], and MS MARCO [ 20 ], with a synthetic fallback when a dataset is unavailable. For fan-out and co-located experiments, where base tools are too short to produce stable contention effects, we construct amplified tools by repeating the same computation 𝑘 times, e.g., 
+
+bert_base_x12 . This preserves the tool’s computational profile while scaling latency and memory pressure into the operating range needed to study runtime contention. 
+
+## 3.2 Runtime Monitor 
+
+The runtime monitor is the feedback component between DAG execution and the LLM scheduler. It does not compute a sched-ule. Instead, it turns the consequences of previous mappings into observations that can be appended to the next scheduler prompt. In each round, the monitor receives the LLM-selected mapping, the measured execution result, and its internal state; it updates la-tency statistics, optionally runs bounded what-if probes, and emits prompt fields such as running averages, reprobe outcomes, swap outcomes, and exploration hints. Algorithm 1 summarizes the per-round procedure. Internally, the monitor keeps a sliding window of per-tool latencies, the best 
+
+Algorithm 1 Runtime Monitor (per round)                                                         
+
+> Require: mapping d, result (𝐸, t,status ), state 𝑆
+> 1: Update sliding-window latency statistics with t
+> 2: Update 𝑆. best if 𝐸 <𝑆.𝐸 ∗
+> 3: if the mapping dchanged then
+> 4: for each tool 𝑖 do
+> 5: for each alternative device 𝑎 ≠𝑑 𝑖 do
+> 6: 𝑟 ←Reprobe (d, 𝑖, 𝑎 )
+> 7: if 𝑟 . status =exceed and 𝑎 =gpu_now then
+> 8: for each tool 𝑗 currently on gpu_now do
+> 9: SwapReprobe (d, 𝑖 →gpu_now , 𝑗 →gpu_queue )
+> 10: end for
+> 11: end if
+> 12: end for
+> 13: end for
+> 14: end if
+> 15: Check exploration-hint conditions from 𝑆
+> 16: Build next prompt fields from history, running averages, reprobe results, swap results, and hints
+
+end-to-end latency seen so far, and counters for stale measurements and repeated mappings. 
+
+Observation feedback. The passive path, Lines 1–2, addresses Factor A. Because offline profiles are measured in isolation, GPU latency estimates can become optimistic when several tools exe-cute concurrently. The monitor therefore keeps a sliding window of recent observations for each tool–device pair and reports the corresponding running average to the LLM. These averages ex-pose the latency actually induced by the LLM’s previous mappings, allowing the scheduler to react to contention without an explicit analytical GPU-sharing model. The monitor also tracks unobserved tool–device pairs so that stale estimates can be reprobed when they may hide a profitable device change. 
+
+> 4
+
+Bounded active exploration. The active path, Lines 3–14, is en-abled under Factor B. Under Factor B, the monitor operates over the three execution modes defined in Section 2: gpu_now , gpu_queue ,and cpu . When the all-gpu_now placement exceeds the VRAM bud-get, the scheduler must decide which tools should remain resident on GPU, which should be deferred through the GPU queue, and which should fall back to CPU. Observation feedback alone may miss alternatives that the current mapping never executes, so the monitor performs single-tool reprobes by moving one tool to an alternative placement while keeping the rest of the mapping fixed. Feasible reprobes are executed and reported as measured what-if evidence. Single-tool moves are insufficient when a tool cannot move to 
+
+gpu_now without displacing another resident tool. In this case, the monitor runs swap reprobes: the blocked tool is moved to gpu_now ,while one current gpu_now tool is moved to gpu_queue . This ex-poses useful two-tool rearrangements without enumerating the full 
+
+3𝑛 mapping space. Finally, if the LLM repeats a stagnant mapping, the monitor may issue a controlled exploration hint. Such hints relax the search behavior but do not specify a target mapping. 
+
+## 3.3 LLM Scheduler 
+
+We use an LLM as a flexible policy layer over heterogeneous sched-uling evidence. The scheduler must reason jointly about DAG struc-ture, tool semantics, CPU/GPU profiles, memory footprints, cold-start load costs, execution history, and monitor-generated what-if measurements. Encoding all of these signals into a single rigid cost model is brittle when workloads or contention regimes change. By contrast, the LLM consumes the same evidence as structured text and adapts its mapping decision without additional training; it can also consume softer guidelines such as ratio-based offload heuristics without treating them as hard constraints, retaining the freedom to override them when monitor evidence contradicts the rule. The LLM’s second strength is its ability to extract useful priors from whatever evidence the prompt provides—profile cards when they are present, semantic descriptions when they are not—and to revise those priors as monitor feedback accumulates. We illustrate both flavors using scenario S5, a fan-out workload whose brute-force oracle places three tools on GPU and offloads 
+
+vector_search_x15 to CPU; Table 2 reports the resulting per-tool latencies under all-GPU and oracle mappings. 
+
+With profile data: oracle from prompt alone. When the prompt includes isolated profile cards, the LLM applies a ratio test on each tool against an offload guideline and emits the oracle mapping in round 0 (Figure 3). It identifies that vector_search_x15 ’s CPU time (387 ms) is close to the slowest GPU bottleneck while 
+
+image_resize_x30 ’s CPU time (521 ms) is well above it, and reaches a 4/4 oracle match without any monitor feedback. 
+
+Without profile data: monitor feedback corrects a wrong seman-tic prior. When the prompt omits profile data, round 0 contains only workload-type tags ( compute-bound , memory-bound , compute-light ) and short tool descriptions, and the LLM falls back to these semantic priors. It places vector_search on GPU (no signal that                 
+
+> Tool profiles (isolated): A TrOCR x2: gpu=370 cpu=127654 ratio=345 B Whisper x4: gpu=136 cpu= 9305 ratio= 69 C Vector search x15: gpu=277 cpu= 739 ratio=2.7 D Image resize x30: gpu=145 cpu= 2201 ratio= 15 Offload guideline (ratio = cpu_time / gpu_time): ratio<1: CPU-preferred. 1-7: ambiguous, offload only if cpu_time < slowest GPU bottleneck under contention. ratio>=7: keep on GPU.
+> A, B, D have ratios well above 7: keep on GPU. C is ambiguous (ratio 2.7); under contention the GPU bottleneck inflates above C’s isolated 277 ms, so C’s CPU time of 739 ms can hide behind it while freeing GPU bandwidth for A, B, D. Offload C.
+> {"A":"gpu", "B":"gpu", "C":"cpu", "D":"gpu"} 4/4 oracle
+
+Figure 3: Warm-start round 0 of scenario S5 (chain-of-thought abridged from the model output). Profile cards plus the ratio guideline are sufficient: the LLM identifies 
+
+vector_search_x15 as the offload target and emits the oracle mapping without monitor feedback. 
+
+its CPU time is small) and offloads image_resize to CPU (mistak-ing compute-light for CPU-friendly), yielding a 2/4 oracle match (Figure 4, top). Over the next two rounds the monitor accumulates per-tool running averages and what-if reprobes for unobserved placements; by round 3 the prompt contains a what-if entry D→gpu: 625 ms that is shorter than the current best E2E (751 ms at round 1) and exceeds the prompt’s 5% stability threshold. The LLM cites this measurement directly to flip D back to GPU, reaching the 4/4 oracle mapping (Figure 4, bottom). The monitor does not prescribe a placement; it expands the LLM’s observation space so that combi-natorially distant alternatives become measured what-if evidence. By contrast, a purely exploratory bandit baseline must redis-cover even obvious device preferences from scratch, while a static heuristic cannot revise its assumptions after contention appears. The LLM bridges these regimes: it consumes profile cards or se-mantic descriptions as priors, and consumes monitor outputs as in-context evidence for revision. The scheduler follows a standard agentic pattern: profiling cards act as the knowledge base, runtime observations provide execution context, and the scheduler prompt acts as the instruction layer. The LLM is called once per round and emits a JSON device mapping that is reused for all DAG executions within that round. In all exper-iments, we use DeepSeek-R1-Distill-Qwen-32B-AWQ [ 6, 17 ] served by vLLM [ 12 ]. The scheduling model runs on GPUs dedicated to scheduling, separate from the tool execution GPU, so LLM inference does not interfere with measured tool latency. 
+
+Prompt structure. The prompt contains four information streams: (i) DAG topology and execution semantics; (ii) per-tool profiling cards, including isolated CPU/GPU times, load times, and mem-ory footprints; (iii) execution history, including end-to-end latency and feasibility status for prior rounds; and (iv) monitor-generated what-if data, including reprobes and swap outcomes when Factor B activates Level 2 exploration. The exact form of streams (ii) and (iv) is regime-specific. For binary CPU/GPU placement (S1–S10), the prompt includes ratio-based offload guidelines as soft heuristics: ratio < 1 is CPU-preferred, 1≤ratio <7 is ambiguous (offload only if CPU                   
+
+> 5Round 0 – workload tags only, no profile data:
+> Tools (described by workload type only): A: TrOCR Handwriting x2 (compute-bound) B: Whisper Speech x4 (compute-bound) C: Vector Similarity x15 (memory-bound) D: Image Resize+Norm x30 (compute-light)
+> A, B compute-bound: GPU. C memory-bound; without profile data, default to GPU. D compute-light; H2D transfer overhead may dominate – assign to CPU.
+> {"A":"gpu", "B":"gpu", "C":"gpu", "D":"cpu"} 2/4 (C and D both wrong)
+> Round 2 – monitor evidence accumulated over R0–R1:
+> Running averages (gpu / cpu, ms): A: 724 / 5294 B: 223 / 3609 C: 427 / 598 D: 427 / 711 What-if reprobes (single-tool swaps): A->cpu: E2E=5277 B->cpu: E2E=3660 C->gpu: E2E= 797 D->gpu: E2E= 625 History: best E2E = 751 ms (R1: A:gpu B:gpu C:cpu D:cpu)
+> Current best already maps C to CPU (relieves contention). What-if for D →gpu yields 625 ms, a 17% improvement over the current 751 ms ( >5% stability threshold). Move D to GPU.
+> {"A":"gpu", "B":"gpu", "C":"cpu", "D":"gpu"} 4/4 oracle
+
+Figure 4: Cold-start trajectory for scenario S5. Round 0: with no profile data the LLM reasons from workload-type tags and incorrectly keeps vector_search on GPU while offload-ing image_resize . Round 2: after the monitor accumulates running averages and what-if reprobes, the entry D→gpu = 625 ms drives the LLM to flip D back to GPU, reaching the oracle mapping. 
+
+time stays below the slowest GPU bottleneck under contention), and ratio ≥ 7 keeps the tool on GPU; the cutoff at 7 falls inside the empirical 5×–8× gap between ambiguous and strong-GPU tools in Table 1. The LLM may override these rules when monitor evidence contradicts them, as illustrated by the round-3 flip of D in Figure 4. For three-way placement (S11–S13), the prompt replaces ratio thresholds with structural rules—memory-budget feasibility, the gpu_queue load-cost trade-off, and the two-phase execution timeline—because the dominant constraint is memory feasibility rather than per-tool speedup. In neither regime does the prompt prescribe a target mapping; the rules describe relationships among tools, and the LLM must compose them. 
+
+## 4 Evaluation 
+
+We evaluate whether an LLM-based scheduler, when coupled with measurement feedback, can find high-quality heterogeneous map-pings across increasingly difficult scheduling regimes. The evalua-tion is organized around three questions: (i) whether the scheduler can recover static CPU/GPU placement decisions when isolated pro-files are reliable; (ii) whether monitor feedback corrects static pro-files under GPU utilization contention; and (iii) whether bounded reprobes and swap reprobes enable the scheduler to reach oracle mappings under explicit VRAM constraints. 
+
+## 4.1 Experimental Setup 
+
+All experiments are conducted on a server equipped with NVIDIA RTX A5500 GPUs and AMD EPYC 7713 CPU cores. In every sce-nario, one GPU is dedicated to the LLM scheduler and a separate GPU is used for tool execution, so LLM inference does not interfere with measured tool latency. For VRAM-constrained scenarios (S11– S13), we impose a manual VRAM ceiling on the tool execution GPU to simulate memory pressure that would arise on smaller-VRAM de-vices. All methods compared within a scenario are executed under the same hardware configuration. We compare the proposed agentic scheduler against four baselines. All-GPU assigns every GPU-capable tool to the GPU, matching the default policy used by many orchestration frameworks. HEFT applies precedence-aware list scheduling using profiled task costs [ 28 ]. UCB1 treats mapping selection as a bandit optimization problem and chooses mappings via upper confidence bounds [ 2]. StarPU is implemented as a greedy runtime heuristic that assigns tools according to estimated completion time with online performance-model updates [ 3 ]. For memory-constrained scenarios, we additionally compare against a memory-aware greedy baseline, since the above baselines do not directly support three-way placement with explicit VRAM constraints. Because each evaluation scenario contains four tools, the feasible mapping space is small enough to enumerate: 24 mappings for S1–S10 and 34 mappings for S11–S13 before feasibility filtering. We therefore define the oracle as the feasible mapping with the lowest measured median end-to-end latency under the same execution environment. The oracle is an offline brute-force reference, not an online scheduling method. The agentic scheduler is evaluated in two modes. In cold start ,the LLM receives only tool names and the workflow topology, with no profiling data; it must reason from semantic priors alone in the first round. In warm start , the LLM is initialized with isolated profile cards (CPU/GPU latency, model load time, VRAM footprint) measured during the offline profiling phase. Both modes share the same monitor feedback loop in subsequent rounds. Each mode runs for 20 rounds. In each round, the target workflow is executed multiple times, and we report the median end-to-end latency. We construct 13 four-tool evaluation scenarios that progres-sively stress three scheduling regimes: precedence-constrained placement, GPU-utilization contention, and VRAM-constrained three-way placement. Table 3 lists the per-scenario tool composi-tion, decision space, memory budget, and oracle mapping; §4.2–4.4 discuss the design of each family in turn. 
+
+## 4.2 Precedence-Constrained Placement (S1–S4) 
+
+Scenarios S1–S4 use the diamond workflow 𝐴 → ( 𝐵 ∥ 𝐶 ) → 𝐷 
+
+to study heterogeneous placement under precedence constraints alone. The aggregate memory footprint fits within device capacity and at most two tools share the GPU concurrently, so neither run-time factor is active; the scheduling problem reduces to per-tool device selection given DAG position, and isolated profiles provide an adequate decision signal. The four scenarios are constructed to span the qualitative tool categories of Table 1—strong-GPU, am-biguous, CPU-preferred, and device-neutral—so that no uniform 
+
+> 6
+
+Table 3: Per-scenario configuration summary. Memory budget is denoted “–” when unconstrained (binary CPU/GPU placement is feasible under the device budget). Total memory is the sum of per-tool VRAM footprints; values are rounded to the nearest MB. Oracle mappings are reported in (𝐴, 𝐵, 𝐶, 𝐷 ) order.                                                                                                                               
+
+> ID Tool A Tool B Tool C Tool D Decision Budget Total Oracle space (MB) (MB) (𝐴 ,𝐵 ,𝐶 ,𝐷 )
+> Topology: 𝐴 → ( 𝐵 ∥𝐶 ) → 𝐷
+> S1 whisper_base llama_1b sentiment web_search GPU/CPU –3242 GPU,GPU,GPU,CPU S2 minilm_l6 doc_merger groupby reranker GPU/CPU –1051 GPU,CPU,CPU,GPU S3 whisper_base distilbert doc_merger web_search GPU/CPU –1448 GPU,GPU,CPU,GPU S4 minilm_l6 vector_search doc_merger distilbert GPU/CPU –4240 GPU,GPU,CPU,GPU
+> Topology: 𝐴 ∥𝐵 ∥𝐶 ∥𝐷
+> S5 ocr_x2 whisper_x4 vector_search_x15 image_resize_x30 GPU/CPU –4136 GPU,GPU,CPU,GPU S6 ocr_x2 resnet50_x15 groupby_x60 vector_search_x15 GPU/CPU –3565 GPU,GPU,GPU,CPU S7 ocr_x2 clip_x12 bert_base_x12 whisper_x4 GPU/CPU –1832 GPU,GPU,GPU,GPU S8 ocr_x2 resnet50_x15 vector_search_x15 groupby_x60 GPU/CPU –3565 GPU,GPU,CPU,GPU S9 whisper_x4 clip_x12 resnet50_x15 image_resize_x30 GPU/CPU –1588 GPU,GPU,GPU,GPU S10 ocr_x2 bert_base_x12 groupby_x60 image_resize_x30 GPU/CPU –1135 GPU,GPU,GPU,CPU
+> Topology: 𝐴 ∥𝐵 ∥𝐶 ∥𝐷 with VRAM budget
+> S11 ocr_x2 clip_x12 bert_base_x12 whisper_x4 GN/GQ/CPU 1700 1832 GN,GN,GQ,GN S12 ocr_x2 bert_base_x12 groupby_x60 image_resize_x30 GN/GQ/CPU 1700 1135 GN,GN,GN,CPU S13 clip_x12 bert_base_x12 whisper_x4 groupby_x60 GN/GQ/CPU 1100 1645 GN,GQ,GN,CPU
+
+device policy recovers the oracle mapping (Table 3) without per-tool reasoning. S1 combines two strong-GPU tools ( whisper_base , llama_1b )with a lightweight classifier ( sentiment ) and a neutral API call (web_search ). The parallel branch is highly asymmetric ( 457 ms versus 6 ms isolated GPU time), and the neutral tool tests whether the scheduler refrains from offloading workloads that derive no benefit from either device. S2 is the principal counter-heuristic case: the parallel branch places doc_merger , the only CPU-preferred tool in our library, alongside the ambiguous groupby ; both are short embedding-style operators with similar workload-class descrip-tions, yet their optimal devices diverge—a separation that priors based on workload semantics alone cannot resolve. S3 draws one tool from each scheduling zone and asks the scheduler to identify the single profitable offload while retaining the strong-GPU and am-biguous tools on the GPU. S4 places two superficially similar offload candidates in the parallel branch, the ambiguous vector_search 
+
+(isolated speedup 1.7×) and the CPU-preferred doc_merger (0.4×); only the latter benefits from offloading, and a ratio-threshold rule applied uncritically would offload both. Figure 5(a) reports the best end-to-end latency achieved by each strategy. On the two high-gain scenarios, S2 and S4, the agentic scheduler reaches oracle-level latency in both cold and warm modes, achieving 2.60 × and 2.83 × speedup over All-GPU, respectively. Clas-sical baselines also perform well in this regime: HEFT, UCB1, and StarPU generally recover the correct offloading decisions because the static profiles are reliable. The LLM’s contribution in S1–S4 is therefore not superiority over classical scheduling heuristics, but evidence that LLM-based scheduling can recover profile-driven heterogeneous mappings without a domain-specific scheduling rule. Table 4 reports oracle-mapping accuracy for S1–S10. Under precedence-constrained execution, UCB1 and the LLM reach 4/4 placement matches on all four scenarios; HEFT-CF reaches 4/4 only on S4 and StarPU misses one placement on S2. UCB1 requires multi-ple exploration rounds to obtain these mappings, whereas the LLM reaches the same mapping quality from the profiling cards in the first scheduling round. 
+
+Table 4: Oracle-mapping accuracy under precedence-constrained placement (S1–S4) and GPU-utilization con-tention (S5–S10). Each entry reports the best match, out of four tool placements, achieved over 20 rounds. Bold entries indicate 4/4 oracle matches.                                                               
+
+> Diamond DAG Strategy S1 S2 S3 S4 Σ4/4 HEFT-CF [28] 3/4 3/4 3/4 4/4 1UCB1 [2] 4/4 4/4 4/4 4/4 4StarPU [3] 4/4 3/4 4/4 4/4 3LLM 4/4 4/4 4/4 4/4 4Fan-out DAG Strategy S5 S6 S7 S8 S9 S10 Σ4/4 HEFT-CF [28] 3/4 3/4 4/4 3/4 3/4 2/4 1UCB1 [2] 4/4 4/4 4/4 4/4 4/4 4/4 6StarPU [3] 3/4 3/4 4/4 3/4 4/4 4/4 3LLM 4/4 4/4 4/4 4/4 4/4 4/4 6Overall 4/4: HEFT-CF 2/10, UCB1 10/10, StarPU 6/10, LLM 10/10.
+
+## 4.3 Contention-Aware Placement (S5–S10) 
+
+Scenarios S5–S10 use the fan-out topology 𝐴 ∥ 𝐵 ∥ 𝐶 ∥ 𝐷 to activate Factor A, GPU utilization contention. All four amplified tools become ready simultaneously and contend for GPU execution resources, while the aggregate memory footprint remains within the VRAM budget so that Factor B is inactive; the decision space re-mains binary CPU/GPU. Each scenario in this family is constructed to expose a distinct contention pattern that defeats a different fixed policy. S5 combines a heavy compute-bound anchor ( ocr_x2 ), a strong-GPU tool ( whisper_x4 ), an ambiguous vector_search_x15 (1.7×), and a compute-light image_resize_x30 (3.7×); ratios are inherited from the base tools in Table 1. The ambiguous tool is the genuine offload target, while the compute-light tool is a decoy: its higher isolated speedup invites offloading, but its CPU latency exceeds the GPU bottleneck under contention. S6 repeats the anchor pat-tern with a milder workload mix; the parallel-branch contention is small enough that an aggressive offload heuristic is penalized,                         
+
+> 7S1 S2 S3 S4
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> 1.50
+> E2E latency
+> (× Oracle)
+> oracle
+> 624 ms oracle
+> 25 ms oracle
+> 154 ms oracle
+> 26 ms
+> (a) Precedence Constrained (S1–S4)
+> 2.1× 2.3×
+> Oracle = 1.0
+> S5 S6 S7 S8 S9 S10
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> 1.25
+> 1.50
+> oracle
+> 599 ms oracle
+> 508 ms oracle
+> 655 ms oracle
+> 492 ms oracle
+> 440 ms oracle
+> 650 ms
+> (b) Parallel Contention (S5–S10)
+> 1.5× 1.6× 1.7×
+> Oracle = 1.0
+> All-GPU HEFT-CF UCB1 StarPU LLM-Cold LLM-Warm
+
+Figure 5: End-to-end latency normalized to the brute-force oracle for S1–S10, the feasible lower bound by construction. (a) Precedence-constrained scenarios; (b) fan-out scenarios with parallel contention. Adaptive strategies (UCB1, StarPU, LLM-Cold, LLM-Warm) report the best of 20 rounds; bars taller than 1.5× are annotated with their actual ratio. Single-round ratios slightly below 1.0 reflect run-to-run measurement noise against the oracle reference, not improvement over the oracle. 
+
+testing whether the scheduler refrains from offloading when con-tention does not warrant it. S7 places four tools that are all strong-GPU under isolation (speedups 8–79 × in Table 1, CPU latencies in the seconds range), making all-GPU the oracle; this scenario tests whether the scheduler resists over-offloading when contention is real but every alternative is worse. S8 places two ambiguous tools (vector_search_x15 , groupby_x60 ) alongside two strong-GPU anchors, asking the scheduler to discriminate between two plausi-ble offload candidates and pick the one whose CPU latency hides behind the surviving GPU bottleneck. S9 contains three tools with similar isolated GPU times (no clear speedup cliff) plus a single am-biguous candidate; the offloading decision is invisible from isolated profiles alone and only becomes apparent once contention measure-ments accumulate. S10 stages the heaviest contention configuration in this family: a strong-GPU anchor ( ocr_x2 ) dominates end-to-end latency, and the scheduler must identify the ambiguous tool whose offload most relieves the anchor rather than the ambiguous tool with the largest nominal speedup ratio. Figure 5(b) and the lower panel of Table 4 show a sharper sep-aration among strategies. HEFT-CF reaches 4/4 in only one of six scenarios because its static contention factor cannot capture the ac-tual interference among four concurrent GPU tools; StarPU’s online model helps in S9 and S10 but its greedy rule still misplaces in half of the fan-out cases. UCB1 and the LLM both reach 4/4 on all six, with different mechanisms: UCB1 treats each complete mapping as an independent bandit arm and explores over multiple rounds, whereas the LLM folds monitor-measured running averages into each prompt and revises placements directly, without per-mapping trials. 
+
+## 4.4 Three-Way Placement under VRAM Constraints (S11–S13) 
+
+Scenarios S11–S13 evaluate the three-way placement setting with explicit VRAM accounting. Each tool may be assigned to gpu_now ,
+
+gpu_queue , or cpu : gpu_now tools execute immediately and count toward the simultaneous VRAM budget; gpu_queue tools execute on the GPU after the immediate phase and do not count toward the same budget; CPU tools avoid GPU memory pressure but may pay higher latency. Two scenarios in this family deliberately reuse tool sets from the fan-out family under tighter memory budgets, isolating the effect of memory pressure on otherwise contention-dominated workloads. Per-scenario budgets, total footprints, and oracle mappings are listed in Table 3. S11 reuses the four strong-GPU tools of S7 under a 1700 MB budget against a 1832 MB total footprint, making the all-immediate-GPU mapping marginally infeasible. Because every tool is strongly GPU-preferred (Table 1), CPU offload is uniformly expensive, and the oracle defers one tool to gpu_queue rather than to CPU; this sce-nario tests whether the scheduler discovers that queue placement is preferable to CPU when GPU speedup is large. S12 reuses the tool set of S10 under the same 1700 MB budget but with a 1135 MB total footprint, so the immediate-GPU mapping remains feasible and CPU and queue alternatives are available without being forced. S12 serves as a control: the oracle here is the same binary CPU/GPU mapping as in the unconstrained S10, and the scenario tests whether the scheduler avoids over-reacting to memory information when no memory pressure is present. S13 combines tools across sched-uling zones under a tight 1100 MB budget and a 1645 MB total, configured so that the oracle requires all three placement modes simultaneously: two tools on gpu_now , one on gpu_queue , and one on cpu . The non-trivial structure is that reaching the oracle requires a two-tool exchange between the immediate-GPU set and the queue, which cannot be revealed by any single local device change. Table 5 summarizes the results. The memory-aware greedy base-line assigns tools to gpu_now by GPU speedup until the budget is exhausted, then falls back to CPU. This policy is safe but lo-cally greedy: it cannot discover that deferring one strongly GPU-preferred tool to gpu_queue may free enough VRAM for a more valuable immediate GPU placement. The agentic scheduler reaches the oracle mapping in all three scenarios, converging by Round 1 in S12, Round 2 in S11, and Round 3 in S13. In S12, the LLM reaches oracle at Round 1 from reprobe data and remains stable for most subsequent rounds; recognizing the CPU-preferred tool is the only decision. In S11, the LLM initially selects a feasible local optimum by placing one tool on CPU; the monitor’s cpu-to-gpu_queue reprobe reveals that queue placement is faster than CPU execution, and swap reprobing then exposes 
+
+> 8
+
+Table 5: Three-way placement results under explicit VRAM accounting. “Oracle-map E2E” and “LLM best-map E2E” report measured latency as 𝜇 ± 𝜎 with sample size in parentheses. In S13, the best-found mapping differs from oracle only in off-critical-path tool D, whose CPU and gpu_queue placements are within run-to-run variance. 
+
+Scenario Budget Total Mem. Greedy E2E Oracle-map E2E (ms) LLM best-map E2E (ms) Match First 4/4 S11 1700 1832 6837 1715 ± 24 (15) 1715 ± 24 (15) 4/4 R2 S12 1700 1135 845 798 ± 38 (18) 798 ± 38 (18) 4/4 R1 S13 1100 1645 4685 1577 ± 7 (4) 1566 ± 30 (12) 4/4 R3 0 2 4 6 8 10 12 14 16 18                
+
+> Round
+> 0/4
+> 1/4
+> 2/4
+> 3/4
+> 4/4
+> Oracle match  First oracle match (4/4):
+> S11: R2 S12: R1 S13: R3
+> (a) Three-way convergence for S11–S13
+> S11
+> S12
+> S13
+> R0
+> OOM
+> OOM
+> OOM
+> OOM
+> CPU
+> FAIL
+> peak = 1508 MB
+> match = 3/4
+> 3 gpu_now tools →
+> VRAM exceeded
+> R1
+> feasible fallback
+> GN
+> GN
+> CPU
+> CPU
+> E2E = 4867 ms
+> peak = 1090 MB
+> match = 2/4
+> C, D moved to CPU
+> R2
+> queue exposed
+> GN
+> GN
+> GQ
+> CPU
+> E2E = 4581 ms
+> peak = 1090 MB
+> match = 2/4
+> monitor:
+> C→gpu_queue reprobe
+> R3
+> swap to oracle
+> GN
+> GQ
+> GN
+> CPU
+> E2E = 1584 ms
+> peak = 1044 MB
+> match = 4/4
+> monitor:
+> swap C↔B reprobe
+> R4–R19
+> post-R3 mostly stable
+> GN
+> GQ
+> GN
+> CPU*
+> E2E ≈ 1567 ms
+> peak = 1044 MB
+> match = 3–4/4
+> A,B,C mostly retained;
+> R12 outlier;
+> D oscillates (cpu↔GQ)
+> Aclip_x12
+> (626 MB)
+> Bbert_base_x12
+> (464 MB)
+> Cwhisper_x4
+> (418 MB)
+> Dgroupby_x60
+> (57 MB)
+> GN gpu_now (immediate GPU) GQ gpu_queue (deferred GPU) CPU cpu (CPU execution) OOM memory-infeasible
+> Oracle mapping:
+> A: gpu_now
+> B: gpu_queue
+> C: gpu_now
+> D: cpu
+> Immediate VRAM:
+> A+C = 1044 MB
+> (budget = 1100 MB)
+> (b) S13 event storyboard —1100 MB VRAM budget
+
+Figure 6: S13 convergence trace with per-round E2E latency. The monitor first restores feasibility, then exposes C’s gpu_queue 
+
+alternative, and finally reveals the C ↔B swap that reaches the oracle mapping. 
+
+a two-tool exchange that reaches the oracle mapping at Round 2. S13 is the hardest of the three because reaching the oracle requires both a queue placement and a non-obvious swap; we analyze its convergence trajectory in detail below. 
+
+## 4.5 Convergence Analysis on S13 
+
+We analyze S13 to show how runtime timing observations drive convergence from an initially incorrect placement to the oracle mapping. Scenario S13 places four amplified tools within a 1100 MB VRAM budget: clip_x12 (A, 656 MB), bert_base_x12 (B, 486 MB), 
+
+whisper_x4 (C, 442 MB), and groupby_x60 (D, 61 MB). The oracle mapping places A and C on gpu_now , B on gpu_queue , and D on CPU. This mapping uses 1098 MB in the immediate GPU phase, which satisfies the 1100 MB budget, while deferring B to the GPU queue. The key difficulty is that B is strongly GPU-preferred, yet moving B out of the immediate GPU set frees enough VRAM to place C on gpu_now . This is a two-tool rearrangement that cannot be revealed by a single local device change. Figure 6 summarizes the S13 convergence story in three phases. In the first phase, the LLM repairs feasibility. At Round 0, it attempts to place the three GPU-preferred tools A, B, and C on 
+
+gpu_now , which exceeds the 1100 MB budget. At Round 1, it moves C and D to CPU, producing a feasible but slow mapping with E2E ≈
+
+4867 ms and a 2/4 oracle match. This step shows that the LLM can correct an infeasible initial mapping, but it has not yet discovered the queue-based alternative. In the second phase, the monitor exposes the value of gpu_queue .Starting from the Round 1 mapping, the monitor reprobes C on 
+
+gpu_queue and measures E2E ≈ 4581 ms. The improvement is not yet sufficient to reach oracle, but it gives the LLM direct evidence that C should not remain on CPU. The LLM adopts the queue placement at Round 2, which still registers a 2/4 oracle match. In the third phase, swap reprobing reveals the oracle rearrange-ment. With C on gpu_queue , a single-tool reprobe that moves C to gpu_now is infeasible because A, B, C, and D together exceed the VRAM budget. This failed reprobe triggers swap reprobing. The monitor tests the exchange C ↔B, moving C to gpu_now and B to gpu_queue . The resulting immediate GPU memory is A + C = 1098 MB, which satisfies the budget, and the measured E2E is approximately 1584 ms. The LLM adopts this mapping at Round 3, reaching the oracle 4/4 placement. After Round 3, the scheduler mostly retains the oracle placement for A, B, and C, and D oscillates between cpu and gpu_queue with negligible effect because D is not on the critical path. One explo-ration outlier occurs at Round 12, where the LLM transiently assigns A to gpu_queue and D to gpu_queue (1/4 match, E2E ≈ 2571 ms); the monitor feedback redirects the scheduler back to the oracle placement in the subsequent round. We do not claim continuous 4/4 stability across R4–R19; rather, the scheduler retains the oracle A/B/C placement in most post-R3 rounds, the remaining variation is primarily D, and the average E2E across oracle-aligned rounds with D on CPU is within about 1% of that with D on gpu_queue .
+
+> 9
+
+Taken together, the evaluation shows that the LLM scheduler is sufficient for profile-driven placement when static measurements are trustworthy, while the monitor becomes essential as runtime effects invalidate isolated profiles. Running averages address utiliza-tion contention, and bounded reprobes plus swap reprobes expose feasible three-way placements under memory pressure. The result-ing system reaches the oracle mapping in all 13 scenarios; small residual deviations of measured end-to-end latency around the or-acle reflect run-to-run variation for latency-equivalent mappings rather than improvement over the oracle. 
+
+## 5 Discussion 
+
+The monitor is intended to expand the scheduler’s observations rather than encode a scheduling policy. Symmetric reprobing fills missing device measurements, swap reprobing tests a bounded set of two-tool exchanges, and exploration hints trigger diversity when repeated rounds stop producing new evidence. The progressive design also keeps monitoring cost proportional to the runtime factors present in the workload. Serial execution needs no monitoring, Factor A requires only passive latency logging, and Factor B activates reprobes and exploration. A deployment can therefore begin with lightweight monitoring and enable the full monitor only when scheduling quality stagnates under VRAM pressure. The profiling landscape is hardware-dependent, but the sched-uler ports to new hardware by re-running the offline profiler rather than retraining: the LLM reasons over the measured profiles in its prompt. The current system provides no formal convergence guarantee. In our experiments, the monitor guides the LLM to the oracle map-ping within 1–3 rounds, but the exploration policy is still heuristic: it expands the observation space without proving that every start-ing point can reach the global optimum. A future data-driven policy could trigger exploration only when runtime measurements reveal unexplored feasible placements. 
+
+## 6 Related Work 
+
+Heterogeneous task scheduling has a long history in the paral-lel computing literature. HEFT [ 28 ] remains the canonical list-scheduling heuristic, assigning tasks to the processor that min-imizes earliest finish time based on profiled task costs and com-munication delays. StarPU [ 3] extends this approach with run-time performance models that adapt to observed execution behav-ior. System-level frameworks such as HeteroSpark [ 16 ] dispatch machine-learning tasks across GPU-accelerated clusters but rely on fixed placement policies rather than online decisions. These algorithms target binary processor placement (CPU or GPU) with-out memory constraints, and they rely on domain-specific cost models rather than general-purpose reasoning. Our work extends the scheduling vocabulary to three device options under explicit memory budgets and demonstrates that an LLM can substitute for hand-crafted heuristics when paired with an appropriate observa-tion mechanism. Reinforcement learning has been applied to device placement for deep-learning computation graphs. Mirhoseini et al. [ 18 , 19 ] train an RL agent to assign TensorFlow operations across devices, an approach subsequently generalized by Placeto [ 1 ] and REGAL [ 21 ]. These methods require thousands of training episodes and target operator-level granularity within a single model rather than tool-level scheduling across heterogeneous workloads. In contrast, the agentic scheduler requires zero training and achieves comparable placement quality through in-context learning from a small number of runtime observations. Recent work has explored LLMs for systems optimization, in-cluding compiler pass ordering [ 5 ] and database configuration tun-ing [ 14 ]. These applications share the premise that LLMs can reason about system configurations from structured descriptions, but they operate in single-shot or few-shot settings without the closed-loop observation feedback that characterizes our monitor co-design. To our knowledge, this work is the first to apply an LLM to hetero-geneous device scheduling for AI tool workloads and the first to identify the need for a co-designed exploration engine that com-pensates for the LLM’s combinatorial reasoning limitations. 
+
+## 7 Conclusion 
+
+We presented an agentic CPU–GPU scheduler for heterogeneous AI tool workloads. The scheduler combines LLM-based placement decisions with an algorithmic runtime monitor, allowing it to rea-son over static tool profiles, execution history, and targeted what-if measurements without offline training. Our results show that static profiles are sufficient only when runtime contention is absent: GPU-utilization contention requires measured feedback, while VRAM capacity contention requires bounded reprobes, swap discovery, and controlled exploration. Across 13 scenarios and four classical baselines, the scheduler reaches the brute-force-optimal mapping while adapting to contention regimes that defeat fixed-profile rea-soning. The central design principle is a separation of observation and decision: the monitor expands the evidence available to the LLM, while the LLM remains responsible for selecting the mapping. This co-design suggests a practical way to use LLMs in systems optimization problems where the search space is combinatorial but good decisions are possible once the right runtime evidence is made explicit. 
+
+## References                         
+
+> [1] Ravichandra Addanki, Shaileshh Bojja Venkatakrishnan, Shreyan Gupta, Hongzi Mao, and Mohammad Alizadeh. 2019. Placeto: Learning generalizable device placement algorithms for distributed machine learning. In Advances in Neural Information Processing Systems , Vol. 32. [2] Peter Auer, Nicolò Cesa-Bianchi, and Paul Fischer. 2002. Finite-time analysis of the multiarmed bandit problem. Machine Learning 47, 2 (2002), 235–256. [3] Cédric Augonnet, Samuel Thibault, Raymond Namyst, and Pierre-André Wacre-nier. 2009. StarPU: A unified platform for task scheduling on heterogeneous multicore architectures. In Proceedings of the 15th International Euro-Par Confer-ence . Springer, 863–874. [4] CrewAI, Inc. 2024. CrewAI: Framework for orchestrating role-playing, au-tonomous AI agents. https://github.com/crewAIInc/crewAI. [5] Chris Cummins, Volker Seber, Hugh Leather, et al .2023. Large language models for compiler optimization. arXiv preprint arXiv:2309.07062 (2023). [6] DeepSeek-AI. 2025. DeepSeek-R1: Incentivizing reasoning capability in LLMs via reinforcement learning. arXiv preprint arXiv:2501.12948 (2025). [7] Jia Deng, Wei Dong, Richard Socher, Li-Jia Li, Kai Li, and Li Fei-Fei. 2009. Ima-geNet: A large-scale hierarchical image database. In IEEE Conference on Computer Vision and Pattern Recognition . 248–255. [8] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2019. BERT: Pre-training of deep bidirectional transformers for language understanding. arXiv preprint arXiv:1810.04805 (2019). [9] Aaron Grattafiori, Abhimanyu Dubey, et al .2024. The Llama 3 herd of models.
+> arXiv preprint arXiv:2407.21783 (2024).
+> 10
+
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. 2016. Deep residual learning for image recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition . 770–778. [11] Jeff Johnson, Matthijs Douze, and Hervé Jégou. 2019. Billion-scale similarity search with GPUs. IEEE Transactions on Big Data 7, 3 (2019), 535–547. [12] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serving with PagedAttention. In 
+
+Proceedings of the 29th Symposium on Operating Systems Principles . 611–626. [13] LangChain, Inc. 2024. LangGraph: Build stateful, multi-actor applications with LLMs. https://github.com/langchain-ai/langgraph. [14] Jianping Lao, Yibo Wang, Yufei Li, Jianping Wang, Yunjia Zhang, et al . 2024. GPTuner: A manual-reading database tuning system via GPT-guided Bayesian optimization. In Proceedings of the VLDB Endowment , Vol. 17. [15] Minghao Li, Tengchao Lv, Jingye Chen, Lei Cui, Yijuan Lu, Dinei Florencio, Cha Zhang, Zhoujun Li, and Furu Wei. 2023. TrOCR: Transformer-based optical char-acter recognition with pre-trained models. Proceedings of the AAAI Conference on Artificial Intelligence 37, 11 (2023), 13094–13102. [16] Peilong Li, Yan Luo, Ning Zhang, and Yu Cao. 2015. HeteroSpark: A GPU-accelerated heterogeneous spark cluster for machine learning. arXiv preprint arXiv:1507.03339 (2015). [17] Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Wei-Ming Chen, Wei-Chen Wang, Guangxuan Xiao, Xingyu Dang, Chuang Gan, and Song Han. 2024. AWQ: Activation-aware weight quantization for LLM compression and acceleration. 
+
+Proceedings of Machine Learning and Systems 6 (2024), 87–100. [18] Azalia Mirhoseini, Anna Goldie, Hieu Pham, Benoit Steiner, Quoc V Le, and Jeff Dean. 2018. A hierarchical model for device placement. In International Conference on Learning Representations .[19] Azalia Mirhoseini, Hieu Pham, Quoc V Le, Benoit Steiner, Rasmus Larsen, Yuefeng Zhou, Sanjay Kumar, Mohammad Norouzi, Samy Bengio, and Jeff Dean. 2017. Device placement optimization with reinforcement learning. In Proceedings of the 34th International Conference on Machine Learning . 2430–2439. [20] Tri Nguyen, Mir Rosenberg, Xia Song, Jianfeng Gao, Saurabh Tiwary, Rangan Majumder, and Li Deng. 2016. MS MARCO: A human generated machine reading comprehension dataset. arXiv preprint arXiv:1611.09268 (2016). [21] Aditya Paliwal, Felix Gimeno, Vinod Nair, Yujia Li, Miles Luber, Petros Alexopou-los, and Jure Leskovec. 2020. REGAL: Transfer learning for fast optimization of computation graphs. In Proceedings of the 3rd MLSys Conference .[22] Vassil Panayotov, Guoguo Chen, Daniel Povey, and Sanjeev Khudanpur. 2015. Lib-rispeech: An ASR corpus based on public domain audio books. IEEE International Conference on Acoustics, Speech and Signal Processing (2015), 5206–5210. [23] Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al . 2021. Learning transferable visual models from natural language supervision. In International Conference on Machine Learning . 8748–8763. [24] Alec Radford, Jong Wook Kim, Tao Xu, Greg Brockman, Christine McLeavey, and Ilya Sutskever. 2023. Robust speech recognition via large-scale weak supervision. In International Conference on Machine Learning . 28492–28518. [25] Nils Reimers and Iryna Gurevych. 2019. Sentence-BERT: Sentence embeddings using Siamese BERT-networks. In Proceedings of the 2019 Conference on Empirical Methods in Natural Language Processing . 3982–3992. [26] Victor Sanh, Lysandre Debut, Julien Chaumond, and Thomas Wolf. 2019. Dis-tilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter. arXiv preprint arXiv:1910.01108 (2019). [27] Richard Socher, Alex Peres, Christopher D Potts, and Christopher D Manning. 2013. Recursive deep models for semantic compositionality over a sentiment treebank. In Proceedings of the 2013 Conference on Empirical Methods in Natural Language Processing . 1631–1642. [28] Haluk Topcuoglu, Salim Hariri, and Min-You Wu. 2002. Performance-effective and low-complexity task scheduling for heterogeneous computing. IEEE Transactions on Parallel and Distributed Systems 13, 3 (2002), 260–274. [29] Wenhui Wang, Furu Wei, Li Dong, Hangbo Bao, Nan Yang, and Ming Zhou. 2020. MiniLM: Deep self-attention distillation for task-agnostic compression of pre-trained transformers. In Advances in Neural Information Processing Systems ,Vol. 33. 5776–5788. [30] Adina Williams, Nikita Nangia, and Samuel Bowman. 2018. A broad-coverage challenge corpus for sentence understanding through inference. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Com-putational Linguistics . 1112–1122. [31] Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, et al . 2024. AutoGen: Enabling next-gen LLM applications via multi-agent conversation. In ICLR 2024 Workshop on LLM Agents .
+
+> 11
+
+## Supplementary Material A S13 Ablation Study 
+
+We ablate S13 to isolate the contribution of each monitor mecha-nism. Table 6 shows that removing any one mechanism prevents the system from reaching the oracle mapping. The failure modes align with the three-step discovery chain discussed in the main paper: cpu-to-queue reprobing is needed to expose C’s gpu_queue alterna-tive; swap reprobing is needed to expose the C ↔B exchange; and exploration hints are needed to escape stagnant local optima when repeated mappings stop producing new evidence. These mecha-nisms are therefore complementary rather than redundant. 
+
+Table 6: S13 ablation. Each monitor mechanism is necessary for reaching the oracle mapping. “LLM only” denotes the scheduler without runtime-monitor feedback.             
+
+> Configuration Best Match Best E2E Full system 4/4 1529 ms w/o cpu →queue reprobe 1/4 4853 ms w/o swap reprobe 1/4 2174 ms w/o exploration hints 1/4 5060 ms LLM only (no monitor) 0/4 OOM
+
+## B Prompt Engineering and Scheduler Example 
+
+The LLM scheduler prompt evolved through six iterations. The initial version provided general contention guidance without ex-plicit comparison rules, causing the LLM to retain CPU-preferred tools on the GPU. The second version introduced hard threshold rules, which improved accuracy but created contradictions near threshold boundaries. The third version removed thresholds in fa-vor of direct millisecond comparison, but still suffered from overly strong “keep both on GPU” guidance. The fourth and fifth versions combined explicit DAG-stage descriptions with structured per-tool reasoning before the final JSON output, improving high-impact de-cisions in Diamond DAG experiments. The sixth version extended the prompt to the three-way memory-constrained setting by de-scribing gpu_now , gpu_queue , and cpu factually and integrating running averages, reprobe results, and swap-reprobe data from the runtime monitor. The fourth and fifth versions are used for fan-out scenarios (S5–S10), where binary CPU/GPU placement ben-efits from explicit ratio-based offload guidelines. The sixth version is used for three-way memory-constrained scenarios (S11–S13), where structural memory and topology rules replace ratio thresh-olds because the dominant constraint is memory feasibility rather than per-tool speedup. Figure 7 shows an abbreviated prompt excerpt from Round 3 of scenario S13. After two rounds, the best observed mapping is 
+
+𝐴 :gpu_now , 𝐵 :gpu_now , 𝐶 :gpu_queue , 𝐷 :cpu with 𝐸 =4581 ms. The monitor’s swap-reprobe block reports that exchanging 𝐵 ↔𝐶 yields 
+
+𝐸 =1585 ms at 1044 MB, within the 1100 MB budget. Figure 8 shows the model-generated scheduling rationale and the final JSON map-ping. The monitor supplies only measured values and feasibility outcomes; the mapping decision is produced by the LLM scheduler.                          
+
+> ## Topology: Fan-out A||B||C||D. VRAM=1100 MB. Tool profiles (isolated): A clip_x12: mem=627 gpu=147 cpu=3018 load=862 B bert_base_x12: mem=463 gpu=153 cpu=12141 load=245 C whisper_x4: mem=417 gpu=136 cpu=2156 load=1212 D groupby_x60: mem= 58 gpu= 90 cpu= 520 load= 202 Running averages (from observed rounds): A gpu_now=866 (2) | B gpu_now=571 (2) | C gpu_queue=3259 (1) D cpu=821 (2) History (best-ever: round 2, E=4581, A:GN B:GN C:GQ D:CPU) 0A:GN B:GN C:GN D:CPU FAIL (1508MB>1100MB) 1A:GN B:GN C:CPU D:CPU E=4867 (1090MB) ok *2 A:GN B:GN C:GQ D:CPU E=4581 (1090MB) ok What-If (base=round 2, single-tool + swap reprobes): A->cpu E=10836 (mem=464, ok) B->cpu E=28923 (mem=626, ok) C->gpu_now INFEASIBLE (mem=1508>1100) D->gpu_queue E= 4146 (mem=1090, ok) SWAP C<->A E= 2565 (mem= 882) full: A:GQ B:GN C:GN D:CPU SWAP C<->B E= 1585 (mem=1044) full: A:GN B:GQ C:GN D:CPU
+
+Figure 7: Abbreviated Round 3 prompt for scenario S13. GN = gpu_now , GQ = gpu_queue . The starred history row is the best observed mapping. The monitor reports mea-sured end-to-end latency and memory usage for each probe; no recommendation is attached. The VRAM values shown (mem=627/463/417/58 ) reflect peak measurements taken at experiment time; subsequent re-profiling with finer-grained peak tracking yields slightly higher values in the main pa-per’s tool-profile table. The LLM’s reasoning is unaffected by this drift because it operates on the values it actually ob-serves in the prompt.                       
+
+> The current mapping matches the best-ever and has an E2E of 4581 ms. According to the What-If analysis, swapping C(whisper_x4) ↔B(bert_base_x12) results in a lower E2E of 1585 ms, which is a significant improvement. This swap is within the memory budget.
+> {"A": "gpu_now", "B": "gpu_queue", "C": "gpu_now", "D": "cpu"}
+
+Figure 8: Model-generated scheduling rationale for the prompt in Figure 7 (Round 3 of S13). The model quotes the monitor’s measured end-to-end values, applies the memory-budget check, and emits the swapped mapping in JSON. The adopted mapping matches the brute-force optimum and is retained for subsequent rounds. 
+
+## C Complete S13 Mapping Trace 
+
+Figure 9 reports the per-round device mapping for the full 20-round warm-start run of scenario S13. Rows show the four tools, the                          
+
+> 12 OOM
+> OOM
+> OOM
+> CPU
+> FAIL
+> 0/4
+> GN
+> GN
+> CPU
+> CPU
+> 4867
+> 2/4
+> GN
+> GN
+> GQ
+> CPU
+> 4581
+> 2/4
+> GN
+> GQ
+> GN
+> CPU
+> 1584
+> 4/4
+> GN
+> GQ
+> GN
+> CPU
+> 1568
+> 4/4
+> GN
+> GQ
+> GN
+> GQ
+> 1550
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1641
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1570
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1554
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1541
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1549
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1552
+> 3/4
+> GQ
+> GN
+> GN
+> GQ
+> 2571
+> 1/4
+> GN
+> GQ
+> GN
+> GQ
+> 1610
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1550
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1529
+> 3/4
+> GN
+> GQ
+> GN
+> GQ
+> 1578
+> 3/4
+> GN
+> GQ
+> GN
+> CPU
+> 1579
+> 4/4
+> GN
+> GQ
+> GN
+> CPU
+> 1576
+> 4/4
+> GN
+> GQ
+> GN
+> GQ
+> 1565
+> 3/4
+> Aclip_x12
+> Bbert_base_x12
+> Cwhisper_x4
+> Dgroupby_x60
+> E2E (ms)
+> oracle match
+> R0 R1 R2 R3 R4 R5 R6 R7 R8 R9 R10 R11 R12 R13 R14 R15 R16 R17 R18 R19
+> first 4/4
+> R3
+> Oracle mapping
+> A:GN B:GQ
+> C:GN D:CPU
+> budget = 1100 MB
+> A+C = 1044 MB
+
+Figure 9: Complete S13 mapping trajectory over 20 rounds. The main paper shows the event-level convergence storyboard; this appendix figure reports the full per-round mapping log. Red outlines denote per-tool agreement with the oracle placement. Table 7: Fan-out steady-state E2E latency (ms) by strategy. Each cell reports 𝜇 ± 𝜎 measured across rounds emitting the strategy’s best-found mapping (sample size 𝑛 shown in parentheses; range across cells is 𝑛 =4 to 20 ). Oracle column is a single brute-force measurement of the oracle mapping. Cells whose mapping equals the oracle mapping are bold. 
+
+Scenario Oracle (BF) UCB1 StarPU LLM-Cold LLM-Warm S5 599.4 599.2 ± 2.2 (5) 792.4 ± 3.1 (20) 600.5 ± 2.6 (4) 599.7 ± 3.6 (5) S6 508.3 508.4 ± 3.8 (5) 712.4 ± 1.6 (20) 506.3 ± 3.1 (6) 507.2 ± 3.0 (8) S7 655.4 658.6 ± 0.8 (5) 659.7 ± 1.5 (20) 658.3 ± 1.0 (7) 658.3 ± 0.8 (7) S8 492.1 497.5 ± 5.9 (5) 706.9 ± 2.3 (20) 499.1 ± 4.7 (4) 496.7 ± 3.3 (8) S9 439.8 440.9 ± 3.8 (5) 442.9 ± 3.0 (20) 439.9 ± 3.0 (13) 442.9 ± 1.6 (6) S10 649.7 646.8 ± 1.5 (5) 648.8 ± 1.9 (20) 648.1 ± 3.2 (12) 646.7 ± 2.3 (6) 
+
+measured end-to-end latency, and the oracle-match count for that round; cells matching the oracle placement are outlined in red. R0 is memory-infeasible (three gpu_now tools exceed the 1100 MB budget); R1 and R2 are feasible but suboptimal; R3 is the first 4/4 oracle match and the mapping adopted by the LLM converges to 
+
+A:GN, B:GQ, C:GN, D:CPU . D continues to oscillate between cpu 
+
+and gpu_queue in subsequent rounds with negligible end-to-end impact, as discussed in the main-paper S13 case study. 
+
+## D Steady-State Latency Under Parallel Contention 
+
+The main-paper normalized-latency figure reports the best of 20 rounds for each adaptive strategy. This minimum is subject to selection variance (taking the lowest of 20 noisy measurements) and is the source of the apparent ratios slightly below 1.0 in that figure. Table 7 reports a noise-resistant alternative for the six fan-out scenarios S5–S10: mean and standard deviation of measured E2E latency across all rounds in which the strategy emitted its best-found mapping. Across all six fan-out scenarios, UCB1, LLM-Cold, and LLM-Warm converge to the brute-force oracle mapping; their steady-state means agree with the oracle reference within 0.4–4% , well within 1–2 standard deviations of run-to-run noise. The apparent “below 1.0” ratios in the main-paper normalized-latency figure are therefore single-round selection artifacts rather than improvements over the oracle. StarPU’s online performance model converges to the all-GPU mapping in S5–S6 and S8 and pays the full contention penalty (> 1.3× over oracle); for S7, S9, and S10 it matches the oracle within run-to-run noise.
