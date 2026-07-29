@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-07-28</span>
+      <span class="dpr-home-dashboard-kicker">2026-07-29</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-07-28 21:40:20 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-07-29 21:22:58 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今天深入剖析了大模型推理的异构协同与动态调度，覆盖统一内存计算、MoE分布感知及稀疏注意力索引优化。</p>
-<p>最值得关注的是FusionML在Apple Silicon统一内存上的CPU+GPU协同预填充机制，以及解构MoE专家负载倾斜的自适应内核分派方法。</p>
-<p>建议从这两篇高分论文入手，理解硬件特性如何重塑推理阶段的计算与数据调度策略。</p>
+<p>系统调度与LLM推理双重突破：从数据流网络的松弛激活时钟演算，到打破预填充-解码分离的动态算子调度。</p>
+<p>最值得关注的两项进展——用时钟演算统一机器学习与实时任务的调度分析，以及为异构平台设计的细粒度推理调度。</p>
+<p>建议读者若做Transformer训练可跟进低秩稀疏注意力近似，若研究联邦多模态则留意缺失模态下的拓扑结构迁移。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FusionML: Prefill, Not Decode - Mechanism and Boundaries of CPU+GPU Co-Execution on Unified-Memory Apple Silicon">FusionML: Prefill, Not Decode - Mechanism and Boundaries of CPU+GPU Co-Execution on Unified-Memory Apple Silicon</span></li><li><span class="dpr-home-dashboard-paper-title" title="Decoding the Skew: Distribution-Aware MoE Inference with Adaptive Kernel Dispatch">Decoding the Skew: Distribution-Aware MoE Inference with Adaptive Kernel Dispatch</span></li><li><span class="dpr-home-dashboard-paper-title" title="Gleam: Adaptive Network-Efficient CUDA API Remoting for Cross-Device GPU Sharing over LANs">Gleam: Adaptive Network-Efficient CUDA API Remoting for Cross-Device GPU Sharing over LANs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Relaxed activation analysis of dataflow networks - A clock calculus for machine learning and real-time scheduling">Relaxed activation analysis of dataflow networks - A clock calculus for machine learning and real-time scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Prefill-Decode Disaggregation: Dissecting LLM Inference for Heterogeneous Platforms via Dynamic Operator Scheduling">Beyond Prefill-Decode Disaggregation: Dissecting LLM Inference for Heterogeneous Platforms via Dynamic Operator Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="CONQuER: Hardware-Aware Mixed-Precision Quantisation with Online-Calibrated Surrogates">CONQuER: Hardware-Aware Mixed-Precision Quantisation with Online-Calibrated Surrogates</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Kalypso: Relational LLM Serving">Kalypso: Relational LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="BettiSplit: Topology-Guided Privacy-Aware Split Learning Against Feature Inversion and Gradient Leakage">BettiSplit: Topology-Guided Privacy-Aware Split Learning Against Feature Inversion and Gradient Leakage</span></li><li><span class="dpr-home-dashboard-paper-title" title="PIVOT: Efficient Query-Group Indexing for Token-Level Sparse Attention">PIVOT: Efficient Query-Group Indexing for Token-Level Sparse Attention</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ELSAA: Efficient Low-Rank and Sparse Attention Approximation for Training Transformers">ELSAA: Efficient Low-Rank and Sparse Attention Approximation for Training Transformers</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedTaste: Topology-Aware Structural Transfer for Multimodal Federated Learning with Missing Modalities">FedTaste: Topology-Aware Structural Transfer for Multimodal Federated Learning with Missing Modalities</span></li><li><span class="dpr-home-dashboard-paper-title" title="Optimization under Persistent State-Dependent Bias: Gradient-based Method and Complexity Analysis">Optimization under Persistent State-Dependent Bias: Gradient-based Method and Complexity Analysis</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>7</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
 </div>
 
