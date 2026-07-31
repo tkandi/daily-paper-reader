@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-07-30</span>
+      <span class="dpr-home-dashboard-kicker">2026-07-31</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-07-30 21:54:39 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-07-31 21:13:43 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今天精读了两篇9分论文，分别聚焦无服务器平台上的高效文本到图像推理和异构系统中基于长度感知的大模型混合长度推理放置。</p>
-<p>最值得关注的是ServerlessT2I用无服务器架构提升图像生成服务效率，以及NELSSA通过GPU与近内存处理混合系统按请求长度智能分配来加速LLM推理。</p>
-<p>3）建议关注无服务器架构在AI推理中的成本优化与性能平衡，以及异构硬件协作如何为变长请求提供更优解。</p>
+<p>今日精读两篇9分顶会新作，解锁低精度训练稳定性与百万级Token记忆解码。</p>
+<p>FP4量化训练突破转置不变块量化，《Memory Decoder》用可插拔参数化记忆大幅提升长文本理解。</p>
+<p>建议开发者关注大模型低比特部署与记忆外挂机制，速览联邦学习与算子稳定性快讯。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -76,7 +76,7 @@
     <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ServerlessT2I: Efficient Text-to-Image Workflow Serving on a Serverless Platform">ServerlessT2I: Efficient Text-to-Image Workflow Serving on a Serverless Platform</span></li><li><span class="dpr-home-dashboard-paper-title" title="NELSSA: A GPU-PNM Heterogeneous System for Mixed-Length LLM Serving via Length-based Request Placement">NELSSA: A GPU-PNM Heterogeneous System for Mixed-Length LLM Serving via Length-based Request Placement</span></li><li><span class="dpr-home-dashboard-paper-title" title="AgenticCANN: Automated Ascend C Operator Generation via Knowledge-Augmented Agentic Evolution">AgenticCANN: Automated Ascend C Operator Generation via Knowledge-Augmented Agentic Evolution</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Stable FP4 Training via Transposition-Invariant Block Quantization">Stable FP4 Training via Transposition-Invariant Block Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Memory Decoder at Scale: A Pretrained, Parametric Long-Term Memory">Memory Decoder at Scale: A Pretrained, Parametric Long-Term Memory</span></li><li><span class="dpr-home-dashboard-paper-title" title="PIcsC: Partitioning-Induced Covariate Shift Correction">PIcsC: Partitioning-Induced Covariate Shift Correction</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Multi-Agent Privacy Game in Federated Learning: A Unified Mean-Field View">Multi-Agent Privacy Game in Federated Learning: A Unified Mean-Field View</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="OrchNAS: Orchestrated Neural Architecture Search Service for Personalised Federated Edge Intelligence">OrchNAS: Orchestrated Neural Architecture Search Service for Personalised Federated Edge Intelligence</span></li><li><span class="dpr-home-dashboard-paper-title" title="Automated Numerical Stability Analysis of Deep Learning Operators">Automated Numerical Stability Analysis of Deep Learning Operators</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedWeave: Rethinking the Unit of Specialization in Heterogeneous Federated MoE-LoRA">FedWeave: Rethinking the Unit of Specialization in Heterogeneous Federated MoE-LoRA</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 </div>
 
