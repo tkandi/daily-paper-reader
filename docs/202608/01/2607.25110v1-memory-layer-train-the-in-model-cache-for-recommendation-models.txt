@@ -1,0 +1,539 @@
+Title: Memory Layer: Train the In-Model Cache for Recommendation Models
+
+URL Source: https://arxiv.org/pdf/2607.25110v1
+
+Published Time: Wed, 29 Jul 2026 00:18:07 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# Memory Layer: Train the In-Model Cache for Recommendation Models 
+
+## Liangyuan Na *, Gufan Yin *, Yixin Bao *, Xianjie Chen †, Justin Lin, Ziheng Huang, Xinyuan Zhang, Wen Zhang, Hao Lin, Xiaoheng Mao, Shuo Tang, Min Yu, Lei Chen, Chao Yang, Ziliang Zhao, Mengjiao Zhou, Zheng Qi, Dmitry Barablin, Chuo-Yun Yang, Kaustubh Vartak, Tingting Zhang, Arun Kumar Singh 
+
+Meta 
+
+Abstract 
+
+Early ranking stages in recommendation systems precompute item embeddings and cache them in-model for scoring within strict la-tency constraints. Because this cache exists only at serving time, outside the training loop, training and serving use different item representations, a structural discrepancy that limits quality and adds operational fragility. We show that co-designing the train-ing and serving paths removes this representation discrepancy at its source. We introduce the memory layer , an in-model key-value embedding cache co-trained with the model: the item tower writes embeddings during training and the model reads them at serving, one source of truth for item representations by construc-tion. Always-on embeddings cover items not yet cached, so every item receives a prediction, and the design consolidates three sepa-rate trainer-to-predictor update paths into a single self-contained pipeline. Deployed in production on Instagram Reels, the mem-ory layer raises prediction coverage from 96% to 100%, improves embedding freshness from 𝑂 (5 min ) to 𝑂 (20 s), and narrows the training-serving Normalized Entropy (NE) gap by up to 86%, yield-ing over 2× recall for the freshest content and a 5–6% cold start engagement lift. Because embeddings are produced during train-ing, the system needs no separate bulk-evaluation or publish-time recomputation, cutting training-and-publish computational cost by 30% at neutral serving computational cost. 
+
+CCS Concepts 
+
+• Information systems → Recommender systems ; • Comput-ing methodologies → Machine learning .
+
+Keywords 
+
+recommendation systems, early-stage ranking, embedding cache, training-serving consistency, cold start 
+
+1 Introduction 
+
+Modern recommendation systems at industrial scale employ multi-stage cascading architectures to balance relevance and computa-tional efficiency. Early-stage ranking (ESR) occupies an important position in this cascade: it must score 𝑂 (1K) candidate items per request with latency constraints measured in double-digit millisec-onds, while providing sufficient ranking quality to surface rele-vant content for downstream stages. To meet these constraints, 
+
+> *These authors contributed equally to this work.
+> †Corresponding author (cxj@meta.com).
+
+the dominant approach is a folded architecture where heavy item-side feature extraction is decoupled from request-time inference: an item tower precomputes dense embeddings offline, which are cached in-model for fast lookup during serving [ 32 ]. The two-tower paradigm [ 11 , 14 ], where independent user and item towers pro-duce embeddings scored via an interaction network, has become the standard for pre-ranking [14]. In this work, we co-train the in-model cache with recommendation models, introducing the mem-ory layer, which turns the read-only serving cache into a trained-and-streamed component that unifies the training and serving item representation into a single source of truth. 
+
+1.1 The Conventional Approach 
+
+The in-model item embedding cache, introduced as part of the Sil-verTorch serving framework [ 32 ], enables ESR models to precom-pute item embeddings and store them within the model’s serving state. The model trains on training data from Scribe [ 13 ], a real-time log-streaming service. The serving cache is populated from two separate sources. A GPU bulk evaluation service periodically processes the candidate pool (hundreds of millions of items) in Hive [ 27 ], an open-source data warehouse. It reads item features from the candidate pool table, backfilled with a multi-hour delay. A separate delta item streaming job consumes the candidate pool scribe to update newly created items at 𝑂 (5 min ) freshness. Items not present in the cache cannot be scored directly and require a system-specific fallback. Figure 1 (a) illustrates this conventional architecture with two distinct training and serving paths. The sys-tem thus maintains three separate update paths from trainer to serving predictor: model parameter streaming/delta updates [ 18 ], full snapshot bulk evaluation through the backfilled Hive table, and delta item streaming via a standalone job. Each is an external dependency whose delay adds latency and operational burden and can surface as stale or missing embeddings at serving. 
+
+1.2 Training-Serving Discrepancy 
+
+Despite its effectiveness, this system introduces structural training-serving discrepancies that limit model quality and create opera-tional fragility. We identify three categories of inconsistency be-tween what the model sees during training and what it encounters at serving: 
+
+Item tower freshness. During training, the model always uses the latest item tower with current parameters. At serving time, item embeddings are generated from an anchor checkpoint that may be hours old, and then cached. The serving model thus operates on arXiv:2607.25110v1 [cs.IR] 27 Jul 2026 Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. stale item representations that lag behind the continuously-updated training state. 
+
+Feature source discrepancy. Training data contains the latest item features from the training data scribe at the time of logging. At serving time, item embeddings are computed from features in the candidate pool backfilled Hive table, a separate source with different logging configuration and hours of pipeline delay [ 30 ]. This dual-source architecture introduces systematic feature discrepancies (e.g., missing or stale features for certain item types) that are difficult to detect offline, and causes the system to react slowly to trending content. 
+
+Cache-miss behavior. During training, the model never encoun-ters a cache miss: the item tower is always executed. At serving time, an item not present in the cache is handled by one of three fallbacks: a fixed negative score that leaves it effectively unranked, deferral to a later-stage model with a random probability, or reliance on additional infrastructure to backfill the prediction. The model cannot learn to handle cold start items gracefully, and the effect of cache misses cannot be measured during offline development. Together, these issues result in a measured 5–12% gap between training Normalized Entropy (NE) and serving NE across engage-ment prediction tasks. §6.4 provides a systematic analysis of how the memory layer addresses each discrepancy. 
+
+1.3 Memory Layer Approach: Training the In-Model Cache 
+
+We observe that the cause is architectural: the item embedding cache exists only at serving time, outside the training loop. Training computes fresh embeddings via the item tower; serving looks up a separately-maintained cache. The two never share state. We propose the memory layer as a persistent, streamed item embedding cache that is co-trained with the model and directly serves predictions at inference time. By making the cache a component of both forward passes, writable in training, readable at serving, we remove the discrepancy at its source. This work makes four contributions: (1) Model: we introduce the memory layer, a co-trained sparse embedding table that provides one source of truth for item representations across training and serving, narrowing the training-serving NE gap by up to 86%: from 12.11% to 1.64% on content selection (pselect), and from 5.24% to 3.42% on reshare. The in-model cache is then complemented with always-on embeddings to guarantee a prediction for every item. (2) System: we design and build the end-to-end infrastructure, a gradient-based Writeback mechanism, multi-table train-ing for comprehensive cache population, Multi-Probe Zero-Collision Hashing (MPZCH) [ 36 ] distributed serving with cache-miss handling, raw embedding streaming for near-real-time propagation, and a feature cache for auxiliary item signals, consolidating three separate update paths into a single self-contained pipeline. (3) Benefit: the unified design improves several dimensions at once: freshness from 𝑂 (5 min ) to 𝑂 (20 s), 100% cold start coverage (+5–6% new-content breakout, +5–6% cold start engagement lift), 30% lower training-and-publish computa-tional cost, improved serving reliability, and better training-serving fidelity. (4) Validation: we deploy on Instagram Reels, a surface of Insta-gram with a large number of daily active users, in production since late 2025 with consistent online benefits. Figure 1 (b) illustrates the resulting system architecture. The memory layer is a shared sparse embedding table using MPZCH [ 36 ]that serves as the single source of truth for item representations in both training and serving. Multi-table training reads from both the training data scribe and candidate pool scribe directly, the item tower writes embeddings into the memory layer via Writeback, and raw embedding streaming propagates all updates to the predictor at 15-second intervals. The predictor performs MPZCH lookup with cache-miss handling via always-on embeddings, scoring 100% of items. Compared to Figure 1 (a), the three separate update paths are consolidated into a single self-contained pipeline centered on the shared memory layer. 
+
+2 Related Work 
+
+In-model item caches. Industrial recommendation uses multi-stage cascades [ 4, 22 , 33 ] that decompose ranking into retrieval, early-stage ranking, and final ranking. At datacenter scale, memory-bound embedding-table operations account for a large amount of their inference computational cost [ 8], motivating in-model em-bedding caches for item representations. Two-tower models [ 11 ,14 , 31 , 34 ] factorize scoring into independent user and item repre-sentations, enabling offline precomputation of item embeddings; SilverTorch [ 32 ] internalizes this caching as an in-model operator with GPU-accelerated lookup [ 3]. Our memory layer extends this in-model cache by making it writable during training , turning a read-only serving artifact into a co-trained component; it is not tied to the two-tower factorization and applies equally to unified rankers such as SlimPer [ 29 ]. Its embedding backbone (collision-free storage and distributed operators) builds on MPZCH [ 36 ] (§4.1) and TorchRec Table-Batched Embedding (TBE) [ 12 ]. Monolith [ 15 ]similarly pursues collisionless tables, but we integrate the table into the training loop as a cache. 
+
+Challenges in serving cached embeddings. Three challenges arise. First, freshness : online training [ 9 , 19 ] keeps models cur-rent, but its delta publishing propagates parameter updates only at minute scale, too slow for fresh item embeddings. Methods that accelerate propagation, whether high-frequency delta publishing (QuickUpdate [ 18 ]) or streaming parameter updates to inference replicas (Ekko [ 26 ]), target model parameters rather than an item cache. Raw Embedding Streaming (RES) instead co-locates capture with the training TBE prefetch pass and streams the co-trained item cache with no dedicated infrastructure (§4.5). Second, consis-tency : training-serving discrepancy is a known source of technical debt in production systems [ 23 , 25 ], yet feature stores [ 1] address feature-level but not representation-level consistency. Third, cold start coverage : new items must still be scored, yet prior cold start methods [ 24 , 28 ] treat them as special cases. The memory layer addresses all three at once through a single shared table (§4.1). 
+
+Memory-augmented networks. Conceptually, the memory layer relates to memory-augmented networks [ 2 , 6 , 7 ] in other domains, 2Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. Training Data Scribe Item Tower Item Embeddings         
+
+> Training Forward / Loss
+> Candidate Pool Hive Table
+> Scoring
+> model-specific
+> Candidate Pool Scribe Table
+> Fallback
+> system-specific
+> Full Snapshot Slots
+> Streaming Backfill Slots
+> Item Embedding Cache
+> Training
+> Serving
+> Bulk Evaluation
+> Cache Hit
+> Cache Miss
+> Training-only Serving-only Rest of Model Trainer-to-Predictor Update from Three Paths
+> Full Snapshot Publish
+> Item Streaming
+> Model Parameter Update Training Data Scribe + Candidate Pool Scribe
+> Item Tower
+> Item Embeddings
+> Training Forward / Loss
+> Item IDs to Rank
+> Scoring
+> model-specific
+> MPZCH Sparse Embedding Table
+> Memory Layer
+> Training
+> Serving Cache Lookup
+> Cache Miss Handling
+> Multi-Table Reader Writeback
+> Always-On Embeddings
+> Raw Embedding Streaming
+> Training-only Serving-only Training-serving (shared)
+> Cache Miss
+> Rest of Model Unified Model Parameter Update Path
+
+Figure 1: System comparison. (a) Conventional ESR system: training and serving are separate, with three trainer-to-predictor update paths and cache-missed items handled by a fallback. (b) Memory layer: training and serving share one co-trained embedding cache over a single update path, and always-on embeddings score every item, making the system self-contained. 
+
+which use an external key-value store of trainable parameters to tar-get model capacity and reasoning ability. We instead target training-serving consistency in recommendation modeling, with bulk-write, real-time-streaming, and zero-collision requirements. 
+
+3 Memory Layer: Model Design 3.1 Definition and Overview 
+
+Definition. The memory layer 𝑀 is a key-value embedding table integrated directly into the model architecture: the key is the item ID (media identifier), denoted 𝑖 ; the value 𝑀 [𝑖 ] is that item’s cached embedding (a dense vector, the item tower output); and it is imple-mented as a sparse embedding table with collision-free hashing and least-recently-used (LRU) eviction. During training the item tower writes embeddings into 𝑀 ; during serving the model reads them back for prediction, one source of truth across both phases, with the write-then-read mechanics detailed in §3.2. 
+
+A co-trained cache. The memory layer is not a static lookup but a co-trained component: its rows are learned jointly with the rest of the model so the cached representation tracks the evolving item tower. There are two natural ways to learn it. The first is ordinary gradient descent, an 𝐿 2 objective ∥𝑀 [𝑖 ] − sg (𝑒 𝑖 )∥ 22 (with 𝑒 𝑖 the item tower output and sg (·) the stop-gradient) that pulls the cached vector toward 𝑒 𝑖 over successive steps. The second is Writeback 
+
+(§4.2): a single-step exact assignment that overwrites 𝑀 [𝑖 ] with the current item tower output every iteration (its target is the item tower output, not a task loss), reusing the model’s existing optimizer path with no additional optimizer state. Both approaches produce comparable results (§6.5), and we use Writeback for its exact assignment (§4.2), which avoids tuning a loss weight and the transient staleness of gradual convergence. 
+
+3.2 Model Architecture 
+
+Figure 2 illustrates the unified model architecture centered on the memory layer. The model comprises an item path centered on the memory layer and the rest of the model architecture: 
+
+Item path. The item tower 𝑓 item processes item features, i.e., fea-tures that are properties of the item itself rather than the request context, and produces dense item embeddings, denoted 𝑒 𝑖 . These em-beddings are written into the memory layer 𝑀 via the CacheLayer Writeback mechanism. The model then reads back the cached value 
+
+ˆ𝑒 𝑖 = 𝑀 [𝑖 ], so the scoring network is trained on exactly what serving Item Features 
+
+> Item Tower
+> Memory Layer
+> Key: Item ID
+> Value: Item Embedding Cache
+> Cache Miss Handling
+> User Features
+> Model-Specific Backbone
+> (User + Interaction + Scoring)
+> CacheLayer (Writeback)
+> Training-only
+> Serving-only
+> Training-serving
+> (shared)
+> Rest of Model
+> Multi-Task Scores
+> Always-On
+> Embeddings
+> Always-On
+> Features
+
+Figure 2: Unified model architecture with the memory layer. 
+
+reads. The item side carries two independent gradient flows (§4.2): Writeback sets 𝑀 [𝑖 ] to the item tower output, and the ranking loss trains the model parameters, including the item tower. The two are decoupled, so the cache faithfully mirrors the item tower while the item tower is shaped by the task, and this write-then-read pattern keeps training aligned with inference. 
+
+Model-specific backbone. The remaining components are model-specific and operate independently of the memory layer. The user-side network produces a user representation 𝐸 user ,𝑢 for user 𝑢 (e.g., from the tokenization results of the SlimPer framework [ 29 ]). A scoring network 𝑔 then combines 𝐸 user ,𝑢 with 𝐸 item ,𝑖 (from the item path: memory layer output plus always-on embeddings) to produce the multi-task scores ˆ𝑦 𝑢,𝑖 = 𝑔 (𝐸 user ,𝑢 , 𝐸 item ,𝑖 ); here 𝐸 user ,𝑢 and 𝐸 item ,𝑖 
+
+are ensemble embeddings, in contrast to the item embedding 𝑒 𝑖 
+
+that the memory layer caches. We write 𝜃 for all model parameters. The memory layer is agnostic to this backbone, which can be any ranking architecture, such as SlimPer [ 29 ] or conventional two-tower models, and can evolve without affecting the item caching mechanism. 
+
+Training vs. serving. The two passes differ only on the item side: training runs the item tower and writes/reads 𝑀 , while serving skips the item tower and reads 𝑀 directly, kept fresh via raw embedding 3Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. streaming (RES, §4.5), with cache misses handled by always-on embeddings 𝑎 𝑖 (§3.3). 
+
+3.3 Always-On Embeddings 
+
+In conventional cached ESR systems, an item without a cached em-bedding cannot be scored directly and falls back to a fixed low score or deferral to a downstream stage, under-serving fresh content. We instead take a hybrid approach that splits the item-side features into two sets. The first set holds most of the item features: the memory layer caches the item-tower output computed from them, so at serv-ing time the model reads this cached vector instead of extracting the features and rerunning the item tower, removing most of the per-item feature-extraction computational cost. The second set is a small number of features chosen to generalize to fresh items, such as the author ID, a topic ID, or other content-understanding features; these are still extracted at serving to produce always-on embed-dings. Because they describe an item through general attributes rather than its identity, they stay informative even for an item the model has never seen, whereas a per-item identity embedding such as the media ID is untrained for such an item. During training the scoring network fuses the cached and always-on embeddings and learns how much to weight each per item: for fresher media the per-item cached signal is thin, so the model leans on the always-on embeddings, which stay meaningful regardless of item age. At serving time a cache hit uses both, while a cache miss zeroes the cached embedding and keeps only the always-on embeddings, so the representation degrades gracefully to the signal the model already relies on for fresh media. Every item therefore receives a reasonable prediction, replacing the previous behavior where cache-missed items lacked a proper score. 
+
+3.4 Cache-based Evaluation 
+
+The cache-based evaluation functionality takes the memory layer as input and computes evaluation loss during training. This mirrors the serving logic, where cached embeddings are used for predic-tions, and helps close the training-serving development experience gap by allowing machine learning engineers to monitor metrics that closely reflect serving NE during offline development. In prac-tice, during evaluation steps the model reads ˆ𝑒 𝑖 = 𝑀 [𝑖 ] from the memory layer (identical to serving) rather than the fresh item tower output. If the memory layer contains stale or missing embeddings, the cache-based evaluation metric will reflect this, enabling en-gineers to diagnose training-serving issues during development rather than discovering them only after deployment. Combined with the memory layer’s training-serving consistency, this mecha-nism contributes to narrowing the training-serving NE gap (§6.4). 
+
+4 Infrastructure Implementation 
+
+Having defined the memory-layer model (§3), we now detail the five infrastructure components that realize it, with an additional feature-cache capability in Appendix A.5. The components of MPZCH (§4.1), Writeback (§4.2), and RES (§4.5) have been released to the broader community through the open-source TorchRec [ 21 ] and FBGEMM [ 20 ] libraries, while the model integration code remains internal. 
+
+4.1 MPZCH Storage Backend 
+
+The memory layer is implemented using Multi-Probe Zero-Collision Hashing (MPZCH) [ 36 ] as its storage backend. MPZCH provides zero-collision ID-to-row mapping via multi-probe lookup, bounded capacity with LRU-based eviction, and GPU-optimized batched read/write operations via TorchRec TBE operators [ 12 ]. The MPZCH module comprises three co-indexed components: (1) an identity ten-sor that maps raw item IDs to unique row indices via multi-probe lookup, residing on the GPU host for fast serving; (2) an embedding table storing item tower output vectors, sharded across GPU and CPU hosts via Distributed Inference (DI) [ 5] for capacity scaling; and (3) a runtime metadata store for auxiliary item-side features (Appendix A.5). All three share row indexing: the 𝑖 -th row across all components corresponds to the same item, ensuring atomic updates. The table manages slot allocation through LRU eviction: when the bounded-capacity table (512-dimensional embeddings) is full, least-recently-accessed slots are reassigned to new items (see Appendix A.3 for DI sharding constraints and capacity analysis). 
+
+4.2 CacheLayer: Writeback Algorithm 
+
+The CacheLayer is responsible for persisting item tower outputs into the memory layer during training. A naive approach, directly assigning values to embedding table rows, would bypass PyTorch’s autograd system and require custom CUDA kernels for another distributed all-to-all communication. Instead, we design a Writeback mechanism that reuses the existing TBE backward infrastructure to achieve exact value assignment through gradient manipulation. The intuition behind our Writeback mechanism is that the sto-chastic gradient descent (SGD) optimizer update rule, with learning rate 𝜂 =1, can be repurposed as an exact assignment operator. Given the current cached value ˆ𝑒 𝑖 and the target 𝑒 𝑖 (the new item tower output), constructing the gradient as 𝑔 wb  
+
+> 𝑖
+
+= ˆ𝑒 𝑖 − 𝑒 𝑖 and applying EXACT_SGD (the TorchRec sparse optimizer mode [ 12 ] that per-forms vanilla SGD without momentum or weight decay) yields the in-place update ˆ𝑒 𝑖 ← ˆ𝑒 𝑖 − 1 · 𝑔 wb  
+
+> 𝑖
+
+= 𝑒 𝑖 . The update performs exact assignment without custom CUDA kernels, reusing the full TBE backward path (including distributed all-to-all for sharded tables). CacheLayer is a custom torch.autograd.Function that saves (current − target) on the forward and returns it as the TBE gradient on the backward. One property is gradient isolation : the Writeback gradient up-dates 𝑀 , while the training-loss gradient independently updates all model parameters 𝜃 (including the item tower), so 𝑀 faithfully reflects item tower outputs without interference from the training objective. Algorithm 1 gives the full procedure, gradient construc-tion, per-ID deduplication that keeps each ID’s update exact, and the EXACT_SGD step, with cross-rank and EmbeddingCollection (EC) index-dedup handling in Appendix A.1. 
+
+4.3 Multi-Table Training 
+
+An important requirement is populating the memory layer with embeddings for the full candidate pool, not just items appearing in organic user interactions. In the conventional system (§1.1), this is handled by a bulk evaluation service consuming the candidate pool Hive table, introducing a multi-hour pipeline delay. Multi-table training eliminates this dependency by reading both training data 4Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. 
+
+Algorithm 1 Memory Layer Writeback ( etarget =𝑒 𝑖 , ecached =ˆ𝑒 𝑖 ). 
+
+Require: Item IDs I, item features 𝑋 I , user representation Euser ,labels 𝑌 , Memory Layer 𝑀 (MPZCH, EXACT_SGD, 𝜂 =1), model params 𝜃 
+
+Ensure: Updated 𝑀 , training loss L 
+
+> 1:
+
+// Forward Pass  
+
+> 2:
+
+etarget ← 𝑓 item (𝑋 I ) {Item tower forward}  
+
+> 3:
+
+ecached ← 𝑀. lookup (I) {Current MPZCH values}  
+
+> 4:
+
+gwb ← ecached − etarget {CacheLayer: save for backward}  
+
+> 5:
+
+L ← 𝐿 (𝑔 (Euser , ecached ), 𝑌 ) {Loss on cached repr.}  
+
+> 6:
+
+// Backward Pass  
+
+> 7:
+
+L.backward () {Autograd for 𝜃 } 
+
+> 8:
+
+// CacheLayer returns gwb as gradient to TBE  
+
+> 9:
+
+// TBE Optimizer Step (EXACT_SGD, 𝜂 =1) 
+
+> 10:
+
+for each unique 𝑖 ∈ I do  
+
+> 11:
+
+𝑀 [𝑖 ] ← 𝑀 [𝑖 ] − 1 · gwb [𝑖 ] = 𝑀 [𝑖 ] − ( 𝑀 [𝑖 ] − etarget [𝑖 ]) =
+
+etarget [𝑖 ] {Exact assignment}  
+
+> 12:
+
+end for  
+
+> 13:
+
+// Result: 𝑀 updated; ∇𝜃 L flows independently (decoupled) 
+
+Algorithm 2 Multi-Table Training with Memory Layer 
+
+Require: Training source 𝑆 train , Pool source 𝑆 pool , Memory Layer 
+
+𝑀 , Item Tower 𝑓 item , model params 𝜃 
+
+Ensure: Updated 𝑀 , training loss L 
+
+> 1:
+
+𝐵 train , 𝐵 pool ← 𝑆 train .next () , 𝑆 pool .next () {async load}  
+
+> 2:
+
+// Forward: merge, single item tower pass, Writeback  
+
+> 3:
+
+Xmerged ← concat (items (𝐵 train ), items (𝐵 pool )) {GPU preproc}  
+
+> 4:
+
+emerged ← 𝑓 item (Xmerged ) {one forward for all items}  
+
+> 5:
+
+CacheLayer.forward( emerged , 𝑀. lookup (I merged )) {Writeback}  
+
+> 6:
+
+// Loss on training batch only  
+
+> 7:
+
+L ← 𝐿 (𝑔 (Euser , Eitem ), 𝑌 train ) {Loss on training batch}  
+
+> 8:
+
+// Backward: updates 𝜃 and, via Algorithm 1, 𝑀  
+
+> 9:
+
+L.backward () 
+
+and candidate pool data directly into the online training loop via a multi-dataloader. The model receives two batches per iteration: a training batch (user interactions with labels) and a pool batch (candidate items without labels), with batch sizes matched to the throughput ratio between sources. The GPU preprocessing stage merges item features from both batches for efficient item tower computation. In the forward pass, the merged features go through the item tower and write embeddings to the memory layer. Embed-dings are then split back: only training-batch items go through the scoring network for loss computation; pool items exist solely to populate the cache. Algorithm 2 formalizes this procedure, with dummy-batch handling for asynchronous loaders in Appendix A.2. 
+
+4.4 Model Publish and Serving 
+
+In conventional ESR systems, item embeddings are served from a dedicated embedding cache populated during bulk evaluation on a separate GPU cluster. The memory layer replaces this with a direct MPZCH lookup: the same table written during training is packaged into a serving artifact during model publish [ 32 ]. Since embeddings are already computed during training, publish reduces to checkpoint conversion, cutting publish time and computational cost (quantified in §5). Full snapshot publishes occur periodically for fault tolerance; real-time freshness is maintained via raw em-bedding streaming (§4.5). Figure 4 (Appendix A.3) illustrates the serving-time architecture. In the current deployment, the always-on set is the author ID, complemented on a cache hit by a per-item media-ID embedding. Unhashed item IDs are sent to the MPZCH identity tensor on the GPU host, which maps each ID to a row index and produces a 
+
+found_mask indicating cache hits. Remapped indices are distributed to remote DI shards for embedding retrieval. Simultaneously, the always-on author-ID table provides an identity embedding for every item regardless of cache status, while the media-ID lookup is gated by the cache-hit mask. The found_mask gates the MPZCH and media-ID outputs: cache-hit items receive their full embedding; cache-missed items are zeroed, leaving the author-ID signal. The gated outputs are concatenated to form 𝐸 item ,𝑖 , passed to the scoring network. 
+
+Cache-miss handling. By default MPZCH returns an embedding from the first probed position for unknown IDs, indistinguishable from a valid lookup and liable to inflate cold-item scores. We instead make the identity tensor return a length-0 entry for cache-missed IDs, producing all-zero rows; the resulting found_mask gates the MPZCH and media-ID outputs to zero, leaving only the author-ID signal (§3.3). DI sharding constraints and observability are detailed in Appendix A.3. 
+
+4.5 Raw Embedding Streaming (RES) 
+
+Raw Embedding Streaming (RES) propagates memory layer updates from the online trainer to the serving predictor in near-real-time, reducing latency from 𝑂 (5 min ) to 𝑂 (20 s) with 100% row coverage (Figure 5, Appendix A.4). The design insight is co-locating streaming with the TBE prefetch I/O pass: RES captures updated embeddings while rows are already resident in GPU high-bandwidth memory (HBM) for the next train-ing iteration, eliminating a separate copy step. The pipeline oper-ates as a 3-stage asynchronous process. Stage 1 (every iteration): stores lookup IDs and pulls updated rows from HBM to CPU asyn-chronously. Stage 2 (continuous, non-blocking): deduplicates by ID, applies quantization, and merges across shards in a separate process. Stage 3 (every 15 seconds): serializes and pushes batched updates to the predictor via the messaging infrastructure. RES streams three data types atomically: MPZCH embedding rows, identity tensor updates, and runtime metadata / feature cache (Appendix A.5). All three stages are non-blocking; CPU-side processing does not block the GPU training loop. This unified architecture eliminates the standalone item streaming job (previously a dedicated GPU cluster), removing a separate serving dependency while achieving 21-second P99 end-to-end latency (detailed pipeline design in Appendix A.4). 
+
+5 Reliability and Efficiency Analysis 5.1 System Simplification and Reliability 
+
+The memory layer consolidates multiple disjoint components into a unified architecture, reducing operational complexity in three ways. 
+
+Simplified serving infrastructure: training and serving logic are aligned by construction, eliminating external dependencies on 5Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. bulk evaluation entirely; both full-snapshot and item-streaming bulk evaluations are removed, leaving the online trainer as the sole source of item representations. Streamlined services: two previously separate streaming services (sparse parameter and item embedding streaming) merge into one infrastructure with two chan-nels (RES for embeddings, sparse for other parameters), and two embedding-maintenance mechanisms (the SilverTorch cache mod-ule and separate sparse tables) unify into a single MPZCH-managed TBE table. Minimized external dependencies: reliance on the candidate-pool Hive table, which carries a multi-hour pipeline de-lay, is reduced, and the standalone item streaming job is eliminated. This simplicity is itself a reliability property: fewer moving parts and dependencies mean fewer points whose delay or unavailability can surface as stale or missing embeddings, hardening the serving path. Consistent with this, the memory-layer system has run in production since late 2025, improving both serving reliability and developer experience over the conventional architecture. 
+
+5.2 Resource Efficiency 
+
+The self-contained design removes the dedicated item-streaming in-frastructure (its work absorbed into the online trainer via RES) and reduces publish to a lightweight checkpoint conversion, cutting full-snapshot publish time and delivering 3× higher recurrent-publish throughput, while freed hosts are reallocated to online training. Overall, the memory layer achieves 30% lower training-and-publish computational cost per model, aggregating across all models that use it. On the serving side, inference-throughput optimizations (Appendix A.6) improve end-to-end serving throughput by 2.42 ×,matching the production baseline’s serving computational cost while delivering better model quality. The net operating point is thus lower training and publish computational cost at neutral serv-ing computational cost, plus the reliability (§5.1) and cold start (§6.3) gains. 
+
+6 Experimental Results 6.1 Experimental Setup 
+
+We deploy and evaluate the memory layer on Instagram Reels at the early-stage ranking layer, serving a large number of daily active users. The results reported here are from a two-tower instantia-tion of the memory layer [ 11 , 14 ]. The baseline model uses the SilverTorch in-model embedding cache [ 32 ] (§1.1), whose capacity is bounded by the predictor’s GPU serving memory, and bypasses uncached items with a fixed negative score. The deployed system adds the memory-layer components of §3–§4 with feature cache (Appendix A.5) as a further extension. Populated during training as a TorchRec TBE table with flexible sharding for distributed inference [ 12 ] (§4.1, Appendix A.3), the memory layer can scale its table size and embedding dimension as needed. The memory layer’s serving-efficiency improvements (§5) let us increase the shared table capacity by 50% over the baseline at neutral serving computational cost, so the larger capacity is part of the coverage improvement rather than an unequal comparison. We report NE [ 9], cache hit rate, embedding time-to-serve (TTS), engagement rates (reshare, time spent, video views), and cold start metrics (breakout rate, recency, and creation-to-first-impression time, i.e., CTI). 0 10 20 30 40 50 60 
+
+> Media Age (minutes since creation)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> Cache Hit Rate (%)
+> Cold Start Gap
+> Baseline
+> Memory Layer
+
+Figure 3: Cache hit rate versus media age. 
+
+6.2 Cache Hit and Embedding Freshness 
+
+Overall prediction coverage increases from 96% (baseline) to 100% (memory layer). The MPZCH memory layer achieves 99.5% cache hit rate by itself, with the remaining 0.5% of previously-missed items handled by always-on embeddings. In the baseline system, cache hit rate was only 10–20% for media created within the last 15 minutes; after the memory layer, cache availability is fully agnostic to media age (Figure 3). Reaching 100% coverage is what makes the ESR stage self-contained: conventional systems rely on a fallback for uncached items, whereas the memory layer scores every item, so item scoring is fully owned within the stage. The same property makes the approach directly applicable to final-stage ranking, where every candidate must receive a score. Embedding freshness improves from 𝑂 (5 min ) to 𝑂 (20 s). We measure time-to-serve (TTS) as the end-to-end latency from train-ing forward pass to predictor patching. The P99 TTS is approxi-mately 21 seconds, primarily the 15-second streaming interval (com-ponent breakdown in Appendix A.4). The memory layer also elimi-nates full-snapshot cache overrides: in the baseline system, each hourly full-snapshot deployment overwrites recently-streamed item embeddings with staler representations computed from a de-layed Hive table, causing a periodic recency drop visible in online metrics. With a single source of item embeddings from training to predictor, this production artifact is eliminated; the model maintains stable recency throughout the full-snapshot cycle. 
+
+6.3 Cold Start Performance 
+
+Since deployment, the memory layer improves cold start through five complementary mechanisms: (1) faster streaming ( 𝑂 (5 min ) → 
+
+𝑂 (20 s)); (2) continuous online training that removes the full-snapshot override problem; (3) expanded cache capacity (by 50%) with multi-source ingestion; (4) always-on embeddings that predict for cache-missed items; and (5) streaming from the latest item tower rather than an hours-old checkpoint. Together these drive both recall im-provements (primarily driven by fresh-content cache-hit increase in §6.2) and model prediction quality improvements for cold start content. In an A/B backtest after launch, cold start recall improves video views by 6–7% for items with 1-hour recency and by over 2× for me-dia created within 5 minutes. Cold start quality also improves across 6Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. 
+
+Table 1: Summary of cold start performance improvements. All A/B improvements are statistically significant.               
+
+> Category Metric Improvement Recall (A/B) Video views (media age <1h) +6–7%
+> Video views (media age <5 min) >2×
+> Quality (A/B) Reshare rate +5–6%
+> Time spent +5–6%
+> Topline Breakout (10K/3d) +5–6%
+> 1-hour recency +5–6%
+> P25 CTI −40 –45%
+
+the cold start pool, with statistically significant engagement-rate improvements of 5–6% in reshare and time spent. These improve-ments translate to attributed topline impact of 5–6% in breakout rate (the fraction of new items reaching 10,000 views within 3 days) and in the 1-hour recency metric, along with a 40–45% reduction in P25 CTI, meaning the fastest-served quartile of new content reaches its first impression sooner (Table 1). An A/B pretest abla-tion confirms these improvements are attributable to the memory layer rather than concurrent model changes. 
+
+6.4 Training-Serving Consistency 
+
+The memory layer resolves each discrepancy of §1.2: item tower freshness via online training and RES (§4.5), the dual feature source via multi-table training on the same scribe (§4.3), and cache misses via always-on embeddings (§3.3). By design, training NE and serving NE share the same item representations: a single source of truth (the MPZCH embedding table) is used in both training and inference. In offline iterations, training NE is computed on the same cached embeddings used for serving. This makes the training-serving consistency of early-stage ranking equivalent to that of late-stage models which do not use external caches. We track the gap between online training NE and online serving NE in Table 2 for two representative tasks: pselect (content selection scoring, predicting which items are selected by later ranking stages) and reshare (reshare-propensity prediction). The training-serving gap is measured as (NE serve −NE train )/ NE train ×
+
+100% , with both metrics measured at the same timestamp window to control for diurnal patterns. Sharing one item representation shrinks these gaps: the pselect gap drops by 86% (12.11% to 1.64%) and the reshare gap by 35% (5.24% to 3.42%). The residual gap is small but nonzero because sharing the table removes the representation discrepancy, not every training-serving difference. We attribute it to three sources: (i) int8 row-wise quantization applied at serving but not in training; (ii) write-behind reads, where serving uses embeddings written a few steps earlier (§7); and (iii) cache-miss fusion, which the model learns only implicitly during training: fresher items, whose cached embedding is less informative, approximate a cache miss, but this implicit pattern differs in distribution from the explicit all-zero miss encountered at serving. Improving this fusion is future work (§7). We therefore report an 86% reduction, not full elimination. 
+
+Table 2: Training-serving NE gap for two representative tasks.          
+
+> Task Baseline Gap Memory Layer Gap Gap Reduction pselect 12.11% 1.64% 86% reshare 5.24% 3.42% 35%
+
+6.5 Ablation Study 
+
+The components are integrated, so strict single-component abla-tions of the deployed system would require infrastructure changes. We instead report the qualitative directional contribution of each component, added on top of the previous configuration (Table 3). We note these measurements come from an early prototype, and each component may differ slightly from the latest production implementation. Thus they are only used to validate our design decisions during development and are not directly comparable to the results reported elsewhere in this section for exact contribu-tion. The co-trained MPZCH cache with Writeback establishes training-serving NE consistency and engagement wins over the bulk-evaluation baseline; always-on embeddings, MPZCH lookup serving, and raw embedding streaming each add further engage-ment and cold start improvements. Multi-table training with cache scale-up makes the system self-contained with broader coverage; and feature cache achieves parity results with additional infra ca-pability. A component-level comparison of the two cache-learning objectives (§3.1) finds Writeback and the 𝐿 2 variant comparable, with Writeback slightly better on pselect NE, so we choose Write-back for its exactness. 
+
+Table 3: Component-wise ablation from early prototype.      
+
+> Configuration A/B metrics improved MPZCH and Writeback Reshare, time spent Always-on embeddings Cold start views and time spent MPZCH lookup serving Reshare, time spent, views Raw Embedding Streaming Reshare
+
+6.6 Evaluation Considerations 
+
+Media distribution. A factor worth discussing separately is how the data helps shape what the ablation measures. The training and candidate-pool sources control which media populate the cache. Reaching full coverage therefore changes which items are scored: the memory layer now ranks the ∼4% of items the baseline bypassed, so treatment and control no longer see identical media pools. This is a serving-time exposure change, not a training-gradient effect: pool items are unlabeled and do not enter the loss. Because cold start media has lower immediate engagement, short-horizon A/B under-reads the benefit; we therefore rely on controlled serving evaluation on identical media sets and longer-running experiments. We also vary the data and feature source and the cache size: the framework already yields improvements without these changes, while multi-table training offers the flexibility to further adjust the media distribution. 
+
+Evaluation scope and reproducibility. Our evaluation is con-fined to a single production surface (Instagram Reels early-stage 7Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. ranking) and uses internal data with no public counterpart, so exact reproduction is not possible. Cross-system comparison is also hard: the memory layer integrates into each surface’s model and serving stack, and infrastructures differ in data sources, cache sizes, and serving constraints. The design nonetheless uses standard building blocks (collision-free hashing, an 𝜂 =1 SGD write, and raw embed-ding streaming) detailed in §3–§4.5 to support reimplementation. 
+
+7 Discussion 7.1 Limitations 
+
+Write-behind staleness. Writeback is inherently write-behind: if item 𝑖 is last processed at training step 𝑡 , the cache stores 𝑀 [𝑖 ] =
+
+𝑓 item (𝑥 𝑖 ; 𝜃 𝑡 ), but at serving time 𝑡 + 𝑘 the model weights have ad-vanced to 𝜃 𝑡 +𝑘 while serving still reads the stale 𝑀 [𝑖 ]. The resulting gap grows with 𝑘 , the number of training steps since item 𝑖 was last refreshed. In practice this is a large improvement, not a regression: the conventional system refreshes items at 𝑂 (5 min ) to 𝑂 (1–2 h),whereas the memory layer streams a single path at 𝑂 (20 s), down to 𝑂 (seconds ) for frequently-trained items, and eliminates the slow bulk evaluation path. Multi-table training (§4.3) bounds 𝑘 by cycling all candidate-pool items through training, so even rarely-served items refresh periodically. The residual staleness is inherent to any write-behind cache, a lower bound absent real-time item tower inference at serving. 
+
+Cache-miss handling. During training the item tower computes every embedding, so cache misses never enter the loss and the model is never explicitly taught how to fuse the cached and always-on embeddings when the cached one is absent; this makes cache-miss fusion a source of the residual training-serving NE gap (§6.4). Learning the fusion explicitly is ongoing work along three direc-tions: (i) simulating the serving-time cache-miss pattern during training, e.g., by having the MPZCH backend emit a training-time miss mask that mirrors serving, so the model learns to fuse under the distribution it meets at inference; (ii) enriching the always-on set with more item-agnostic features so a cache-missed item retains more signal; and (iii) an architectural treatment that makes the fusion robust to a missing component, drawing on the missing-modality literature in multimodal learning [16, 17]. 
+
+7.2 Lessons Learned 
+
+Three lessons generalize beyond this deployment. Consolidation results in reliability : collapsing three trainer-to-predictor paths into one removed several classes of external dependency (§5), a larger reliability improvement than any single-component tuning. Cover-age changes measurement : reaching 100% coverage shifts the served media distribution toward cold start content, which typically draws lower immediate engagement than established content, so short-horizon A/B under-reads the benefit and controlled serving evalua-tion is required (§6.5-§6.6). Exactness beats tuning : we prefer exact mechanisms (the 𝜂 =1 Writeback and kernel-level runtime-metadata design, Appendix A.5) over the gradient-loss and second-table vari-ants we first tried, which needed loss-weight tuning or corrupted int64 feature values. 
+
+7.3 Generalization and Future Work 
+
+The memory layer’s principles extend beyond this deployment. Because it is a general-purpose, model-co-located key-value store, the same mechanism supports: (i) cross-stage generalization : with always-on embeddings it spans early-stage (cache-everything) to late-stage (cache-nothing) ranking, and a natural extension is a sin-gle model serving both stages; (ii) generalized caching : the runtime-metadata design (Appendix A.5) can hold arbitrary features or cached history embeddings, reducing dependence on feature stores; and (iii) LLM foundation-model integration : a pre-trained language or vision-language model writes item embeddings into the mem-ory layer during training. Because the cache is co-trained with the model (§3.1), whether by Writeback or the 𝐿 2 variant, ranking gra-dients can propagate back into the foundation model to fine-tune or co-train it end-to-end. Serving reads only the cached embed-dings, incurring zero foundation-model inference computational cost. This pattern makes otherwise-prohibitive foundation models deployable within a strict-latency ESR stage. It also connects to memory-augmented networks [ 2], whose addressing ideas (learned eviction, hierarchical memory, product-key lookup) could inform future designs. 
+
+8 Conclusion 
+
+We presented the memory layer, a model-serving co-design that turns the item embedding cache from a read-only serving artifact into a co-trained component. Making the same sparse table writable in training, readable at serving, and streamed between the two in seconds establishes one source of truth for item representations, removing the training-serving representation discrepancy by con-struction, while always-on embeddings guarantee a prediction for every item. Deployed on Instagram Reels since late 2025, it reaches 100% pre-diction coverage and improves embedding freshness from 𝑂 (5 min )
+
+to 𝑂 (20 s), while narrowing the training-serving NE gap by up to 86%. These improvements translate to topline impact: over 2× recall for the freshest content and a 5–6% cold start engagement lift. The self-contained design also delivers a 30% reduction in training-and-publish computational cost at neutral serving computational cost and improves serving reliability from a simpler system. More broadly, co-designing the training and serving paths yields quality, reliability, and efficiency improvements that are hard to obtain by optimizing either path alone. The principles extend to cross-stage ranking, generalized caching, and LLM foundation-model integration, positioning the in-model cache as a foundation for next-generation recommendation systems. 
+
+Acknowledgments 
+
+Engineering collaborators. We are grateful to collaborators across Meta whose discussion and support were invaluable to this work: Yiming Liao, Xiaochen Hou, Tuan Trieu, Su Min Kim, Rui Jian, Xialu Li, Faran Ahmad, Sarunya Pumma, Supadchaya Puangpontip, Albert Chen, Enzhou Liu, Ji Liu. 
+
+Leadership. We are also grateful for the leadership support of Mis-ael Manjarres, Lan Gao, William Pei, Zhengyu Su, Guangdeng Liao, Haotian Wu, Deepak Agarwal, Peng Xia, Yiyi Pan, Bi Xue, Shilin Ding, whose guidance and investment made this work possible. 8Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. 
+
+References 
+
+[1] Denis Baylor, Eric Breck, Heng-Tze Cheng, Noah Fiedel, Chuan Yu Foo, Zakaria Haque, Salem Haykal, Mustafa Ispir, Vihan Jain, Levent Koc, et al . 2017. TFX: A TensorFlow-Based Production-Scale Machine Learning Platform. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD) . ACM. [2] Vincent-Pierre Berges, Barlas Oğuz, Daniel Haziza, Wen-tau Yih, Luke Zettle-moyer, and Gargi Ghosh. 2025. Memory Layers at Scale. In Proceedings of the 42nd International Conference on Machine Learning . PMLR. [3] Xiaoshuang Chen, Gengrui Zhang, Yao Wang, Yulin Wu, Shuo Su, Kaiqiao Zhan, and Ben Wang. 2024. Cache-Aware Reinforcement Learning in Large-Scale Recommender Systems. In Companion Proceedings of the ACM Web Conference 2024 . ACM. [4] Paul Covington, Jay Adams, and Emre Sargin. 2016. Deep Neural Networks for YouTube Recommendations. In Proceedings of the 10th ACM Conference on Recommender Systems (RecSys) . ACM. [5] Lu Fang, Shiyan Deng, Hongyi Jia, Huamin Li, Ilina Mitra, Sheng Qin, Zhengkai Zhang, Zhuoran Zhao, and Zinnia Zheng. 2026. Building Highly Efficient Inference System for Recommenders Using PyTorch. https://pytorch.org/blog/building-highly-efficient-inference-system-for-recommenders-using-pytorch/. PyTorch Blog. [6] Alex Graves, Greg Wayne, and Ivo Danihelka. 2014. Neural Turing Machines. 
+
+arXiv preprint arXiv:1410.5401 (2014). [7] Alex Graves, Greg Wayne, Malcolm Reynolds, Tim Harley, Ivo Danihelka, Ag-nieszka Grabska-Barwińska, Sergio Gómez Colmenarejo, Edward Grefenstette, Tiago Ramalho, John Agapiou, et al . 2016. Hybrid Computing Using a Neural Network with Dynamic External Memory. Nature 538, 7626 (2016). [8] Udit Gupta, Carole-Jean Wu, Xiaodong Wang, Maxim Naumov, Brandon Reagen, David Brooks, Bradford Cottel, Kim Hazelwood, Mark Hempstead, Bill Jia, et al .2020. The Architectural Implications of Facebook’s DNN-based Personalized Rec-ommendation. In IEEE International Symposium on High-Performance Computer Architecture (HPCA) . IEEE. [9] Xinran He, Junfeng Pan, Ou Jin, Tianbing Xu, Bo Liu, Tao Xu, Yanxin Shi, Antoine Atallah, Ralf Herbrich, Stuart Bowers, et al . 2014. Practical Lessons from Predict-ing Clicks on Ads at Facebook. In Proceedings of the 8th International Workshop on Data Mining for Online Advertising (AdKDD) . ACM. [10] Juhee Hong, Meng Liu, Shengzhi Wang, Xiaoheng Mao, Huihui Cheng, Leon Gao, Christopher Leung, Jin Zhou, Chandra Mouli Sekar, Zhao Zhu, Ruochen Liu, Tuan Trieu, Dawei Sun, Jeet Kanjani, Rui Li, Jing Qian, Xuan Cao, Minjie Fan, and Mingze Gao. 2025. Generative Early Stage Ranking. arXiv preprint arXiv:2511.21095 (2025). [11] Jui-Ting Huang, Ashish Sharma, Shuying Sun, Li Xia, David Zhang, Philip Pronin, Janani Padmanabhan, Giuseppe Ottaviano, and Linjun Yang. 2020. Embedding-based Retrieval in Facebook Search. In Proceedings of the 26th ACM SIGKDD International Conference on Knowledge Discovery & Data Mining (KDD) . ACM. [12] Dmytro Ivchenko, Dennis van der Staay, Colin Taylor, Xing Liu, Will Feng, Rahul Kindi, Anirudh Sudarshan, and Shahin Sefati. 2022. TorchRec: A PyTorch Domain Library for Recommendation Systems. In Proceedings of the 16th ACM Conference on Recommender Systems (RecSys) . ACM. [13] Manos Karpathiotakis, Vlassios Rizopoulos, Basri Kahveci, Tiziano Carotti, Artem Gelum, Hazem Nada, and Yuri Dolgov. 2025. Scribe: How Meta Transports Terabytes per Second in Real Time. Proceedings of the VLDB Endowment (2025). [14] Xiangyang Li, Bo Chen, HuiFeng Guo, Jingjie Li, Chenxu Zhu, Xiang Long, Sujian Li, Yichao Wang, Wei Guo, Longxia Mao, et al . 2022. IntTower: The Next Generation of Two-Tower Model for Pre-Ranking System. In Proceedings of the 31st ACM International Conference on Information and Knowledge Management (CIKM) . ACM. [15] Zhuoran Liu, Leqi Zou, Xuan Zou, Caihua Wang, Biao Zhang, Da Tang, Bolin Zhu, Yijie Zhu, Peng Wu, Ke Wang, et al . 2022. Monolith: Real Time Recommendation System With Collisionless Embedding Table. In Proceedings of 5th Workshop on Online Recommender Systems and User Modeling, jointly with the 16th ACM Conference on Recommender Systems . ACM. [16] Mengmeng Ma, Jian Ren, Long Zhao, Davide Testuggine, and Xi Peng. 2022. Are Multimodal Transformers Robust to Missing Modality?. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE. [17] Mengmeng Ma, Jian Ren, Long Zhao, Sergey Tulyakov, Cathy Wu, and Xi Peng. 2021. SMIL: Multimodal Learning with Severely Missing Modality. In Proceedings of the 35th AAAI Conference on Artificial Intelligence (AAAI) . AAAI Press. [18] Kiran Kumar Matam, Hani Ramezani, Fan Wang, Zeliang Chen, Yue Dong, Mao-mao Ding, Zhiwei Zhao, Zhengyu Zhang, Ellie Wen, and Assaf Eisenman. 2024. QuickUpdate: A Real-Time Personalization System for Large-Scale Recommen-dation Models. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI ’24) . USENIX Association. [19] H Brendan McMahan, Gary Holt, David Sculley, Michael Young, Dietmar Ebner, Julian Grady, Lan Nie, Todd Phillips, Eugene Davydov, Daniel Golovin, et al . 2013. Ad Click Prediction: A View from the Trenches. In Proceedings of the 19th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD) .ACM. [20] Meta Platforms, Inc. 2026. FBGEMM. https://github.com/pytorch/FBGEMM. Software repository, accessed 2026. [21] Meta Platforms, Inc. 2026. TorchRec. https://github.com/meta-pytorch/torchrec/. Software repository, accessed 2026. [22] Maxim Naumov, Dheevatsa Mudigere, Hao-Jun Michael Shi, Jianyu Huang, Narayanan Sundaraman, Jongsoo Park, Xiaodong Wang, Udit Gupta, Carole-Jean Wu, Alisson G Azzolini, et al . 2019. Deep Learning Recommendation Model for Personalization and Recommendation Systems. arXiv preprint arXiv:1906.00091 
+
+(2019). [23] Neoklis Polyzotis, Sudip Roy, Steven Euijong Whang, and Martin Zinkevich. 2018. Data Lifecycle Challenges in Production Machine Learning: A Survey. SIGMOD Record (2018). [24] Andrew I. Schein, Alexandrin Popescul, Lyle H. Ungar, and David M. Pennock. 2002. Methods and Metrics for Cold-Start Recommendations. In Proceedings of the 25th Annual International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR) . ACM. [25] D. Sculley, Gary Holt, Daniel Golovin, Eugene Davydov, Todd Phillips, Dietmar Ebner, Vinay Chaudhary, Michael Young, Jean-François Crespo, and Dan Denni-son. 2015. Hidden Technical Debt in Machine Learning Systems. In Advances in Neural Information Processing Systems (NeurIPS) . Curran Associates, Inc. [26] Chijun Sima, Yao Fu, Man-Kit Sit, Liyi Guo, Xuri Gong, Feng Lin, Junyu Wu, Yongsheng Li, Haidong Rong, Pierre-Louis Aublin, and Luo Mai. 2022. Ekko: A Large-Scale Deep Learning Recommender System with Low-Latency Model Up-date. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association. [27] Ashish Thusoo, Joydeep Sen Sarma, Namit Jain, Zheng Shao, Prasad Chakka, Suresh Anthony, Hao Liu, Pete Wyckoff, and Raghotham Murthy. 2009. Hive: A Warehousing Solution over a Map-Reduce Framework. Proceedings of the VLDB Endowment 2, 2 (2009), 1626–1629. [28] Li Wang, Binbin Jin, Zhenya Huang, Hongke Zhao, Defu Lian, Qi Liu, and Enhong Chen. 2021. Preference-Adaptive Meta-Learning for Cold-Start Recommendation. In Proceedings of the 30th International Joint Conference on Artificial Intelligence (IJCAI) . International Joint Conferences on Artificial Intelligence Organization. [29] Siqi Wang, Xianjie Chen, Shaofeng Deng, Albert Chen, Romil Shah, Jiawei Huang, Zhaoqin Wang, Zhang Zhang, Yiqun Liu, Meilei Jiang, et al . 2026. SlimPer: Make Personalization Model Slim and Smart. arXiv preprint arXiv:2607.12281 (2026). [30] Zhikai Wang, Yanyan Shen, Zibin Zhang, and Kangyi Lin. 2023. Feature Stal-eness Aware Incremental Learning for CTR Prediction. In Proceedings of the Thirty-Second International Joint Conference on Artificial Intelligence (IJCAI) . In-ternational Joint Conferences on Artificial Intelligence Organization. [31] Zhe Wang, Liqin Zhao, Biye Jiang, Guorui Zhou, Xiaoqiang Zhu, and Kun Gai. 2020. COLD: Towards the Next Generation of Pre-Ranking System. In Proceedings of the DLP-KDD Workshop at KDD . ACM. [32] Bi Xue, Hong Wu, Lei Chen, Chao Yang, Yiming Ma, Fei Ding, Zhen Wang, Liang Wang, Xiaoheng Mao, Ke Huang, et al . 2026. SilverTorch: A Unified Model-based System to Democratize Large-Scale Recommendation on GPUs. In Proceedings of the 49th International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR) . ACM. [33] YaChen Yan and Liubo Li. 2024. RankTower: A Synergistic Framework for En-hancing Two-Tower Pre-Ranking Model. In Proceedings of the AdKDD Workshop at KDD . ACM. [34] Xinyang Yi, Ji Yang, Lichan Hong, Derek Zhiyuan Cheng, Lukasz Heldt, Aditee Kumthekar, Zhe Zhao, Li Wei, and Ed Chi. 2019. Sampling-Bias-Corrected Neural Modeling for Large Corpus Item Recommendations. In Proceedings of the 13th ACM Conference on Recommender Systems (RecSys) . ACM. [35] Mark Zhao, Dhruv Choudhary, Devashish Tyagi, Ajay Somani, Max Kaplan, Sung-Han Lin, Sarunya Pumma, Jongsoo Park, Aarti Basant, Niket Agarwal, et al .2023. RecD: Deduplication for End-to-End Deep Learning Recommendation Model Training Infrastructure. In Proceedings of Machine Learning and Systems (MLSys) . mlsys.org. [36] Ziliang Zhao, Bi Xue, Emma Lin, Tianqi Lu, Mengjiao Zhou, Kaustubh Vartak, Shakhzod Ali-Zade, Tao Li, Bin Kuang, Rui Jian, et al . 2026. Multi-Probe Zero Collision Hash (MPZCH): Mitigating Embedding Collisions and Enhancing Model Freshness in Large-Scale Recommenders. arXiv preprint arXiv:2602.17050 (2026). 
+
+A Additional Infrastructure Details 
+
+This appendix elaborates the infrastructure components of §4, in-troduces the feature cache extension, notes inference throughput optimization, and discusses deployment considerations. 9Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. 
+
+A.1 Writeback and EC Index Deduplication Interaction 
+
+The memory layer uses EmbeddingCollection with index dedupli-cation enabled, which collapses duplicate indices within the local batch before all-to-all communication to reduce both communi-cation volume and TBE lookup count [ 12 ]. After the embedding lookup and output all-to-all, the full output is reconstructed by ex-panding deduplicated embeddings via index_select . In backward, this expansion uses scatter_add to reconstruct gradients, accumu-lating contributions for duplicate indices rather than keeping them separate. Without correction, the Writeback gradient magnitude for a frequently-appearing ID would be inflated proportionally to its batch count, violating the exact-assignment property. To handle this, CacheLayer computes the within-batch frequency of each ID during forward and normalizes the Writeback gradient by dividing by the corresponding frequency before the TBE optimizer step. This guarantees that the total Writeback for a given ID equals (cached −
+
+target) regardless of how many times it appears. Per-ID deduplica-tion (§4.2) remains necessary for cross-rank duplicates, since index dedup operates only within the local batch on each rank. 
+
+A.2 Multi-Table Dummy-Batch Handling 
+
+Since both dataloaders must keep pace with real-time data, we use timeout-based asynchronous loading. If either source lacks ready data, the system substitutes a pre-saved batch template (captured from the first valid batch after startup) as a dummy, maintaining correct tensor dimensions without contributing to model updates. Per-sample indicators control downstream behavior: dummy train-ing batches have zeroed loss weights; dummy pool batches skip Writeback. This guarantees the training loop never stalls. Dummy templates are persisted across restarts for deterministic behavior, and the system logs dummy-batch frequency as a health metric to detect sustained data availability issues. 
+
+A.3 DI Sharding and Cache-Miss Detection Candidate     
+
+> Item IDs
+> (Unhashed)
+> Identity Tensor
+> (Hash Map)
+> EC
+> Shard 0
+> EC
+> Shard 1
+> EC
+> Shard 2
+> GPU Host
+> Zero-collision Multi-probe
+> Lookup
+> Always-On
+> Embeddings
+> Media ID Author ID
+> Always-On Embedding
+> Tables
+> Table-wise Sharded
+> found_mask
+> Distribute
+> Remapped
+> Indices
+> Remote DI Shards (GPU + CPU)
+> Bucket-aware: One Bucket
+> Cannot Span Shards
+> Cache Hit
+> Indicator
+> →to
+> Model
+> Forward
+> Item Embeddings
+> Remapped Indices
+> Full Snapshot Publish (Every 4h) Raw Embedding Streaming ( )
+> found_mask Embedding Collection, Row-wise Sharded
+
+Figure 4: MPZCH Distributed Inference serving diagram. DI sharding. To increase the memory-layer capacity by 50% while maintaining inference latency, the MPZCH table is sharded across GPU and CPU hosts via Distributed Inference [ 5 ]. The identity tensor resides on the GPU host for fast ID-to-row lookup, while the Embedding Collection is row-wise sharded across DI hosts for ca-pacity. An important constraint is bucket-aware sharding: a single MPZCH bucket cannot be split across different DI shards, because probing occurs at the bucket level during ID lookup. The shard-ing strategy respects bucket boundaries to ensure correct lookup semantics. Always-on embedding tables use table-wise sharding (each table on one host) for better queries-per-second (QPS) given their small size. All other unused item-side embedding tables are trimmed to prevent latency increases from unnecessary sparse architecture output. 
+
+Cache-miss detection. By default, the MPZCH module returns an embedding from the first probed position for IDs not present in the identity tensor, indistinguishable from a valid lookup. This means cache-missed items would receive embeddings belonging to unre-lated (often popular) items, inflating their scores. We implement explicit cache-miss detection: for cache-missed IDs, the identity tensor returns a length-0 entry in the remapped ID list, which in-dicates all-zero rows after the embedding forward and masking. The found_mask tensor (derived from entry lengths) gates MPZCH and media ID outputs via element-wise masking. Cache hit rate is logged as a semi-binary value per item and aggregated in the serving metrics system, enabling per-pool analysis by joining with downstream metadata. 
+
+A.4 Raw Embedding Streaming: Detailed Design Scheduler (3-5 min Intervals)   
+
+> CPU
+> GPU (Sharded Embedding Tables, etc.)
+> Trainer Host
+> Serving Model
+> Predictor
+> Embedding Rows Copy
+> Delta Patching
+> Scheduler (15s Intervals)
+> CPU Serving Model
+> Predictor
+> Batched Embedding Updates
+> HBM
+> In-Memory Dedup
+> Raw Updates
+> Conventional Delta Publishing Raw Embedding Streaming
+> Trainer Host
+> UVM
+> GPU (Sharded Embedding Tables, etc.)
+
+Figure 5: Comparison of conventional delta publishing (left) and the raw embedding streaming pipeline (right). Motivation. Low-latency model-update systems propagate param-eter updates from the trainer to serving, by high-frequency delta publishing [ 18 ] or by streaming to replicas [ 26 ]. Conventional delta publishing [ 18 ] copies embedding deltas to a GPU memstore every iteration, then at 3–5 minute intervals copies weight rows from GPU to CPU for publish. This approach has drawbacks for unified virtual memory (UVM) caching or key-value (SSD) tables, as it trig-gers large batch copies of rows that may already be offloaded to DRAM or Flash, pausing the trainer. RES differs in two ways: (1) it captures updated embeddings during the existing TBE prefetch I/O pass, while rows are already resident in GPU HBM, eliminating a separate copy step; and (2) it runs as part of the training process itself with no dedicated streaming infrastructure. 
+
+Iteration timing. In Stage 1, RES stores the lookup IDs from itera-tion 𝑡 and, in iteration 𝑡 + 1, pulls the updated rows corresponding to those IDs from the TBE while they are still in HBM from the prefetch pass. The rows are asynchronously copied to CPU and sent to an in-memory store running in a separate process. This one-iteration delay ensures rows are captured after the Writeback update has been applied, guaranteeing consistency. 
+
+Unified streaming. Because item-embedding updates now flow through RES inside the online-training job, they combine with standard sparse streaming into a single trainer-to-predictor update path for all parameters (§4.5). 10 Memory Layer: Train the In-Model Cache for Recommendation Models Na, Yin, and Bao, et al. 
+
+Latency breakdown. The P99 end-to-end TTS ( ∼21 s) is primarily the streaming interval, with smaller contributions from embedding capture, deduplication, streaming preparation, message delivery, and predictor patching. 
+
+A.5 Feature Cache 
+
+Beyond item tower embeddings, ranking models often require item-side raw features at serving time. For example, explicit cross-feature matching [ 10 ] counts overlapping IDs between user engagement history and item-side features such as the content author’s iden-tifier. Without a feature cache, these must be fetched live from external services at serving time. We extend the memory layer to store these features alongside item embeddings. We generate and persist the feature cache during training, together with item IDs and item embeddings. In training, after reading ID-list features [ 35 ], we shuffle IDs and features all-to-all across ranks and persist them into the corresponding sharded MPZCH module. During inference, cached features are looked up by item ID from the same MPZCH table and used to compute downstream signals. In online training, all updated IDs and feature cache are streamed together to the predictor at ∼15 s cadence. Figure 6 illustrates the end-to-end flow. The design must simultaneously satisfy three hard constraints: zero tolerance for precision loss (int64 feature values where any cor-ruption causes a measurable NE regression), no additional computa-tional overhead, and training-inference consistency. We extend the MPZCH module with a 2D parameter of shape [𝑁 × num_features ],where 𝑁 is the MPZCH table’s row capacity, to store custom run-time metadata alongside the embedding table. The metadata shares the same indexing as the identity tensor: the feature cache for the 
+
+𝑖 -th item is stored in the 𝑖 -th row. After an item ID is successfully inserted into the MPZCH kernel, its features are written at the same slot; evicted slots are automatically zeroed. This atomic co-location eliminates synchronization issues between embeddings and fea-tures. During training, cross-feature values are encoded losslessly (int64 → float via bitwise reinterpretation) and written to MPZCH metadata slots via the existing all-to-all communication path with no additional computational overhead (encoding details below). At inference time, cached features are retrieved via index lookup on the runtime metadata, co-located with the identity tensor on the GPU host. Cache-missed features are masked to zero. Since item IDs and features are saved as a pair, they share the same cache hit rate with no additional serving latency. The feature cache is streamed atomically alongside embeddings via RES (§4.5), ensuring no window where a predictor has a new item ID but stale features. 
+
+Training encoding detail. During training, cross-feature values are extracted from item-side ID-list features, encoded from int64 to float via bitwise reinterpretation ( torch.view , lossless), and at-tached as 2D weights to the embedding input KeyedJaggedTensor (KJT) [ 12 , 35 ]. These are distributed via the existing all-to-all com-munication path. After MPZCH deduplication and ID insertion, features are written only at successfully inserted slots and decoded back to int64 before saving. 
+
+Streaming atomicity. One requirement is atomicity in RES: when-ever an item ID delta is streamed, its corresponding feature cache must be included in the same update. We extended three streaming pipeline components (the post-lookup tracker, raw IDs tracker, and Item ID-list Features  
+
+> Extract ID-List Features for Caching
+> Trainer Rank 0
+> Item Embedding
+> Predictor
+> Raw Embedding Streaming (~15s)
+> Sharded MPZCH Module (Item IDs + Embeddings + Feature Cache)
+> Trainer Rank 1
+> Training
+> Item ID-list Features
+> Extract ID-List Features for Caching
+> Sharded MPZCH Module (Item IDs + Embeddings + Feature Cache)
+> All-to-All Shuffle Across Ranks
+> User ID-List Features
+> Sharded MPZCH Module
+> Dense Layers
+> Item ID
+> Feature Cache Cross-Feature Matching
+> Prediction Results
+> Inference
+
+Figure 6: Feature cache end-to-end flow. 
+
+embedding kernel) to co-capture and co-stream runtime metadata, ensuring no window exists where a predictor has a new item ID but stale features. 
+
+Alternatives considered. We chose the runtime metadata design over two alternatives: (1) separate MPZCH modules (rejected due to unsynchronizable race conditions between independent hash maps and additional CUDA synchronization computational over-head), and (2) a second EmbeddingCollection with shared identity tensor using CacheLayer Writeback (rejected due to NaN canoni-calization corrupting int64 values, MPZCH collision semantics, EC index dedup precision loss, and UVM cache staleness). The chosen design operates at the MPZCH kernel level, below autograd and TBE abstraction, where ID assignment and metadata writes are guaranteed atomic. 
+
+A.6 Inference Throughput Optimization 
+
+The memory layer’s structural property, each lookup returns exactly one embedding per item (pooling factor = 1), enables the adoption of non-pooled EmbeddingCollection, unlocking index deduplica-tion [ 12 ], uint8 sparse output quantization, and proportional core-table sharding [ 5], delivering ∼40% throughput improvement for the sparse component. Always-on embedding tables are placed on the GPU host via table-wise sharding, eliminating cross-host communication. Combined with parallelism tuning, these yield the end-to-end 2.42 × serving throughput reported in §5. 
+
+A.7 Operating Requirements and Deployment Trade-offs 
+
+The memory layer depends on continuous online training to refresh item embeddings; systems that rely solely on periodic batch retrain-ing cannot reach the 𝑂 (20 s) freshness that closes the training-serving gap, so the approach is best suited to surfaces that already run online training. On the infrastructure side there is a direct trade-off between cache capacity and coverage: scaling the hash capacity further raises coverage but requires additional host memory and capacity planning. Finally, the int8 row-wise quantization used for serving efficiency must be handled carefully when int64 feature-cache values are co-located in adjacent structures, which is precisely why we adopt the runtime-metadata design (Appendix A.5) rather than a simpler column-appending scheme. 11

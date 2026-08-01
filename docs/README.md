@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-07-31</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-01</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>9</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-07-31 21:13:43 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-01 21:31:10 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读两篇9分顶会新作，解锁低精度训练稳定性与百万级Token记忆解码。</p>
-<p>FP4量化训练突破转置不变块量化，《Memory Decoder》用可插拔参数化记忆大幅提升长文本理解。</p>
-<p>建议开发者关注大模型低比特部署与记忆外挂机制，速览联邦学习与算子稳定性快讯。</p>
+<p>今天聚焦大模型系统优化与绿色训练：精读了两篇9.0分论文，速读覆盖强化学习、推荐缓存与联邦学习。</p>
+<p>最值得关注的方向是 KAP 桥接 LLM 知识选择与运行时消耗，以及 PowerScale 利用数据中心联合功耗实现节能分布式训练。</p>
+<p>建议读者优先深挖 KAP 如何让模型更高效、PowerScale 如何让训练更省电，两者都指向下一代高能效 AI 系统。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Stable FP4 Training via Transposition-Invariant Block Quantization">Stable FP4 Training via Transposition-Invariant Block Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Memory Decoder at Scale: A Pretrained, Parametric Long-Term Memory">Memory Decoder at Scale: A Pretrained, Parametric Long-Term Memory</span></li><li><span class="dpr-home-dashboard-paper-title" title="PIcsC: Partitioning-Induced Covariate Shift Correction">PIcsC: Partitioning-Induced Covariate Shift Correction</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KAP: Bridging the Knowledge Selection-Runtime Consumption Gap in LLM Systems">KAP: Bridging the Knowledge Selection-Runtime Consumption Gap in LLM Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="PowerScale: Energy-Efficient Geo-Distributed Model Training with Federated Datacenter Power">PowerScale: Energy-Efficient Geo-Distributed Model Training with Federated Datacenter Power</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Motion-Aware Vector Quantization Framework with Centroid Reuse for Efficient VLA Inference">A Motion-Aware Vector Quantization Framework with Centroid Reuse for Efficient VLA Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">9 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="OrchNAS: Orchestrated Neural Architecture Search Service for Personalised Federated Edge Intelligence">OrchNAS: Orchestrated Neural Architecture Search Service for Personalised Federated Edge Intelligence</span></li><li><span class="dpr-home-dashboard-paper-title" title="Automated Numerical Stability Analysis of Deep Learning Operators">Automated Numerical Stability Analysis of Deep Learning Operators</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedWeave: Rethinking the Unit of Specialization in Heterogeneous Federated MoE-LoRA">FedWeave: Rethinking the Unit of Specialization in Heterogeneous Federated MoE-LoRA</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Variance-Reduced Q-Learning over Static and Time-Varying Networks">Variance-Reduced Q-Learning over Static and Time-Varying Networks</span></li><li><span class="dpr-home-dashboard-paper-title" title="Memory Layer: Train the In-Model Cache for Recommendation Models">Memory Layer: Train the In-Model Cache for Recommendation Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedOGL: Combating Catastrophic Forgetting in Federated Open-World Multimodal Graph Learning">FedOGL: Combating Catastrophic Forgetting in Federated Open-World Multimodal Graph Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>9</strong></span></div>
 </section>
 </div>
 
