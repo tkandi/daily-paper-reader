@@ -1,0 +1,468 @@
+Title: Characterizing LLM Kernel Access and Memory Interaction in Multi-Partition NUMA GPUs
+
+URL Source: https://arxiv.org/pdf/2607.28824v1
+
+Published Time: Mon, 03 Aug 2026 00:11:44 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# Characterizing LLM Kernel Access and Memory Interaction in Multi-Partition NUMA GPUs 
+
+Donghyeon Joo *1,2 , Sooraj Puthoor 2, Nuwan Jayasena 2, and Bahar Asgari 11University of Maryland, College Park 2AMD 
+
+{dhjoo98, bahar}@umd.edu, {sooraj.puthoor, Nuwan.Jayasena}@amd.com 
+
+## Abstract 
+
+Large language model (LLM) workloads motivate multi-partition GPUs as a path to scaling compute and memory capacity, but their non-uniform memory access characteristics and inter-partition communication can amplify contention and degrade locality, leading to suboptimal kernel latency. To address this, we analyze performance-critical LLM kernel implementations spanning weight projection, mixture-of-experts, and attention variants of state-of-the-art serving engines to present a characterization of data access patterns in multi-partition GPUs. First, we introduce memory trace analysis methodology to derive workgroup-level data access and sharing behavior, then evaluate the locality implications on latency using a cycle-level simulator. Using these tools, we categorize LLM kernel operands into three inter-workgroup sharing patterns (global, partial, or private) and show that the required optimization strategies differ across categories, from simple per-workgroup pinning to subgroup-aware co-scheduling. Our findings highlight the need for placement-aware kernel programming and smarter architectural support for work and data locality in multi-partition GPUs. 
+
+## 1. Introduction 
+
+Large language models (LLMs) have grown rapidly in both parameter count and deployment scale, placing mounting pressure on accelerator platforms to deliver higher compute throughput and larger effective memory capacity simultaneously. Models such as DeepSeek [12], Gemma [17], and Qwen [43] now routinely exceed hundreds of billions of parameters, and inference workloads increas-ingly demand long context windows, pushing effective KV cache footprints well beyond what a single memory stack can serve efficiently. At the same time, architectural trends such as mixture-of-experts (MoE) and sparse attention have decoupled model capacity from per-token compute, introducing irregular sparse activation patterns that further stress memory subsystems. On the serving side, inference engines such as vLLM [20] and SGLang [44] have emerged to expose a rich kernel-level interface through which memory access patterns are ultimately determined, patterns whose locality properties are becoming increasingly consequential as hardware scales. To meet the capacity and bandwidth demands of LLM inference, GPU vendors are turning to multi-partition 
+
+> .*Work done during internship at AMD.
+
+designs. Rather than scaling a monolithic die, multi-partition GPUs compose several compute and memory domains within a single package, connected by a high-bandwidth on-package interconnect. AMD Instinct ™ MI300X [4] and NVIDIA B200 [15] are early examples of this integration strategy [23, 42] in the industry, with parallel efforts in academia exploring multi-chiplet composition for DNN ac-celerators to address analogous scaling and communication challenges [8, 25, 32, 37]. However, this composition comes at the cost of non-uniform memory access (NUMA). A workgroup executing on one partition may access data resident on a remote partition, incurring higher latency and competing for shared interconnect bandwidth. Non-uniform memory access effects now manifest at intra-package level. Current GPU memory management units (MMUs) ex-pose a single unified virtual address space to kernels, abstracting away the physical partition layout. While this simplifies programming, it also means neither the kernel developer nor the runtime has explicit fine-grained control over where data physically resides relative to the work-groups that consume it. The consequence is that access patterns which are benign on monolithic GPUs, shared weight tensors, activations, or KV cache entries, can silently become cross-partition traffic, amplifying contention and degrading latency on multi-partition platforms. To this end, we ask what are the costs of non-uniform memory access in modern LLM serving kernels, and what kernel programming practice and architectural support are required to close the gap? 
+
+To answer this, we conduct a systematic characterization of LLM kernel memory access patterns through the lens of multi-partition NUMA effects. We analyze performance-critical operators, weight projection, attention variants, and mixture-of-experts, as implemented in vLLM and SGLang by first generating memory traces from real kernel execution. We further develop GPU memory trace analysis techniques to derive inter-workgroup sharing behavior of target kernels to classify kernels by their inter-workgroup sharing patterns 
+
+(global, partial, or private). Second, we extend an existing cycle-level simulator that consumes target kernel objects to analyze the NUMA implications on latency. Together, these methods expose the structural properties that determine NUMA sensitivity and guide both architectural design and kernel development practice. 1arXiv:2607.28824v1 [cs.AR] 30 Jul 2026 2. Background 
+
+This section provides background on multi-partition NUMA GPUs, how the MMU exposes the address space, and the LLM workload scope we target. 
+
+2.1. Multi-partition GPU 
+
+AMD Instinct MI300X (Figure 1) [33] is a prominent example of how GPU compute and memory scaling is achieved through a multi-partition architecture [6, 24]. The package integrates eight Accelerator Compute Dies (XCDs), each containing 38 Compute Units (CUs) and a 4 MB private L2 cache, for a total of 304 CUs and 32 MB of aggregate L2. The eight XCDs are organized as four pairs, where each pair is 3D-stacked on top of a dedicated I/O die (IOD). The four IODs provide on-package networking and connectivity to eight HBM3 stacks that together supply 192 GB of memory [9]. A 256 MB Infinity Cache, distributed across the four IODs, acts as a last-level cache between the per-XCD L2 caches and HBM3, reducing the frequency of accesses that must reach external memory. The XCDs, IODs, and HBM stacks are interconnected via AMD’s Infinity Fabric, a high-bandwidth on-package interconnect that routes data requests across the chip complex, while Infinity Cache intercepts a fraction of those requests on the IOD before they reach HBM [4]. IOD 0      
+
+> XCD 0
+> 38 CUs | 4 MB L2
+> XCD 1
+> 38 CUs | 4 MB L2
+> HBM3
+> 24 GB
+> HBM3
+> 24 GB
+> IOD 1
+> XCD 2
+> 38 CUs | 4 MB L2
+> XCD 3
+> 38 CUs | 4 MB L2
+> HBM3
+> 24 GB
+> HBM3
+> 24 GB
+> IOD 2
+> XCD 4
+> 38 CUs | 4 MB L2
+> XCD 5
+> 38 CUs | 4 MB L2
+> HBM3
+> 24 GB
+> HBM3
+> 24 GB
+> IOD 3
+> XCD 6
+> 38 CUs | 4 MB L2
+> XCD 7
+> 38 CUs | 4 MB L2
+> HBM3
+> 24 GB
+> HBM3
+> 24 GB
+> Infinity Fabric
+> Intra -partition Communication
+> Inter -partition Communication
+> 64MB Infinity Cache 64MB Infinity Cache 64MB Infinity Cache 64MB Infinity Cache
+
+Figure 1: Multi-Partition Architecture of AMD Instinct MI300X. 
+
+When a workgroup scheduled on a CU accesses data that is mapped to the HBM of the same IOD, data access overhead (green arrow of Figure 1) is minimal compared to accessing data mapped to HBM of a remote IOD. Inter-partition accesses (red arrow of Figure 1) must traverse the interconnect and thus exhibit substantially higher latency. Therefore, the natural abstraction required for locality-aware scheduling and data placement is the base die , which is the physical die whose compute dies share local HBM. On the AMD Instinct MI300X, each IOD and two XCDs constitute one base die. Each base die forms a single partition, the scheduling and data-placement unit we use throughout this paper, as the same abstraction applies to any multi-partition GPU in which a group of compute units shares a local memory domain. 
+
+The Abstraction Gap . Despite this physical NUMA struc-ture, the GPU memory management unit (MMU) exposes a single, unified virtual address space to all kernels and programmers. This abstraction simplifies programming but critically hides the partition topology where neither the kernel developer nor the runtime have explicit, fine-grained visibility into where data physically resides relative to the workgroups that consume it. The physical placement of compute and data across partitions, which determines whether a given access is served locally or must traverse the partition boundary, is abstracted away at the programming level. As a consequence, access patterns that are benign on monolithic GPUs, such as shared weight tensors, activations, or reused KV cache entries, can silently become cross-partition traffic on multi-partition platforms, amplifying con-tention and degrading kernel latency without any indication to the programmer. This tension has been identified across interconnect and cache architecture [19, 24, 28], virtual memory management [13, 29, 36], memory migration [7, 30], and inter-partition synchronization [45], and is the central problem our work addresses. 
+
+2.2. Prior Characterization Work 
+
+LLM Inference Characterization . A growing body of work characterizes LLM inference at the kernel and system levels. Splitwise [27] decomposes inference into prefill and decode phases and proposes phase-aware scheduling to re-duce interference. Subsequent studies characterize memory-subsystem bottlenecks under large-batch inference [31], heterogeneous CPU–GPU data-movement overheads [40], compute–memory trade-offs across LLM kernels and model families [41], and kernel-architecture co-design for sparse LLM inference [16]. Collectively, these works provide valuable insights into system-level and kernel-level behavior during LLM inference. However, they do not examine the 
+
+intra-package NUMA effects that emerge when workgroups from a single kernel are distributed across partitions of a multi-chiplet GPU. Our work complements these efforts by characterizing memory access behavior at workgroup granularity and quantifying the impact of partition locality. 
+
+Inter-Thread-Block Locality and Co-Scheduling . Exploit-ing data sharing across thread blocks to guide scheduling has a long history on monolithic GPUs. Prior work con-structs inter-CTA locality graphs to co-schedule thread blocks with shared data footprints on the same SMs, improving cache locality and reducing redundant memory traffic [21]. PAVER [39] extends this approach using compile-time PTX analysis and graph partitioning to maximize thread-block locality, while Huzaifa et al. [14] study inter-kernel producer–consumer reuse across kernel boundaries. However, they target monolithic GPUs, where suboptimal placement primarily increases cache misses. In contrast, our work studies locality in multi-partition NUMA GPUs, where misplaced accesses incur expensive inter-partition communication. 
+
+## 3. Methodology 
+
+Our method starts from generating memory traces in the virtual address space from real GPU kernels. From 2these memory traces, we use our analysis logic to diagnose workgroup-level access patterns. We then quantify the performance impact of these patterns using cycle-level simulation, whose configuration we describe alongside the case-by-case results in Section 5.1. 
+
+Why Workgroup-level? We conduct our analysis at the granularity of individual workgroups (equivalently, Thread-blocks in NVIDIA terminology) because the workgroup is the fundamental unit of scheduling across Compute Units (CUs) in the AMD GPU execution model. In a multi-partition GPU such as the AMD Instinct MI300X, the hardware scheduler distributes workgroups across XCDs, interleaving them across partitions at dispatch time. Consequently, the memory access footprint and sharing behavior of a workgroup directly determines whether its accesses are satisfied locally within the partition’s memory hierarchy or must traverse the inter-partition interconnect to reach a remote HBM stack. Analyzing at a coarser granularity (e.g., the full kernel grid) would obscure these per-partition locality effects, while analyzing at a finer granularity (e.g., individual wavefronts or lanes) would not align with the scheduling boundary that governs data placement decisions. Thus, characterizing which data each workgroup reads and writes, how workgroups share data with one another, and how their footprints relate spatially to partition boundaries is an adequate level of abstraction for reasoning about NUMA effects in multi-partition GPU execution. 
+
+Virtual Address to Physical Address Mapping . We use AMD Omniprobe [2] to collect kernel memory traces. Omniprobe trace collection operates in the virtual address space, as it instruments kernel execution at the application level where only virtual addresses are visible. A natural concern is whether virtual-address traces faithfully rep-resent the partition-level locality effects that arise from physical page placement. We argue that they do, as the structural properties we characterize, which workgroups share data and how many bytes they share, are invariant under any virtual-to-physical address mapping. Whether inter-WG overlap is zero, partial, or total is determined by the kernel’s access pattern, not by where the runtime places pages. Our categorization (Section 4) is therefore grounded in virtual-address arithmetic without loss of generality. 
+
+3.1. Memory Trace Analysis 
+
+This section describes the memory trace analysis pipeline that extracts inter-workgroup sharing behavior from raw GPU execution traces. 
+
+3.1.1. Trace Ingestion and Address Filtering. The pipeline ingests GPU execution traces stored as JSON files. As shown in Figure 2, each trace entry carries the kernel name, dispatch ID, workgroup coordinates, wave number, operation type, and a list of per-lane memory addresses. We filter out entries whose addresses fall outside the global memory range. All subsequent analysis operates exclusively on the retained entries. 
+
+> Figure 2: Example of Omniprobe Memory Trace.
+
+3.1.2. Kernel and Workgroup Selection. From the fil-tered trace, we enumerate all unique kernel dispatches (identified by dispatch ID and kernel name) and allow the user to select a target dispatch. Within that dispatch, we enumerate all unique workgroup coordinates and extract the trace subset belonging to a chosen reference WG for single-WG analysis. 
+
+3.1.3. Intra-Lane Stride Detection. Before per-entry analysis, we characterize the intra-lane stride σlane , de-fined as the step size at which a single wavefront lane advances through memory across successive instructions, by collecting the first address per trace entry for a fixed wave, segmenting the sorted sequence into constant-stride runs, and taking the dominant stride. This stride is then used to determine byte-range endpoints during chunk formation. 
+
+3.1.4. Per-Entry Multi-Stride Segmentation. Each trace entry contains a list of addresses, one per active lane in a wavefront. We walk the consecutive deltas within that list and partition the sequence into stride-consistent sub-sequences. Specifically, the first non-zero delta initializes a base stride . Subsequent deltas that match the base stride extend the current segment, while a mismatch closes the current segment and resets the base stride. Zero-delta addresses (broadcast accesses, where multiple lanes target the same location) are recorded separately and counted as stride-zero events. 
+
+3.1.5. Chunk Formation and Merging. Stride-consistent segments are converted to byte intervals [s, e) where s =min(sublist) and e = max(sublist) + σ. All intervals sharing the same stride are then merged greedily. Two intervals that are contiguous or within a configurable gap tolerance δ
+
+are collapsed into a single interval. The result is a compact set of merged memory chunks per stride per operation type, representing the effective memory footprint of the workgroup for that stride class. 
+
+3.1.6. Inter-workgroup Reuse Analysis. Chunk deriva-tion is executed independently for every WG in a kernel. The resulting chunk sets are compared pairwise against a reference WG. For a reference WG R and another WG Q,we compute the byte-level overlap between corresponding chunk sets: 3reuse read (R, Q) = X
+
+> r∈C rd
+> R
+
+X
+
+> q∈C rd
+> Q
+
+max  0, min( re, qe) − max( rs, qs)
+
+reuse write (R, Q) = X
+
+> r∈C wr
+> R
+
+X
+
+> q∈C wr
+> Q
+
+max  0, min( re, qe) − max( rs, qs)
+
+where Crd  
+
+> W
+
+and Cwr  
+
+> W
+
+denote the read and write chunk sets of WG W, and (rs, re) denotes the start and end of an interval. Non-zero overlap quantifies shared data and is a direct proxy for potential NUMA contention when WGs are placed on different partitions. 
+
+## 4. Workload Categorization 
+
+We apply the memory trace analysis methodology of Section 3 to classify the memory access behavior of LLM kernels. We characterize the memory access behavior of LLM kernels by analyzing how workgroups within a single dispatch collectively access each operand data structure. 
+
+4.1. Inter-WG Sharing Patterns 
+
+We identify three distinct patterns by which workgroups access a shared data structure. As shown in Figure 3, they are WG-local, global shared, and partial sharing across WGs. WG -Private Access  Shared Access    
+
+> Across WGs
+> Partial Sharing
+> Across WGs
+> WGs DS ☨
+> Accesses
+> Each WG accesses
+> independent data chunks
+> (e.g. KV access in MHA)
+> All WGs access
+> entire data structure
+> (e.g. activation vector)
+> WGs DS Accesses
+> Subgroup of WGs
+> access a DS slice
+> (e.g. KV access in GQA)
+> WGs
+> DS
+> Accesses
+> ☨DS denotes Data Structure
+
+Figure 3: Categorization of WG-level Data Structure Access. 
+
+WG-Private Access . Each workgroup reads or writes a disjoint region of the operand. There is zero measured overlap between the chunk sets of any two WGs. The operand is effectively partitioned across the WG grid, and no inter-WG data sharing occurs within the kernel. This pattern is locality-friendly since if the runtime can co-locate a WG with the memory region it exclusively owns, all accesses will be partition-local with no cross-partition replication. Examples include the output tile of a GEMM-based projection kernel, where each WG is responsible for computing and writing a distinct output submatrix. 
+
+Global Shared Access . All workgroups in the dispatch access the entire extent of the operand, where our analysis reports large byte-overlap between every WG pair that matches the full size of the structure. The operand is 
+
+broadcast across the WG grid, in that every partition that receives WGs must either cache a local copy or incur repeated remote fetches. We identify this pattern as the primary source of cross-partition contention in LLM kernels. The clearest instance is the activation in a linear projection where regardless of which output tile a WG is computing, it must read across the full vector, meaning all WGs on all partitions compete for the same underlying data. 
+
+Partial Sharing Across WGs . A structurally intermediate pattern in which workgroups form subgroups: workgroups within a subgroup share a slice of the operand, while workgroups in different subgroups access disjoint slices. The byte-overlap measured between WGs is non-zero but bounded to a strict fraction of the operand. This is the most nuanced pattern from a placement perspective since the relevant unit of co-location is the subgroup, not the individual workgroups and not the entire grid. Examples include grouped-query attention (GQA), where multiple query-head workgroups share the same K and V head, and mixture-of-experts (MOE), where multiple expert-specific workgroups share the expert weight and activation vectors. 
+
+4.2. NUMA Sensitivity: Partition Locality 
+
+The categorization above describes how workgroups interact with each operand, but does not directly quantify the resulting cross-partition traffic. Therefore, we introduce a theoretical per-operand metric that captures the fraction of memory accesses served by each partition’s local memory under a given placement and scheduling policy. For an operand O accessed by the workgroups of a kernel dispatch under placement policy π and workgroup scheduling policy σ, we define Partition Locality as 
+
+Partition Locality( O, π, σ) = #local_accesses 
+
+#local_accesses + # remote_accesses 
+
+Decomposition . Partition Locality is determined by the composition of three independently controllable factors: 1) Kernel access footprint. The per-operand virtual address range each workgroup touches and the degree of overlap across WGs. This is extracted by our trace analysis. 2) Page placement policy π. The mapping from virtual pages to physical memory across partitions. Under round-robin interleaving at page granular-ity P across N stacks, a contiguous virtual range of size F ≫ P has approximately ⌈F/P⌉/N pages on any given partition. 3) WG scheduling policy σ. The mapping of work-group IDs to partitions. Under round-robin dispatch, workgroup w executes on partition w mod N.This decomposition separates the invariant kernel behavior (factor 1) from the policy-controlled runtime decisions (factors 2 and 3), making the metric applicable across placement strategies. 
+
+Baseline locality under default policies . Under round-robin page interleaving and round-robin WG scheduling, as derived from AMD documents [1, 5] and employed in our cycle-accurate simulator, any operand whose per-WG 4footprint F is large relative to the page size P converges to a baseline locality of 
+
+Partition Locality baseline ≈ 1
+
+N , (1) regardless of sharing category. On AMD Instinct MI300X with N=4 partitions, this baseline is approximately 0.25 . In other words, under naive policies even WG-local operands suffer poor locality, because page interleaving spreads their footprint across all partitions indiscriminately. 
+
+Achievable locality under optimized placement . What distinguishes the three sharing categories is not their base-line locality, but the ceiling reachable through placement and scheduling optimization:  
+
+> •
+
+WG-Private. Each WG accesses a disjoint region of O. The runtime can pin each WG’s pages to its local partition memory, achieving 100% locality with no data replication. This category offers the largest optimization headroom.  
+
+> •
+
+Global Sharing. All WGs access the full extent of O.Without replication, locality remains at 1/ N under any placement policy. Achieving locality 1.0 requires 
+
+N-way replication at a memory cost of N × |O| . 
+
+> •
+
+Partial Sharing. A subgroup of G WGs shares a slice of O. If all G WGs are co-scheduled on the same partition and the shared slice is pinned to that partition’s local memory, locality approaches 1.0 .Under default round-robin scheduling, the G WGs spread across min( G, N) partitions, and locality degrades proportionally. This category benefits most from partition-aware WG scheduling. Thus, each sharing category implies a characteristic (base-line, ceiling) pair: the baseline is what the default runtime delivers ( ≈ 1/ N in all cases), and the ceiling is what optimized placement and scheduling can achieve. The gap between the two is the per-operand optimization headroom, and it is this gap that determines how much performance a NUMA-aware runtime can recover. 
+
+Evaluation approach . In the next section, we report Partition Locality per operand for each target kernel under round-robin WG scheduling and page-interleaved placement at single-page granularity, matching the configuration of our cycle-accurate simulator (Section 5.1). The per-operand locality breakdown identifies which operand drives cross-partition traffic (the structural cause), while the simulator quantifies the latency overhead (the performance cost). 
+
+## 5. Case-by-Case Analyses 
+
+Having established the taxonomy of Section 4, we now apply it across the target LLM operators. For each operator, we combine two complementary sources of evidence: mem-ory trace analysis (Section 3), which identifies the sharing pattern and byte-level overlap of each operand from real kernel executions on the AMD Instinct MI300X, and cycle-level simulation, which quantifies the latency overhead        
+
+> TABLE 1: Software Environment
+> Component Version / Details
+> GPU AMD Instinct MI300X ROCm 7.1.0 Trace tool Omniprobe [2] Serving engines vLLM v0.0.19.2, SGLang v0.5.10 Cycle-level simulator MGPUSIM [34] (extended)
+
+incurred when participating workgroups are scheduled across partitions. Together, these measurements ground the taxonomy in hardware cost and allow us to evaluate operators by their NUMA sensitivity. Each case study is chosen to stress a different point in the sharing-complexity spectrum: weight projection and MHA decode isolate the WG-private regime, GQA decode introduces partial sharing within head groups, MLA decode adds cross-kernel producer-consumer dependencies, FA pre-fill tests whether compute-boundness masks NUMA effects, and MoE exposes dynamic, routing-dependent sharing. 
+
+5.1. Experimental Setup 
+
+We run target kernels on an AMD Instinct MI300X under ROCm 7.1.0 for both memory trace collection and kernel object extraction. Table 1 lists the software stack. For memory trace generation we use Omniprobe [2], an instrumentation tool for AMD Instinct GPUs that injects compile-time code to stream per-wavefront memory access messages. Target GPU kernels are taken from vLLM and SGLang frameworks. For performance analysis we extend MGPUSIM [34], a cycle-level GPU simulator, using the multi-partition incorpo-ration methodology of NVGIM [29] and local/remote DRAM access latency information from MCM-GPU [6] to model inter-partition memory access overhead. We configure a 4-partition topology similar to AMD Instinct MI300X [4]. The remaining simulation parameters are given in Table 2 and are chosen to constitute a viable simulation setup. Physical pages are distributed across partitions in round-robin fashion at 4 KB granularity, and workgroups are dispatched to partitions in round-robin order at single-workgroup granularity (WG i executes on partition i mod 4 ), matching the default policies documented by AMD [1, 5]. To isolate the performance cost of inter-partition data movement, we compare each kernel under two simulator configurations. The default configuration uses the crossbar interconnect described in Table 2. The ideal configuration replaces the inter-partition interconnect with a zero-latency direct connection. Every inter-partition memory request completes in a single simulation cycle with no queuing, serialization, or bandwidth limitation, so that all accesses are served as if data were always partition-local. 
+
+5.2. Weight Projection 
+
+We analyze up-projection of Llama-2-7B [38] with an FP16 11008 ×4096 weight matrix in batch size 4. We use the 5TritonBLAS [35] backend, a Triton-based GEMM framework that analytically selects kernel configurations based on GPU cache hierarchy and memory topology via Origami [3], an AMD-developed model that predicts optimal tile sizes and grid strategies without autotuning. 
+
+Trace observations . This kernel launches with a grid of 
+
+43 × 1 × 1 workgroups. Each WG reads a disjoint 2 MB slice of the weight matrix in a WG-local pattern. The input activation tensor (32 KB across all four batch entries) is read in its entirety by every WG, constituting global shared access. Each WG writes an independent 8 KB output slice, again in a WG-local pattern. 
+
+Partition Locality analysis . The weight matrix dominates the memory footprint at 2 MB per WG, totaling 43 ×2 MB =86 MB across the full grid. Under default round-robin page interleaving at 4 KB granularity, each WG’s 2 MB weight slice spans 512 pages distributed across all N=4 partitions, yielding a baseline locality of 1/ N = 0.25 . Because weight access is WG-private, the achievable ceiling is 1.0 via per-WG page pinning with no data replication. The input activation tensor (32 KB) is globally shared but spans only 8 pages. Achieving locality 1.0 requires N-way replication at a cost of 4 × 32 KB = 128 KB , which is negligible. Output tiles (8 KB per WG) are WG-private and contribute minimally to cross-partition traffic. 
+
+Performance impact . Decode-phase weight projection is a skinny matrix-matrix product ( 11008 × 4096 × 4), placing it squarely in the memory-bound regime where bandwidth utilization governs execution time. Under default placement, approximately 3/4 of the 2 MB per-WG weight reads are served from remote partition memory, and the resulting inter-partition traffic directly translates to queuing delays and interconnect contention. Cycle-level simulation comparing default round-robin placement against zero inter-partition overhead shows a 1.72 × latency difference (Figure 4). Because all operands are either WG-private or negligibly small and globally shared, the optimization requires only per-WG page pinning with no WG co-scheduling, making weight projection the most amenable operator to static, partition-aware data placement among those we study. 
+
+TABLE 2: Simulated 4-Partition GPU Configuration                
+
+> Parameter Value
+> Partitions (base dies) 4CUs / partition 32 (8 SAs ×4 CUs) Total CUs 128 Core frequency 2100 MHz L1 cache 32 KB L1V/CU, 16 KB L1S/4CUs L2 cache / partition 4 MB L2 latency 14-cycle bank + 2-cycle directory [29] DRAM / partition 2 GB, 8 banks DRAM latency 95-cycle row-miss [6] Interconnect Crossbar, 32-cycle one-way, 768 GB/s [6] Page placement 4 KB round-robin [1] WG scheduling Round-robin, per-WG granularity [5]
+
+In Figure 5, we validate this across varying batch sizes. The speedup remains within 1.64 –1.77 × across all configurations, confirming that the NUMA sensitivity of weight projection is governed by the batch-invariant weight matrix rather than the scaling activation operand. 
+
+5.3. Attention 
+
+We analyze three attention variants that differ in KV head structure and caching behavior: multi-head attention (MHA), which maintains separate KV heads per query head; grouped-query attention (GQA) [22], which shares each KV head across a group of query heads; and multi-head latent attention (MLA) [12], which compresses the KV cache into a low-dimensional latent space. All implementations use FlashAttention-based kernels [10]. 
+
+5.3.1. Multi-Head Attention Decode. For decode, we analyze the operation at batch size B=4 with KV cache of 1024 tokens previously generated from prefill. 
+
+Trace observations . This kernel launches with a grid of 
+
+1 × 32 × 4 workgroups, where grid Y dimension parallelizes heads and grid Z dimension parallelizes batch inputs. The per-token access granularity remains 256 B, determined by the per-head dimension slicing ( dhead = 128 elements in FP16). Query vector, key and value caches are accessed in a WG-private pattern where each workgroup reads disjoint 256 B slices of Q, K, and V with zero overlap as each WG handles a distinct (head, batch) pair and reads only the KV cache entries of its assigned sequence. 
+
+Partition Locality analysis . With all operands in the WG-private category, the achievable locality ceiling is 1.0 
+
+where each WG’s footprint can in principle be pinned to its executing partition’s local memory. However, under the default round-robin page-interleaved placement, the per-WG KV footprint of 1024 × 256 B = 256 KB per operand is still distributed across all N=4 partitions, yielding a baseline locality of ≈ 1/ N = 0.25 .
+
+Performance impact . Cycle-level simulation shows a 
+
+1.64 × latency difference between default placement and ideal configurations. Decode performs a single matrix-vector product per head rather than the matrix-matrix products 1 1 1 1 1 1 1   
+
+> 1.72 1.64 1.79
+> 1.45
+> 1.09 1.05
+> 1.32
+> 0
+> 0.4
+> 0.8
+> 1.2
+> 1.6
+> 2
+> Weight
+> Projection
+> MHA
+> decode
+> GQA
+> decode
+> MLA
+> decode
+> FA
+> prefill
+> MoE
+> decode
+> (shared
+> routing)
+> MoE
+> decode
+> (disjoint
+> routing)
+> Round-Robin Placement (Baseline)
+> Normalized Speedup
+
+Figure 4: Achievable kernel speedup when inter-partition data transfer overhead is eliminated, normalized to default round-robin placement. Higher bars indicate greater NUMA sensitivity and larger optimization headroom. 
+
+61.77 1.72              
+
+> 1.64
+> 1.71 1.68
+> 1.4
+> 1.5
+> 1.6
+> 1.7
+> 1.8
+> 1.9
+> 2
+> 14816 32
+> Normalized Speedup
+> Batch Size Figure 5: NUMA sensitivity of weight projection across batch sizes. The dominant operand (2 MB WG-private weight matrix) is batch-invariant. The globally shared activation grows from 8 KB (B=1 )to 256 KB (B=32 )but remains negligible relative to the weight footprint.
+
+of prefill, shifting the bottleneck from compute to memory bandwidth. Under memory-bound regime, the 3/4 fraction of remote partition memory accesses directly translates to execution time penalty. Because all operands are WG-private, optimization requires pinning each WG’s KV cache pages and query to the local memory of the partition that will execute that WG. Similar to weight projection, MHA decode is an amenable target for simple per-WG data placement policies. 
+
+5.3.2. Group Query Attention Decode. GQA amortizes KV cache cost by sharing each KV head across a group of G query heads. We analyze GQA decode of Llama-3-8B [22] with HQ=32 query heads and HKV =8 KV heads (G=4 ), sequence length L=1024 , head dimension dhead =128 ,and batch size B=4 .
+
+Trace observations . GQA kernel has the same grid config-uration as MHA, with a grid of 1 × 32 × 4. The per-token access granularity remains 256 B ( dhead × 2 B), consistent with MHA. Query vector is read in WG-private pattern, identical to MHA decode. On the other hand, Key and value caches are accessed in partial sharing pattern, per KV-head group. Each KV head is shared by G=4 query-head WGs. These four WGs read the same KV cache slice of L × dhead × 2 B = 256 KB per operand, while WGs in different groups access disjoint KV slices. This contrasts with MHA decode, where KV access is fully WG-private. GQA introduces inter-WG sharing within each group of four, shifting KV from the private category to partial sharing. 
+
+Partition Locality analysis . The total KV footprint is 
+
+HKV × 256 KB × 2 = 4 MB (K and V combined), a 4×
+
+reduction from MHA’s HQ × 256 KB × 2 = 16 MB . Under default round-robin page interleaving, baseline KV locality remains ≈ 1/ N = 0.25 per access, the same as MHA. How-ever, the achievable ceiling is no longer 1.0 through simple per-WG pinning, because KV data is shared across G=4 WGs. Reaching locality 1.0 for KV requires co-scheduling each group of 4 WGs onto the same partition and pinning the shared KV slice to that partition’s local memory. The query operand is accessed in WG-private pattern with achievable ceiling of 1.0 via per-WG pinning. 
+
+Performance impact . Cycle-level simulation shows a 
+
+1.79 × latency difference between default placement and ideal configurations, compared to 1.64 × for MHA decode. This higher overhead arises because GQA’s grouped KV heads are accessed by multiple query-head workgroups simultaneously. With four query-heads sharing each KV head, WGs dispatched to different chiplets issue concurrent requests to the same remote cache lines, increasing inter-chiplet traffic by 23.7% despite a 4 × reduction in unique KV data, and raising average vector memory stall cycles per instruction from 1.96 to 2.44 compared to MHA. 
+
+5.3.3. Multi-head Latent Attention Decode. MLA [12] compresses the KV cache by storing a low-dimensional latent vector per token, reducing the per-token footprint from O(nheads · dhead ) to O(dlatent ) at the cost of additional up-projection matrix multiplications during decode to recon-struct K and V. We preserve the core MLA dimensions, 512-dimensional content, 64-dimensional RoPE, 576-dimensional keys, 512-dimensional values, and 128 query heads with sequence length of 1024 and batch size of 4. MLA decode differs from GQA and MHA in the compact-ness of the KV cache reads. Rather than reading per-head key and value vectors, each token contributes a single latent vector for K and a 512-dimensional latent vector for V, shared across all query heads. In our kernel, weight absorption is performed outside the attention kernel. Query projection pre-absorbs the up-projection weight matrix, so the MLA kernel reads only these latent vectors. The extreme 128:1 sharing ratio (all 128 Q-heads attending to one KV head) means every workgroup processing a different query head reads the identical KV sequence from cache, maximizing cache reuse but concentrating memory traffic on a narrow per-token footprint. MLA decode of vLLM is a two-stage kernel pipeline. Stage 1 computes tiled attention over KV sequence splits, and Stage 2 reduces the partial outputs via log-sum-exp (LSE) trick analogous to the FlashDecoding formulation [11]. 
+
+Trace observations: Stage 1 . This kernel launches with a 4 × 8 × 4 grid (batch × query-head groups × sequence splits), where each WG operates on 16 query heads. Each workgroup reads 256 tokens worth of latent-dimension context, with each token occupying a 1024 B block ( dlatent ×
+
+2 B), yielding a per-WG K content read footprint of 256 ×
+
+1024 B = 256 KB . An additional 32 KB of RoPE-dimension key is read per WG ( 256 × 64 × 2 B). Value reads match the content dimension, contributing another 256 KB ( 256 ×512 ×
+
+2 B), for a total per-WG KV read footprint of 544 KB. Both KV and query operands exhibit partial sharing: KV blocks are shared across WGs along grid axis Y, and query slices are shared along grid axis Z. Stage 1 writes intermediate results in 2052 B granularity per block, a contiguous concatenation of 512 attention output elements and 1 log-sum-exp element, all in float32 precision ( 512 × 4 + 1 × 4 = 2052 B). Each WG writes 16 such blocks. 
+
+Trace observations: Stage 2 . This kernel launches with a grid of 4 × 128 × 1 workgroups, where grid X dimension 7parallelizes batch inputs and grid Y dimension parallelizes reduction. Each Stage 2 workgroup reads four contigu-ous blocks of the (output + LSE) intermediate, totaling 
+
+4 × 2052 B = 8208 B per WG in WG-private pattern. Each workgroup writes 1024 B of attention output and a 4 B LSE scalar, for a total per-WG write footprint of 1028 B in a WG-private pattern. 
+
+Partition Locality analysis . Stage 1’s sharing structure differs from MHA and GQA. Latent KV (per-WG footprint of 544 KB) is shared across all WGs across grid Y, forming subgroups whose size depends on the grid Y dimension. Under default round-robin page interleaving, baseline lo-cality is ≈ 1/ N = 0.25 . The achievable ceiling requires co-scheduling each Y-group onto the same partition and pinning the corresponding latent slice locally. Query is partial shared across grid Z, forming a second, orthogonal partial sharing group. Stage 1 intermediate output is a WG-private write where each WG writes its own 16 blocks of 
+
+2052 B with no inter-WG overlap. 
+
+A Case for Inter-kernel Data Reuse . The two-stage formulation reveals an important case of inter-kernel data sharing. Stage 1 writes intermediate operands in a WG-private pattern, and Stage 2 reads these operands in the same WG-private category. However, each Stage 1 WG writes 16 intermediate blocks, while each Stage 2 WG reads four contiguous blocks, each produced by different Stage 1 WGs. This creates a producer-consumer dependency across kernel boundaries where a single Stage 2 consumer depends on four distinct Stage 1 producers. Since the intermediate buffer is small enough to reside in L2 cache, this is a case where partition-aware WG scheduling can exploit L2 reuse across kernel boundaries, provided the four Stage 1 producers and their corresponding Stage 2 consumer are co-scheduled on the same partition. This demonstrates that NUMA-aware scheduling must consider not only intra-kernel sharing but also cross-kernel relationships. 
+
+Performance impact . Cycle-level simulation shows a 
+
+1.45 × latency difference between default placement and ideal configurations. This is lower than both MHA de-code ( 1.64 ×) and GQA decode ( 1.79 ×), because the per-token KV cache footprint is substantially smaller than the nheads × dhead × 2 B of MHA or GQA, reducing total cross-partition traffic. However the scheduling complexity is higher. Optimizing MLA locality demands coordinating both intra-kernel group affinity across two grid axes and inter-kernel producer-consumer co-location, whereas MHA requires only per-WG pinning. In Figure 6, we validate the NUMA sensitivity of all three decode variants across varying sequence lengths at 
+
+B=4 . GQA decode consistently exhibits the highest overhead (1.75 –1.86 ×) due to contention amplification from partial KV sharing, followed by MHA ( 1.56 –1.74 ×) and MLA (1.30 –1.72 ×), confirming that the sharing category and NUMA sensitivity are preserved across sequence lengths. 1.74 1.63 1.64           
+
+> 1.72
+> 1.70
+> 1.75 1.80 1.79
+> 1.86
+> 1.78
+> 1.30 1.34
+> 1.45
+> 1.56
+> 1.46
+> 1.2
+> 1.3
+> 1.4
+> 1.5
+> 1.6
+> 1.7
+> 1.8
+> 1.9
+> 2
+> 256 512 1024 2048 4096
+> Normalized Speedup
+> Sequence Length (Tokens)
+> MHA decode GQA decode MLA decode
+> Figure 6: NUMA sensitivity of attention decode variants across sequence lengths at batch size B=4 . The sharing category of each operand is stable across all lengths , while the overhead magnitude grows with per-WG KV footprint.
+
+5.3.4. Flash Attention Prefill. We profile MHA FlashAt-tention prefill at single batch, sequence of length L=1024 ,with H=32 heads and hidden dimension dmodel =4096 .
+
+Trace observations . This kernel launches with a 8 × 32 × 1
+
+grid, where grid X dimension parallelizes query heads and grid Y dimension splits the sequence length. Each head operates on a per-head dimension of dhead = 128 
+
+elements in FP16, yielding a per-token access granularity of 128 × 2 B = 256 B for each of the query, key, and value operands. Each workgroup reads its own query tile, consisting of one or more contiguous 256 B blocks corresponding to its assigned output rows. Key and Value activations exhibit partial sharing. All workgroups assigned to the same attention head read the entire key and value sequences for that head. Each WG iterates over all L tokens during the tiled score computation and value aggregation. 
+
+Partition Locality analysis . While the per-token access granularity is 256 B, the relevant quantity for Partition Locality is the aggregate per-head footprint, the total KV data that a head’s WG subgroup collectively touches. For sequence length L=1024 , this is 256 KB per operand (K or V), totaling 512 KB of shared KV data per head. At 
+
+P=4 KB interleaving, the 256 KB per-operand footprint spans 
+
+∼64 pages distributed round-robin across N=4 partitions, and baseline locality converges to ≈ 1/ N = 0.25 . As query access is WG-private, the achievable ceiling under optimized placement is 1.0 with no replication cost. 
+
+Performance impact . While the partial sharing structure of KV within a head makes head-to-partition affinity the primary optimization direction, co-scheduling all WGs of the same attention head onto a single partition, and pinning that head’s KV activations to the same partition’s local memory to raise KV locality from the baseline toward 1.0 ,cycle-level simulation proves this unnecessary. Cycle-level simulation comparing default round-robin placement against the ideal configuration shows only a 1.09 × latency difference. This is consistent with the compute-bound nature of FlashAttention prefill. The tiled matrix multiplications in the score computation and value aggregation dominate execution time, and the memory subsystem (including remote partition memory accesses) 8is not on the critical path. Although KV locality is poor under default placement, the arithmetic intensity of prefill masks the NUMA penalty. This stands in contrast to the decode-phase attention kernels, where memory-boundness exposes the same locality deficiency as a significant cost. 
+
+5.3.5. Mixture-of-Experts. We evaluate the fused MoE kernel from vLLM using DeepSeek-V3 671B dimensions: hidden dimension 7168, expert dimension 2048, 256 total experts with top-K=8 routing. Considering a single-GPU scenario under expert parallelism, we use 32 experts with 8 activated, with batch size 4. The kernel implements a batched GEMM across all active experts in a single dispatch. A pre-processing step sorts tokens by their routed expert and pads to BLOCK_SIZE_M =64 boundaries, producing a contiguous token index array and a per-block expert assignment map. Each WG is assigned a (pid _m, pid _n)
+
+tile: pid _m determines the expert and token block, pid _n
+
+determines the output feature slice. This mapping is central to the sharing analysis as it defines which WGs read overlapping activation rows. 
+
+Trace observations . Each WG reads three operand classes. Routing metadata is globally shared, while input activations are partially shared. Each token is routed to K=8 experts, each with 32 output-tiling WGs, so 8 × 32 = 256 WGs read the same activation rows. In the decode setting with four real tokens per expert block, the actual activation access per WG is 4 × 7168 × 2 B = 56 KB . Expert weights ( 64 ×
+
+7168 × 2 B = 896 KB per WG) are WG-private. Each WG reads a distinct BLOCK_SIZE_N -wide strip of its expert’s weight matrix, with no overlap across output tiles. Output tiles ( 8 KB per WG) are WG-private. 
+
+Partition Locality analysis . The dominant cross-partition traffic sources are expert weights (896 KB per WG, WG-private) and input activations (56 KB per WG at B=4 , partial sharing with group size K=8 ). Routing metadata ( ∼256 B) and output tiles (8 KB) are too small to contribute mean-ingfully. Under default page interleaving, both dominant operands converge to baseline locality ≈ 1/ N, but they require different optimizations. Weight locality can be raised to 1.0 via per-WG page pinning, whereas activation locality requires co-scheduling the K=8 expert WGs that share token rows onto the same partition. Expert weights contribute a fixed 896 KB per WG regardless of batch size, while activation footprint scales linearly with the number of routed tokens per expert block, making activation placement equally critical at larger batch sizes. 
+
+Routing-dependent sharing and placement sensitivity .
+
+Because the kernel dispatches all active experts in a single grid, the token-to-expert routing outcome determines both the total unique weight footprint and the degree of cross-WG reuse. We evaluate two extremes. Under shared routing ,all four tokens activate experts 0–7 and thus the unique weight working set is 8 × 2048 × 7168 × 2 B = 224 MB, and each expert’s WGs read all four tokens. Under disjoint routing , each token activates eight entirely different experts (4 × 8 = 32 ), so every expert handles a single token. The unique weight footprint grows to 896 MB with zero cross-WG reuse, pressuring the cache hierarchy and compounding the interconnect overhead under default page interleaving. Critically, token routing dynamically determines both the number of active WGs and the total expert weight footprint. Without adequate co-placement of WGs and their corresponding data, this variability leads to repeated cross-partition reads of both expert weights and activations. 
+
+Performance impact . Cycle-level simulation confirms this sensitivity. The latency gap between default and ideal configurations is 1.05 × under shared routing but 1.32 ×
+
+under disjoint routing, reflecting the larger unique weight footprint and absence of cross-WG reuse. Closing this gap requires a two-tier placement strategy. A static tier pins each expert’s weight tiles and its corre-sponding WGs to the same partition. A dynamic tier places token activation pages on the partitions whose experts were selected by the router, which is a decision that changes every batch. Neither tier alone suffices as pinning weights without co-locating activations still incurs remote activation reads, while co-locating activations without pinning weights leaves the dominant operand scattered across partitions. 
+
+5.4. Discussion 
+
+Table 3 consolidates the sharing patterns, per-workgroup footprints, achievable speedups, and required placement optimizations identified across the analyzed LLM kernels. Throughout different case studies on LLM kernels on multi-partition GPU, we identified memory trace-based WG-level data access patterns and derived achievable Partition Locality under optimal workgroup/data placement. With a cycle-level simulator, we derived the achievable kernel speedup by optimizing inter-partition data access. Returning to our motivating question, the cost of NUMA in LLM serving kernels ranges from negligible (1.09 × for compute-bound FA prefill) to substantial (1.79 × for GQA decode), and the required mitigation ranges from simple per-WG page pinning (weight projection, MHA decode) to subgroup-aware co-scheduling with dynamic, per-batch placement (MoE, MLA). Crucially, no single placement policy suffices across all operators. The sharing category of the dominant operand determines both the severity of the penalty and the complexity of the solution. However, achieving this optimal placement requires significant sup-port from the underlying GPU architecture. 
+
+5.4.1. GPU Architecture Implications. 
+
+Data Interleaving Granularity . Our case studies show that the per-WG operand slices vary widely in size across kernels from 8 KB output tiles to 2 MB weight slices in projection, and from 256 B query vectors to 544 KB latent KV blocks in MLA decode. Under GPU’s fixed 4 KB page-size interleaving, this variation complicates correct chiplet-local placement of data structure slices for each WG. CLAP [26] samples a subset of pages at runtime to profile each data structure’s partition-locality degree, then maps page groups contiguously into the physical frames 9TABLE 3: Per-operand sharing patterns, footprints, and optimization strategies across LLM kernels. Speedup indicates the latency ratio between ideal (zero inter-partition overhead) and default round-robin placement at B=4 , L=1024 unless noted. Negligible operands (output tiles ≤8 KB, routing metadata ∼256 B) are omitted.                                                                         
+
+> Kernel Operand Sharing Per-WG Subgroup Speedup Required Optimization Pattern Footprint Size
+> Weight Projection Weight matrix Private 2 MB —1.72 ×Per-WG page pinning Activation Global 32 KB All WGs N-way replication (128 KB) MHA Decode Query Private 256 B —1.64 ×Per-WG page pinning KV cache Private 256 KB —Per-WG page pinning GQA Decode Query Private 256 B —1.79 ×Per-WG page pinning KV cache Partial 256 KB G=4 Co-schedule GWGs + pin MLA Decode Latent KV Partial 544 KB |Y|=8
+> 1.45 ×
+> Co-schedule Y-group + pin Query Partial 256 B |Z|=4 Co-schedule Z-group Intermediate Private 32 KB —Inter-kernel co-location †
+> FA Prefill Query Private 256 B/tile —1.09 ×Per-WG page pinning KV Partial 256 KB/head Per head Head-to-partition affinity MoE Decode Expert weights Private 896 KB —1.05 ×S
+> 1.32 ×D
+> Static per-WG pinning Activation Partial 56 KB §K=8 Dynamic per-batch co-schedule
+> †Cross-kernel producer–consumer locality between Stage 1 and Stage 2 enables L2 reuse under partition co-location.
+> SShared routing (all tokens →same 8 experts). DDisjoint routing (each token →different 8 experts).
+> §At B=4 (4 real tokens per expert block); scales linearly with batch size.
+
+of the predicted home partition. The resulting virtual-to-physical contiguity allows these groups to be covered by a single merged TLB entry, delivering large-page TLB reach without the coarse-grained misplacement that large pages impose in NUMA settings. However, CLAP assumes round-robin WG scheduling whereas our partial-sharing results (GQA, MoE) show that data placement alone is insufficient without coordinated WG co-scheduling. 
+
+WG Scheduling Granularity . For WG-private operands, it is crucial to map each WG–data structure slice pair to the same partition. For partially shared operands, the relevant co-location unit is the WG subgroup. In GQA decode, the G=4 query-head WGs sharing a KV head must be co-scheduled. In MoE, expert-specific WGs sharing routed activations must land together. These complex WG subgroup–data structure slice dependencies call for explicit, fine-grained placement of WGs across partitions, beyond default round-robin dispatch. LADM (Locality-Aware Data Management) [18] intro-duces a compiler-assisted static index analysis that classi-fies GPU kernel access patterns into three categories, no datablock-locality, row/column locality, and intra-thread locality, and uses this to have GPU driver proactively co-place threadblocks (or workgroups) and their data onto the same partition before kernel execution, avoiding the latency penalties of reactive first-touch demand paging. MGvm (MCM-aware GPU virtual memory) [29] builds on LADM’s static analysis for workgroup scheduling and data placement, and additionally extends it to the virtual memory layer. It coordinates TLB home-slice assignment with PTE placement to keep address translation local, accompanied by a 2MB–4KB interleaving granularity switching mechanism driven by a real-time hardware monitor to prevent L2 TLB contention hotspots. While MGvm addresses WG-private patterns effectively, the dynamic per-batch placement re-quired by MoE’s routing-dependent sharing (Section 5.3.5) remains outside its static analysis scope. 
+
+5.4.2. Kernel Programming Implications. The architec-tural solutions discussed above operate below the program-ming model. Page placement policies and WG scheduling decisions are made by the MMU and hardware dispatcher, neither of which is exposed to kernel code. From a kernel developer’s perspective, the physical placement of data across partition memory is entirely invisible. There is no programmatic mechanism to pin an operand to a specific partition’s memory. What kernel developers can control is the mapping of workgroups to compute resources, which in turn determines which WGs share an on-die L2 cache. This makes WG scheduling order the primary lever available at the kernel programming level for improving data locality on multi-partition GPUs. For example, Choudhary et al. [9] demonstrate that by swizzling the workgroups in head-first mapping, they can localize workgroups of a head that share K and V tensors to the same XCD, confining shared data to a single per-die L2 cache and achieving up to 50% throughput improvement over conventional scheduling with L2 hit rates of 80–97%. AMD’s CPX (Core Partitioned X-celerator) mode [5] offers a more direct alternative. Combined with NPS4 memory partitioning, CPX exposes each XCD as a separate logical GPU with its own local memory partition, giving kernel developers explicit control over both compute and data placement. This sidesteps the abstraction gap entirely, but at the cost of the unified address space. Each partition 10 sees only a fraction of total memory, and cross-partition communication requires explicit multi-GPU coordination. 
+
+## 6. Conclusions 
+
+We characterize memory access patterns of performance-critical LLM kernels on multi-partition NUMA GPUs, clas-sifying them by inter-workgroup sharing pattern (global, partial, private). Our trace-driven analysis and cycle-level simulation reveal that state-of-the-art LLM serving kernels have significant opportunities for speedup through careful placement of workgroups and data structure slices across partitions, and that current runtimes cannot fully exploit these opportunities. These findings underscore the need for placement-aware WG scheduling, finer data interleaving granularity, and runtime support for partition locality to fully realize the memory capacity benefits of multi-partition GPU architectures. 
+
+## References 
+
+[1] Advanced Micro Devices, Inc., “AMD CDNA 3 Architecture: Powering the Next Generation of AI and HPC Accelerators,” AMD, Tech. Rep., 2023, documents 4 KiB page-granularity interleaving across HBM stacks: “switch stack every 4KiB through physical memory space” (partitioning diagram, p. 13). [Online]. Avail-able: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-3-white-paper.pdf [2] ——, “Omniprobe,” github.com/AMDResearch/omniprobe, 2025, gitHub repository. [3] ——, “Using Origami and Stream-K with hipBLASLt,” 
+
+ROCm Documentation, hipBLASLt , 2025, describes the Origami with Stream-K kernel selection strategy for GEMM on AMD Instinct accelerators. [Online]. Avail-able: https://rocm.docs.amd.com/projects/hipBLASLt/en/develop/how-to/how-to-use-streamk.html [4] C. Ambati and T. Diep, “AMD MI300X GPU Performance Analysis,” arXiv preprint arXiv:2510.27583 , 2025. [Online]. Available: https://arxiv.org/abs/2510.27583 [5] AMD ROCm Software Team. (2024) AMD Instinct MI300X GPU Partitioning Overview. SPX mode: “Workgroups are automatically distributed across all XCDs (round-robin)”. [Online]. Available: https://instinct.docs.amd.com/projects/amdgpu-docs/en/latest/gpu-partitioning/mi300x/overview.html [6] A. Arunkumar, E. Bolotin, B. Cho, U. Milic, E. Ebrahimi, O. Villa, A. Jaleel, C.-J. Wu, and D. Nellans, “MCM-GPU: Multi-Chip-Module GPUs for Continued Performance Scalability,” in Proceedings of the 44th Annual International Symposium on Computer Architecture .Toronto ON Canada: ACM, Jun. 2017, pp. 320–332. [7] U. Bakhtiar, A. Namjoo, and B. Asgari, “Chasoň: Supporting cross-HBM channel data migration to enable efficient sparse algebraic acceleration,” in Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2025, pp. 778–794. [8] J. Cai, Z. Wu, S. Peng, Y. Wei, Z. Tan, G. Shi, M. Gao, and K. Ma, “Gemini: Mapping and architecture co-exploration for large-scale DNN chiplet accelerators,” in 2024 IEEE International Symposium on High-Performance Computer Architecture (HPCA) . IEEE, 2024, pp. 156–171. [9] M. Choudhary, K. Sangaiah, S. Singh, M. Osama, L. W. Wills, and G. Dasika, “Optimizing attention on GPUs by exploiting GPU architectural NUMA effects,” arXiv preprint arXiv:2511.02132 , 2025. [10] T. Dao, “Flashattention-2: Faster attention with better parallelism and work partitioning,” in International Conference on Learning Representations (ICLR) , 2024. [Online]. Available: https://arxiv.org/abs/2307.08691 [11] T. Dao, D. Haziza, F. Massa, and G. Sizov, “Flash-decoding for long-context inference,” https://pytorch.org/blog/flash-decoding/, 2023, describes a two-phase attention kernel with parallel per-split com-putation followed by a reduction over splits. [12] DeepSeek-AI, “DeepSeek-V2: A strong, economical, and efficient mixture-of-experts language model,” arXiv preprint arXiv:2405.04434 ,2024. [13] Y. Feng, S. Na, H. Kim, and H. Jeon, “Barre Chord: Efficient Virtual Memory Translation for Multi-Chip-Module GPUs,” in 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) .Buenos Aires, Argentina: IEEE, Jun. 2024, pp. 834–847. [14] M. Huzaifa, J. Alsop, A. Mahmoud, G. Salvador, M. D. Sinclair, and S. V. Adve, “Inter-kernel reuse-aware thread block scheduling,” ACM Transactions on Architecture and Code Optimization (TACO) , vol. 17, no. 3, pp. 1–27, 2020. [15] A. Jarmusch and S. Chandrasekaran, “Microbenchmarking nvidia’s blackwell architecture: An in-depth architectural analysis,” arXiv preprint arXiv:2512.02189 , 2025. [Online]. Available: https://arxiv.org/abs/2512.02189 [16] D. Joo, H. Hosseini, R. Hadidi, and B. Asgari, “Coruscant: Co-designing GPU kernel and sparse tensor core to advocate unstruc-tured sparsity in efficient LLM inference,” in Proceedings of the 58th IEEE/ACM International Symposium on Microarchitecture (MICRO) ,2025, pp. 232–245. [17] A. Kamath, J. Ferret, S. Pathak, N. Vieillard, R. Merhej, S. Perrin, T. Matejovicova, A. Ramé, M. Rivière, L. Rouillard, T. Mesnard, G. Cideron, J.-b. Grill, S. Ramos, E. Yvinec, M. Casbon, E. Pot, I. Penchev, and G. Liu, “Gemma 3 technical report,” arXiv preprint arXiv:2503.19786 , 2025. [18] M. Khairy, V. Nikiforov, D. Nellans, and T. G. Rogers, “Locality-Centric Data and Threadblock Management for Massive GPUs,” in 2020 53rd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) . Athens, Greece: IEEE, Oct. 2020, pp. 1022–1036. [Online]. Available: https://ieeexplore.ieee.org/document/9251964/ [19] H. Kim, R. Hadidi, L. Nai, H. Kim, N. Jayasena, Y. Eckert, O. Kayiran, and G. Loh, “CODA: Enabling Co-location of Computation and Data for Multiple GPU Systems,” ACM Transactions on Architecture and Code Optimization , vol. 15, no. 3, pp. 1–23, Sep. 2018. [20] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) , 2023. [21] A. Li, S. L. Song, W. Liu, X. Liu, A. Kumar, and H. Corporaal, “Locality-aware CTA clustering for modern GPUs,” in Proceedings of the Twenty-Second International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) . ACM, 2017, pp. 297–311. [22] Llama Team, AI@Meta, “The Llama 3 herd of models,” arXiv preprint arXiv:2407.21783 , 2024. [23] G. H. Loh and R. Swaminathan, “The Next Era for Chiplet Innovation,” in 2023 Design, Automation & Test in Europe Conference & Exhibition (DATE) . Antwerp, Belgium: IEEE, Apr. 2023, pp. 1–6. [24] U. Milic, O. Villa, E. Bolotin, A. Arunkumar, E. Ebrahimi, A. Jaleel, A. Ramirez, and D. Nellans, “Beyond the socket: NUMA-aware GPUs,” in Proceedings of the 50th Annual IEEE/ACM International Symposium on Microarchitecture . Cambridge Massachusetts: ACM, Oct. 2017, pp. 123–135. [25] M. Musavi, E. Irabor, A. Das, E. Alarcón, and S. Abadal, “Communi-cation characterization of AI workloads for large-scale multi-chiplet accelerators,” in 2025 IEEE International Symposium on Circuits and Systems (ISCAS) , 2025, pp. 1–5. [26] J. Park, S. Jang, O. Kwon, Y. Lee, and S. Hong, “Leveraging Chiplet-Locality for Efficient Memory Mapping in Multi-Chip Module GPUs,” in Proceedings of the 2025 58th IEEE/ACM International Symposium on Microarchitecture . Seoul Korea: ACM, Oct. 2025, pp. 1040–1057. 
+
+11 [27] P. Patel, E. Choukse, C. Zhang, A. Shah, Íñigo Goiri, S. Maleki, and R. Bianchini, “Efficient generative llm inference using phase splitting,” in Proceedings of the 51st Annual International Symposium on Computer Architecture (ISCA) . IEEE, 2024. [Online]. Available: https://www.microsoft.com/en-us/research/publication/splitwise-efficient-generative-llm-inference-using-phase-splitting/ [28] J. Power, A. Basu, J. Gu, S. Puthoor, B. M. Beckmann, M. D. Hill, S. K. Reinhardt, and D. A. Wood, “Heterogeneous system coherence for integrated CPU-GPU systems,” in Proceedings of the 46th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) ,2013, pp. 457–467. [29] B. Pratheek, N. Jawalkar, and A. Basu, “Designing Virtual Memory System of MCM GPUs,” in 2022 55th IEEE/ACM International Sympo-sium on Microarchitecture (MICRO) . Chicago, IL, USA: IEEE, Oct. 2022, pp. 404–422. [30] A. Prodromou, M. R. Meswani, N. Jayasena, G. H. Loh, and D. M. Tullsen, “MemPod: A clustered architecture for efficient and scalable migration in flat address space multi-level memories,” in 2017 IEEE International Symposium on High Performance Computer Architecture (HPCA) , 2017, pp. 433–444. [31] P. G. Recasens, F. Agulló, Y. Zhu, C. Wang, E. K. Lee, O. Tardieu, J. Torres, and J. L. Berral, “Mind the memory gap: Unveiling gpu bottlenecks in large-batch llm inference,” arXiv preprint arXiv:2503.08311 , 2025. [Online]. Available: https://arxiv.org/abs/2503.08311 [32] Y. S. Shao, J. Clemons, R. Venkatesan, B. Zimmer, M. Fojtik, N. Jiang, B. Keller, A. Klinefelter, N. Pinckney, P. Raina, S. G. Tell, Y. Zhang, W. J. Dally, J. S. Emer, C. T. Gray, S. W. Keckler, and B. Khailany, “Simba: Scaling deep-learning inference with multi-chip-module-based architecture,” in Proceedings of the 52nd IEEE/ACM International Symposium on Microarchitecture (MICRO) , 2019, pp. 14–27. [33] A. Smith, G. H. Loh, M. J. Schulte, M. Ignatowski, S. Naffziger, M. Mantor, M. F. N. Kalyanasundharam, V. Alla, N. Malaya, J. L. Greathouse, E. Chapman, and R. Swaminathan, “Realizing the AMD Exascale Heterogeneous Processor Vision : Industry Product,” in 
+
+2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) . Buenos Aires, Argentina: IEEE, Jun. 2024, pp. 876–889. [34] Y. Sun, T. Baruah, S. A. Mojumder, S. Dong, X. Gong, S. Treadway, Y. Bao, S. Hance, C. McCardwell, V. Zhao, H. Barclay, A. K. Ziabari, Z. Chen, R. Ubal, J. L. Abellán, J. Kim, A. Joshi, and D. Kaeli, “MGPUSim: enabling multi-GPU performance modeling and optimization,” in Proceedings of the 46th International Symposium on Computer Architecture . Phoenix Arizona: ACM, Jun. 2019, pp. 197–209. [Online]. Available: https://dl.acm.org/doi/10.1145/3307650.3322230 [35] R. Swann, M. Osama, X. Guo, B. Nelson, L. Zhang, A. Brown, Y. Ong, A. Yazdani, S. Siddens, G. Dasika, and A. Underwood, “tritonBLAS: Triton-based analytical approach for GEMM kernel parameter selection,” arXiv preprint arXiv:2512.04226 , 2024. [36] J. Tan, Z. Li, W. Wang, J. Wang, K. Yan, and X. Wei, “ACOPT: Adaptive continuity-aware address translation for performance optimization of MCM-GPU architectures,” Future Generation Computer Systems ,vol. 175, p. 108048, Feb. 2026. [37] Z. Tan, H. Cai, R. Dong, and K. Ma, “NN-Baton: DNN workload orchestration and chiplet granularity exploration for multichip accelerators,” in 2021 ACM/IEEE 48th Annual International Symposium on Computer Architecture (ISCA) , 2021, pp. 1013–1026. [38] H. Touvron, L. Martin, K. Stone, P. Albert, A. Almahairi, Y. Babaei, N. Bashlykov, S. Batra, P. Bhargava, S. Bhosale, D. Bikel, L. Blecher, C. C. Ferrer, M. Chen, G. Cucurull, D. Esiobu, J. Fernandes, J. Fu, W. Fu, B. Fuller, C. Gao, V. Goswami, N. Goyal, A. Hartshorn, S. Hosseini, R. Hou, H. Inan, M. Kardas, V. Kerkez, M. Khabsa, I. Kloumann, A. Korenev, P. S. Koura, M.-A. Lachaux, T. Lavril, J. Lee, D. Liskovich, Y. Lu, Y. Mao, X. Martinet, T. Mihaylov, P. Mishra, I. Molybog, Y. Nie, A. Poulton, J. Reizenstein, R. Rungta, K. Saladi, A. Schelten, R. Silva, E. M. Smith, R. Subramanian, X. E. Tan, B. Tang, R. Taylor, A. Williams, J. X. Kuan, P. Xu, Z. Yan, I. Zarov, Y. Zhang, A. Fan, M. Kambadur, S. Narang, A. Rodriguez, R. Stojnic, S. Edunov, and T. Scialom, “Llama 2: Open foundation and fine-tuned chat models,” 
+
+arXiv preprint arXiv:2307.09288 , 2023. [39] D. Tripathy, A. Abdolrashidi, L. N. Bhuyan, L. Zhou, and D. Wong, “PAVER: Locality graph-based thread block scheduling for GPUs,” 
+
+ACM Transactions on Architecture and Code Optimization (TACO) ,vol. 18, no. 3, pp. 1–26, 2021. [40] P. Vellaisamy, T. Labonte, S. Chakraborty, M. Turner, S. Sury, and J. P. Shen, “Characterizing and Optimizing LLM Inference Workloads on CPU-GPU Coupled Architectures,” in 2025 IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) .Ghent, Belgium: IEEE, May 2025, pp. 49–61. [41] H. Wang, X. Xiao, M. Yan, Z. Zhu, D. Han, D. Wang, W. Li, X. Ye, C. Hu, H. Chen, and G. Sun, “A Systematic Characterization of LLM Inference on GPUs,” arXiv preprint arXiv:2512.01644 , Dec. 2025. [42] D. Xu, L. Xu, J. Ren, and Y. Sun, “Exploring the Wafer-Scale GPUs,” in Proceedings of the 17th Workshop on General Purpose Processing Using GPU . Las Vegas NV USA: ACM, Mar. 2025, pp. 8–13. [43] J. Xu, Z. Guo, J. He, H. Hu, T. He, S. Bai, K. Chen, J. Wang, Y. Fan, K. Dang, B. Zhang, X. Wang, Y. Chu, and J. Lin, “Qwen3-omni technical report,” arXiv preprint arXiv:2509.17765 , 2025. [44] L. Zheng, L. Yin, Z. Xie, J. Huang, C. Sun, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng, “SGLang: Efficient execution of structured language model programs,” in Advances in Neural Information Processing Systems (NeurIPS) , 2024. [45] B. Zhong, Z. Ye, X. Li, P. Wang, H. Huang, Z. Li, Z. Yu, and M. Wang, “LRM-GPU: Alleviating synchronization overhead for multi-chiplet GPU architecture,” in 2026 IEEE International Symposium on High-Performance Computer Architecture (HPCA) , 2026. 
+
+12
