@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-03</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-07</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 15 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>9</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-03 21:56:16 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-07 02:12:59 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读6篇大模型系统前沿，发现推理与微调共置服务及多分区GPU内存交互是两大亮点。</p>
-<p>高分论文揭示：无主机亲和的DeltaServe可无缝混合推理与微调，而多分区NUMA GPU上LLM核心访问模式将深刻影响性能。</p>
-<p>建议开发者优先关注共置调度策略与显存局部性优化，它们正成为下一代LLM服务效率的关键。</p>
+<p>今日深入剖析了多GPU运行时能效调度与分级通信框架，并速览了专家并行训练的低成本方案。</p>
+<p>最值得关注的是DEFT联合任务放置与DVFS的节能策略，以及可配置分级Allreduce带来的通信加速。</p>
+<p>建议读者尝试将这类通信与能耗联合优化思路引入大规模模型训练，在节省成本的同时保持扩展性。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">9 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DeltaServe: Host-Agnostic Co-Serving of Inference and Fine-Tuning for LLMs">DeltaServe: Host-Agnostic Co-Serving of Inference and Fine-Tuning for LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Characterizing LLM Kernel Access and Memory Interaction in Multi-Partition NUMA GPUs">Characterizing LLM Kernel Access and Memory Interaction in Multi-Partition NUMA GPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework">Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DEFT: Joint Task Placement and DVFS for Energy-Efficient Multi-GPU Runtimes">DEFT: Joint Task Placement and DVFS for Energy-Efficient Multi-GPU Runtimes</span></li><li><span class="dpr-home-dashboard-paper-title" title="Configurable and Hierarchical Allreduce">Configurable and Hierarchical Allreduce</span></li><li><span class="dpr-home-dashboard-paper-title" title="Unleashing the Potential of Large Language Models: A Blueprint for Real-Time, Enterprise-Ready Deployments">Unleashing the Potential of Large Language Models: A Blueprint for Real-Time, Enterprise-Ready Deployments</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>9</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DraftExpert: Expansion-Aware Self-Speculative Decoding for End-Device MoE Inference">DraftExpert: Expansion-Aware Self-Speculative Decoding for End-Device MoE Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tevatron Meets Megatron: Expert-Parallel LLM Reranker Training on an Academic Budget">Tevatron Meets Megatron: Expert-Parallel LLM Reranker Training on an Academic Budget</span></li><li><span class="dpr-home-dashboard-paper-title" title="Pin Once, Swap Light: Subspace-Aligned Centroid-Residual Training for Efficient Ultra-LoRA Serving">Pin Once, Swap Light: Subspace-Aligned Centroid-Residual Training for Efficient Ultra-LoRA Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="MESH: Memory-Efficient Sinkhorn Optimization for Mixture-of-Experts Training">MESH: Memory-Efficient Sinkhorn Optimization for Mixture-of-Experts Training</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 </div>
 
