@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-07</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-08</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 15 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>9</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-07 02:12:59 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-08 20:54:32 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日深入剖析了多GPU运行时能效调度与分级通信框架，并速览了专家并行训练的低成本方案。</p>
-<p>最值得关注的是DEFT联合任务放置与DVFS的节能策略，以及可配置分级Allreduce带来的通信加速。</p>
-<p>建议读者尝试将这类通信与能耗联合优化思路引入大规模模型训练，在节省成本的同时保持扩展性。</p>
+<p>今日精读联邦学习两篇高影响力工作（FL-OA与FeDepth），并速读多篇处理异构性的联邦学习及大模型协作新作。</p>
+<p>最值得关注的是：通过外包审计增强拜占庭鲁棒性，以及针对机器人异构性的深度估计联邦方案，同时跨大模型KV缓存翻译体现了协作新思路。</p>
+<p>建议读者重点关注联邦学习在真实智能设备与异构系统下的安全性与实用性突破，可结合自身场景尝试模型重组或图学习范式。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">9 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DEFT: Joint Task Placement and DVFS for Energy-Efficient Multi-GPU Runtimes">DEFT: Joint Task Placement and DVFS for Energy-Efficient Multi-GPU Runtimes</span></li><li><span class="dpr-home-dashboard-paper-title" title="Configurable and Hierarchical Allreduce">Configurable and Hierarchical Allreduce</span></li><li><span class="dpr-home-dashboard-paper-title" title="Unleashing the Potential of Large Language Models: A Blueprint for Real-Time, Enterprise-Ready Deployments">Unleashing the Potential of Large Language Models: A Blueprint for Real-Time, Enterprise-Ready Deployments</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FL-OA: A Byzantine-Robust Federated Learning Framework with Outsourced Auditing for Intelligent Devices">FL-OA: A Byzantine-Robust Federated Learning Framework with Outsourced Auditing for Intelligent Devices</span></li><li><span class="dpr-home-dashboard-paper-title" title="FeDepth: Federated Learning for Depth Estimation under Robot Heterogeneity">FeDepth: Federated Learning for Depth Estimation under Robot Heterogeneity</span></li><li><span class="dpr-home-dashboard-paper-title" title="ComFuse: Fusing Complex Memory-Intensive Subgraphs with Compute-Intensive Kernels For Modern GPU Architectures">ComFuse: Fusing Complex Memory-Intensive Subgraphs with Compute-Intensive Kernels For Modern GPU Architectures</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>9</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tevatron Meets Megatron: Expert-Parallel LLM Reranker Training on an Academic Budget">Tevatron Meets Megatron: Expert-Parallel LLM Reranker Training on an Academic Budget</span></li><li><span class="dpr-home-dashboard-paper-title" title="Pin Once, Swap Light: Subspace-Aligned Centroid-Residual Training for Efficient Ultra-LoRA Serving">Pin Once, Swap Light: Subspace-Aligned Centroid-Residual Training for Efficient Ultra-LoRA Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="MESH: Memory-Efficient Sinkhorn Optimization for Mixture-of-Experts Training">MESH: Memory-Efficient Sinkhorn Optimization for Mixture-of-Experts Training</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Mixture-of-Translators: Translating KV Caches Across Heterogeneous Large Language Models">Mixture-of-Translators: Translating KV Caches Across Heterogeneous Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Towards Effective Federated Multimodal Graph Learning via Navigating Multifaceted Heterogeneity">Towards Effective Federated Multimodal Graph Learning via Navigating Multifaceted Heterogeneity</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedJigsaw: Multi-Agent Collaborative Model Reassembly for Decentralized Heterogeneous Federated Learning">FedJigsaw: Multi-Agent Collaborative Model Reassembly for Decentralized Heterogeneous Federated Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 
