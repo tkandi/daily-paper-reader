@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-09</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-10</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-09 20:39:23 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-10 21:17:39 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读两篇聚焦不确定性下云编排与在线强化学习，速读则覆盖隐私量化、边端协同及KV缓存压缩。</p>
-<p>最值得关注的是将决策优化闭环融入云资源调度，以及用稀疏策略迁移提升智能体在线学习效率。</p>
-<p>建议开发者优先从不确定性感知的闭环优化视角，重新审视当前系统的资源调度与模型服务架构。</p>
+<p>今日精读两篇前沿系统论文，直击大模型长上下文训练与多芯GPU扩展的两大工程瓶颈。</p>
+<p>最值得看的是StateFlow提出的序列流水线并行，能高效训练超长线性递归模型；NUNA则首次刻画并缓解了多芯GPU的非均匀网络访问问题。</p>
+<p>若你想跟进，不妨从线性模型的并行策略和下一代GPU互联优化切入，它们正在重塑大算力基础设施。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Closed-Loop Decision-Focused Learning for User-Aware Cloud Orchestration under Uncertainty">Closed-Loop Decision-Focused Learning for User-Aware Cloud Orchestration under Uncertainty</span></li><li><span class="dpr-home-dashboard-paper-title" title="AReaL-DTE: Sparse Policy-Weight Transfer for Online Agentic Reinforcement Learning">AReaL-DTE: Sparse Policy-Weight Transfer for Online Agentic Reinforcement Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="CRIP: Channel Level Representation Injection for Personalized One-Shot Federated Learning">CRIP: Channel Level Representation Injection for Personalized One-Shot Federated Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="StateFlow: Sequence Pipeline Parallelism for Long-Context Modeling with Linear Recurrence">StateFlow: Sequence Pipeline Parallelism for Long-Context Modeling with Linear Recurrence</span></li><li><span class="dpr-home-dashboard-paper-title" title="NUNA: Characterizing and Mitigating Non-Uniform Network Access in Multi-Die GPU Scale-Up Systems">NUNA: Characterizing and Mitigating Non-Uniform Network Access in Multi-Die GPU Scale-Up Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="SNI-GNN: SmartNIC-Assisted Full-Graph GNN Training with In-Network Embedding Prediction">SNI-GNN: SmartNIC-Assisted Full-Graph GNN Training with In-Network Embedding Prediction</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SSTQ:Privacy-Preserving Vector Quantization via Subsampled Stochastic TurboQuant">SSTQ:Privacy-Preserving Vector Quantization via Subsampled Stochastic TurboQuant</span></li><li><span class="dpr-home-dashboard-paper-title" title="Latency-Tolerant Cloud-Edge Collaborative Vision-Language-Action Models via Emergent Representational Specialization">Latency-Tolerant Cloud-Edge Collaborative Vision-Language-Action Models via Emergent Representational Specialization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Practical Online KV Cache Compaction for LLM Agents: An Empirical Study">Practical Online KV Cache Compaction for LLM Agents: An Empirical Study</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Stream Learning: Partition-Fair Gossip Learning Without Tokens">Stream Learning: Partition-Fair Gossip Learning Without Tokens</span></li><li><span class="dpr-home-dashboard-paper-title" title="Multi-Level Modeling of Large Language Model Inference Latency and Energy via Hybrid Analytical--Machine-Learning Predictors">Multi-Level Modeling of Large Language Model Inference Latency and Energy via Hybrid Analytical--Machine-Learning Predictors</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
 </div>
 
