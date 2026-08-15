@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-10</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-15</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 20 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>9</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-10 21:17:39 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-15 19:44:57 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,10 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读两篇前沿系统论文，直击大模型长上下文训练与多芯GPU扩展的两大工程瓶颈。</p>
-<p>最值得看的是StateFlow提出的序列流水线并行，能高效训练超长线性递归模型；NUNA则首次刻画并缓解了多芯GPU的非均匀网络访问问题。</p>
-<p>若你想跟进，不妨从线性模型的并行策略和下一代GPU互联优化切入，它们正在重塑大算力基础设施。</p>
+<p>今日共生成 20 篇推荐（精读 9 篇，速读 11 篇）</p>
+<p>精读：《ElastiCo: Elastic Configuration and Interference-Aware Orchestration for GPU Clusters》（10.0/10）, 《Compute-Optimal Is Not Cluster-Optimal: Systems-Aware Scaling for Sparse Mixture-of-Experts》（10.0/10）</p>
+<p>速读：《LGNNIC: Acceleration of Large-Scale GNN Training using SmartNICs》（8.0/10）, 《ZeroLock: Concurrent Memory-Efficient LLM Training via Modular Update Decoupling》（8.0/10）, 《Gradient Under Microscope: Benchmarking Resource Utilization of Memory-Efficient Gradient Computation Methods》（8.0/10）</p>
+<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +74,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">9 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="StateFlow: Sequence Pipeline Parallelism for Long-Context Modeling with Linear Recurrence">StateFlow: Sequence Pipeline Parallelism for Long-Context Modeling with Linear Recurrence</span></li><li><span class="dpr-home-dashboard-paper-title" title="NUNA: Characterizing and Mitigating Non-Uniform Network Access in Multi-Die GPU Scale-Up Systems">NUNA: Characterizing and Mitigating Non-Uniform Network Access in Multi-Die GPU Scale-Up Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="SNI-GNN: SmartNIC-Assisted Full-Graph GNN Training with In-Network Embedding Prediction">SNI-GNN: SmartNIC-Assisted Full-Graph GNN Training with In-Network Embedding Prediction</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ElastiCo: Elastic Configuration and Interference-Aware Orchestration for GPU Clusters">ElastiCo: Elastic Configuration and Interference-Aware Orchestration for GPU Clusters</span></li><li><span class="dpr-home-dashboard-paper-title" title="Compute-Optimal Is Not Cluster-Optimal: Systems-Aware Scaling for Sparse Mixture-of-Experts">Compute-Optimal Is Not Cluster-Optimal: Systems-Aware Scaling for Sparse Mixture-of-Experts</span></li><li><span class="dpr-home-dashboard-paper-title" title="EasyBalance: Cross-Layer Load Balancing in Distributed MoE Inference">EasyBalance: Cross-Layer Load Balancing in Distributed MoE Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>9</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Stream Learning: Partition-Fair Gossip Learning Without Tokens">Stream Learning: Partition-Fair Gossip Learning Without Tokens</span></li><li><span class="dpr-home-dashboard-paper-title" title="Multi-Level Modeling of Large Language Model Inference Latency and Energy via Hybrid Analytical--Machine-Learning Predictors">Multi-Level Modeling of Large Language Model Inference Latency and Energy via Hybrid Analytical--Machine-Learning Predictors</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="LGNNIC: Acceleration of Large-Scale GNN Training using SmartNICs">LGNNIC: Acceleration of Large-Scale GNN Training using SmartNICs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ZeroLock: Concurrent Memory-Efficient LLM Training via Modular Update Decoupling">ZeroLock: Concurrent Memory-Efficient LLM Training via Modular Update Decoupling</span></li><li><span class="dpr-home-dashboard-paper-title" title="Gradient Under Microscope: Benchmarking Resource Utilization of Memory-Efficient Gradient Computation Methods">Gradient Under Microscope: Benchmarking Resource Utilization of Memory-Efficient Gradient Computation Methods</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 
