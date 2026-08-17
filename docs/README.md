@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-16</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-17</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-16 20:44:27 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-17 20:41:13 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 12 篇推荐（精读 4 篇，速读 8 篇）</p>
-<p>精读：《Memory-Efficient Activation Checkpointing with Sliding Window and Hirschberg&#x27;s Algorithm for 0/1 Knapsack Solving in PyTorch》（8.0/10）, 《SeFoRA: Sketch-Aggregated Federated Low-Rank Adaptation with Heterogeneous Client Ranks》（8.0/10）</p>
-<p>速读：《Out-of-Distribution Federated Distillation with Domain-Aware Proxy》（7.0/10）, 《AI Query Compilation for Unified and Optimized Execution》（7.0/10）, 《Efficient Reinforcement Learning for Long-Horizon Tool-Use Agentic Tasks》（7.0/10）</p>
+<p>今日共生成 8 篇推荐（精读 2 篇，速读 6 篇）</p>
+<p>精读：《InSituANN: Revisiting IVF for PCIe-Efficient Billion-Scale Vector Search》（8.0/10）, 《FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction》（8.0/10）</p>
+<p>速读：《Multimodal Federated Learning under Dual-Axis Modality Missingness》（7.0/10）, 《APEX: Adaptive Expert Prefetching for Memory-Efficient Edge MoE Inference》（7.0/10）, 《Beyond Parameter Space: NTK-Guided Personalized Aggregation for Robust Federated Learning》（7.0/10）</p>
 <p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
@@ -74,12 +74,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Memory-Efficient Activation Checkpointing with Sliding Window and Hirschberg&#x27;s Algorithm for 0/1 Knapsack Solving in PyTorch">Memory-Efficient Activation Checkpointing with Sliding Window and Hirschberg&#x27;s Algorithm for 0/1 Knapsack Solving in PyTorch</span></li><li><span class="dpr-home-dashboard-paper-title" title="SeFoRA: Sketch-Aggregated Federated Low-Rank Adaptation with Heterogeneous Client Ranks">SeFoRA: Sketch-Aggregated Federated Low-Rank Adaptation with Heterogeneous Client Ranks</span></li><li><span class="dpr-home-dashboard-paper-title" title="User-Assisted Collaborative Distributed Inference for Efficient QoS-Aware Autoscaling">User-Assisted Collaborative Distributed Inference for Efficient QoS-Aware Autoscaling</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="InSituANN: Revisiting IVF for PCIe-Efficient Billion-Scale Vector Search">InSituANN: Revisiting IVF for PCIe-Efficient Billion-Scale Vector Search</span></li><li><span class="dpr-home-dashboard-paper-title" title="FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction">FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Out-of-Distribution Federated Distillation with Domain-Aware Proxy">Out-of-Distribution Federated Distillation with Domain-Aware Proxy</span></li><li><span class="dpr-home-dashboard-paper-title" title="AI Query Compilation for Unified and Optimized Execution">AI Query Compilation for Unified and Optimized Execution</span></li><li><span class="dpr-home-dashboard-paper-title" title="Efficient Reinforcement Learning for Long-Horizon Tool-Use Agentic Tasks">Efficient Reinforcement Learning for Long-Horizon Tool-Use Agentic Tasks</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Multimodal Federated Learning under Dual-Axis Modality Missingness">Multimodal Federated Learning under Dual-Axis Modality Missingness</span></li><li><span class="dpr-home-dashboard-paper-title" title="APEX: Adaptive Expert Prefetching for Memory-Efficient Edge MoE Inference">APEX: Adaptive Expert Prefetching for Memory-Efficient Edge MoE Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Parameter Space: NTK-Guided Personalized Aggregation for Robust Federated Learning">Beyond Parameter Space: NTK-Guided Personalized Aggregation for Robust Federated Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>8</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 </div>
 
