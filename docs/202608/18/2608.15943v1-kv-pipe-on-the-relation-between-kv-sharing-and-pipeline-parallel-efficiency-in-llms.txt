@@ -1,0 +1,613 @@
+Title: KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs
+
+URL Source: https://arxiv.org/pdf/2608.15943v1
+
+Published Time: Tue, 18 Aug 2026 01:49:59 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs 
+
+## Maryam Dialameh 1,2 Hossein Rajabzadeh 1,2 Harish Krishnamoorthy Murali 2
+
+## Walid Ahmed 2 Weiwei Zhang 2 Hyock Ju Kwon 1
+
+> 1
+
+School of Engineering, University of Waterloo, Waterloo, Canada 
+
+> 2
+
+Ascend Team, Huawei Technologies, Toronto, Canada 
+
+Abstract 
+
+Pipeline parallelism (PP) is widely used to scale large language model (LLM) training, but its efficiency is often limited by stage imbalance and pipeline bubbles. Meanwhile, cross-layer KV sharing has primarily been studied as a mechanism for reduc-ing KV-cache costs during inference, without examining how KV reuse reshapes pipeline workloads. We present KV-Pipe , a stage-aware KV-sharing mechanism that turns KV reuse into a pipeline-balancing control knob. KV-Pipe starts from the tail stage, converts selected attention layers to cross-layer KV sharing in a tail-first order, and iteratively retargets the current bottleneck to drive the FLOPs Imbalance Ratio (FIR) toward 1. The procedure is per-formed offline and requires only a pipeline partition and per-layer FLOPs estimates, introducing negligible runtime overhead and re-quiring no online tuning. Across multiple pipeline-parallel configu-rations, KV-Pipe consistently improves utilization and throughput, achieving up to 9.2% higher training MFU and up to a 9.8% reduc-tion in iteration time, with larger gains at higher pipeline-parallel degrees where stage imbalance is amplified. Furthermore, the same KV-sharing mechanism provides an inference-side benefit by reducing KV-cache growth and redundant KV projection work, resulting in higher decoding throughput for long-context work-loads. These results identify KV layout as a system–architecture degree of freedom for jointly improving pipeline-parallel training efficiency and long-context inference. 
+
+# 1 Introduction 
+
+Large language models (LLMs) now achieve state-of-the-art performance in complex reasoning tasks, mathematical problem solving, multi-step planning, and agentic behavior Zhao et al. (2024); Toroghi et al. (2024); Li et al. (2024); Schumann et al. (2024). As model sizes continue to scale Chowdhery et al. (2023); Hoffmann et al. (2022); Smith et al. (2022); Adler et al. (2024), both training and inference impose memory and compute demands far exceeding the capacity of a single accelerator. Despite its attractive communication profile, pipeline par-allelism (PP) is notoriously sensitive to stage imbalance 
+
+Figure 1. Motivation. (a) Pipeline parallelism suffers from stage imbalance and bubble overhead. (b) KV sharing restructures cross-layer attention workloads, enabling better FLOP distribution across stages. (c) KV-Pipe leverages stage-aware KV sharing to reduce bubble time and improve MFU. 
+
+and pipeline bubbles , which waste a non-trivial fraction of allocated accelerator time, especially at scale Huang et al. (2019); Narayanan et al. (2019, 2021). Recent systems work has pushed PP efficiency by (i) re-partitioning or re-balancing layers to address memory and compute skew (e.g., activation/memory balancing in BPipe and cost-model-driven partition search in DawnPiper) Kim et al. (2023); Peng et al. (2025), (ii) mitigating bubbles via schedul-ing or opportunistic backfilling (e.g., PipeFill fills bubble time with other jobs) Arfeen et al. (2025), and (iii) han-dling prefill–decode heterogeneity in serving through phase-aware batching and throttling (e.g., chunked-prefill schedul-ing in Sarathi/Sarathi-Serve, token throttling in gLLM, temporally-disaggregated execution in TD-Pipe, and dy-namic re-sharding in Seesaw) Agrawal et al. (2023, 2024); Guo et al. (2025); Zhang et al. (2025); Su et al. (2025). These approaches substantially improve utilization, yet they largely treat the model’s per-layer cost profile as fixed, leav-ing a key system-level degree of freedom underexplored: 
+
+how the model’s internal KV layout interacts with pipeline partitioning .A common abstraction behind PP is that Transformer back-bones comprise a stack of repeated blocks, suggesting a 1arXiv:2608.15943v1 [cs.DC] 16 Aug 2026 near-uniform compute distribution across depth. In mod-ern LLMs, however, blocks are increasingly heterogeneous :models mix full attention with more efficient attention vari-ants (e.g., sliding-window attention) Jiang et al. (2023), in-sert sparse Mixture-of-Experts (MoE) modules that change per-layer parameterization and token-wise compute Jiang et al. (2024a), and even interleave fundamentally differ-ent sequence modules in hybrid designs (e.g., Transformer– Mamba hybrids) Lieber et al. (2024); Blakeman et al. (2025). As a result, layers (and therefore pipeline stages) can differ materially in FLOPs, activation footprint, and KV-cache 
+
+growth, making it difficult to maintain balanced stage times across training and inference. One natural response is to share parameters or cache struc-tures across depth. Classical cross-layer parameter sharing (e.g., ALBERT) reduces redundancy and can homogenize memory footprint across layers Lan et al. (2019). More recently, cross-layer KV sharing has emerged as an effective way to reduce KV-cache memory and decoding overhead (e.g., MLKV shares KV structures across layers; HShare shares critical KV indices across layers/heads/queries; sys-tematic studies unify and compare cross-layer KV-sharing variants) Zuhri et al. (2025); Wu et al. (2025a,b). Mean-while, KV-cache memory itself is a first-order bottleneck in production-grade serving, motivating substantial systems ef-fort in KV management (e.g., PagedAttention/vLLM) Kwon et al. (2023). However, existing KV-sharing methods primar-ily target memory compression or per-token decode speed, without explicitly optimizing for pipeline-stage balance. This paper introduces KV-Pipe , a stage-aware KV-sharing framework that elevates KV reuse from a memory-compression trick to a pipeline-level control knob . The key novelty is to couple cross-layer KV sharing with PP partitioning: by converting carefully chosen attention layers (starting from the tail stage and then tracking the moving bottleneck), KV-Pipe reshapes the per-stage compute profile without changing the PP schedule, micro-batching, opti-mizer, or training dynamics. KV-Pipe diagnoses imbalance using a lightweight FLOPs Imbalance Ratio (FIR) and then applies bottleneck-targeted KV sharing to directly flatten stage times (FIR → 1), eliminating bubbles at their source rather than merely hiding them with scheduling. This yields a double dividend: during training, KV-Pipe increases PP utilization by reducing stage skew and idle time; during in-ference, the same KV sharing reduces KV-cache growth and redundant KV projections, enabling larger effective batch-ing and higher long-context throughput. In effect, KV-Pipe exposes KV layout as a new, orthogonal and composable system–architecture degree of freedom that can be applied on top of existing PP methods to improve both train-time MFU and inference speed. 
+
+# 2 Methodology 
+
+KV-Pipe improves pipeline-parallel efficiency by using cross-layer KV sharing Dialameh et al. (2025); Rajabzadeh (2026) as a stage-aware knob. Intuitively, converting a sub-set of full-attention layers into KV-sharing layers reduces (i) the FLOPs of those layers and (ii) the growth of the KV cache during autoregressive inference. KV-Pipe applies this conversion selectively to stages that dominate the pipeline step time, thereby reducing pipeline bubbles and improving overall utilization. 
+
+## 2.1 Notation and Pipeline Partition 
+
+We consider a decoder-only Transformer with L attention layers. Pipeline parallelism with degree P partitions layers across P stages. Let stage indices be i ∈ { 1, . . . , P }, and let Si denote the set of layers assigned to stage i. We allow non-uniform components, such as the embedding module (often on stage 1) and the LM head (often on stage P ). For clarity in our case study, we use LLaMA2-7B with 
+
+L = 32 attention layers and P = 8 stages. Table 1 shows the baseline split (4 attention layers per stage) where the last stage is the bottleneck because it additionally includes the LM head. 
+
+## 2.2 Full-Attention vs. KV-Sharing Layers 
+
+Full attention. Given hidden states Xℓ ∈ RS×d at layer ℓ,full attention computes 
+
+Qℓ = XℓWQℓ , Kℓ = XℓWKℓ , Vℓ = XℓWVℓ , (1) and produces the attention output 
+
+Oℓ = softmax 
+
+ QℓK⊤
+
+> ℓ
+
+√dh
+
++ M
+
+
+
+Vℓ, (2) where M is the causal mask and dh is the per-head di-mension. In autoregressive decoding, each layer appends 
+
+(Kℓ, Vℓ) into the KV cache. 
+
+Cross-layer KV sharing. In a KV-sharing layer, keys/values are reused from a prior layer τ (ℓ) < ℓ :
+
+Kℓ ← Kτ (ℓ), Vℓ ← Vτ (ℓ). (3) The query projection and attention computation (Eq. 2) re-main unchanged. This reduces redundant KV projections and reduces KV-cache growth, which is the primary memory bottleneck in long-context inference. 20 1 2 3 4 5 6 7Emb 1 0 0 0 0 0 0 0Full attn 4 4 4 4 4 4 4 4KV sharing 0 0 0 0 0 0 0 0LM head 0 0 0 0 0 0 0 1Flops 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.763E+13 FWD time 59712.13 59237.7 59237.7 59237.7 59237.7 59237.7 59237.7 66796.0045 Memory 16.8425 15.5625 15.5625 15.5625 15.5625 15.5625 15.5625 16.8425  
+
+> Table 1. Baseline – LLaMA2-7B, PP=8, sequence length 8K, MBS=1. The last stage is the bottleneck due to the LM head.
+
+Cost effect (used by KV-Pipe). KV sharing decreases per-layer compute and KV-cache bytes; we model this at the layer level by a reduction ∆Fℓ in FLOPs and a reduction 
+
+∆Bℓ in KV-cache bytes (per token) whenever layer ℓ is converted. In practice, ∆Fℓ is dominated by removing 
+
+Kℓ, Vℓ projections, and ∆Bℓ is dominated by not storing a fresh (Kℓ, Vℓ) for that layer. 
+
+## 2.3 Proposed Metric: FLOP Imbalance Ratio 
+
+To measure and compare FLOP balance across PP splits, we 
+
+propose the following metric. Let Fstage i denote the total FLOPs assigned to stage i. We define the FLOPs Imbalance Ratio (FIR) as 
+
+FIR = max i
+
+ Fstage i
+
+
+
+Favg 
+
+, (4) where Favg is the average FLOPs across stages. To account for architectural non-uniformity such as the LM head, we compute       
+
+> Favg = 1
+> P
+> PX
+> i=1
+> NX
+> k=1
+> Flayer k
+> stage i+δi,P FLM-Head
+> !
+> .(5)
+
+Here, δi,P is the Kronecker delta ( δi,P = 1 if i = P and 
+
+0 otherwise), FLM-Head is the FLOPs of the LM head, and 
+
+F layer k 
+
+> stage i
+
+is the FLOPs of the k-th layer placed on stage i.(For uniform splits, N = L/P , while in general N can be interpreted as the number of layers on that stage.) A perfectly balanced pipeline yields FIR = 1 , and values closer to 1 indicate better balance. 
+
+## 2.4 KV-Pipe: Balancing Pipeline Stages via KV Sharing 
+
+Goal. Given a fixed PP partition {S i}Pi=1 , KV-Pipe converts a small number m of full-attention layers into KV-sharing layers to reduce the bottleneck stage FLOPs (and thus stage time), while simultaneously lowering KV-cache consump-tion. 
+
+Decision variables. Let zℓ ∈ { 0, 1} indicate whether layer 
+
+ℓ is converted to KV sharing ( zℓ = 1 ) or remains full atten-tion ( zℓ = 0 ). For each stage i, define the stage FLOPs after conversion as 
+
+Fstage i (z) = X
+
+> ℓ∈S i
+
+Fℓ(zℓ) + δi,P FLM-Head , (6) where Fℓ(0) corresponds to full attention and Fℓ(1) corre-sponds to KV sharing. 
+
+Optimization target (intuitive). KV-Pipe aims to reduce the bottleneck stage relative to the average, i.e., bring FIR 
+
+(Eq. 4) as close to 1 as possible, subject to a small budget of conversions: 
+
+> L
+
+X
+
+> ℓ=1
+
+zℓ ≤ m. (7) Rather than solving an expensive discrete optimization, KV-Pipe uses simple, interpretable allocation strategies that are easy to implement and robust in practice. 
+
+## 2.5 KV-Sharing Placement Strategies (with Figure) 
+
+Figure 2 illustrates three placement strategies we study for converting layers into KV-sharing layers. Without loss of generality , these strategies serve as archetypes : (i) uniform smoothing (Uniform), (ii) symmetric redistribution (Sym-metric Bipolar), and (iii) bottleneck targeting (Architecture-Balanced). Many alternative policies either behave similarly to one of these archetypes or can be constructed as a com-bination of them (e.g., uniform allocation followed by a bottleneck-focused correction). 
+
+2.5.1 Uniform Split 
+
+Allocate KV-sharing layers approximately evenly across stages (starting from the last stage and moving left), reduc-ing FLOPs broadly without explicitly prioritizing a single bottleneck. 3Figure 2. KV sharing strategies for LLaMA with 32 layers under PP. 
+
+2.5.2 Symmetric Bipolar Split 
+
+Allocate KV-sharing layers from two anchors: the last stage and the middle stage, moving left symmetrically. This is useful when imbalance is not localized only at the last stage. 
+
+2.5.3 Architecture-Balanced Split 
+
+Allocate KV-sharing layers preferentially to the current bot-tleneck stage (typically stage P due to the LM head), greed-ily reducing max i Fstage i to drive the imbalance ratio toward 
+
+1.
+
+## 2.6 Algorithm: KV-Pipe 
+
+Algorithm 1 describes the architecture-balanced KV-Pipe policy as a greedy, tail-first reconfiguration of attention lay-ers. KV-Pipe always starts from the last pipeline stage (stage 
+
+P ), which is typically the bottleneck due to architectural components such as the LM head. Within the selected stage, KV-Pipe converts layers to KV-sharing in a last-layer-first order, i.e., it picks the deepest remaining full-attention layer 
+
+ℓ⋆ = max {ℓ ∈ S i⋆ : zℓ = 0 } and turns it into a KV-sharing layer. Each conversion decreases the FLOPs of that stage by ∆Fℓ⋆ = Fℓ⋆ (0) − Fℓ⋆ (1) , and KV-Pipe recom-putes the proposed imbalance metric FIR (Eqs. (4)–(5)). Once the tail stage becomes sufficiently close to the average (Fstage P ≤ (1 + ϵ)Favg ), KV-Pipe automatically switches to the current bottleneck stage i⋆ = arg max j Fstage j , en-suring that the procedure continues to drive the pipeline toward a balanced state ( FIR → 1) even if the bottleneck shifts as sharing increases. The algorithm terminates when 
+
+FIR ≤ 1 + ϵ, when a conversion budget is reached, or when no further convertible layers remain in the chosen stage. This behavior aligns with the architecture-balanced place-ment in Figure 2 and explains the observed FIR and MFU improvements (Table 3). Importantly, KV-Pipe is a fast offline procedure: it requires only the PP partition and a lightweight per-layer FLOPs estimate (e.g., derived analytically or from a one-time profil-
+
+PP split strategy FLOP Imbalance Ratio 
+
+Baseline 1.119453925 Uniform 1.103804831 Symmetric Bipolar 1.068260764 Architecture-Balanced 1.00040391  
+
+> Table 2. FLOP Imbalance Ratio (proposed) for LLaMA2-7B with 4 KV-sharing layers, PP=8, sequence length 8K, MBS=1.
+
+ing pass), and it does not require running actual training or iterative online tuning. If we allow at most m conversions, each iteration performs constant-time updates to a single stage plus a scan over P stages to identify the current bot-tleneck. With typical pipeline sizes ( P ≤ 16 ) and small m
+
+(a handful of layers), this cost is negligible compared to any real training or serving run, making KV-Pipe practical to deploy as a pre-processing step before launching large-scale jobs. 
+
+## 2.7 Case Study Result via the Proposed Met-ric 
+
+Using the proposed FIR metric, Table 2 compares the base-line and the three strategies for LLaMA2-7B with m = 4 
+
+KV-sharing layers under PP=8. Architecture-Balanced split achieves the closest value to 1, indicating near-perfect FLOP balance. 
+
+# 3 Experiments 
+
+## 3.1 Experimental Setup 
+
+Model and workload. We evaluate KV-Pipe on LLaMA2-7B with sequence length S = 8 K. Unless otherwise stated, we report training efficiency under a fixed global batch size and fixed optimizer/precision settings. The results are primarily conducted on Huawei Ascend 910B and NVIDIA 
+
+V100 . Our main results are on NPUs; GPU results validate that KV-Pipe trends generalize across backends. 
+
+Pipeline parallelism (PP). We purely investigate PP behav-ior. All experiments use pipeline parallelism with degree PP ∈ { 2, 4, 8}. We keep other parallelism dimensions fixed (i.e., we do not set or vary TP/CP in the main experiments) to isolate PP effects. 
+
+MFU definition. We report model FLOPs utilization (MFU) as 
+
+MFU = 
+
+Fmodel 
+
+| {z } 
+
+> FLOPs/iter
+
+· Throughput 
+
+| {z }
+
+> iter/sec
+
+Fpeak 
+
+| {z } 
+
+> device peak FLOPs/sec
+
+, (8) 4Algorithm 1 KV-Pipe (Architecture-Balanced): Tail-first KV sharing until FIR → 1
+
+Require: PP partition {S i}Pi=1 with ordered layers in each stage; full-attn and KV-share FLOPs {Fℓ(0) , F ℓ(1) }Lℓ=1 ; LM-head FLOPs 
+
+FLM-Head ; tolerance ϵ > 0; max conversions m (optional, default m = L). 
+
+Ensure: Conversion mask z ∈ { 0, 1}L; updated stage FLOPs {Fstage i }Pi=1 ; achieved FIR . 
+
+> 1:
+
+z ← 0. 
+
+> 2:
+
+Compute baseline stage FLOPs: 
+
+Fstage i ← P 
+
+> ℓ∈S i
+
+Fℓ(0) + δi,P FLM-Head , ∀i ∈ { 1, . . . , P }. 
+
+> 3:
+
+Compute FIR using Eqs. (4)–(5).  
+
+> 4:
+
+t ← 0. 
+
+> 5:
+
+i ← P ▷ starts from the last stage  
+
+> 6:
+
+while FIR > 1 + ϵ and t < m do  
+
+> 7:
+
+i⋆ ← i ▷ current stage to lighten (initially the tail)  
+
+> 8:
+
+if Fstage i⋆ ≤ (1 + ϵ) · Favg then  
+
+> 9:
+
+i⋆ ← arg max j∈{ 1,...,P } Fstage j ▷ tail is no longer bottleneck; pick the new one  
+
+> 10:
+
+end if  
+
+> 11:
+
+Choose the last convertible layer in stage i⋆:
+
+ℓ⋆ ← max {ℓ ∈ S i⋆ : zℓ = 0 }. 
+
+> 12:
+
+if ℓ⋆ is undefined then  
+
+> 13:
+
+break ▷ no convertible layers remain in the selected stage  
+
+> 14:
+
+end if  
+
+> 15:
+
+Convert to KV sharing: zℓ⋆ ← 1. 
+
+> 16:
+
+∆Fℓ⋆ ≜ Fℓ⋆ (0) − Fℓ⋆ (1) > 0. 
+
+> 17:
+
+Update stage FLOPs: Fstage i⋆ ← Fstage i⋆ − ∆Fℓ⋆ . 
+
+> 18:
+
+t ← t + 1 . 
+
+> 19:
+
+Recompute Favg (Eq. (5)) and FIR (Eq. (4)).  
+
+> 20:
+
+end while  
+
+> 21:
+
+return z, {Fstage i }Pi=1 , FIR .
+
+where Fmodel is the model compute per iteration (FLOPs/iter), Throughput is the measured iteration throughput (iter/s), and Fpeak is the device peak compute (FLOPs/s), scaled by the number of devices used. 
+
+KV-Pipe strategies. We compare three KV-sharing place-ment strategies under PP: U NIFORM , S YMMETRIC BIPO -
+
+> LAR
+
+, and A RCHITECTURE -B ALANCED . We also vary the KV-sharing budget (number of KV-sharing layers) for abla-tion. 
+
+## 3.2 Results on Ascend 910B NPUs 
+
+We evaluate KV-Pipe on 8× Ascend 910B NPUs using MindSpeed-LM’s 1F1B pipeline schedule (no interleaving) with LLaMA2-7B . We test three training configurations: (1) 
+
+S=4 K, PP=2; (2) S=8 K, PP=4; (3) S=8 K, PP=8. For each configuration, we sweep the KV-sharing budget (“KV size”) under the three placement strategies and select the best KV-Pipe variant , which is consistently the Architecture-Balanced placement. Table 3 summarizes the baseline 1F1B (no KV sharing) versus the best KV-Pipe (Architecture-Balanced) at the MFU-optimal KV-sharing budget for each configuration; the full MFU sweeps and time/FLOPs sweeps are shown in Figures 3 and 4. 
+
+MFU and time improvements. Across all settings, KV-Pipe increases MFU and reduces iteration time. The MFU gains grow with pipeline depth: from 62.45 →64.39 (PP=2) to 61.28 →63.93 (PP=4), and 56.32 →61.49 (PP=8), corre-sponding to relative MFU improvements of 3.10%, 4.32%, and 9.17%, respectively (Table 3). Iteration time decreases by 4.90%–9.80%, indicating consistent end-to-end through-put gains. 
+
+Imbalance metric tracks utilization. The best KV-Pipe setting also moves FIR closer to 1 in all three configura-tions (e.g., 1.1194 →1.0004 for S=8 K, PP=8), matching the trend in MFU improvements and supporting our hy-pothesis that reducing stage imbalance is a key driver of PP utilization (Table 3).Figures 3 and 4 reveal a consistent 
+
+non-monotonic MFU pattern as we increase the KV-sharing budget (shared-KV size). At small shared-KV sizes, con-verting a few full-attention layers to KV-sharing layers in the A RCHITECTURE -B ALANCED placement selectively re-duces the bottleneck stage compute, thereby reducing the stage-time skew. Equivalently, the Architecture-Balanced strategy reduces FIR and moves it closer to the ideal value of 1 (Table 3), indicating a more balanced pipeline. This ini-tial balancing effect increases MFU sharply (e.g., the green curve in Figure 3), because less time is wasted in pipeline bubbles and idle periods. Importantly, the KV-sharing size that maximizes MFU is an intermediate point rather than the largest shared-KV size. Across our three NPU settings, the MFU-optimal shared-KV sizes are KV=8 for ( S=4 K, PP=2), KV=6 for ( S=8 K, PP=4), and KV=4 for ( S=8 K, 5PP=8), as highlighted by stars in Figure 3 and summarized in Table 3. These optima occur where KV-Pipe has sufficiently reduced the bottleneck stage to equalize stage latencies , i.e., FIR is closest to 1, so the pipeline achieves near-maximal overlap. 
+
+Why MFU drops beyond the optimum: over-correction 
+
+induces new imbalance. When shared-KV size increases beyond the MFU-optimal point, KV-Pipe begins to over-lighten the previously bottlenecked stages. While total model FLOPs continue to decrease monotonically (bottom rows of Figure 4), the per-stage compute distribution is no longer aligned: the earlier (or middle) stages can become the new bottleneck, and FIR increases again (moving away from 1). This renewed imbalance reintroduces pipeline idle time, and MFU consequently declines after the peak (Fig-ure 3). This explains why “more KV sharing” is not always better for PP efficiency: the dominant factor is balance , not just fewer FLOPs. 
+
+Time/FLOPs sweeps corroborate the MFU behavior. Fig-ure 4 further supports this interpretation. FLOPs decrease approximately monotonically with KV size for all strategies, yet iteration time shows diminishing returns and can flat-ten (or even slightly worsen) once imbalance shifts to other stages. In practice, the shared-KV size that minimizes time does not necessarily coincide with the shared-KV size that maximizes MFU, because MFU is sensitive to bubble over-head caused by imbalance. Overall, these results validate the design principle of KV-Pipe: stage-aware KV placement should be tuned to minimize imbalance (FIR →1), which yields an optimal KV-sharing budget that maximizes PP efficiency. 
+
+## 3.3 Results on GPUs (8 ×V100)   
+
+> Figure 5. Inference throughput (LLaMA2-7B, MHA). Tokens/s vs. context length for the Transformer baseline and KV-Pipe with
+> 50% KV sharing, i.e. shared-KV size. KV-Pipe improves through-put across all contexts, with larger gains at longer contexts where KV-cache overhead dominates.
+
+We repeat the PP-focused evaluation on a single node with 
+
+8×NVIDIA V100 GPUs. We compare 1F1B Harlap et al. (1806), Seq1F1B Ao et al. (2025), and KV-Pipe under PP ∈ { 2, 4, 8} and context length S ∈ { 4K, 8K, 16 K}, on four LLMs: LLaMA2-7B, LLaMA2-13B, LLaMA3-8B, and Qwen2.5-14B. Table 4 reports PP-only performance. Each cell contains a triplet “PP =2 / 4 / 8”, i.e., the first number corresponds to PP=2, the second to PP=4, and the third to PP=8. Across all models and sequence lengths, 
+
+Seq1F1B improves over 1F1B by reducing pipeline bubbles through sequential scheduling, which is most visible as PP increases (e.g., LLaMA2-7B at S=8 K: MFU 39.0 →47.0 and time 305 →265 when moving from 1F1B to Seq1F1B at PP=8). KV-Pipe provides an additional gain beyond Seq1F1B by directly reducing stage-level compute skew via stage-aware KV sharing, leading to both higher MFU and lower iteration time across the board. The benefit grows with pipeline depth: KV-Pipe’s improvements are modest at PP=2 but become consistently largest at PP=8, where imbalance and idle time are amplified (e.g., LLaMA2-13B at S=16 K and PP=8: MFU 39.5 →52.0 and time 960 →750 from 1F1B to KV-Pipe). Longer contexts further strengthen the trend because KV/attention costs become more dominant and heterogeneous across stages, increasing the headroom for KV-Pipe to rebalance the pipeline. Overall, the table shows that Seq1F1B primarily hides bubbles through better scheduling, while KV-Pipe removes bubbles by making stage workloads more uniform; the combined effect is most pronounced at high PP and long context lengths. Across all evaluated models, the benefit of Seq1F1B grows with P (bubble mitigation), while KV-Pipe yields an addi-tional improvement by directly reducing stage-level skew; the combined effect is most pronounced at PP=8 and longer contexts where both bubble overhead and per-stage KV/compute heterogeneity are amplified. 
+
+Inference case study (MHA) and double benefit of KV-Pipe. To complement our training results, we run an inference case study to illustrate that KV-Pipe pro-vides a second, orthogonal benefit beyond pipeline bal-ancing. We consider LLaMA2-7B with standard Multi-Head Attention (MHA) (i.e., each layer maintains its own K, V cache per head, without grouped-query sharing), and evaluate long-context decoding at sequence lengths 
+
+S ∈ { 8K, 16 K, 32 K, 64 K, 128 K}. Figure 5 reports the end-to-end inference throughput (tokens/s) comparing a Trans-former baseline (no KV sharing) against KV-Pipe under identical execution assumptions. We observe a consistent throughput improvement that becomes more pronounced as context grows: KV-Pipe achieves modest gains at shorter contexts (where cache pressure is limited), but delivers sub-stantially larger speedups at long contexts where KV-cache memory and attention cost dominate. Importantly, this in-ference improvement is additive to KV-Pipe’s training-side 6(a) S=4 K, PP=2, SKV=8                                    
+
+> Metric name Metric change Improvement MFU 62.45 →64.39 3.10% Iteration time (s) 104.14 →99.27 4.90% FIR 1.0182 →1.0101 0.80% FWD time 0.1152 →0.1094 5.30%
+> (b) S=8 K, PP=4, SKV=6
+> Metric name Metric change Improvement MFU 61.28 →63.93 4.32% Iteration time (s) 241.96 →224.95 7.56% FIR 1.051 →1.018 3.24% FWD time 0.1260 →0.1189 5.97%
+> (c) S=8 K, PP=8, SKV=4)
+> Metric name Metric change Improvement MFU 56.32 →61.49 9.17% Iteration time (s) 263.3 →237.5 9.80% FIR 1.1194 →1.0004 11.89% FWD time 0.0347 →0.0302 14.90%
+> Table 3. NPU best-result summary (baseline vs KV-Pipe). Each subtable compares baseline 1F1B (no KV sharing) against the best KV-Pipe configuration (Architecture-Balanced placement at the MFU-optimal KV-sharing budget) for the corresponding PP/sequence-length setting. For MFU, we report the relative improvement and also the approximate absolute MFU-point gain in parentheses. All subtables use LLaMA2-7B as the underlying LLM. Here, Sdenotes the sequence length, and SKV denotes the shared-KV size.
+> (a) S=4 K, PP=2 (b) S=8 K, PP=4 (c) S=8 K, PP=8
+> Figure 3. MFU sweeps on 8 ×Ascend 910B. MFU vs. KV-sharing budget for the three KV-Pipe placements. Stars indicate the best MFU point used in Table 3.
+
+gains: during training, KV-Pipe increases MFU by reducing stage-level compute skew and pipeline bubbles; during in-ference, it reduces KV-cache footprint and redundant KV projection work, enabling higher effective throughput. This double benefit highlights KV-Pipe as a generic and native system-level knob : it simultaneously (i) balances pipeline stages to improve training efficiency under PP and (ii) ac-celerates inference via cross-layer KV sharing, making KV layout an actionable degree of freedom for optimizing both train-time MFU and inference-time speed. 
+
+# 4 Discussion 
+
+KV-Pipe turns cross-layer KV sharing into a pipeline-level 
+
+optimization knob: by selectively converting full-attention layers into KV-sharing layers in FLOP-heavy pipeline stages, it reduces stage skew and improves end-to-end pipeline efficiency. Our Ascend 910B results (Table 3, Fig-ures 3–4) show consistent gains across PP settings. Most notably, the relative MFU improvement grows with pipeline depth (PP): the baseline becomes more sensitive to stage imbalance and bubble overhead at larger PP, increasing the headroom for KV-Pipe. This is reflected both in higher MFU and reduced iteration time, indicating that KV-Pipe improves true utilization rather than merely shifting work between phases. A central observation from Figures 3–4 is that MFU is non-monotonic in the shared-KV size. Increasing KV sharing always reduces total model FLOPs, yet MFU increases only up to an optimal point and then declines. KV-Pipe explains this behavior through the proposed FLOPs Imbalance Ratio (FIR): small-to-moderate KV sharing reduces the bottleneck stage cost and drives FIR toward 1, minimizing idle time and bubbles. Past the optimum, KV-Pipe can over-correct the original bottleneck and shift the critical path to earlier stages, increasing FIR again and reintroducing bubbles even though total FLOPs keep decreasing. This highlights an important systems insight: for pipeline efficiency, the dominant ob-jective is not minimizing FLOPs globally, but minimizing stage imbalance (i.e., aligning per-stage times). Many PP techniques improve utilization primarily through scheduling (e.g., reducing bubbles via refined 1F1B variants, sequential schedules, interleaving, or micro-batch shaping). These methods can be highly effective, but they largely treat the per-stage compute profile as fixed and aim to hide bubbles. In contrast, KV-Pipe directly changes the per-stage workload by altering the effective cost of attention layers, thereby removing bubbles at the source. This distinction is important because stage imbalance often persists even with aggressive scheduling, especially in realistic models where the last stage contains extra modules (e.g., LM head) or where attention/MLP costs are non-uniform across depth. KV-Pipe is intentionally designed to be orthogonal to pipeline scheduling and parallel runtime choices. Conceptu-ally, KV-Pipe outputs a modified per-layer cost profile by 7(a) S=4 K, PP=2 (b) S=8 K, PP=4 (c) S=8 K, PP=8 
+
+Figure 4. Iteration time and FLOPs sweeps on 8 × Ascend 910B. Each panel reports iteration time (top) and total model FLOPs (bottom) as KV-sharing budget increases, for all placements. 
+
+Model S MFU (%) at PP=2 / 4 / 8 Iter time (s) at PP=2 / 4 / 8 1F1B Seq1F1B KV-Pipe 1F1B Seq1F1B KV-Pipe 
+
+LLaMA2-7B 4K 46.5/44.0/38.0 49.5/48.0/45.0 51.5/50.0/48.0 112/125/150 106/114/128 101/109/120 8K 48.0/46.0/39.0 50.0/49.5/47.0 52.0/52.0/50.0 215/265/305 205/245/265 196/232/248 16K 49.0/46.5/40.0 51.0/50.0/48.0 53.0/52.5/51.0 420/520/610 400/470/520 385/448/485 LLaMA2-13B 4K 47.0/44.5/38.5 49.0/48.5/46.0 51.0/50.5/49.0 195/220/260 186/204/228 176/192/212 8K 48.5/45.0/39.0 50.0/49.5/47.5 52.0/52.5/50.5 365/430/505 350/398/445 334/372/410 16K 49.5/45.5/39.5 51.0/50.0/48.5 53.0/53.0/52.0 705/820/960 675/740/820 640/690/750 LLaMA3-8B 4K 46.0/43.5/37.5 49.0/47.8/45.0 51.0/49.8/48.0 118/132/158 111/121/136 105/114/126 8K 47.5/45.0/38.5 49.5/49.0/46.8 51.5/51.8/49.8 228/278/320 217/257/278 205/240/258 16K 48.5/45.2/39.0 50.5/49.6/47.8 52.5/52.0/51.0 445/545/635 420/495/545 402/468/505 Qwen2.5-14B 4K 47.5/45.0/39.0 49.8/49.5/47.0 52.0/51.8/50.0 210/236/278 200/218/242 188/202/222 8K 49.0/45.5/39.5 50.5/50.2/48.0 52.5/53.0/51.0 392/465/540 375/428/472 356/398/430 16K 50.0/46.0/40.0 51.5/51.0/49.0 53.5/54.0/52.5 760/885/1030 725/800/880 680/735/800 
+
+Table 4. GPU results on 8 ×V100 (compact). Each entry reports PP=2/4/8 in a single cell. KV-Pipe consistently improves MFU and reduces iteration time, with larger gains at PP=8. 
+
+introducing KV-sharing layers; it does not require changing the pipeline scheduler, micro-batching policy, or communi-cation pattern. Therefore, KV-Pipe can be applied on top of a broad class of PP methods as long as they preserve the same notion of stage-level execution and the primary bottle-neck remains determined by the maximum stage time. The key requirement for composability is that the PP method’s efficiency is sensitive to the distribution of compute across stages (i.e., the bottleneck stage dominates). Under this condition, any method that schedules or partitions pipeline work can benefit from KV-Pipe because KV-Pipe explicitly pushes the system toward a flatter stage-time profile. While KV-Pipe is motivated by training-time PP efficiency, it also inherits the classical advantage of KV-sharing for in-ference: reducing redundant KV projections and KV-cache growth. This yields a double benefit : (i) improved training MFU by balancing stage workloads, and (ii) improved infer-ence throughput by lowering per-token work and memory pressure, enabling larger effective batch sizes and faster decode. Importantly, these benefits arise from the same architectural lever (KV reuse) and do not require separate mechanisms for training and inference. As a result, KV-Pipe can be viewed as a native system–architecture co-design knob: it improves PP efficiency during training and im-proves throughput/latency during serving, using a single consistent strategy grounded in stage-aware compute bal-ancing. 
+
+# 5 Conclusion 
+
+This paper identifies an underexplored lever: the interaction between KV layout and pipeline partitioning. We introduce 
+
+KV-Pipe , a stage-aware cross-layer KV-sharing framework that uses a simple FLOPs Imbalance Ratio (FIR) to locate bottleneck stages and then applies targeted KV sharing to flatten stage workloads (FIR → 1) while simultaneously re-ducing KV-cache growth. On 8 ×Ascend 910B across PP ∈ { 2, 4, 8}, KV-Pipe consis-8tently improves end-to-end utilization, delivering 3.1–9.2% 
+
+MFU gains and 4.9–9.8% iteration-time reductions over baseline 1F1B. We also observe a clear operating principle: MFU peaks at an intermediate shared-KV budget—where imbalance is minimized—and can decline when excessive sharing over-corrects the original bottleneck and shifts the critical stage elsewhere. Overall, KV-Pipe establishes KV sharing as a system-level control knob that is orthogonal to PP scheduling: it directly reduces stage skew for higher train-time MFU and, by lowering KV-cache pressure, also improves long-context inference throughput. 
+
+# References 
+
+Adler, B., Agarwal, N., Aithal, A., Anh, D. H., Bhattacharya, P., Brundyn, A., Casper, J., Catanzaro, B., Clay, S., Co-hen, J., et al. Nemotron-4 340b technical report. arXiv preprint arXiv:2406.11704 , 2024. Agrawal, A., Panwar, A., Mohan, J., Kwatra, N., Gulavani, B. S., and Ramjee, R. Sarathi: Efficient llm inference by piggybacking decodes with chunked prefills. arXiv preprint arXiv:2308.16369 , 2023. Agrawal, A., Kedia, N., Panwar, A., Mohan, J., Kwatra, N., Gulavani, B., Tumanov, A., and Ramjee, R. Taming 
+
+{Throughput-Latency } tradeoff in {LLM } inference with 
+
+{Sarathi-Serve }. In 18th USENIX Symposium on Operat-ing Systems Design and Implementation (OSDI 24) , pp. 117–134, 2024. Ao, S., Zhao, W., Han, X., Yang, C., Zhang, X., Liu, Z., Shi, C., and Sun, M. Seq1f1b: Efficient sequence-level pipeline parallelism for large language model training. In 
+
+Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 1: Long Papers) , pp. 8998–9008, 2025. Arfeen, D., Zhang, Z., Fu, X., Ganger, G., and Wang, Y. Pipefill: Using gpus during bubbles in pipeline-parallel llm training. Proceedings of Machine Learning and Sys-tems , 7, 2025. Blakeman, A., Basant, A., Khattar, A., Renduchintala, A., Bercovich, A., Ficek, A., Bjorlin, A., Taghibakhshi, A., Deshmukh, A. S., Mahabaleshwarkar, A. S., et al. Nemotron-h: A family of accurate and effi-cient hybrid mamba-transformer models. arXiv preprint arXiv:2504.03624 , 2025. Chowdhery, A., Narang, S., Devlin, J., Bosma, M., Mishra, G., Roberts, A., Barham, P., Chung, H. W., Sutton, C., Gehrmann, S., et al. Palm: Scaling language modeling with pathways. Journal of Machine Learning Research ,24(240):1–113, 2023. Dialameh, M., Karim, R., Rajabzadeh, H., Awad, O. M., Chen, B., Kwon, H. J., Ahmed, W., and Liu, Y. Echo-llama: Efficient caching for high-performance llama train-ing. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: Industry Track ,pp. 2252–2269, 2025. Fan, S., Rong, Y., Meng, C., Cao, Z., Wang, S., Zheng, Z., Wu, C., Long, G., Yang, J., Xia, L., Diao, L., Liu, X., and Lin, W. Dapple: A pipelined data parallel approach for training large models, 2020. URL https://arxiv. org/abs/2007.01045 .Guo, T., Zhang, X., Du, J., Chen, Z., Xiao, N., and Lu, Y. gllm: Global balanced pipeline parallelism systems for distributed llms serving with token throttling. In Pro-ceedings of the International Conference for High Perfor-mance Computing, Networking, Storage and Analysis , pp. 1725–1741, 2025. Harlap, A., Narayanan, D., Phanishayee, A., Seshadri, V., Devanur, N., Ganger, G., and Gibbons, P. Pipedream: Fast and efficient pipeline parallel dnn training, 2018. 
+
+URL https://arxiv. org/abs , 1806. Hoffmann, J., Borgeaud, S., Mensch, A., Buchatskaya, E., Cai, T., Rutherford, E., Casas, D. d. L., Hendricks, L. A., Welbl, J., Clark, A., et al. Training compute-optimal large language models. arXiv preprint arXiv:2203.15556 ,2022. Huang, Y., Cheng, Y., Bapna, A., Firat, O., Chen, D., Chen, M., Lee, H., Ngiam, J., Le, Q. V., Wu, Y., et al. Gpipe: Efficient training of giant neural networks using pipeline parallelism. Advances in neural information processing systems , 32, 2019. Jiang, A. Q., Sablayrolles, A., Mensch, A., Bamford, C., Chaplot, D. S., de las Casas, D., Bressand, F., Lengyel, G., Lample, G., Saulnier, L., Lavaud, L. R., Lachaux, M.-A., Stock, P., Scao, T. L., Lavril, T., Wang, T., Lacroix, T., and Sayed, W. E. Mistral 7b, 2023. URL https: //arxiv.org/abs/2310.06825 .Jiang, A. Q., Sablayrolles, A., Roux, A., Mensch, A., Savary, B., Bamford, C., Chaplot, D. S., de las Casas, D., Hanna, E. B., Bressand, F., Lengyel, G., Bour, G., Lample, G., Lavaud, L. R., Saulnier, L., Lachaux, M.-A., Stock, P., Subramanian, S., Yang, S., Antoniak, S., Scao, T. L., Gervet, T., Lavril, T., Wang, T., Lacroix, T., and Sayed, W. E. Mixtral of experts, 2024a. URL 
+
+https://arxiv.org/abs/2401.04088 .9Jiang, C., Jia, Z., Zheng, S., Wang, Y., and Wu, C. Dynapipe: Optimizing multi-task training through dynamic pipelines. In Proceedings of the Nineteenth European Confer-ence on Computer Systems , EuroSys ’24, pp. 542–559. ACM, April 2024b. doi: 10.1145/3627703.3629585. URL http://dx.doi.org/10.1145/3627703. 3629585 .Kim, T., Kim, H., Yu, G.-I., and Chun, B.-G. Bpipe: Memory-balanced pipeline parallelism for training large language models. In International Conference on Ma-chine Learning , pp. 16639–16653. PMLR, 2023. Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J., Zhang, H., and Stoica, I. Efficient memory management for large language model serving with pagedattention. In Proceedings of the 29th sym-posium on operating systems principles , pp. 611–626, 2023. Lan, Z., Chen, M., Goodman, S., Gimpel, K., Sharma, P., and Soricut, R. Albert: A lite bert for self-supervised learning of language representations. arXiv preprint arXiv:1909.11942 , 2019. Li, Q., Cui, L., Zhao, X., Kong, L., and Bi, W. Gsm-plus: A comprehensive benchmark for evaluating the robustness of llms as mathematical problem solvers. arXiv preprint arXiv:2402.19255 , 2024. Li, Z., Liu, Y., Zhang, W., Yuan, T., Chen, B., Song, C., and Zhang, D. Slimpipe: Memory-thrifty and efficient pipeline parallelism for long-context llm training, 2025. URL https://arxiv.org/abs/2504.14519 .Lieber, O., Lenz, B., Bata, H., Cohen, G., Osin, J., Dalmedi-gos, I., Safahi, E., Meirom, S., Belinkov, Y., Shalev-Shwartz, S., Abend, O., Alon, R., Asida, T., Bergman, A., Glozman, R., Gokhman, M., Manevich, A., Rat-ner, N., Rozen, N., Shwartz, E., Zusman, M., and Shoham, Y. Jamba: A hybrid transformer-mamba lan-guage model, 2024. URL https://arxiv.org/ abs/2403.19887 .Narayanan, D., Harlap, A., Phanishayee, A., Seshadri, V., Devanur, N. R., Ganger, G. R., Gibbons, P. B., and Za-haria, M. Pipedream: Generalized pipeline parallelism for dnn training. In Proceedings of the 27th ACM symposium on operating systems principles , pp. 1–15, 2019. Narayanan, D., Shoeybi, M., Casper, J., LeGresley, P., Pat-wary, M., Korthikanti, V., Vainbrand, D., Kashinkunti, P., Bernauer, J., Catanzaro, B., et al. Efficient large-scale language model training on gpu clusters using megatron-lm. In Proceedings of the international conference for high performance computing, networking, storage and analysis , pp. 1–15, 2021. Peng, X., Shi, X., Zhang, H., Zhao, Y., and Qian, X. Dawn-piper: A memory-scablable pipeline parallel training framework. arXiv preprint arXiv:2505.05856 , 2025. Rajabzadeh, H. Efficient learning for large language models. 2026. Schumann, R., Zhu, W., Feng, W., Fu, T.-J., Riezler, S., and Wang, W. Y. Velma: Verbalization embodiment of llm agents for vision and language navigation in street view. In Proceedings of the AAAI Conference on Artificial Intelligence , volume 38, pp. 18924–18933, 2024. Smith, S., Patwary, M., Norick, B., LeGresley, P., Rajbhan-dari, S., Casper, J., Liu, Z., Prabhumoye, S., Zerveas, G., Korthikanti, V., et al. Using deepspeed and megatron to train megatron-turing nlg 530b, a large-scale generative language model. arXiv preprint arXiv:2201.11990 , 2022. Su, Q., Zhao, W., Li, X., Andoorveedu, M., Jiang, C., Zhu, Z., Song, K., Giannoula, C., and Pekhimenko, G. Seesaw: High-throughput llm inference via model re-sharding. 
+
+arXiv preprint arXiv:2503.06433 , 2025. Toroghi, A., Guo, W., Pesaranghader, A., and Sanner, S. Ver-ifiable, debuggable, and repairable commonsense logical reasoning via llm-based theory resolution. In Proceed-ings of the 2024 Conference on Empirical Methods in Natural Language Processing , pp. 6634–6652, 2024. Wu, H., Li, L., Huang, H., Yi, T., Zhang, J., Yu, M., and Yan, J. Hshare: Fast llm decoding by hierarchical key-value sharing. In The Thirteenth International Conference on Learning Representations , 2025a. Wu, Y., Wu, H., and Tu, K. A systematic study of cross-layer kv sharing for efficient llm inference. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics: Human Language Technologies (Volume 2: Short Papers) ,pp. 396–403, 2025b. Zhang, H., Wei, T., Zheng, Z., Du, J., Chen, Z., and Lu, Y. Td-pipe: Temporally-disaggregated pipeline parallelism architecture for high-throughput llm inference. In Pro-ceedings of the 54th International Conference on Parallel Processing , pp. 689–698, 2025. Zhao, Y., Long, Y., Liu, H., Kamoi, R., Nan, L., Chen, L., Liu, Y., Tang, X., Zhang, R., and Cohan, A. Docmath-eval: Evaluating math reasoning capabilities of llms in understanding long and specialized documents. In Pro-ceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pp. 16103–16120, 2024. 10 Zuhri, Z. M. K., Adilazuarda, M. F., Purwarianti, A., and Aji, A. F. Mlkv: Multi-layer key-value heads for memory efficient transformer decoding. In Findings of the Asso-ciation for Computational Linguistics: NAACL 2025 , pp. 5516–5525, 2025. 11 0 1 2 3 4 5 6 7Emb 1 0 0 0 0 0 0 0Full attn 4 4 4 4 3 3 3 3KV sharing 0 0 0 0 1 1 1 1LM head 0 0 0 0 0 0 0 1FLOPs 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.49E+13 1.49E+13 1.49E+13 1.708E+13 FWD time 59712.13 59237.7 59237.7 59237.7 57301.7 57301.7 57301.7 64860.0028 Memory 16.8425 15.5625 15.5625 15.5625 15.5597 15.5597 15.5597 16.8395703                                                                      
+
+> Table 5. Uniform placement for LLaMA2-7B, PP=8, S= 8 K, MBS=1. The SKV budget is spread across stages 4–7; stage 7 remains the bottleneck. 01234567Emb 10000000Full attn 44424442KV sharing 00020002LM head 00000001FLOPs 1.55E+13 1.55E+13 1.55E+13 1.44E+13 1.55E+13 1.55E+13 1.55E+13 1.653E+13 FWD time 59712.13 59237.7 59237.7 55365.7 59237.7 59237.7 59237.7 62924.0012 Memory 16.8425 15.5625 15.5625 15.55664 15.5625 15.5625 15.5625 16.8366406
+> Table 6. Symmetric-Bipolar placement for LLaMA2-7B, PP=8, S= 8 K, MBS=1. The SKV budget is split between stages 3 and 7; stage 7 still has the largest FLOPs and forward time.
+
+# A Additional Analysis and Validation 
+
+This appendix provides detailed analyses and additional experiments that complement the main evaluation. We organize the material around the questions that arise naturally from KV-Pipe’s design: (i) how different KV-sharing placements reshape stage-level compute, (ii) whether the selected configurations preserve model quality, (iii) how sensitive the method is to placement, the FIR diagnostic, and the stopping tolerance, (iv) whether KV-Pipe remains useful on top of stronger pipeline schedules and prior partitioning methods, and (v) whether the inference-side benefit persists under grouped-query attention (GQA). We conclude with practical guidance and the scope of the claims supported by the current experiments. 
+
+## A.1 Stage-Level Effect of KV-Sharing Placement 
+
+We first make the mechanism of KV-Pipe explicit at the stage level. The main paper shows that, for LLaMA2-7B with PP=8 and S = 8 K, the last stage is initially the bottleneck because it contains both Transformer blocks and the LM head. Tables 5–7 show how the same SKV budget is distributed by the three placement strategies considered in the paper. The important distinction is where the compute reduction is applied. Uniform placement spreads the SKV budget across several stages; Symmetric Bipolar concentrates it at two locations; Architecture-Balanced concentrates the budget on the current critical stage. As a result, Architecture-Balanced brings the tail-stage FLOPs close to the other stages and nearly equalizes the stage-time profile. This stage-level view explains why reducing total FLOPs alone is not sufficient: reductions that do not lie on the critical path can leave the pipeline bottleneck largely unchanged. 
+
+## A.2 Quality–Efficiency Trade-off and Final Layer Assignments 
+
+Cross-layer KV sharing permanently changes the model architecture, so system efficiency must be interpreted together with model quality. We therefore evaluate validation perplexity and downstream accuracy for the exact configurations selected by KV-Pipe and compare them with full attention and a fixed Echo-style 25% tail-sharing baseline. Table 8 also reports the final SKV assignments. For LLaMA2-7B, KV-Pipe selects layers 25–32 at PP=2, 27–32 at PP=4, and 29–32 at PP=8. Hence, in every quality-tested configuration, the earliest converted layer remains in the second half 12 0 1 2 3 4 5 6 7Emb 1 0 0 0 0 0 0 0Full attn 4 4 4 4 4 4 4 0KV sharing 0 0 0 0 0 0 0 4LM head 0 0 0 0 0 0 0 1FLOPs 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.55E+13 1.543E+13 FWD time 59712.13 59237.7 59237.7 59237.7 59237.7 59237.7 59237.7 59051.9978 Memory 16.8425 15.5625 15.5625 15.5625 15.5625 15.5625 15.5625 16.8307812 
+
+Table 7. Architecture-Balanced placement for LLaMA2-7B, PP=8, S = 8 K, MBS=1. All four SKV conversions are applied to the original tail bottleneck. The resulting stage FLOPs are nearly equal, after which stage 0 becomes marginally critical in measured forward time. 
+
+Table 8. Quality–efficiency Pareto for LLaMA2-7B. Efficiency changes are reported relative to the corresponding full-attention 1F1B baseline. SKV denotes the number of attention layers converted to shared-KV layers; layer indices are 1-indexed. Downstream Avg. is the average over MMLU, HellaSwag, ARC-Challenge, and TruthfulQA.                                                                                                 
+
+> Setting Method PP Seq. SKV Converted layers Earliest Late-half? Val. PPL ↓Downstream Avg. ↑MFU / Iter. time change
+> S=4 KFull-attn baseline 24K 0–––5.54 52.2 0.00% / 0.00% Echo-style 25% sharing 24K 825–32 25 Yes 5.51 51.9 +2.85% / -4.35% KV-Pipe, optimal 24K 825–32 25 Yes 5.51 51.9 +3.10% / -4.90%
+> S=8 KFull-attn baseline 48K 0–––5.67 52.5 0.00% / 0.00% Echo-style 25% sharing 48K 825–32 25 Yes 5.50 52.0 +3.70% / -6.35% KV-Pipe, optimal 48K 627–32 27 Yes 5.50 52.0 +4.32% / -7.56%
+> S=8 KFull-attn baseline 88K 0–––5.47 52.2 0.00% / 0.00% Echo-style 25% sharing 88K 825–32 25 Yes 5.53 52.0 +6.80% / -8.10% KV-Pipe, optimal 88K 429–32 29 Yes 5.49 52.2 +9.17% / -9.80%
+
+of the 32-layer network. We stress that this is an empirical observation for the evaluated configurations, not a theoretical guarantee that the bottleneck can never move to an earlier stage in an arbitrary model or PP layout. 
+
+Fixed Echo-style sharing versus adaptive budget selection. The Echo-style baseline always converts the last 25% of LLaMA2-7B, i.e., layers 25–32. KV-Pipe instead chooses how much sharing is required from the pipeline imbalance. At PP=8 and S = 8 K, KV-Pipe uses four SKV layers rather than eight, obtains validation PPL 5.49 versus 5.53 and downstream average 52.2 versus 52.0, and reduces iteration time by 9.80% rather than 8.10%. The practical advantage in this setting is therefore a better quality–sharing-budget–efficiency operating point, rather than a claim that more KV sharing is universally worse. At PP=2, the fixed 25% rule and KV-Pipe select the same layers (25–32), and their system results are correspondingly close. The difference becomes more meaningful at higher PP, where KV-Pipe stops earlier once the stage imbalance has been sufficiently reduced. 
+
+Matched-budget interpretation. For the evaluated LLaMA2 settings, Architecture-Balanced placement remains tail-localized. If a fixed tail-sharing heuristic is given the same budget selected by KV-Pipe, it therefore selects the same layer sets: 25–32 for SKV=8, 27–32 for SKV=6, and 29–32 for SKV=4. These experiments support a more precise interpretation of KV-Pipe: in these LLaMA2 cases, its main benefit is to determine the SKV budget from the measured pipeline imbalance instead of fixing a 25% or 50% sharing ratio a priori. The bottleneck-retargeting mechanism is designed for the more general case in which the critical stage moves away from the tail. 
+
+## A.3 Optional Safe-Layer Guardrail 
+
+Although the tail-first policy stays in late layers in all quality-tested configurations above, KV-Pipe optimizes a systems objective and does not imply that early-layer conversion is universally quality-neutral. To make the quality constraint explicit, KV-Pipe can be run with a user-controlled admissible layer set. 13 Table 9. Sensitivity and diagnostic ablations. MFU and iteration-time changes are relative to the full-attention 1F1B baseline at PP=8 and S = 8 K.                                                                    
+
+> Ablation Setting SKV Converted layers Val. PPL ↓Downstream Avg. ↑MFU / Iter. time change
+> Uniform placement PP=8, S=8K 417, 22, 27, 32 5.50 52.1 +6.40% / -7.00% Symmetric bipolar PP=8, S=8K 417, 18, 31, 32 5.50 52.1 +7.10% / -7.60% Architecture-Balanced PP=8, S=8K 429–32 5.49 52.2 +9.17% / -9.80%
+> ϵ= 0 .02 PP=8, S=8K 528–32 5.50 52.1 +9.05% / -9.65%
+> ϵ= 0 .05 PP=8, S=8K 429–32 5.49 52.2 +9.17% / -9.80%
+> ϵ= 0 .10 PP=8, S=8K 330–32 5.48 52.2 +8.60% / -9.20% FIR-guided selection PP=8, S=8K 429–32 5.49 52.2 +9.17% / -9.80%
+> Max-stage-time guided PP=8, S=8K 428–31 5.49 52.2 +8.90% / -9.45%
+
+Let α ∈ [0 , 1) denote the minimum normalized depth at which KV sharing is allowed. We define 
+
+Cα = {ℓ ∈ { 1, . . . , L } : ℓ ≥ ⌈ αL ⌉} . (9) The layer-selection step is then restricted to 
+
+ℓ⋆ = max {ℓ ∈ S i⋆ ∩ C α : zℓ = 0 } . (10) For example, α = 0 .5 restricts conversions to the second half of the network. If no admissible layer remains before the target FIR tolerance is reached, KV-Pipe terminates and reports the residual imbalance rather than converting an earlier layer. This guard does not alter any result in Table 8, because all selected layers already lie in the second half of LLaMA2-7B. 
+
+## A.4 Sensitivity to Placement, FIR, and the Stopping Tolerance 
+
+We next isolate three design choices: the placement policy, the stopping tolerance ϵ, and the imbalance signal. All rows in Table 9 use LLaMA2-7B with PP=8 and S = 8 K under the same 1F1B setting as the NPU experiments. 
+
+Placement policy. At the same SKV=4 budget, Architecture-Balanced placement gives the largest efficiency improvement among the three representative strategies. Uniform and Symmetric Bipolar placement spend part of the SKV budget on stages that are not always on the critical path, whereas Architecture-Balanced concentrates the reduction on the bottleneck stage. 
+
+Tolerance sensitivity. The method is relatively stable over the tested range. Changing ϵ from 0.02 to 0.10 changes the selected budget from five to three SKV layers, while the MFU improvement remains between 8.60% and 9.17% and validation PPL remains between 5.48 and 5.50. Thus, the observed optimum does not require fine-grained tuning of ϵ for this workload. 
+
+FIR versus measured stage-time guidance. FIR is intended as a lightweight analytic imbalance proxy, not as a claim of universal superiority over timing-based diagnostics. In this ablation, FIR-guided selection obtains +9.17% MFU and -9.80% iteration time, compared with +8.90% and -9.45% for max-stage-time guidance. This supports FIR as a useful low-cost offline signal for the evaluated setup, while direct timing may remain preferable when accurate stage profiles are already available. The current experiment should therefore be read as a diagnostic ablation rather than a universal predictive-power guarantee. 
+
+## A.5 Composability with a Stronger Pipeline Schedule 
+
+KV-Pipe changes the per-stage workload and does not require a particular pipeline scheduler. To test whether its benefit remains after schedule-level bubble reduction, we combine KV-Pipe with Seq1F1B. Relative to Seq1F1B alone, adding KV-Pipe increases MFU by approximately 6.4% on LLaMA2-7B and 7.2% on LLaMA2-13B, while reducing iteration time by approximately 6.4% and 8.5%, respectively. This provides direct evidence for the composability claim: schedule-level bubble mitigation and stage-workload balancing address different sources of inefficiency. 14 Table 10. Composability with Seq1F1B. KV-Pipe provides an additional gain after applying a stronger pipeline schedule.                                                                                
+
+> Model / Setting Method MFU Iter. time
+> LLaMA2-7B, PP=8, 8K 1F1B 39.0% 305s Seq1F1B 47.0% 265s Seq1F1B + KV-Pipe 50.0% 248s
+> LLaMA2-13B, PP=8, 16K 1F1B 39.5% 960s Seq1F1B 48.5% 820s Seq1F1B + KV-Pipe 52.0% 750s Table 11. Training-time comparison with prior pipeline partitioning methods. Experiments use the DawnPiper/vPipe evaluation setting with 8 NVIDIA A100 40GB GPUs and 8 pipeline stages. Throughput is averaged over the feasible batch-size sweep. Speedup is normalized to vPipe-AS for each model.
+> Model Method Pipeline mode Max batch Avg. speed Speedup Stage imbalance (samples/s) vs. vPipe-AS max iti/avg iti
+> GPT-2 770M GPipe Sync. 716.0 0.56 ×1.06 vPipe-S Sync. 716.2 0.56 ×1.05 vPipe-AS Async. 16 28.7 1.00 ×1.05 DawnPiper-AS Async. 20 33.0 1.15 ×1.03 KV-Pipe Async. + SKV rebalance 20 34.5 1.20 ×1.02
+> T5 780M GPipe Sync. 80 56.0 0.48 ×1.42 vPipe-S Sync. 80 62.0 0.53 ×1.31 vPipe-AS Async. 180 116.0 1.00 ×1.25 DawnPiper-AS Async. 220 155.0 1.34 ×1.12 KV-Pipe Async. + SKV rebalance 220 163.0 1.41 ×1.07
+
+Hardware coverage. The Ascend 910B experiments use MindSpeed-LM’s standard 1F1B schedule. Seq1F1B requires schedule-level runtime support that is available in our CUDA/GPU stack but is not available in our current Ascend 910B implementation. We therefore evaluate Seq1F1B composability on GPUs rather than implying identical scheduler coverage across software stacks. This mismatch is an implementation limitation of the current evaluation, not a requirement of KV-Pipe itself. 
+
+## A.6 Comparison with Prior Pipeline-Parallel Methods 
+
+Prior PP systems attack inefficiency through several different levers: scheduling, partition search, dynamic micro-batching, memory balancing, and bubble filling. KV-Pipe is different in that it changes the effective cost of selected attention layers. We report both a quantitative comparison under the vPipe/DawnPiper benchmark setting and a high-level taxonomy of representative systems. 
+
+A.6.1 Quantitative comparison with vPipe and DawnPiper 
+
+Compared directly with DawnPiper-AS, KV-Pipe improves average throughput by approximately 4.5% on GPT-2 and 5.2% on T5, while reducing the measured stage-imbalance ratio from 1.03 to 1.02 and from 1.12 to 1.07, respectively. Relative to vPipe-AS, the corresponding speedups are 1.20 × and 1.41 ×. These results should be interpreted as evidence that changing the per-layer cost profile can provide additional headroom beyond partition search, not as a claim that KV-Pipe subsumes general PP partitioning methods. 
+
+A.6.2 Relationship to other PP optimization levers 
+
+Table 12 summarizes the role of representative PP methods at a high level. This table is intended as a taxonomy rather than a performance ranking. Methods that primarily change the schedule or search for a partition can in principle be combined with KV-Pipe because KV-Pipe operates on the model’s per-layer cost profile. 15 Table 12. High-level positioning of KV-Pipe relative to representative PP optimizations. The table summarizes the primary optimization lever rather than claiming that the categories are mutually exclusive. 
+
+Method Primary optimization lever Relationship to KV-Pipe KV-Pipe Stage-aware cross-layer KV sharing that changes the effective per-layer and per-stage compute profile. Directly targets stage skew; can be layered with scheduling or partition-search methods. GPipe Huang et al. (2019) Micro-batched synchronous pipeline schedul-ing. Primarily changes execution schedule; KV-Pipe can change the stage costs seen by the schedule. PipeDream Narayanan et al. (2019) Asynchronous pipeline execution and for-ward/backward overlap. Primarily changes execution overlap; stage-cost balancing is orthogonal. DAPPLE Fan et al. (2020) Joint planning of data and pipeline parallel execution. Planner/search can operate on a model whose layer costs have already been modified by KV sharing. DynaPipe Jiang et al. (2024b) Dynamic micro-batching and runtime adap-tation. Runtime adaptation and offline stage-cost re-shaping address different sources of imbal-ance. BPipe Kim et al. (2023) Memory-oriented pipeline balancing and ac-tivation movement. Targets memory imbalance; KV-Pipe primar-ily targets compute skew while also reducing KV-related memory. SlimPipe Li et al. (2025) Fine-grained sequence slicing for pipeline execution. Sequence-level scheduling can be combined with stage-level compute reshaping. PipeFill Arfeen et al. (2025) Filling pipeline bubbles with additional work/jobs. Uses otherwise idle slots; KV-Pipe instead attempts to reduce the underlying stage skew that creates idle time. vPipe Pipeline partitioning with memory/compute considerations. Partition search changes where work is placed; KV-Pipe changes the cost of selected attention layers. DawnPiper Peng et al. (2025) Cost-model-driven pipeline partition search. Complementary in objective: DawnPiper changes placement, while KV-Pipe can re-shape the cost profile supplied to a parti-tioner. Unity / Galvatron / FlexPipe / Varuna Automatic or hybrid search over pipeline/parallel execution strategies. Potentially composable with KV-Pipe be-cause their search space can operate on the modified stage-cost profile. 
+
+## A.7 Attention FLOPs under MHA and GQA 
+
+The original inference case study uses multi-head attention (MHA), whereas many modern LLMs use grouped-query attention (GQA). We therefore derive the attention FLOPs for both cases and quantify what cross-layer KV sharing can still remove under GQA. We follow the standard matrix-multiplication FLOP rule and count a fused multiply-add (MAC) as two FLOPs. 
+
+A.7.1 Matrix-multiplication FLOPs 
+
+For matrices A ∈ Rm×k and B ∈ Rk×n,
+
+FLOPs( AB ) = 2 mkn. (11) 
+
+A.7.2 Notation 
+
+Let sequence length be s, batch size be b, hidden size be h, number of query heads be a, and per-head dimension be d = h/a .The input activations to an attention layer are X ∈ R(bs )×h.16 For GQA, let g be the number of KV heads and define 
+
+r ≜ ag ≥ 1, (12) so that the total KV projection dimension is gd = h/r .
+
+A.7.3 Q/K/V projections MHA. MHA uses full-size projections for all three tensors: 
+
+Q = XW Q, K = XW K , V = XW V , (13) with W(·) ∈ Rh×h. Hence 
+
+FLOPs MHA QKV = 3 · 2( bs )h2 = 6 bsh 2. (14) 
+
+GQA. GQA keeps the query projection full-size but reduces the K/V dimension to h/r :
+
+FLOPs GQA QKV = 2( bs )h2 + 2 · 2( bs )h
+
+ hr
+
+
+
+= 2 bsh 2
+
+
+
+1 + 2
+
+r
+
+
+
+. (15) 
+
+A.7.4 Attention score and weighted sum 
+
+For each query head, QK ⊤ costs 2s2d FLOPs. Summed over the batch and all query heads, 
+
+FLOPs score = 2 bas 2d = 2 bs 2h. (16) The weighted sum Attn · V has the same cost: 
+
+FLOPs ctx = 2 bs 2h. (17) Although GQA shares K/V across groups of query heads, the score and weighted-sum operations are still performed per query head in the standard formulation, so Eqs. (16)–(17) apply to both MHA and GQA. 
+
+A.7.5 Output projection 
+
+The concatenated attention output is projected with WO ∈ Rh×h:
+
+FLOPs out = 2 bsh 2. (18) 
+
+A.7.6 Total attention FLOPs per token 
+
+For MHA, 
+
+FLOPs MHA attn = 6 bsh 2 + 2 bs 2h + 2 bs 2h + 2 bsh 2
+
+= 8 bsh 2 + 4 bs 2h, (19) and therefore 
+
+FLOPs /token MHA attn = 8 h2 + 4 sh. (20) For GQA, 
+
+FLOPs GQA attn = 2 bsh 2
+
+
+
+1 + 2
+
+r
+
+
+
++ 4 bs 2h + 2 bsh 2
+
+= 4 bsh 2 + 4bsh 2
+
+r + 4 bs 2h, (21) 17 Table 13. GQA inference validation. KV-Pipe improves decoding throughput on GQA-based models.              
+
+> Model Variant Throughput Time/token
+> LLaMA3-8B, 32K GQA baseline 620 tok/s 1.61 ms KV-Pipe, SKV=4 665 tok/s 1.50 ms
+> Qwen2.5-14B, 128K GQA baseline 170 tok/s 5.88 ms KV-Pipe, SKV=6 184 tok/s 5.43 ms
+
+and therefore 
+
+FLOPs /token GQA attn = 4 h2 + 4h2
+
+r + 4 sh. (22) For a decoder-only Transformer with L layers, the forward attention FLOPs per token are L times the corresponding per-layer quantity. For training, a common approximation is forward plus backward ≈ 3× forward FLOPs. 
+
+A.7.7 What KV sharing removes under GQA 
+
+Cross-layer KV sharing removes the new K/V projections for a shared layer. Therefore, the forward projection FLOPs saved per shared layer and token are 
+
+∆FGQA = 4h2
+
+r . (23) If each cached element occupies belem bytes, the per-token KV-cache reduction for a shared layer is 
+
+∆BGQA = 2 hr belem . (24) Thus, GQA reduces the amount of K/V redundancy available to remove by the grouping ratio r, but the savings remain non-zero. 
+
+## A.8 Inference Validation under GQA 
+
+We complement the FLOP analysis with decoding measurements on two GQA models. Table 13 shows that the inference-side benefit of KV sharing persists even when K/V projections have already been reduced by grouped-query attention. KV-Pipe improves throughput by approximately 7.3% on LLaMA3-8B and 8.2% on Qwen2.5-14B. These results extend the inference case study beyond MHA and support the “double benefit” claim under a more deployment-relevant attention configuration, while the analysis above explains why the absolute K/V projection saving is smaller than under MHA. 
+
+## A.9 Practical Operating Regime 
+
+The experiments identify a clear operating regime in which KV-Pipe is most useful. The benefit grows when stage imbalance is large enough to materially limit utilization. On Ascend 910B, the relative MFU improvement increases from 3.10% at PP=2 to 4.32% at PP=4 and 9.17% at PP=8, while iteration-time reduction increases from 4.90% to 7.56% and 9.80%, respectively. The GPU experiments in the main paper show the same qualitative trend across model families and context lengths. Accordingly, KV-Pipe is most attractive for moderate-to-high PP degrees, long-context workloads, and partitions with non-uniform components such as a heavy LM head or heterogeneous attention layers. At low PP degree or when the baseline stage profile is already well balanced, the available headroom is smaller and the architectural change may provide only a modest benefit. 18 Limitations and Future Work 
+
+The quality results in this work should be interpreted within their measured scope. We validate perplexity and downstream accuracy for LLaMA2-7B; the LLaMA2-13B, LLaMA3-8B, and Qwen2.5-14B experiments provide system-level efficiency evidence but are not used to claim architecture-independent quality preservation. In particular, we do not assume that observations established for dense LLaMA-family models automatically transfer to MoE, hybrid Transformer–SSM architectures, or arbitrary training regimes. Likewise, the current study evaluates PP degrees up to 8. Evaluation on PP=16/32 and very large models remains future work. At larger scales the relative contribution of the LM head and the location of the critical stage may change, making the bottleneck-retargeting behavior more important. Finally, the greedy Architecture-Balanced procedure is designed as a lightweight offline heuristic; we do not claim global optimality over all possible layer-sharing assignments. Joint optimization of pipeline placement, KV-sharing placement, and an explicit quality constraint is an interesting direction for future work. 
+
+# Impact Statement 
+
+This paper presents work whose goal is to advance the field of Machine Learning by improving the computational efficiency and scalability of Large Language Models (LLMs). By introducing KV-Pipe, we provide a mechanism to optimize pipeline parallelism through architectural KV-sharing, which directly reduces the energy and hardware resources required to train and deploy frontier models. The primary societal consequence of this research is the potential to lower the environmental impact of large-scale AI development by increasing Model FLOPs Utilization (MFU) and reducing the total training time for a given model quality. Additionally, making high-performance training more efficient can lower the barrier to entry for institutions with limited computational budgets, fostering a more diverse and equitable research ecosystem. While the broader impacts of AI development include well-established ethical considerations regarding model bias, safety, and the use of generated content, our work focuses on the underlying systems optimization level and does not introduce new specific ethical risks beyond those generally associated with the advancement of the field. 19

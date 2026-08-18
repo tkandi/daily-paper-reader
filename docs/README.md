@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-17</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-18</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-17 20:41:13 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-18 20:40:02 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 8 篇推荐（精读 2 篇，速读 6 篇）</p>
-<p>精读：《InSituANN: Revisiting IVF for PCIe-Efficient Billion-Scale Vector Search》（8.0/10）, 《FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction》（8.0/10）</p>
-<p>速读：《Multimodal Federated Learning under Dual-Axis Modality Missingness》（7.0/10）, 《APEX: Adaptive Expert Prefetching for Memory-Efficient Edge MoE Inference》（7.0/10）, 《Beyond Parameter Space: NTK-Guided Personalized Aggregation for Robust Federated Learning》（7.0/10）</p>
+<p>今日共生成 10 篇推荐（精读 5 篇，速读 5 篇）</p>
+<p>精读：《Collective Communication for Distributed LLM Systems: Planning, Runtime Adaptation, and Computation Coordination》（9.0/10）, 《KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs》（9.0/10）</p>
+<p>速读：《Personalized Federated Learning via Variance-Aware Nonparametric Empirical Bayes》（7.0/10）, 《LoKiFormer: Locality-aware Attention with Decoupled Knowledge Memory for Efficient Large Language Model Pretraining》（7.0/10）, 《P2Skill: Privacy Preserving Skill Distillation for Cloud-Local LLM Inference Systems》（7.0/10）</p>
 <p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
@@ -74,12 +74,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="InSituANN: Revisiting IVF for PCIe-Efficient Billion-Scale Vector Search">InSituANN: Revisiting IVF for PCIe-Efficient Billion-Scale Vector Search</span></li><li><span class="dpr-home-dashboard-paper-title" title="FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction">FreeBalance: Pre-Routing Online Moe Load Balancing via Residual Workload Prediction</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Collective Communication for Distributed LLM Systems: Planning, Runtime Adaptation, and Computation Coordination">Collective Communication for Distributed LLM Systems: Planning, Runtime Adaptation, and Computation Coordination</span></li><li><span class="dpr-home-dashboard-paper-title" title="KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs">KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="LOCAL: Enabling Learning On-device Contiguously for Agent LLMs">LOCAL: Enabling Learning On-device Contiguously for Agent LLMs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Multimodal Federated Learning under Dual-Axis Modality Missingness">Multimodal Federated Learning under Dual-Axis Modality Missingness</span></li><li><span class="dpr-home-dashboard-paper-title" title="APEX: Adaptive Expert Prefetching for Memory-Efficient Edge MoE Inference">APEX: Adaptive Expert Prefetching for Memory-Efficient Edge MoE Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Parameter Space: NTK-Guided Personalized Aggregation for Robust Federated Learning">Beyond Parameter Space: NTK-Guided Personalized Aggregation for Robust Federated Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Personalized Federated Learning via Variance-Aware Nonparametric Empirical Bayes">Personalized Federated Learning via Variance-Aware Nonparametric Empirical Bayes</span></li><li><span class="dpr-home-dashboard-paper-title" title="LoKiFormer: Locality-aware Attention with Decoupled Knowledge Memory for Efficient Large Language Model Pretraining">LoKiFormer: Locality-aware Attention with Decoupled Knowledge Memory for Efficient Large Language Model Pretraining</span></li><li><span class="dpr-home-dashboard-paper-title" title="P2Skill: Privacy Preserving Skill Distillation for Cloud-Local LLM Inference Systems">P2Skill: Privacy Preserving Skill Distillation for Cloud-Local LLM Inference Systems</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 </div>
 
