@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-18</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-19</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 9 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>9</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-18 20:40:02 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-19 20:48:17 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,10 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 10 篇推荐（精读 5 篇，速读 5 篇）</p>
-<p>精读：《Collective Communication for Distributed LLM Systems: Planning, Runtime Adaptation, and Computation Coordination》（9.0/10）, 《KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs》（9.0/10）</p>
-<p>速读：《Personalized Federated Learning via Variance-Aware Nonparametric Empirical Bayes》（7.0/10）, 《LoKiFormer: Locality-aware Attention with Decoupled Knowledge Memory for Efficient Large Language Model Pretraining》（7.0/10）, 《P2Skill: Privacy Preserving Skill Distillation for Cloud-Local LLM Inference Systems》（7.0/10）</p>
-<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
+<p>今日速读9篇论文，聚焦联邦学习效率与</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -74,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">0 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Collective Communication for Distributed LLM Systems: Planning, Runtime Adaptation, and Computation Coordination">Collective Communication for Distributed LLM Systems: Planning, Runtime Adaptation, and Computation Coordination</span></li><li><span class="dpr-home-dashboard-paper-title" title="KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs">KV-Pipe: On the Relation Between KV Sharing and Pipeline Parallel Efficiency in LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="LOCAL: Enabling Learning On-device Contiguously for Agent LLMs">LOCAL: Enabling Learning On-device Contiguously for Agent LLMs</span></li></ul>
+<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">9 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Personalized Federated Learning via Variance-Aware Nonparametric Empirical Bayes">Personalized Federated Learning via Variance-Aware Nonparametric Empirical Bayes</span></li><li><span class="dpr-home-dashboard-paper-title" title="LoKiFormer: Locality-aware Attention with Decoupled Knowledge Memory for Efficient Large Language Model Pretraining">LoKiFormer: Locality-aware Attention with Decoupled Knowledge Memory for Efficient Large Language Model Pretraining</span></li><li><span class="dpr-home-dashboard-paper-title" title="P2Skill: Privacy Preserving Skill Distillation for Cloud-Local LLM Inference Systems">P2Skill: Privacy Preserving Skill Distillation for Cloud-Local LLM Inference Systems</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Heterogeneous Compression for Resource-Efficient Federated Knowledge Distillation">Adaptive Heterogeneous Compression for Resource-Efficient Federated Knowledge Distillation</span></li><li><span class="dpr-home-dashboard-paper-title" title="PTXBench: Benchmark and Adapt LLMs for GPU Kernel Optimization with Architecture-specific PTX">PTXBench: Benchmark and Adapt LLMs for GPU Kernel Optimization with Architecture-specific PTX</span></li><li><span class="dpr-home-dashboard-paper-title" title="Could Model Partitioning Make Federated Learning More Sustainable?">Could Model Partitioning Make Federated Learning More Sustainable?</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>9</strong></span></div>
 </section>
 </div>
 
