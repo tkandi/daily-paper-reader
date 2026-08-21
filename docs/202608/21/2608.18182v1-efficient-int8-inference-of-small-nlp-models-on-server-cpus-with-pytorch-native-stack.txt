@@ -1,0 +1,342 @@
+Title: Efficient INT8 Inference of Small NLP Models on Server CPUs with PyTorch Native Stack
+
+URL Source: https://arxiv.org/pdf/2608.18182v1
+
+Published Time: Thu, 20 Aug 2026 00:04:05 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# EFFICIENT INT8 I NFERENCE OF SMALL NLP M ODELS ON 
+
+# SERVER CPU S WITH PYTORCH NATIVE STACK 
+
+A P REPRINT 
+
+Weiwen Xia, Yuxin Cui, E Cao 
+
+Intel Corporation 
+
+{weiwen.xia,lily.cui,e.cao}@intel.com 
+
+# ABSTRACT 
+
+Small NLP models, especially BERT-family encoders, remain important in industrial workloads such as classification, ranking, and retrieval even in the era of large language models. On server CPUs, INT8 quantization offers an attractive latency-throughput-cost trade-off, but users increasingly expect such acceleration to be available directly in the native PyTorch stack. We integrate SmoothQuant into TorchAO and optimize the resulting inference path for Intel Xeon CPUs through graph-level fusion in TorchInductor and efficient INT8 GEMM kernel selection across oneDNN-, AVX512_VNNI-, and AMX-based implementations. Across BERT, DistilBERT, and XLM-RoBERTa benchmarks, the approach delivers up to 5.8× end-to-end throughput speedup with negligible—and in some cases no measurable—accuracy loss relative to the FP32 baseline. We also validated our work by detailed performance analysis with roofline models. The implementation has been upstreamed to PyTorch and TorchAO, enabling out-of-the-box deployment with native PyTorch tooling. 
+
+Keywords NLP · INT8 quantization · CPU inference · PyTorch · TorchInductor · Roofline Model · Intel Xeon 
+
+# 1 Introduction 
+
+Although large language models (LLMs) have attracted much of the recent attention, small NLP models based on the BERT family remain widely deployed for production tasks such as classification, ranking, and retrieval [Devlin et al., 2019, Sanh et al., 2019, Conneau et al., 2020]. CPU inference continues to play a central role in such deployments because of its favorable cost profile and the ubiquity of server CPU infrastructure. Within the PyTorch ecosystem, there is strong demand for efficient inference using the native software stack. Straightfor-ward FP32 execution on CPU is often suboptimal because transformer inference is dominated by matrix multiplications (GEMM) with substantial compute and memory cost. INT8 quantization is a widely adopted technique for reducing both footprint and execution time while maintaining acceptable accuracy [Jacob et al., 2018, Nagel et al., 2021]. At the same time, modern Intel Xeon CPUs expose instruction-set support such as VNNI and AMX that can substantially accelerate INT8 GEMM workloads [Intel Corporation, 2023]. In this work, we integrate SmoothQuant [Xiao et al., 2023], a post-training quantization method designed to mitigate activation outliers in transformers, into the native PyTorch stack and optimize its performance on modern Xeon CPUs. Our contributions are: • End-to-end SmoothQuant workflow is integrated into TorchAO’s frontend [Or et al., 2025] and improved for subsequent graph optimizations. • Graph fusion passes in TorchInductor [Ansel et al., 2024] is added for INT8 GEMM operators eliminating runtime overheads of weight layout conversion and handling of post-operations. • Kernel selection is enabled for INT8 GEMM for peak performance to choose between oneDNN-backed kernels [oneDNN Contributors, 2024] and template-based GEMM kernels in TorchInductor’s CPP backend. • AVX512_VNNI microkernel is added in TorchInductor’s CPP backend to cover 3rd Gen Xeon CPUs in addition to AMX-based kernels for newer platforms. arXiv:2608.18182v1 [cs.CL] 18 Aug 2026 INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+• Comprehensive performance analysis with roofline models and benchmarks are conducted to show the effectiveness of the proposed workflow and optimizations. • Benchmarks are conducted on BERT, DistilBERT, and XLM-RoBERTa over SQuAD [Rajpurkar et al., 2016] and MultiNLI [Williams et al., 2018] showing negligible accuracy loss and substantial throughput gains compared to FP32 baselines. This work strengthens the PyTorch-native inference path for small NLP models on server CPUs, enabling users to deploy SmoothQuant-optimized INT8 inference with minimal effort and without leaving the PyTorch ecosystem or using third-party tools. 
+
+# 2 Related Work 
+
+Quantization has long been studied as a way to improve inference efficiency. Integer-only quantization was popularized by work such as Jacob et al. [2018], and later surveys summarize the broader landscape of post-training quantization (PTQ) and quantization-aware training (QAT) [Nagel et al., 2021]. For transformer models, several methods explicitly target quantization difficulty caused by activation outliers or model sensitivity. LLM.int8() [Dettmers et al., 2022] introduces mixed-precision handling for outlier channels in LLMs. GPTQ [Frantar et al., 2023] focuses on accurate weight-only post-training quantization, and AWQ [Lin et al., 2024] uses activation-aware weight quantization. Compared with these methods, SmoothQuant [Xiao et al., 2023] shifts activation difficulty into the weights so that standard INT8 arithmetic can be applied efficiently on common hardware. Several software stacks support quantized inference on CPUs. Intel Neural Compressor [Intel Corporation, 2024a] provides broad quantization support but typically relies on PyTorch itself or other third-party tools for deployment. Hugging Face Optimum Intel [Hugging Face and Intel Corporation, 2024] integrates Intel-oriented optimization into the Hugging Face ecosystem, while ONNX Runtime [ONNX Runtime Developers, 2018] provides INT8 inference through exported ONNX graphs. SGLang [Zheng et al., 2024] and vLLM [Kwon et al., 2023] are important LLM-serving systems, but they focus on decoder-style LLM serving rather than BERT-family encoder inference and do not target SmoothQuant in native PyTorch. Intel Extension for PyTorch (IPEX) [Intel Corporation, 2024b] previously offered an efficient SmoothQuant workflow on top of oneDNN, but that path relied on legacy torch.jit -based optimization; its maintenance has since shifted toward native PyTorch 2.x compilation and upstream integration. Our work differs from these approaches by delivering a fully native PyTorch solution that combines SmoothQuant, TorchAO, TorchInductor graph fusion, and ISA-aware CPU kernel selection in one workflow. This integration allows for seamless deployment of optimized INT8 inference within the PyTorch ecosystem. 
+
+# 3 Background and Challenges 
+
+3.1 SmoothQuant and Quantization Modes 
+
+Activation outliers are common in transformer models and can lead to large quantization error under straightforward INT8 quantization. SmoothQuant [Xiao et al., 2023] addresses this issue by redistributing scale factors between activations and weights: the activation tensor is divided by a per-channel smoothing factor, while the corresponding weight tensor is multiplied by the same factor. This transformation reduces activation outliers while preserving the linear layer mathematically. The smoothing factors are derived offline using a small calibration dataset. After smoothing, the model becomes substantially more amenable to standard INT8 quantization [Jacob et al., 2018, Nagel et al., 2021]. The resulting quantization flow can be either static or dynamic, depending on when activation quantization parameters are determined. In static quantization, scales and zero points are obtained during calibration and then fixed in the graph. In dynamic quantization, they are computed at runtime and may vary by input. Static quantization generally offers lower runtime overhead, whereas dynamic quantization can sometimes preserve accuracy more effectively at the cost of additional execution work. 
+
+3.2 PyTorch and TorchAO 
+
+PyTorch is widely used for both research and production [Paszke et al., 2019]. PyTorch 2 introduces TorchInductor (its API torch.compile might be better known), which enables graph capture, optimization, and backend lowering for improved execution efficiency [Ansel et al., 2024]. On CPU, TorchInductor’s CPP backend is a key path for native 2INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+server-class inference performance. Ahead-of-Time Inductor (AOTI) is a specialized version of TorchInductor that compiles the model into a shared binary, eliminating Python overhead and enabling easier integration into production systems. TorchAO is the PyTorch-native quantization library that provides user-friendly APIs for PTQ and QAT [Or et al., 2025]. It supports a range of low-precision data types and quantization methods through a modular design. 
+
+3.3 Challenges 
+
+The integration of SmoothQuant is straightforward in terms of correctness, but achieving high performance on CPU requires additional engineering effort. TorchAO quantizes models in eager mode without backend-aware lowering or graph-level optimization. That makes the resulting model correct, but not necessarily fast enough for production CPU inference. To achieve peak performance with native PyTorch, the quantized model must be compiled with TorchInductor, which introduces several engineering challenges: • The SmoothQuant workflow shares common code with existing TorchAO quantization flows, which contain inefficient operations for high-performance inference. • The scaled INT8 GEMM operator is convenient for modeling and prototyping but has limited performance. • Leveraging TorchInductor’s kernel-selection mechanism is a key strategy so that different shapes can choose the best backend implementation. • Supporting both legacy AVX512_VNNI-only platforms, such as Ice Lake, and newer AMX-capable Xeon generations. 
+
+# 4 Design and Implementation 
+
+4.1 Overall Design 
+
+Our workflow is built on top of TorchAO’s quantization path and TorchInductor’s graph optimization and CPP backend. To apply SmoothQuant to a pretrained model, the user invokes TorchAO’s high-level API, which: • prepares the model for calibration by inserting observers for activation statistics; • searches for smoothing factors by running calibration data through the prepared model; • replaces torch.nn.Linear weights with a custom tensor subclass that stores quantized weights, scales, and smoothing factors; and • replaces high-precision linear operations with INT8 × INT8 → INT32 GEMM via torch._int_mm , followed by output scaling. After quantization, linear layers execute in INT8 while the remaining operators stay in higher precision. The model is then compiled through TorchInductor, which applies graph optimizations and lowers the result into the CPP backend. We added graph passes that fuse scaled INT8 GEMM subgraphs centered on torch._int_mm into the oneDNN-backed operator torch.ops.onednn.qlinear_pointwise . We also extended TorchInductor’s template-based GEMM path with AMX and AVX512_VNNI microkernels so that lowering can select between the oneDNN-based kernel and generated template kernels. 
+
+4.2 Improving Implementation of Common Quantization Flows 
+
+The integration of SmoothQuant shares much common code with existing TorchAO quantization flows, and we made several improvements to improve runtime performance: • When applying the smoothing factor, we precompute the inverse of the factor to avoid repeated division at runtime. • We avoid tensor copies by ignoring a few unnecessary tensor expand operations. • We ignore dummy zero points to save computation. 3INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT Torchao 
+
+> SmoothQuant workflow
+> Fusion passes in TorchInductor
+> Lowering path to CPP
+> backend with kernel
+> selection and codegen
+> Original Model
+> torch.nn.Linear
+> Quantized Model
+> torch._int_mm
+> Forward Graph
+> qlinear_pointwise
+> C++ code
+> Selected GEMM kernels
+
+Figure 1: SmoothQuant workflow built on TorchAO and TorchInductor. TorchAO prepares and quantizes the model, TorchInductor fuses INT8 subgraphs, and the CPP backend selects between oneDNN and template-based GEMM kernels. C++ code is generated and compiled for deployment. 
+
+4.3 Overcoming torch._int_mm Limitations 
+
+We implemented the CPU version of torch._int_mm using oneDNN to support INT8 GEMM for cases like the SmoothQuant flow in TorchAO. However, the primitive by itself introduces three important limitations: • Runtime weight layout conversion. Efficient INT8 GEMM on Xeon often requires blocked weight layouts tailored for VNNI and AMX instructions. Converting weights from plain layout to blocked layout at runtime is expensive. • Missing scale and post-operation handling. The operator computes INT8 × INT8 → INT32 GEMM without an epilogue, so scales and other post-operations need to be handled separately. • oneDNN setup overhead. oneDNN requires auxiliary data structures whose per-call construction can become nontrivial overhead. We address these issues by extending the graph fusion capability in TorchInductor. The following pattern and its variants are matched: 
+
+input_reshape -> int_mm -> dtype_convert -> mul -> mul -> output_reshape -> add_bias 
+
+where int_mm is the INT8 GEMM operator, the first mul applies the activation scale, the second mul ap-plies the weight scale, and add_bias adds a bias term. The matched subgraph is then replaced by a single 
+
+torch.ops.onednn.qlinear_pointwise operator. This fused operator accepts blocked-layout weights, applies acti-vation and weight scales as post-operations inside the kernel, and caches oneDNN metadata after warm-up. This kernel can be further fused with other operators such as GeLU [Hendrycks and Gimpel, 2016] by existing fusion capability of TorchInductor. A corresponding weight layout conversion operator is also added to the graph to convert weights from plain layout to blocked layout, which is evaluated and folded during a constant folding pass in TorchInductor. 
+
+4.4 Template-Based GEMM Kernels for Maximum Performance 
+
+Although qlinear_pointwise performs well in many cases, it is not uniformly optimal across all matrix shapes. We therefore extended TorchInductor’s template-based GEMM kernels as an alternative lowering target. Specifically, we implemented INT8 GEMM microkernels using AMX and AVX512_VNNI intrinsics and integrated them into the CPP backend’s generated kernel path. During lowering, TorchInductor’s kernel-selection mechanism generates candidate kernels, compiles them, micro-benchmarks them, and selects the fastest implementation for future execution. This one-time selection process enables the system to balance the generality of oneDNN against the shape specialization of template-generated kernels. 
+
+4.5 Supporting Ice Lake: s8s8 → u8s8 Transformation 
+
+TorchAO quantizes both activations and weights to signed INT8 ( s8). However, 3rd Gen Xeon (Ice Lake) does not provide native s8 × s8 GEMM instructions; AVX512_VNNI requires activation to be unsigned INT8 u8, i.e. u8 × s8.For GEMM of Y = X · W ⊤, we therefore shift the activation tensor X by a constant: 
+
+Xu8 = uint8(int32( Xs8) + 128) . (1) 4INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 1: Hardware platforms used for baseline collection. Xeon Generation Codename Model Physical Cores Instruction Support 3rd Gen Ice Lake 8358 64 AVX512F, AVX512_VNNI 6th Gen Granite Rapids 6980P 256 AVX512F, AVX512_VNNI, AMX To preserve mathematical equivalence, the shift is treated as a zero point and compensated in the GEMM result. For a weight matrix W ∈ ZN ×K , the compensation term is 
+
+c =
+
+> K
+
+X
+
+> k=1
+
+W:,k 
+
+!
+
+· 128 . (2) And the GEMM result is computed as 
+
+Y = Xu8 · W ⊤ − c. (3) Because both the shift and the weights are constant, the weight conversion and compensation vector are precomputed before inference. Although this introduces some overhead for loading and subtraction, it still yields substantial speedup by enabling AVX512_VNNI execution on Ice Lake. The fusion pattern in Section 4.3 is extended to include the shift and compensation accordingly. 
+
+# 5 Performance Analysis and Optimization Targets 
+
+5.1 Benchmark Setup for Baseline Collection 
+
+BERT-family models contain both the GEMM-heavy layers that benefit most from quantization and the higher-precision operators that still limit end-to-end speedup and they are representative of the small NLP models that remain widely deployed in production. To ground the performance discussion in a concrete baseline, we begin with a focused study that identifies the dominant execution hotspots and quantifies the headroom for INT8 acceleration. We conduct benchmarks on two representative Xeon platforms: 3rd Gen (Ice Lake) and 6th Gen (Granite Rapids). Table 1 summarizes the hardware platforms. The 4th and 5th Gen Xeon platforms share the same INT8 GEMM instruction support as the 6th Gen architecture, so we omit them for scope; ISA-level conclusions transfer, while absolute performance may differ across generations. For the performance benchmark, we measure end-to-end throughput in requests per second (RPS) and linear-block latency (GEMM + fused post-operations) using synthetic inputs with batch size 1. Table 2 summarizes the baseline collection setup. The multi-instance launch strategy is used to maximize throughput by running multiple independent model instances in parallel, each pinned to a subset of physical cores: 16 instances on 64 physical cores for Ice Lake, and 64 instances on 256 physical cores for Granite Rapids. Instances are partitioned per socket; within each socket, instances share model weights and synthetic inputs to maximize utilization of last level cache (LLC) and avoid cross-socket memory access. We collect FP32 baselines on both evaluated platforms and BF16 on Granite Rapids, where native BF16 compute is available. For reproducibility, (1) each instance is pinned with taskset to physical cores only, with OMP_NUM_THREADS=4 , KMP_AFFINITY=granularity=fine,compact,1,<first_core> ,and torch.set_num_threads(4) ; (2) Intel OpenMP runtime library and the TCMalloc memory allocator are used; (3) the first 100 iterations are warm-up and the next 200 iterations are measured; (4) the total throughput and latency are reported. 
+
+5.2 Baseline Hotspot Breakdown 
+
+We focus on BERT-large [Devlin et al., 2019] in this section and subsequent sections and similar analysis goes for other BERT-family models. Table 3 summarizes profiler-derived operator breakdowns for the FP32 baselines on both platforms and the BF16 baseline on Granite Rapids. The baseline already reveals the core optimization target of this work. In the FP32 baselines, about 87% of self CPU time on Granite Rapids and about 89% on Ice Lake are spent in linear-block kernels, while attention accounts for about 12% and 10% , respectively. For BF16 on Granite Rapids, linear-block share decreases while attention and normalization shares increase. These baselines justify treating linear-block/GEMM as the main hotspot while also making clear that non-GEMM operators limit end-to-end speedup after GEMM is accelerated. Due 5INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 2: Baseline collection setup. Item Value Model BERT-large Input shape Batch size 1, sequence length 256 Precision modes FP32 on both platforms; BF16 on Granite Rapids Launch strategy Multi-instance with weight-sharing on each socket Cores per instance 4Number of instances Number of physical cores / 4 Deployment path AOTI enabled Input data Synthetic Table 3: Baseline hotspot breakdown for the BERT-large analysis case under the same multi-instance setup used for throughput benchmarking. Operator shares are aggregated from representative profiler logs. The linear-block consists of GEMM and fused post-operations such as bias addition, activation, and residual addition.                 
+
+> Baseline Linear-Block Attention LayerNorm Other FP32 on Ice Lake 88.5% 10.4% 0.6% 0.5% FP32 on Granite Rapids 86.9% 11.8% 0.8% 0.5% BF16 on Granite Rapids 72.70% 19.75% 5.99% 1.56%
+
+to profiler limitations, we cannot separate pure GEMM from linear blocks. We treat linear-block as an approximation of GEMM for the following analysis, which is reasonable because GEMM dominates linear-blocks. 
+
+5.3 INT8 GEMM Ceiling Estimation 
+
+According to the roofline model [Williams et al., 2009], the peak memory bandwidth and compute throughput of the evaluated platforms can be used to estimate the balance point (BP) for different data types by 
+
+BP = Pcompute 
+
+B (4) where Pcompute is the peak compute throughput and B is the peak memory bandwidth. The balance point indicates the arithmetic intensity at which a kernel transitions from being memory-bound to compute-bound. The results are listed in Table 4, where the theoretical throughputs are estimated by hardware specs and the memory bandwidth is from measurement. The shapes of BERT-large GEMM and their arithmetic intensity (AI) are shown in Table 5, which are evaluated by 
+
+AI = 2 · M · N · KEin · (M · K + K · N ) + Eout · (M · N ) (5) where Ein and Eout are the data sizes of input and output elements respectively and M , K, and N are the GEMM dimensions. We have disregarded the lm_head layer for simplicity because it accounts for a negligible proportion of the time. Apparently, (1) FP32 GEMM is always compute-bound on both platforms (AI > BP); (2) BF16 GEMM is memory-bound on Granite Rapids (AI < BP); and (3) INT8 GEMM is compute-bound on Ice Lake (AI > BP) but memory-bound on Granite Rapids (AI < BP). According to the roofline model, theoretical peak throughput of GEMM is computed by 
+
+PGEMM = min( Pcompute , B · AI ) (6) where Pcompute is the peak compute throughput, B the peak memory bandwidth, and AI the arithmetic intensity. Therefore, the estimated GEMM speedup on Ice Lake is 4.0×. And on Granite Rapids, GEMM is memory-bound for both BF16 and INT8. However, it is noted that the size of quantized INT8 model (442 MB) is already less than the LLC size (504 MB) on the platform. So, ideally, the weights W of INT8 GEMM ( Y = X · W ⊤) can reside in LLC completely. However, X and Y have to be read from and written to main memory, because W takes up 87 .7% of LLC and X and Y data are changing at runtime. Therefore, we also measured the LLC read bandwidth to be about 1000 GB/s and we estimate the effective memory bandwidth Beff for INT8 GEMM on Granite Rapids according to the sizes of X, W , and Y for each shape by 
+
+Beff = DX + DW + DY
+
+(DX + DY )/B mem + DW /B LLC 
+
+(7) 6INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 4: Estimated peak compute and measured memory bandwidth per socket, balance point for different data types on the evaluated platforms.               
+
+> Platform FP32 Throughput (TFLOPS) BF16 Throughput (TFLOPS) INT8 Throughput (TOPS) Memory Bandwidth (GB/s) FP32 Balance Point (FLOPs/byte) BF16 Balance Point (FLOPs/byte) INT8 Balance Point (OPs/byte) Ice Lake 6.76 N/A 27.03 175.00 38.63 N/A 154.46 Granite Rapids 19.66 262.14 524.29 700.00 28.09 374.49 748.99
+
+Table 5: BERT-large GEMM shapes and their arithmetic intensity.                                
+
+> Arithmetic Intensity (ops/byte) GEMM Shape M×K×NOccurrences per forward pass FP32 BF16 INT8
+> 256 ×1024 ×1024 96 85.33 146.29 227.56
+> 256 ×1024 ×4096 24 97.52 163.84 248.24
+> 256 ×4096 ×1024 24 97.52 186.18 341.33
+
+where DX , DW , and DY are the total data sizes (bytes) of X, W , and Y matrices respectively, Bmem is the measured memory bandwidth, and BLLC is the measured LLC read bandwidth. The effective memory bandwidth for INT8 GEMM on Granite Rapids and the BP for each shape are listed in Table 6. After adjustment, the INT8 GEMMs are still memory-bound on Granite Rapids, but the effective memory bandwidth is improved and the balance point is reduced. Then the estimated GEMM throughput and speedup on Granite Rapids can be computed as in Table 7. The aggregate throughput across mixed GEMM shapes is computed by 
+
+PGEMM =
+
+P
+
+> i
+
+(counts i · Fi)
+
+P 
+
+> i
+
+(counts i · Fi/P i) (8) where PGEMM is the aggregate GEMM throughput, counts i the occurrences, Fi the number of operations, and Pi the per-shape GEMM throughput, defined by 
+
+Pi = min( Pcompute , B i · AI i), (9) with Bi = Beff ,i for INT8 GEMM on Granite Rapids and Bi = Bmem otherwise. 
+
+5.4 Estimated End-to-End Speedup Ceiling 
+
+By applying Amdahl’s law [Amdahl, 1967], we estimate the end-to-end speedup ceiling for BERT-large on both platforms. For INT8 vs FP32, we use the FP32 baselines in Table 3. Let f be the fraction of time spent in a hotspot and 
+
+s be the speedup of that hotspot. The overall speedup S is then: 
+
+S =
+
+ 1 − fGEMM 
+
+snon-GEMM 
+
++ fGEMM 
+
+sGEMM 
+
+−1
+
+. (10) The auto-mixed-precision (AMP) mechanism in PyTorch automatically converts operators to BF16 regardless of hardware support, which is a common practice in production and is used in the subsequent benchmarks. Its behaviors are as follows: • For unquantized models on Ice Lake: AMP converts inputs of all operators to BF16 but the computation remains in FP32 because Ice Lake does not support BF16. The GEMM part will be slower due to additional data type conversion, while the non-GEMM part can benefit from reduced memory bandwidth usage. Table 6: Effective memory bandwidth and balance point for INT8 GEMM on Granite Rapids.                         
+
+> GEMM Shape Effective Memory Bandwidth (GB/s) Arithmetic Intensity (OPs/byte) Balance Point (OPs/byte)
+> 256 ×1024 ×1024 807.69 227.56 649.12
+> 256 ×1024 ×4096 819.15 248.24 640.04
+> 256 ×4096 ×1024 875.00 341.33 599.19
+
+7INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 7: Estimated GEMM throughput and speedup on Granite Rapids.                                 
+
+> GEMM Shape FP32 Throughput (TFLOPS) BF16 Throughput (TFLOPS) INT8 Throughput (TOPS) INT8 vs FP32 Speedup INT8 vs BF16 Speedup
+> 256 ×1024 ×1024 19.66 102.40 183.79 9.35 ×1.79 ×
+> 256 ×1024 ×4096 19.66 114.69 203.35 10.34 ×1.77 ×
+> 256 ×4096 ×1024 19.66 130.33 298.67 15.19 ×2.29 ×
+> Weighted Average 19.66 114.69 218.87 11.13 ×1.91 ×
+
+• For quantized models on Ice Lake: AMP converts inputs of all operators to BF16 but the computation of GEMM is in INT8 and other parts remain in FP32. The GEMM part still benefits from INT8 speedup, while the non-GEMM part can benefit from reduced memory bandwidth usage. • For unquantized models on Granite Rapids: AMP converts inputs of all operators to BF16 and computation is done in BF16 (such as GEMM) or FP32 (such as elementwise operations). The GEMM and attention benefit from BF16 speedup, and the rest can benefit from reduced memory bandwidth usage. • For quantized models on Granite Rapids: AMP converts inputs of all operators to BF16 and the computation of GEMM is in INT8 and other parts are in BF16 or FP32, as stated in the previous item. Thus, the non-GEMM part can benefit from BF16 computation (attention) and reduced memory bandwidth usage. Therefore, to estimate the end-to-end speedup ceiling compared to FP32, we also need to consider the speedup of non-GEMM parts by AMP. We measured that the non-GEMM part has 1.20 × speedup on Ice Lake and 2.06 × speedup on Granite Rapids with BF16. The speedup is brought by data compression and/or native BF16 compute as mentioned above, partially offset by the overhead of data type conversion. We use the estimated GEMM speedup and measured speedup values for the non-GEMM part. Since we only have fractions for linear-block, not pure GEMM, the estimate is approximate. Then we get the estimated end-to-end speedup ceilings of INT8 as follows: • INT8 vs FP32 on Ice Lake: fGEMM = 0 .885 , sGEMM = 4 .0, fnon-GEMM = 0 .115 , snon-GEMM = 1 .20 , S = 3 .15 .• INT8 vs FP32 on Granite Rapids: fGEMM = 0 .869 , sGEMM = 11 .13 , fnon-GEMM = 0 .131 , snon-GEMM = 2 .06 ,
+
+S = 7 .06 .• INT8 vs BF16 on Granite Rapids: for this comparison we use the measured BF16 baseline hotspot breakdown in Table 3. With fGEMM = 0 .727 , sGEMM = 1 .91 , fnon-GEMM = 0 .273 , and snon-GEMM = 1 .0, we get S = 1 .53 .However, the realized end-to-end speedup can differ from, and is usually lower than, the estimated ceiling because • The estimated peak GEMM speedup is ideal. • The quantization itself introduces additional overhead, including 
+
+– Application of smoothing factors to activations. 
+
+– Quantization and dequantization of tensors. 
+
+– Handling compensation on Ice Lake. 
+
+– Finding quantization parameters (scales) for dynamic quantization. • Framework overhead exists when running real workloads. • The linear-block latency includes not only GEMM but also post-operations, so it is only an approximation. • The LLC behavior may be more complicated than assumed. 
+
+# 6 Experiments and Evaluation 
+
+6.1 Benchmark Setup 
+
+The full evaluation of this work reuses the baseline collection setup from Section 5 and extends it from baseline collection to full SmoothQuant benchmarking. In particular, the same hardware platforms, sequence length, batch size, multi-instance launch strategy, AMP and AOTI deployment path are reused for throughput measurements. This section adds the model suite, quantization methods, and downstream accuracy tasks needed for the complete SmoothQuant evaluation. 8INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 8: Models used for the performance benchmark. Model Model ID BERT-large bert-large-uncased 
+
+DistilBERT distilbert-base-uncased 
+
+XLM-RoBERTa xlm-roberta-base 
+
+Table 9: Task-finetuned checkpoints used for accuracy evaluation. The model marked by * is finetuned on SQuAD 2.0 but still workable for the test on SQuAD 1.1.               
+
+> Dataset Model Model ID SQuAD 1.1 BERT-large google-bert/bert-large-uncased-whole-word-masking-finetuned-squad
+> SQuAD 1.1 DistilBERT distilbert/distilbert-base-cased-distilled-squad
+> SQuAD 1.1 XLM-RoBERTa deepset/xlm-roberta-base-squad2 *MultiNLI BERT-large yoshitomo-matsubara/bert-large-uncased-mnli
+> MultiNLI DistilBERT typeform/distilbert-base-uncased-mnli
+> MultiNLI XLM-RoBERTa symanto/xlm-roberta-base-snli-mnli-anli-xnli
+
+We evaluate the approach in terms of both performance and accuracy using BERT-large [Devlin et al., 2019], DistilBERT [Sanh et al., 2019], and XLM-RoBERTa [Conneau et al., 2020]. Minimizing accuracy loss after quantization is not the main contribution of this work, but we include it to confirm that the native SmoothQuant workflow works out of the box with little loss in quality. We use SQuAD and MultiNLI for downstream evaluation, relying on task-finetuned checkpoints. Task-finetuned checkpoints do not change performance characteristics, and according to model publishers, finetuning is required for downstream tasks. For SmoothQuant throughput benchmarks, we reuse the Section 5 baseline configuration and replace the baseline precision modes with the quantized configurations in Table 10. Both static and dynamic SmoothQuant are evaluated. For accuracy evaluation, we use the task-finetuned checkpoints in Table 9 with real downstream datasets instead of synthetic inputs. The granularity of quantization of activations and weights can be per-tensor and per-row (per-channel), and we use per-row quantization for weights in all experiments and per-tensor quantization for activations for static quantization and per-row for dynamic quantization. Performance can be improved more with per-tensor quantization of weights at the cost of accuracy loss and it is not included in the experiments. The benchmark implementation is available at https://github.com/Xia-Weiwen/torchao_smoothquant_benchmark .
+
+6.2 Performance Results 
+
+The performance results on both platforms are shown in Tables 11 and 12. Overall, the proposed workflow delivers substantial end-to-end performance improvements across all evaluated models and hardware platforms. On Ice Lake, it improves throughput by approximately 1.9× to 2.6× over FP32 and reduces linear-block latency by more than 3×. On Granite Rapids, throughput speedup ranges from 4.2× to 5.8×, and linear-block latency speedup is more than 7.5×,reflecting the much higher INT8 GEMM ceiling enabled by AMX. Static SmoothQuant consistently outperforms the dynamic variant in end-to-end throughput because more work is moved offline into calibration and precomputation. The comparison of INT8 vs BF16 on Granite Rapids is done in Table 13. The realized speedup of INT8 over BF16 is 0.98 ×
+
+to 1.59 × in throughput and 1.45 × to 1.84 × in linear-block latency. The < 1× throughput speedup for DistilBERT and XLM-RoBERTa occurs because dynamic quantization overhead is higher than the GEMM speedup in these cases. 
+
+6.3 Comparing Realized Speedup to Estimated Ceiling 
+
+We compare the realized speedup of the focused BERT-large to estimated ceilings in Section 5, summarized as Table 14. On Ice Lake, the throughput speedup is 2.22 × for dynamic quantization, about 70% of the estimated ceiling, and 
+
+2.58 × for static quantization, about 82% of the estimated ceiling. The linear-block latency speedup is 3.59 × for dynamic quantization, about 90% of the estimated ceiling, and 3.87 × for static quantization, about 97% of the estimated ceiling. Here, linear-block latency includes GEMM together with fused scale handling and surrounding post-operations, so it is a practical proxy instead of a strict GEMM-only metric. Because TorchInductor fusion differs across data types and models, linear-block speedup is not a strict like-for-like kernel comparison and should be interpreted as an approximation of pure GEMM speedup. 9INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 10: Quantization methods used in the experiments. Method Short Name No quantization, no AMP FP32 No quantization, with AMP BF16 SmoothQuant, static quantization Smooth-Static SmoothQuant, dynamic quantization Smooth-Dynamic Table 11: INT8 speedup over FP32 on Ice Lake. 
+
+Model Method Throughput Speedup Linear-Block Speedup BERT-large Smooth-Dynamic 2.22 × 3.59 ×
+
+BERT-large Smooth-Static 2.58 × 3.87 ×
+
+DistilBERT Smooth-Dynamic 1.90 × 3.31 ×
+
+DistilBERT Smooth-Static 2.30 × 3.35 ×
+
+XLM-RoBERTa Smooth-Dynamic 1.86 × 3.05 ×
+
+XLM-RoBERTa Smooth-Static 2.17 × 3.71 ×
+
+Table 12: INT8 speedup over FP32 on Granite Rapids. 
+
+Model Method Throughput Speedup Linear-Block Speedup BERT-large Smooth-Dynamic 5.02 × 9.92 ×
+
+BERT-large Smooth-Static 5.82 × 8.67 ×
+
+DistilBERT Smooth-Dynamic 4.24 × 7.60 ×
+
+DistilBERT Smooth-Static 5.37 × 8.84 ×
+
+XLM-RoBERTa Smooth-Dynamic 4.17 × 7.58 ×
+
+XLM-RoBERTa Smooth-Static 5.41 × 8.71 ×
+
+Table 13: INT8 speedup over BF16 on Granite Rapids. 
+
+Model Method Throughput Speedup Linear-Block Speedup BERT-large Smooth-Dynamic 1.37 × 1.84 ×
+
+BERT-large Smooth-Static 1.59 × 1.61 ×
+
+DistilBERT Smooth-Dynamic 0.98 × 1.45 ×
+
+DistilBERT Smooth-Static 1.24 × 1.69 ×
+
+XLM-RoBERTa Smooth-Dynamic 0.99 × 1.50 ×
+
+XLM-RoBERTa Smooth-Static 1.29 × 1.67 ×
+
+Table 14: Realized speedup of BERT-large over estimated speedup ceiling on both evaluated platforms. 
+
+Throughput Speedup Linear-Block Speedup Platform Method Baseline Realized Estimated Gap Realized Estimated Gap Ice Lake Smooth-Dynamic FP32 2.22 × 3.15 × 29.59% 3.59 × 4.00 × 10.22% Ice Lake Smooth-Static FP32 2.58 × 3.15 × 18.17% 3.87 × 4.00 × 3.21% Granite Rapids Smooth-Dynamic FP32 5.02 × 7.06 × 28.89% 9.92 × 11.13 × 10.89% Granite Rapids Smooth-Static FP32 5.82 × 7.06 × 17.56% 8.67 × 11.13 × 22.12% Granite Rapids Smooth-Dynamic BF16 1.37 × 1.53 × 10.41% 1.84 × 1.91 × 3.58% Granite Rapids Smooth-Static BF16 1.59 × 1.53 × -3.98% 1.61 × 1.91 × 15.64% 
+
+It can be seen that the realized speedup on Ice Lake is lower than the estimated ceiling, which is consistent with the analysis in Section 5. However, the gap in linear-block latency is relatively small because Ice Lake is compute-bound for INT8 GEMM and the quantization overhead has limited impact. Thus the speedup brought by AVX512_VNNI is easily realized. On Granite Rapids, the throughput speedup over FP32 is 5.02 × for dynamic quantization, roughly 71% of the estimated ceiling, and 5.82 × for static quantization, roughly 82% of the estimated ceiling. The linear-block latency speedup is about 8.7× for static quantization and 9.9× for dynamic quantization, achieving roughly 78% and 89% of the estimated 10 INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Table 15: Accuracy results on Granite Rapids.                                                                                           
+
+> Model Metric FP32 BF16 Smooth-Static Alpha Loss Smooth-Dynamic Alpha Loss BERT-large SQuAD F1 92.64 92.67 92.66 0.6 0.0% 92.63 0.6 0.0% BERT-large SQuAD EM 86.41 86.45 86.49 0.6 -0.1% 86.44 0.6 0.0% BERT-large MultiNLI Accuracy 64.55 64.58 64.73 0.7 -0.3% 64.52 0.6 0.0% DistilBERT SQuAD F1 86.39 86.41 86.00 0.7 0.5% 86.40 0.6 0.0% DistilBERT SQuAD EM 79.02 79.04 78.49 0.7 0.7% 79.04 0.6 0.0% DistilBERT MultiNLI Accuracy 82.21 82.16 82.26 0.8 -0.1% 82.17 0.6 0.0% XLM-RoBERTa SQuAD F1 76.43 76.34 76.47 0.55 -0.1% 76.59 0.6 -0.2% XLM-RoBERTa SQuAD EM 69.95 69.89 70.04 0.55 -0.1% 70.30 0.6 -0.5% XLM-RoBERTa MultiNLI Accuracy 82.26 82.23 82.31 0.7 -0.1% 82.26 0.6 0.0%
+
+ceiling, respectively. The gap is larger for static quantization because the linear-block fusions are different for the two cases, where the heavy post-operation GeLU is fused for static quantization but not for dynamic quantization. When comparing INT8 to BF16, throughput speedup is 1.37 × for dynamic quantization and 1.59 × for static quantiza-tion, achieving roughly 90% and 104% of the estimated ceiling, respectively. The overshoot indicates the limitation of the roofline model and does not reflect a true breakthrough of the estimated ceiling. The linear-block latency speedup is 
+
+1.84 × for dynamic quantization and 1.61 × for static quantization, achieving roughly 96% and 84% of the estimated ceiling, respectively. Dynamic quantization has a smaller linear-block-latency gap for the same reason as above. The gap with estimated ceilings is mainly brought by the overhead of quantization and dequantization, and searching for quantization parameters for dynamic quantization, which is more significant on Granite Rapids because INT8 GEMM is memory-bound. Again, the speedup of linear-block latency is only an approximation of GEMM speedup due to the fusion behavior. Taking these factors into account, the overall achieved speedups are consistent with the expectation from the ceiling analysis. 
+
+6.4 Accuracy Results 
+
+The accuracy results in Table 15 show that the proposed workflow introduces negligible accuracy loss ( < 1% ) while substantially improving performance. In the few cases where a quantized result is marginally higher than the baseline, the difference is small enough to be attributed to routine evaluation variance or mild overfitting rather than a systematic improvement from quantization itself. The results confirm that the native SmoothQuant workflow works out of the box with little loss in quality. 
+
+# 7 Conclusion 
+
+We integrated and deeply optimized a SmoothQuant-based INT8 inference workflow of BERT-family NLP models in the native PyTorch stack for Intel Xeon CPUs. The work extends TorchAO’s quantization workflow for SmoothQuant, expands TorchInductor’s graph fusion capability to remove runtime overheads such as layout conversion and separate post-operations, and adds AVX512_VNNI and AMX template-based GEMM kernels that participate in backend kernel selection. We further support Ice Lake through an s8s8 → u8s8 transformation with precomputed compensation. A comprehensive performance analysis is conducted with roofline models for the realized speedups to demonstrate the effectiveness of the proposed workflow and optimizations. Across representative BERT-family models, the resulting system achieves near-FP32 accuracy with large throughput gains, providing an out-of-the-box path for efficient CPU deployment in native PyTorch. 
+
+# Acknowledgements 
+
+We thank Mingfei Ma, Lifeng Wang, Guobing Chen and all other colleagues at Intel Corporation who provided their support and feedback for this work. 
+
+# References 
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. Bert: Pre-training of deep bidirectional transformers for language understanding. In Proceedings of the 2019 Conference of the North American Chapter of 
+
+11 INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+the Association for Computational Linguistics: Human Language Technologies , 2019. Victor Sanh, Lysandre Debut, Julien Chaumond, and Thomas Wolf. Distilbert, a distilled version of BERT: Smaller, faster, cheaper and lighter. arXiv preprint arXiv:1910.01108 , 2019. Alexis Conneau, Kartikay Khandelwal, Naman Goyal, Vishrav Chaudhary, Guillaume Wenzek, Francisco Guzmán, Edouard Grave, Myle Ott, Luke Zettlemoyer, and Veselin Stoyanov. Unsupervised cross-lingual representation learning at scale. In Proceedings of the 58th Annual Meeting of the Association for Computational Linguistics , 2020. Benoit Jacob, Skirmantas Kligys, Bo Chen, Menglong Zhu, Matthew Tang, Andrew Howard, Hartwig Adam, and Dmitry Kalenichenko. Quantization and training of neural networks for efficient integer-arithmetic-only inference. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition , 2018. Markus Nagel, Rana Ali Amjad, Mart van Baalen, Christos Louizos, and Tijmen Blankevoort. A white paper on neural network quantization. arXiv preprint arXiv:2106.08295 , 2021. Intel Corporation. Intel Architecture Instruction Set Extensions and Future Features Programming Reference . Intel Cor-poration, 2023. Document 319433. Covers VNNI and AMX. https://cdrdv2.intel.com/v1/dl/getContent/ 671368 .Guangxuan Xiao, Ji Lin, Matthieu Seznec, Julien Demouth, and Song Han. Smoothquant: Accurate and efficient post-training quantization for large language models. In Proceedings of the 40th International Conference on Machine Learning , 2023. Andrew Or, Apurva Jain, Daniel Vega-Myhre, Jesse Cai, Charles David Hernandez, Zhenrui Zheng, Driss Guessous, Vasiliy Kuznetsov, Christian Puhrsch, Mark Saroufim, Supriya Rao, Thien Tran, and Aleksandar Samarzdzic. TorchAO: PyTorch-native training-to-serving model optimization. arXiv preprint arXiv:2507.16099, 2025. CodeML Workshop at ICML 2025. Jason Ansel, Edward Yang, Horace He, Natalia Gimelshein, Animesh Jain, Michael Voznesensky, Bin Bao, Peter Bell, David Berard, Evgeni Burovski, et al. PyTorch 2: Faster machine learning through dynamic Python bytecode transformation and graph compilation. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , 2024. doi:10.1145/3620665.3640366. oneDNN Contributors. oneapi deep neural network library (onednn). https://github.com/uxlfoundation/ oneDNN , 2024. Version 3.13. Pranav Rajpurkar, Jian Zhang, Konstantin Lopyrev, and Percy Liang. SQuAD: 100,000+ questions for machine comprehension of text. In Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing , 2016. Adina Williams, Nikita Nangia, and Samuel R. Bowman. A broad-coverage challenge corpus for sentence understanding through inference. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies , 2018. Tim Dettmers, Mike Lewis, Younes Belkada, and Luke Zettlemoyer. LLM.int8(): 8-bit matrix multiplication for transformers at scale. arXiv preprint arXiv:2208.07339 , 2022. Elias Frantar, Saleh Ashkboos, Torsten Hoefler, and Dan Alistarh. GPTQ: Accurate post-training quantization for generative pre-trained transformers. In The Eleventh International Conference on Learning Representations , 2023. Ji Lin, Jiaming Tang, Haotian Tang, Shang Yang, Xingyu Dang, and Song Han. AWQ: Activation-aware weight quantization for LLM compression and acceleration. In Proceedings of Machine Learning and Systems , 2024. Intel Corporation. Intel neural compressor. https://github.com/intel/neural-compressor , 2024a. Open-source neural network compression library. Hugging Face and Intel Corporation. Optimum intel. https://github.com/huggingface/optimum-intel , 2024. Intel-oriented optimization extension for Hugging Face Optimum. ONNX Runtime Developers. Onnx runtime. https://onnxruntime.ai , 2018. Open-source inference and training accelerator. Source: https://github.com/microsoft/onnxruntime .Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. SGLang: Efficient execution of structured language model programs. In Advances in Neural Information Processing Systems , 2024. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In 
+
+Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , 2023. Intel Corporation. Intel extension for pytorch. https://github.com/intel/intel-extension-for-pytorch ,2024b. Version 2.8; project functionality has largely been upstreamed into PyTorch. 12 INT8 Inference of Small NLP Models on Xeon CPUs A P REPRINT 
+
+Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, et al. Pytorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems , 2019. Dan Hendrycks and Kevin Gimpel. Gaussian error linear units (GELUs). arXiv preprint arXiv:1606.08415 , 2016. Samuel Williams, Andrew Waterman, and David Patterson. Roofline: An insightful visual performance model for multicore architectures. In Communications of the ACM , volume 52, pages 65–76, 2009. Gene M. Amdahl. Validity of the single processor approach to achieving large scale computing capabilities. In 
+
+Proceedings of the April 18-20, 1967, Spring Joint Computer Conference , 1967. 13
