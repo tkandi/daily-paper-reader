@@ -609,6 +609,13 @@ window.SubscriptionsSmartQuery = (function () {
   );
 
   const loadLlmConfig = () => {
+    const localConfig =
+      window.DPRLocalLLM && typeof window.DPRLocalLLM.getSummaryConfig === 'function'
+        ? window.DPRLocalLLM.getSummaryConfig()
+        : null;
+    if (localConfig && localConfig.baseUrl && localConfig.apiKey && localConfig.model) {
+      return localConfig;
+    }
     const secret = window.decoded_secret_private || {};
     const summarized = secret.summarizedLLM || {};
     const baseUrl = normalizeText(summarized.baseUrl || '');

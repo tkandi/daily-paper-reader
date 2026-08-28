@@ -20,6 +20,7 @@ def _load_module():
                 pass
 
         llm_stub.DeepSeekClient = DummyDeepSeekClient
+        llm_stub.LLMClient = DummyDeepSeekClient
         llm_stub.resolve_max_output_tokens = lambda default=393216: default
         sys.modules["llm"] = llm_stub
 

@@ -21,6 +21,7 @@ def _load_module():
                 pass
 
         llm_stub.DeepSeekClient = DummyDeepSeekClient
+        llm_stub.LLMClient = DummyDeepSeekClient
         sys.modules["llm"] = llm_stub
 
     src_path = ROOT / "src" / "6.generate_docs.py"

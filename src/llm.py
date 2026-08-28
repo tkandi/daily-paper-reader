@@ -14,7 +14,20 @@ import requests
 """
 
 # 单次实验级别的全局 token 统计（需由调用方在实验开始前手动 reset）
-DEFAULT_MAX_OUTPUT_TOKENS = 393216
+DEFAULT_MAX_OUTPUT_TOKENS = 16 * 1024
+DEEPSEEK_V4_MAX_OUTPUT_TOKENS = 393216
+DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+
+def default_max_output_tokens(model: str = "", base_url: str = "") -> int:
+    normalized_model = str(model or "").strip().lower()
+    normalized_base = str(base_url or "").strip().lower()
+    if (
+        normalized_model in {"deepseek-v4-flash", "deepseek-v4-pro"}
+        and "deepseek.com" in normalized_base
+    ):
+        return DEEPSEEK_V4_MAX_OUTPUT_TOKENS
+    return DEFAULT_MAX_OUTPUT_TOKENS
 
 
 def resolve_max_output_tokens(default: int = DEFAULT_MAX_OUTPUT_TOKENS) -> int:
@@ -35,9 +48,6 @@ GLOBAL_TOKENS = {
 }
 # 单次实验级别的全局时间统计（秒）
 GLOBAL_TIME_SECONDS: float = 0.0
-
-DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-
 
 def reset_global_tokens():
     """重置本次实验的全局 token 统计。"""
@@ -94,7 +104,9 @@ class LLMClient:
         # 实例级别的累计耗时（秒）
         self._cum_time_seconds: float = 0.0
         self.kwargs: Dict[str, Any] = {
-            'max_tokens': resolve_max_output_tokens(),
+            'max_tokens': resolve_max_output_tokens(
+                default_max_output_tokens(model=model, base_url=base_url)
+            ),
             'temperature': 0.6,
             'top_p': 0.3,
             'top_k': 50,
@@ -151,6 +163,8 @@ class LLMClient:
                 return 'deepseek'
             if model.startswith('deepseek-'):
                 return 'deepseek'
+            if '127.0.0.1:8317' in url or 'localhost:8317' in url:
+                return 'cliproxyapi'
         except Exception:
             pass
         return 'llm'
@@ -528,7 +542,9 @@ class LLMClient:
 
         # 对输出 token 上限做保护；DeepSeek V4 支持更长输出，默认按 384K 预留。
         try:
-            max_output_tokens = resolve_max_output_tokens()
+            max_output_tokens = resolve_max_output_tokens(
+                default_max_output_tokens(model=self.model, base_url=self.base_url)
+            )
             if isinstance(payload.get('max_tokens'), int) and payload['max_tokens'] > max_output_tokens:
                 payload['max_tokens'] = max_output_tokens
         except Exception:
@@ -646,7 +662,7 @@ class LLMClient:
                 last_error = e
                 if self._is_authentication_error(e):
                     print(
-                        "LLM 鉴权失败：当前 API Key 无效或无权限，请在本地配置中更新 DeepSeek API Key 后重试。"
+                        "LLM 鉴权失败：当前客户端 API Key 无效或无权限，请检查对应模型服务配置后重试。"
                     )
                     if hasattr(e, "response") and e.response is not None:
                         try:
@@ -804,18 +820,35 @@ class ClientFactory:
         - LLM_API_KEY：通用 API key（优先级高于各 provider 专用 key）
         - LLM_BASE_URL：通用 base_url（优先级高于默认 base_url）
         """
-        model_env = (os.getenv('LLM_MODEL') or '').strip()
+        model_env = (os.getenv('LLM_MODEL') or os.getenv('SUMMARY_MODEL') or '').strip()
         if not model_env:
-            raise ValueError("缺少必要环境变量: LLM_MODEL（格式为 'deepseek/model'）")
+            raise ValueError("缺少必要环境变量: LLM_MODEL 或 SUMMARY_MODEL")
 
-        provider, model = parse_provider_model(model_env)
-        api_key = (os.getenv('LLM_API_KEY') or '').strip() or None
-        base_url = (os.getenv('LLM_BASE_URL') or '').strip() or None
+        provider = (os.getenv('LLM_PROVIDER') or '').strip().lower()
+        model = model_env
+        if '/' in model_env:
+            prefix, candidate = model_env.split('/', 1)
+            if prefix.lower() in {'deepseek', 'openai', 'openai-compatible', 'cliproxyapi'}:
+                provider = provider or prefix.lower()
+                model = candidate
+        api_key = (
+            os.getenv('LLM_API_KEY')
+            or os.getenv('SUMMARY_API_KEY')
+            or os.getenv('DEEPSEEK_API_KEY')
+            or ''
+        ).strip()
+        base_url = (
+            os.getenv('LLM_BASE_URL')
+            or os.getenv('SUMMARY_BASE_URL')
+            or os.getenv('DEEPSEEK_BASE_URL')
+            or ''
+        ).strip()
 
-        if provider == 'deepseek':
+        if provider == 'deepseek' and not base_url:
             base_url = base_url or DEFAULT_DEEPSEEK_BASE_URL
-            return DeepSeekClient(api_key=api_key or os.getenv('DEEPSEEK_API_KEY', ''), model=model, base_url=base_url)
-        raise ValueError(f"当前仅支持 DeepSeek API，请使用 'deepseek/模型名'，当前 provider={provider}")
+        if not base_url:
+            raise ValueError("缺少必要环境变量: LLM_BASE_URL 或 SUMMARY_BASE_URL")
+        return LLMClient(api_key=api_key, model=model, base_url=base_url)
 
     @staticmethod
     def from_config(_config: dict | None = None):

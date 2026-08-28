@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -18,16 +20,24 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
+
 try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover
     yaml = None
+
+try:
+    from local_env import read_env_file
+except ImportError:  # pragma: no cover
+    from src.local_env import read_env_file
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 RUNS_DIR = ROOT_DIR / ".local-runs"
 CONFIG_PATH = ROOT_DIR / "config.yaml"
 SECRET_PATH = ROOT_DIR / "secret.private"
 ENV_PATH = ROOT_DIR / ".env"
+LOCAL_LLM_PROXY_PREFIX = "/api/local/llm"
 
 
 def utc_now() -> str:
@@ -36,6 +46,118 @@ def utc_now() -> str:
 
 def norm_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def truthy(value: Any) -> bool:
+    return norm_text(value).lower() in {"1", "true", "yes", "on"}
+
+
+def _runtime_env() -> dict[str, str]:
+    values = {str(key): str(value) for key, value in os.environ.items()}
+    values.update(read_env_file(ENV_PATH))
+    return values
+
+
+def _first_env(values: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = norm_text(values.get(key))
+        if value:
+            return value
+    return ""
+
+
+def _normalize_llm_model(value: str) -> str:
+    model = norm_text(value)
+    if "/" in model:
+        provider, candidate = model.split("/", 1)
+        if provider.lower() in {"deepseek", "openai", "openai-compatible", "cliproxyapi"}:
+            return candidate
+    return model
+
+
+def _split_model_names(value: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in re.split(r"[,\n]+", norm_text(value)):
+        model = _normalize_llm_model(item)
+        key = model.lower()
+        if model and key not in seen:
+            seen.add(key)
+            out.append(model)
+    return out
+
+
+def build_chat_completions_url(base_url: str) -> str:
+    raw = norm_text(base_url).rstrip("/")
+    if not raw:
+        return ""
+    if raw.lower().endswith("/chat/completions"):
+        return raw
+    if re.search(r"/v\d+$", raw, re.IGNORECASE):
+        return f"{raw}/chat/completions"
+    return f"{raw}/v1/chat/completions"
+
+
+def get_local_llm_runtime() -> dict[str, Any]:
+    values = _runtime_env()
+    api_key = _first_env(values, "LLM_API_KEY", "SUMMARY_API_KEY", "DEEPSEEK_API_KEY")
+    base_url = _first_env(values, "LLM_BASE_URL", "SUMMARY_BASE_URL", "DEEPSEEK_BASE_URL")
+    summary_model = _normalize_llm_model(
+        _first_env(values, "SUMMARY_MODEL", "LLM_MODEL", "DEEPSEEK_MODEL")
+    )
+    models = _split_model_names(values.get("DPR_LOCAL_CHAT_MODELS", ""))
+    if summary_model and summary_model.lower() not in {item.lower() for item in models}:
+        models.insert(0, summary_model)
+    provider = _first_env(values, "LLM_PROVIDER") or (
+        "cliproxyapi" if re.search(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::8317)?", base_url) else "openai-compatible"
+    )
+    return {
+        "configured": bool(api_key and base_url and models),
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url.rstrip("/"),
+        "endpoint": build_chat_completions_url(base_url),
+        "summary_model": summary_model or (models[0] if models else ""),
+        "models": models,
+    }
+
+
+def public_local_llm_runtime() -> dict[str, Any]:
+    runtime = get_local_llm_runtime()
+    return {
+        "configured": bool(runtime["configured"]),
+        "provider": runtime["provider"],
+        "baseUrl": LOCAL_LLM_PROXY_PREFIX,
+        "summaryModel": runtime["summary_model"],
+        "models": list(runtime["models"]),
+    }
+
+
+def _is_loopback_address(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(str(value).split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def is_allowed_local_request(client_host: str, origin: str = "") -> bool:
+    values = _runtime_env()
+    if truthy(values.get("DPR_LOCAL_ALLOW_REMOTE_API")):
+        return True
+    normalized_origin = norm_text(origin)
+    if normalized_origin:
+        try:
+            origin_host = urlparse(normalized_origin).hostname or ""
+        except ValueError:
+            origin_host = ""
+        allowed_origins = {
+            item.rstrip("/")
+            for item in re.split(r"[,\n]+", values.get("DPR_LOCAL_ALLOWED_ORIGINS", ""))
+            if item.strip()
+        }
+        if not (_is_loopback_address(origin_host) or origin_host.lower() == "localhost"):
+            return normalized_origin.rstrip("/") in allowed_origins
+    return _is_loopback_address(client_host)
 
 
 def build_secret_env(secret: dict[str, Any] | None) -> dict[str, str]:
@@ -53,6 +175,21 @@ def build_secret_env(secret: dict[str, Any] | None) -> dict[str, str]:
 
     env: dict[str, str] = {}
     if summarized or first_chat:
+        provider = norm_text(
+            ((secret.get("llmProvider") or {}).get("type") if isinstance(secret.get("llmProvider"), dict) else "")
+        ) or (
+            "deepseek"
+            if "deepseek" in base_url.lower() or model.lower().startswith("deepseek-")
+            else "openai-compatible"
+        )
+        chat_models = first_chat.get("models") if isinstance(first_chat.get("models"), list) else []
+        env["LLM_PROVIDER"] = provider
+        env["LLM_API_KEY"] = api_key
+        env["LLM_BASE_URL"] = base_url
+        env["LLM_MODEL"] = model
+        env["DPR_LOCAL_CHAT_MODELS"] = ",".join(
+            item for item in (norm_text(value) for value in chat_models) if item
+        ) or model
         env["SUMMARY_API_KEY"] = api_key
         env["DEEPSEEK_API_KEY"] = api_key
         env["SUMMARY_BASE_URL"] = base_url
@@ -368,9 +505,14 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(ROOT_DIR), **kwargs)
 
     def end_headers(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = norm_text(self.headers.get("Origin") or "")
+        if origin and is_allowed_local_request(self.client_address[0], origin):
+            self.send_header("Access-Control-Allow-Origin", origin.rstrip("/"))
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        if truthy(self.headers.get("Access-Control-Request-Private-Network")):
+            self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
@@ -381,7 +523,14 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/local/health":
-            return self._json({"ok": True, "mode": "local-debug", "time": utc_now()})
+            return self._json({
+                "ok": True,
+                "mode": "local-debug",
+                "time": utc_now(),
+                "llmConfigured": bool(get_local_llm_runtime()["configured"]),
+            })
+        if parsed.path == f"{LOCAL_LLM_PROXY_PREFIX}/config":
+            return self._json({"ok": True, **public_local_llm_runtime()})
         if parsed.path == "/api/local/config":
             return self._json({
                 "ok": True,
@@ -410,6 +559,12 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/local/") and not is_allowed_local_request(
+            self.client_address[0], self.headers.get("Origin") or ""
+        ):
+            return self._json({"ok": False, "error": "local API request origin is not allowed"}, status=403)
+        if parsed.path == f"{LOCAL_LLM_PROXY_PREFIX}/v1/chat/completions":
+            return self._proxy_local_llm_chat()
         if parsed.path == "/api/local/config":
             return self._save_local_config()
         if parsed.path == "/api/local/secret":
@@ -428,6 +583,64 @@ class Handler(SimpleHTTPRequestHandler):
             cmd = build_command(workflow_key, workflow_file, inputs)
             run = RUN_STORE.create(workflow_key, workflow_file, inputs, cmd, config=config, secret=secret)
             return self._json({"ok": True, "run": run})
+        except Exception as exc:
+            return self._json({"ok": False, "error": str(exc)}, status=400)
+
+    def _proxy_local_llm_chat(self) -> None:
+        runtime = get_local_llm_runtime()
+        if not runtime["configured"]:
+            return self._json({"ok": False, "error": "local LLM is not configured"}, status=503)
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+            if length <= 0 or length > 16 * 1024 * 1024:
+                return self._json({"ok": False, "error": "invalid request body size"}, status=400)
+            payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            if not isinstance(payload, dict):
+                return self._json({"ok": False, "error": "payload must be an object"}, status=400)
+            model = _normalize_llm_model(payload.get("model") or runtime["summary_model"])
+            allowed_models = {str(item).lower() for item in runtime["models"]}
+            if not model or model.lower() not in allowed_models:
+                return self._json({"ok": False, "error": "model is not allowed by local configuration"}, status=400)
+            messages = payload.get("messages")
+            if not isinstance(messages, list) or not messages:
+                return self._json({"ok": False, "error": "messages must be a non-empty array"}, status=400)
+            payload["model"] = model
+            stream = bool(payload.get("stream"))
+            upstream = requests.post(
+                runtime["endpoint"],
+                headers={
+                    "Authorization": f"Bearer {runtime['api_key']}",
+                    "Content-Type": "application/json",
+                    "Accept": "text/event-stream" if stream else "application/json",
+                },
+                json=payload,
+                timeout=(10, 300),
+                stream=stream,
+            )
+            content_type = upstream.headers.get("Content-Type") or (
+                "text/event-stream; charset=utf-8" if stream else "application/json; charset=utf-8"
+            )
+            if not stream:
+                data = upstream.content
+                self.send_response(upstream.status_code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+
+            self.send_response(upstream.status_code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Connection", "close")
+            self.end_headers()
+            for chunk in upstream.iter_content(chunk_size=8192):
+                if not chunk:
+                    continue
+                self.wfile.write(chunk)
+                self.wfile.flush()
+            self.close_connection = True
+        except requests.RequestException as exc:
+            return self._json({"ok": False, "error": f"local LLM upstream failed: {exc}"}, status=502)
         except Exception as exc:
             return self._json({"ok": False, "error": str(exc)}, status=400)
 

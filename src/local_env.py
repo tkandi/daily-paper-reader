@@ -40,17 +40,15 @@ def _valid_env_key(key: str) -> bool:
     return bool(key) and not key[0].isdigit() and key.replace("_", "").isalnum()
 
 
-def load_local_env() -> None:
-    if str(os.getenv("DPR_DISABLE_DOTENV") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        return
-
+def read_env_file(path: str | Path | None = None) -> dict[str, str]:
     root = Path(__file__).resolve().parent.parent
-    env_path = Path(os.getenv("DPR_DOTENV_PATH") or root / ".env").expanduser()
+    env_path = Path(path or os.getenv("DPR_DOTENV_PATH") or root / ".env").expanduser()
     try:
         lines = env_path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return
+        return {}
 
+    values: dict[str, str] = {}
     for raw_line in lines:
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -63,4 +61,13 @@ def load_local_env() -> None:
         key = key.strip()
         if not _valid_env_key(key):
             continue
-        os.environ.setdefault(key, _unquote(value.strip()))
+        values[key] = _unquote(value.strip())
+    return values
+
+
+def load_local_env() -> None:
+    if str(os.getenv("DPR_DISABLE_DOTENV") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return
+
+    for key, value in read_env_file().items():
+        os.environ.setdefault(key, value)

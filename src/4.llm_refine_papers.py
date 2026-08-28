@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List
 
-from llm import DeepSeekClient, resolve_max_output_tokens
+from llm import LLMClient, default_max_output_tokens, resolve_max_output_tokens
 from subscription_plan import build_pipeline_inputs
 
 SCRIPT_DIR = os.path.dirname(__file__)
@@ -21,12 +21,19 @@ RANKED_DIR = os.path.join(ARCHIVE_DIR, "rank")
 CONFIG_FILE = os.getenv("DPR_CONFIG_FILE") or os.path.join(ROOT_DIR, "config.yaml")
 
 DEFAULT_FILTER_MODEL = (
-    os.getenv("DEEPSEEK_FILTER_MODEL")
+    os.getenv("LLM_FILTER_MODEL")
+    or os.getenv("DEEPSEEK_FILTER_MODEL")
     or os.getenv("SUMMARY_MODEL")
+    or os.getenv("LLM_MODEL")
     or os.getenv("DEEPSEEK_MODEL")
     or "deepseek-v4-flash"
 )
-DEFAULT_DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL") or os.getenv("SUMMARY_BASE_URL") or "https://api.deepseek.com"
+DEFAULT_LLM_BASE_URL = (
+    os.getenv("LLM_BASE_URL")
+    or os.getenv("SUMMARY_BASE_URL")
+    or os.getenv("DEEPSEEK_BASE_URL")
+    or "https://api.deepseek.com"
+)
 DEFAULT_FILTER_CONCURRENCY = 4
 MAX_FILTER_RETRIES = 3
 
@@ -320,7 +327,7 @@ def build_repeated_user_prompt(query: str) -> str:
 
 
 def call_filter(
-    client: DeepSeekClient,
+    client: LLMClient,
     all_requirements: List[Dict[str, str]],
     docs: List[Dict[str, str]],
     debug_dir: str,
@@ -641,14 +648,14 @@ def recover_filter_results(
     )
 
 
-def _make_filter_client(api_key: str, model: str, max_output_tokens: int) -> DeepSeekClient:
-    client = DeepSeekClient(api_key=api_key, model=model, base_url=DEFAULT_DEEPSEEK_BASE_URL)
+def _make_filter_client(api_key: str, model: str, max_output_tokens: int) -> LLMClient:
+    client = LLMClient(api_key=api_key, model=model, base_url=DEFAULT_LLM_BASE_URL)
     client.kwargs.update({"temperature": 0.1, "max_tokens": max_output_tokens})
     return client
 
 
 def _make_filter_runner(
-    client: DeepSeekClient,
+    client: LLMClient,
     all_requirements: List[Dict[str, str]],
     debug_dir: str,
     base_tag: str,
@@ -793,9 +800,9 @@ def process_file(
         return
     paper_map = build_paper_map(papers)
 
-    api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("SUMMARY_API_KEY")
+    api_key = os.getenv("LLM_API_KEY") or os.getenv("SUMMARY_API_KEY") or os.getenv("DEEPSEEK_API_KEY")
     if not api_key:
-        raise RuntimeError("missing DEEPSEEK_API_KEY or SUMMARY_API_KEY")
+        raise RuntimeError("missing LLM_API_KEY, SUMMARY_API_KEY or DEEPSEEK_API_KEY")
 
     group_start(f"Step 4 - llm refine {os.path.basename(input_path)}")
     log(
@@ -973,7 +980,9 @@ def main() -> None:
     parser.add_argument(
         "--max-output-tokens",
         type=int,
-        default=resolve_max_output_tokens(),
+        default=resolve_max_output_tokens(
+            default_max_output_tokens(DEFAULT_FILTER_MODEL, DEFAULT_LLM_BASE_URL)
+        ),
         help="max tokens for model output.",
     )
     parser.add_argument(

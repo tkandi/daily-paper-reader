@@ -8,6 +8,7 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
+  const DEFAULT_CLIPROXYAPI_BASE_URL = 'http://127.0.0.1:8317';
   const DEFAULT_DEEPSEEK_CHAT_MODELS = [
     'deepseek-v4-flash',
     'deepseek-v4-pro',
@@ -19,6 +20,20 @@
       label: 'DeepSeek 官方',
       baseUrl: 'https://api.deepseek.com',
       models: Object.freeze(['deepseek-v4-flash', 'deepseek-v4-pro']),
+    }),
+  });
+  const OPENAI_COMPATIBLE_PRESETS = Object.freeze({
+    cliproxyapi: Object.freeze({
+      key: 'cliproxyapi',
+      label: '本机 CLIProxyAPI',
+      baseUrl: DEFAULT_CLIPROXYAPI_BASE_URL,
+      models: Object.freeze([]),
+    }),
+    'openai-compatible': Object.freeze({
+      key: 'openai-compatible',
+      label: 'OpenAI-compatible',
+      baseUrl: '',
+      models: Object.freeze([]),
     }),
   });
 
@@ -41,6 +56,30 @@
       return `${normalized}/chat/completions`;
     }
     return `${normalized}/v1/chat/completions`;
+  };
+
+  const buildModelsEndpoint = (value) => {
+    const raw = normalizeText(value).replace(/\/+$/g, '');
+    if (!raw) return '';
+    if (/\/models$/i.test(raw)) return raw;
+    const normalized = normalizeBaseUrlForStorage(raw);
+    if (!normalized) return '';
+    if (/\/v\d+$/i.test(normalized)) {
+      return `${normalized}/models`;
+    }
+    return `${normalized}/v1/models`;
+  };
+
+  const extractModelIds = (payload, maxCount = 100) => {
+    const rows = payload && Array.isArray(payload.data)
+      ? payload.data
+      : payload && Array.isArray(payload.models)
+        ? payload.models
+        : [];
+    const values = rows.map((item) => (
+      typeof item === 'string' ? item : item && (item.id || item.name)
+    ));
+    return sanitizeModelList(values, maxCount);
   };
 
   const sanitizeModelList = (values, maxCount = 3) => {
@@ -113,15 +152,31 @@
     const safeSecret = secret && typeof secret === 'object' ? secret : {};
     const llmProvider = safeSecret.llmProvider || {};
     const explicit = normalizeText(llmProvider.type || llmProvider.provider || '').toLowerCase();
-    if (explicit === 'deepseek') {
-      return 'deepseek';
+    if (['deepseek', 'cliproxyapi', 'openai-compatible'].includes(explicit)) {
+      return explicit;
     }
-    return 'deepseek';
+    const summarized = safeSecret.summarizedLLM || {};
+    const profile = inferChatApiProfile(summarized.baseUrl, summarized.model);
+    if (profile === 'deepseek') return 'deepseek';
+    if (profile === 'cliproxyapi') return 'cliproxyapi';
+    return 'openai-compatible';
   };
 
   const getDeepSeekPreset = (key) => {
     const presetKey = normalizeText(key).toLowerCase();
     const preset = DEEPSEEK_PRESETS[presetKey];
+    if (!preset) return null;
+    return {
+      key: preset.key,
+      label: preset.label,
+      baseUrl: preset.baseUrl,
+      models: [...preset.models],
+    };
+  };
+
+  const getOpenAICompatiblePreset = (key) => {
+    const presetKey = normalizeText(key).toLowerCase();
+    const preset = OPENAI_COMPATIBLE_PRESETS[presetKey];
     if (!preset) return null;
     return {
       key: preset.key,
@@ -140,7 +195,10 @@
     if (normalizedModel.startsWith('deepseek-')) {
       return 'deepseek';
     }
-    return 'unsupported';
+    if (/(?:localhost|127\.0\.0\.1|\[::1\])(?::8317)?(?:$|\/)/i.test(normalizedBaseUrl)) {
+      return 'cliproxyapi';
+    }
+    return normalizedBaseUrl ? 'openai-compatible' : 'unsupported';
   };
 
   const resolveJsonResponseMode = ({ baseUrl, model, preferSchema = true }) => {
@@ -179,7 +237,7 @@
 
   const buildConnectivityTestPayload = ({ baseUrl, model }) => {
     const normalizedModel = normalizeText(model);
-    return {
+    const payload = {
       model: normalizedModel,
       messages: [
         {
@@ -191,23 +249,32 @@
           content: 'hello world',
         },
       ],
-      temperature: 0,
-      max_tokens: 256,
+      stream: false,
     };
+    if (inferChatApiProfile(baseUrl, model) === 'deepseek') {
+      payload.temperature = 0;
+      payload.max_tokens = 256;
+    }
+    return payload;
   };
 
   return {
     DEFAULT_DEEPSEEK_BASE_URL,
+    DEFAULT_CLIPROXYAPI_BASE_URL,
     DEFAULT_DEEPSEEK_CHAT_MODELS,
     DEEPSEEK_PRESETS,
+    OPENAI_COMPATIBLE_PRESETS,
     normalizeText,
     normalizeBaseUrlForStorage,
     buildChatCompletionsEndpoint,
+    buildModelsEndpoint,
+    extractModelIds,
     sanitizeModelList,
     resolveChatModels,
     resolveSummaryLLM,
     inferProviderType,
     getDeepSeekPreset,
+    getOpenAICompatiblePreset,
     inferChatApiProfile,
     resolveJsonResponseMode,
     isDeepSeekV4Model,

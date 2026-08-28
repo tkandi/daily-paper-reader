@@ -1,5 +1,16 @@
 // 全局密钥会话管理：负责首次进入时的密码解锁 / 游客模式
 (function () {
+  if (
+    !window.DPRLocalLLM &&
+    typeof window.DPRLoadAssets === 'function'
+  ) {
+    window.DPR_LOCAL_LLM_READY = window.DPRLoadAssets([
+      { type: 'script', path: 'app/local-llm.js' },
+    ]).catch((error) => {
+      console.warn('[LOCAL LLM] 本地代理增强加载失败：', error);
+      return false;
+    });
+  }
   const STORAGE_KEY_MODE = 'dpr_secret_access_mode_v1'; // 已不再使用，仅保留兼容
   const STORAGE_KEY_PASS = 'dpr_secret_password_v1';
   const STORAGE_KEY_LOCAL_SECRET = 'dpr_local_secret_private_v1';
@@ -105,6 +116,9 @@
       throw new Error((data && data.error) || `写入本地 secret.private 失败：HTTP ${res.status}`);
     }
     saveLocalSecretPayload(payload);
+    if (window.DPRLocalLLM && typeof window.DPRLocalLLM.load === 'function') {
+      await window.DPRLocalLLM.load({ force: true }).catch(() => null);
+    }
     return true;
   }
 
@@ -254,6 +268,27 @@
     if (/\/v\d+$/i.test(raw)) return `${raw}/chat/completions`;
     return `${raw}/v1/chat/completions`;
   };
+  const buildModelsEndpoint = (value) => {
+    const utils = getLLMUtils();
+    if (typeof utils.buildModelsEndpoint === 'function') {
+      return utils.buildModelsEndpoint(value);
+    }
+    const raw = normalizeBaseUrlForStorage(value || '');
+    if (!raw) return '';
+    if (/\/v\d+$/i.test(raw)) return `${raw}/models`;
+    return `${raw}/v1/models`;
+  };
+  const extractModelIds = (payload, maxCount) => {
+    const utils = getLLMUtils();
+    if (typeof utils.extractModelIds === 'function') {
+      return utils.extractModelIds(payload, maxCount);
+    }
+    const rows = payload && Array.isArray(payload.data) ? payload.data : [];
+    return sanitizeModelList(
+      rows.map((item) => (typeof item === 'string' ? item : item && (item.id || item.name))),
+      maxCount || 100,
+    );
+  };
   const sanitizeModelList = (values, maxCount) => {
     const utils = getLLMUtils();
     if (typeof utils.sanitizeModelList === 'function') {
@@ -302,6 +337,12 @@
   const getDefaultDeepSeekBaseUrl = () => {
     const utils = getLLMUtils();
     return normalizeBaseUrlForStorage(utils.DEFAULT_DEEPSEEK_BASE_URL || 'https://api.deepseek.com');
+  };
+  const getDefaultCLIProxyAPIBaseUrl = () => {
+    const utils = getLLMUtils();
+    return normalizeBaseUrlForStorage(
+      utils.DEFAULT_CLIPROXYAPI_BASE_URL || 'http://127.0.0.1:8317',
+    );
   };
   const getDefaultDeepSeekChatModels = () => {
     const utils = getLLMUtils();
@@ -1114,7 +1155,7 @@
       }, 100);
     };
 
-    // 初始化向导：第 2 步（仅保留 DeepSeek API）
+    // 初始化向导：第 2 步（DeepSeek 或 OpenAI-compatible / CLIProxyAPI）
     const renderInitStep2 = (password) => {
       setStep2Modal(true);
       const currentSecret =
@@ -1131,6 +1172,7 @@
       const initialGithubToken = normalizeText(
         currentSecret.github && currentSecret.github.token,
       );
+      const initialProviderType = inferProviderType(currentSecret);
       const initialApiKey = normalizeText(currentSummaryLLM.apiKey || '');
       const initialDeepSeekModel =
         normalizeText(currentSummaryLLM.model || '') || 'deepseek-v4-flash';
@@ -1142,6 +1184,18 @@
             ? 'DeepSeek V4 Pro · 高性能模型'
             : model,
       }));
+      const initialCustomBaseUrl =
+        initialProviderType === 'deepseek'
+          ? getDefaultCLIProxyAPIBaseUrl()
+          : normalizeBaseUrlForStorage(currentSummaryLLM.baseUrl || '') || getDefaultCLIProxyAPIBaseUrl();
+      const initialCustomApiKey = initialProviderType === 'deepseek' ? '' : initialApiKey;
+      const currentCustomChatModels = sanitizeModelList(
+        [
+          currentSummaryLLM.model,
+          ...(Array.isArray(currentChatEntry.models) ? currentChatEntry.models : []),
+        ],
+        3,
+      );
 
       modal.innerHTML = `
         <h2 style="margin-top:0;">🛡️ 新配置指引 · 第二步</h2>
@@ -1169,8 +1223,20 @@
               </div>
             </div>
 
+            <div class="secret-setup-step2-block">
+              <div class="secret-setup-step2-title">大模型服务</div>
+              <p class="secret-setup-step2-note">
+                本地部署推荐 CLIProxyAPI；也可继续使用 DeepSeek 或其它 OpenAI-compatible 服务。
+              </p>
+              <div style="display:flex; flex-wrap:wrap; gap:10px 16px; line-height:1.8;">
+                <label><input type="radio" name="secret-setup-provider" value="cliproxyapi" /> 本机 CLIProxyAPI</label>
+                <label><input type="radio" name="secret-setup-provider" value="deepseek" /> DeepSeek 官方</label>
+                <label><input type="radio" name="secret-setup-provider" value="openai-compatible" /> 其它兼容接口</label>
+              </div>
+            </div>
+
             <div id="secret-setup-deepseek-section" class="secret-setup-step2-block">
-              <div class="secret-setup-step2-title">DeepSeek API（必填）</div>
+              <div class="secret-setup-step2-title">DeepSeek API</div>
               <p class="secret-setup-step2-note">
                 DeepSeek 用于 query enrich、LLM refine、总结与聊天；Reranker 可在右侧单独选择。
               </p>
@@ -1197,13 +1263,75 @@
                 用于工作流总结 / 过滤的大模型
                 <span class="secret-model-tip">!
                   <span class="secret-model-tip-popup">
-                    当前只保留 DeepSeek 官方 API。<br/>
+                    DeepSeek 官方模型使用较大的输出窗口。<br/>
                     Reranker API Key 与 DeepSeek 分开配置。
                   </span>
                 </span>
               </div>
               <div id="secret-setup-deepseek-models" style="font-size:13px;">
                 <select id="secret-setup-deepseek-model-select" class="secret-setup-select"></select>
+              </div>
+            </div>
+
+            <div id="secret-setup-custom-section" class="secret-setup-step2-block" style="display:none;">
+              <div class="secret-setup-step2-title">OpenAI-compatible / CLIProxyAPI</div>
+              <p class="secret-setup-step2-note">
+                Base URL 填服务根地址，例如 <code>http://127.0.0.1:8317</code>；系统会调用
+                <code>/v1/models</code> 与 <code>/v1/chat/completions</code>。
+              </p>
+              <div class="secret-setup-input-row" style="margin-bottom:6px;">
+                <input
+                  id="secret-setup-custom-api-key"
+                  type="password"
+                  autocomplete="off"
+                  placeholder="CLIProxyAPI 客户端 API Key（不是 management key）"
+                  style="width:100%; box-sizing:border-box; padding:6px 8px; font-size:13px;"
+                />
+              </div>
+              <div class="secret-setup-input-row" style="margin-bottom:6px;">
+                <input
+                  id="secret-setup-custom-base-url"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="http://127.0.0.1:8317"
+                  style="width:100%; box-sizing:border-box; padding:6px 8px; font-size:13px;"
+                />
+                <button id="secret-setup-custom-discover" type="button" class="secret-gate-btn secondary">
+                  读取模型
+                </button>
+              </div>
+              <datalist id="secret-setup-custom-model-options"></datalist>
+              <div style="font-weight:500; margin:8px 0 4px;">工作流总结 / 过滤模型</div>
+              <input
+                id="secret-setup-custom-model-1"
+                type="text"
+                list="secret-setup-custom-model-options"
+                autocomplete="off"
+                placeholder="例如 gpt-5.4-mini"
+                style="width:100%; box-sizing:border-box; padding:6px 8px; font-size:13px; margin-bottom:6px;"
+              />
+              <div style="font-weight:500; margin:4px 0;">额外聊天模型（可选）</div>
+              <input
+                id="secret-setup-custom-model-2"
+                type="text"
+                list="secret-setup-custom-model-options"
+                autocomplete="off"
+                placeholder="聊天模型 2"
+                style="width:100%; box-sizing:border-box; padding:6px 8px; font-size:13px; margin-bottom:6px;"
+              />
+              <input
+                id="secret-setup-custom-model-3"
+                type="text"
+                list="secret-setup-custom-model-options"
+                autocomplete="off"
+                placeholder="聊天模型 3"
+                style="width:100%; box-sizing:border-box; padding:6px 8px; font-size:13px; margin-bottom:6px;"
+              />
+              <button id="secret-setup-custom-test" type="button" class="secret-gate-btn secondary">
+                测试当前配置
+              </button>
+              <div id="secret-setup-custom-status" style="min-height:18px; font-size:12px; color:#999; margin-top:6px;">
+                可先读取模型目录，再发送一次最小 <code>hello world</code> 请求。
               </div>
             </div>
           </div>
@@ -1242,17 +1370,6 @@
                 </div>
               </div>
               <div id="secret-setup-reranker-status" style="font-size:12px; color:#666; line-height:1.6;"></div>
-              <input type="radio" name="secret-setup-provider" value="deepseek" checked style="display:none;" />
-            </div>
-
-            <div id="secret-setup-custom-section" style="display:none;">
-              <input id="secret-setup-custom-api-key" type="hidden" />
-              <input id="secret-setup-custom-base-url" type="hidden" />
-              <input id="secret-setup-custom-model-1" type="hidden" />
-              <input id="secret-setup-custom-model-2" type="hidden" />
-              <input id="secret-setup-custom-model-3" type="hidden" />
-              <button id="secret-setup-custom-test" type="button" style="display:none;"></button>
-              <div id="secret-setup-custom-status" style="display:none;"></div>
             </div>
           </div>
         </div>
@@ -1287,6 +1404,8 @@
       const deepseekModelSelect = document.getElementById('secret-setup-deepseek-model-select');
       const customApiKeyInput = document.getElementById('secret-setup-custom-api-key');
       const customBaseUrlInput = document.getElementById('secret-setup-custom-base-url');
+      const customDiscoverBtn = document.getElementById('secret-setup-custom-discover');
+      const customModelOptions = document.getElementById('secret-setup-custom-model-options');
       const customModel1Input = document.getElementById('secret-setup-custom-model-1');
       const customModel2Input = document.getElementById('secret-setup-custom-model-2');
       const customModel3Input = document.getElementById('secret-setup-custom-model-3');
@@ -1317,6 +1436,8 @@
         !deepseekModelSelect ||
         !customApiKeyInput ||
         !customBaseUrlInput ||
+        !customDiscoverBtn ||
+        !customModelOptions ||
         !customModel1Input ||
         !customModel2Input ||
         !customModel3Input ||
@@ -1342,10 +1463,15 @@
         .join('');
 
       githubInput.value = initialGithubToken;
-      deepseekInput.value = initialApiKey;
+      deepseekInput.value = initialProviderType === 'deepseek' ? initialApiKey : '';
+      customApiKeyInput.value = initialCustomApiKey;
+      customBaseUrlInput.value = initialCustomBaseUrl;
+      customModel1Input.value = currentCustomChatModels[0] || '';
+      customModel2Input.value = currentCustomChatModels[1] || '';
+      customModel3Input.value = currentCustomChatModels[2] || '';
 
       providerInputs.forEach((input) => {
-        input.checked = input.value === 'deepseek';
+        input.checked = input.value === initialProviderType;
       });
       deepseekModelSelect.value = initialDeepSeekModel || 'deepseek-v4-flash';
       if (!deepseekModelSelect.value) {
@@ -1365,7 +1491,10 @@
       rerankerBaseUrlInput.value = currentReranker.baseUrl || '';
 
       let githubOk = !!initialGithubToken;
-      let deepseekOk = !!initialApiKey;
+      let deepseekOk = initialProviderType === 'deepseek' && !!initialApiKey;
+      let customOk = initialProviderType !== 'deepseek' && Boolean(
+        initialCustomApiKey && initialCustomBaseUrl && currentCustomChatModels[0],
+      );
 
       const setErrorText = (text, color) => {
         if (!errorEl) return;
@@ -1375,6 +1504,10 @@
 
       const selectedDeepSeekModel = () => {
         return normalizeText(deepseekModelSelect.value || '');
+      };
+      const selectedProviderType = () => {
+        const selected = providerInputs.find((input) => input.checked);
+        return normalizeText(selected && selected.value) || 'deepseek';
       };
       const selectedRerankerProfile = () => {
         return findRerankerProfile(rerankerProfileSelect.value);
@@ -1418,7 +1551,16 @@
         rerankerStatusEl.textContent = `${profile.note} 模型：${profile.model}`;
       };
       const syncProviderSections = () => {
-        deepseekSection.style.display = 'block';
+        const providerType = selectedProviderType();
+        const useDeepSeek = providerType === 'deepseek';
+        deepseekSection.style.display = useDeepSeek ? 'block' : 'none';
+        customApiKeyInput.closest('#secret-setup-custom-section').style.display = useDeepSeek ? 'none' : 'block';
+        if (
+          providerType === 'cliproxyapi' &&
+          !normalizeText(customBaseUrlInput.value)
+        ) {
+          customBaseUrlInput.value = getDefaultCLIProxyAPIBaseUrl();
+        }
       };
 
       const resetGithubStatus = () => {
@@ -1434,8 +1576,9 @@
         deepseekStatusEl.style.color = '#999';
       };
       const resetCustomStatus = () => {
+        customOk = false;
         customStatusEl.innerHTML =
-          '将依次用已填写聊天模型发送 <code>hello world</code>，检查接口与模型是否可用。';
+          '可先读取模型目录，再发送一次最小 <code>hello world</code> 请求。';
         customStatusEl.style.color = '#999';
       };
       const resetRerankerTestStatus = () => {
@@ -1481,21 +1624,41 @@
       };
 
       const collectProviderDraft = () => {
-        const apiKey = normalizeText(deepseekInput.value);
-        const model = selectedDeepSeekModel();
+        const providerType = selectedProviderType();
+        const useDeepSeek = providerType === 'deepseek';
+        const apiKey = normalizeText(
+          useDeepSeek ? deepseekInput.value : customApiKeyInput.value,
+        );
+        const baseUrl = normalizeBaseUrlForStorage(
+          useDeepSeek ? getDefaultDeepSeekBaseUrl() : customBaseUrlInput.value,
+        );
+        const chatModels = useDeepSeek
+          ? getDefaultDeepSeekChatModels()
+          : sanitizeModelList(
+              [customModel1Input.value, customModel2Input.value, customModel3Input.value],
+              3,
+            );
+        const model = useDeepSeek ? selectedDeepSeekModel() : (chatModels[0] || '');
         if (!apiKey) {
-          throw new Error('请先输入 DeepSeek API Key。');
+          throw new Error(
+            useDeepSeek ? '请先输入 DeepSeek API Key。' : '请先输入兼容接口的客户端 API Key。',
+          );
+        }
+        if (!baseUrl) {
+          throw new Error('请填写大模型 Base URL。');
         }
         if (!model) {
           throw new Error('请选择用于工作流总结的大模型。');
         }
-        const reranker = buildRerankerDraft(apiKey, getDefaultDeepSeekBaseUrl());
+        const reranker = buildRerankerDraft(apiKey, baseUrl);
         return {
-          providerType: 'deepseek',
+          providerType,
           summaryApiKey: apiKey,
-          summaryBaseUrl: getDefaultDeepSeekBaseUrl(),
+          summaryBaseUrl: baseUrl,
           summaryModel: model,
-          chatModels: getDefaultDeepSeekChatModels(),
+          filterModel: model,
+          rewriteModel: model,
+          chatModels,
           skipRerank: false,
           reranker: {
             ...reranker,
@@ -1504,18 +1667,26 @@
       };
 
       const buildPingEntries = () => {
-        const apiKey = normalizeText(deepseekInput.value);
-        const model = selectedDeepSeekModel();
-        if (!apiKey || !model) {
-          throw new Error('请先填写 DeepSeek API Key 并选择模型。');
+        const providerType = selectedProviderType();
+        const useDeepSeek = providerType === 'deepseek';
+        const apiKey = normalizeText(useDeepSeek ? deepseekInput.value : customApiKeyInput.value);
+        const baseUrl = normalizeBaseUrlForStorage(
+          useDeepSeek ? getDefaultDeepSeekBaseUrl() : customBaseUrlInput.value,
+        );
+        const models = useDeepSeek
+          ? [selectedDeepSeekModel()]
+          : sanitizeModelList(
+              [customModel1Input.value, customModel2Input.value, customModel3Input.value],
+              3,
+            );
+        if (!apiKey || !baseUrl || !models.length) {
+          throw new Error('请先填写 API Key、Base URL 和至少一个模型。');
         }
-        return [
-          {
-            apiKey,
-            baseUrl: getDefaultDeepSeekBaseUrl(),
-            model,
-          },
-        ];
+        return models.map((model) => ({
+          apiKey,
+          baseUrl,
+          model,
+        }));
       };
 
       const bindResetOnInput = (elements, resetFn) => {
@@ -1531,8 +1702,13 @@
         githubStatusEl.style.color = '#666';
       }
       if (initialApiKey) {
-        deepseekStatusEl.textContent = '已载入当前 DeepSeek 配置；如更换 API Key 或模型，建议点击测试按钮。';
-        deepseekStatusEl.style.color = '#666';
+        if (initialProviderType === 'deepseek') {
+          deepseekStatusEl.textContent = '已载入当前 DeepSeek 配置；如更换 API Key 或模型，建议点击测试按钮。';
+          deepseekStatusEl.style.color = '#666';
+        } else {
+          customStatusEl.textContent = '已载入当前兼容接口配置；如更换地址、密钥或模型，建议重新测试。';
+          customStatusEl.style.color = '#666';
+        }
       }
 
       syncProviderSections();
@@ -1546,6 +1722,74 @@
         resetCustomStatus,
       );
       bindResetOnInput([rerankerApiKeyInput, rerankerBaseUrlInput], resetRerankerTestStatus);
+      customDiscoverBtn.addEventListener('click', async () => {
+        const apiKey = normalizeText(customApiKeyInput.value);
+        const baseUrl = normalizeBaseUrlForStorage(customBaseUrlInput.value);
+        const endpoint = buildModelsEndpoint(baseUrl);
+        if (!apiKey || !endpoint) {
+          customStatusEl.textContent = '❌ 请先填写客户端 API Key 和 Base URL。';
+          customStatusEl.style.color = '#c00';
+          return;
+        }
+        customDiscoverBtn.disabled = true;
+        customTestBtn.disabled = true;
+        customStatusEl.textContent = '正在读取模型目录...';
+        customStatusEl.style.color = '#666';
+        try {
+          const response = await fetch(endpoint, {
+            headers: {
+              Accept: 'application/json',
+              Authorization: `Bearer ${apiKey}`,
+            },
+          });
+          if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(`HTTP ${response.status}${text ? ` - ${text.slice(0, 160)}` : ''}`);
+          }
+          const payload = await response.json();
+          const models = extractModelIds(payload, 100);
+          if (!models.length) {
+            throw new Error('接口返回成功，但模型目录为空。');
+          }
+          customModelOptions.innerHTML = '';
+          models.forEach((model) => {
+            const option = document.createElement('option');
+            option.value = model;
+            customModelOptions.appendChild(option);
+          });
+          if (!normalizeText(customModel1Input.value)) {
+            customModel1Input.value = models[0];
+          }
+          customOk = false;
+          customStatusEl.textContent = `✅ 已读取 ${models.length} 个模型；请选择模型后测试。`;
+          customStatusEl.style.color = '#28a745';
+        } catch (e) {
+          customStatusEl.textContent = `❌ 读取模型失败：${e.message || e}`;
+          customStatusEl.style.color = '#c00';
+        } finally {
+          customDiscoverBtn.disabled = false;
+          customTestBtn.disabled = false;
+        }
+      });
+      customTestBtn.addEventListener('click', async () => {
+        customDiscoverBtn.disabled = true;
+        customTestBtn.disabled = true;
+        customStatusEl.textContent = '正在测试兼容接口...';
+        customStatusEl.style.color = '#666';
+        try {
+          const models = await pingChatModels(buildPingEntries(), customStatusEl);
+          customStatusEl.textContent = `✅ 配置可用：${models.join(', ')}`;
+          customStatusEl.style.color = '#28a745';
+          customOk = true;
+        } catch (e) {
+          customStatusEl.textContent = `❌ 测试失败：${e.message || e}`;
+          customStatusEl.style.color = '#c00';
+          customOk = false;
+        } finally {
+          customDiscoverBtn.disabled = false;
+          customTestBtn.disabled = false;
+        }
+      });
       rerankerProfileSelect.addEventListener('change', syncRerankerFields);
       rerankerProfileSelect.addEventListener('change', resetRerankerTestStatus);
       rerankerTestBtn.addEventListener('click', async () => {
@@ -1613,8 +1857,11 @@
       providerInputs.forEach((input) => {
         input.addEventListener('change', () => {
           syncProviderSections();
+          const providerType = selectedProviderType();
           setErrorText(
-            'DeepSeek 密钥将加密写入 GitHub Secrets（用于 GitHub Actions），并同步生成本地 secret.private 备份。',
+            providerType === 'cliproxyapi'
+              ? 'CLIProxyAPI 配置仅适用于本机流水线或 self-hosted runner；GitHub 托管 runner 无法访问 127.0.0.1。'
+              : '模型密钥将加密保存；本地模式还会同步写入被 Git 忽略的 .env。',
             '#999',
           );
         });
@@ -1746,6 +1993,10 @@
 
         if (providerDraft.providerType === 'deepseek' && !deepseekOk) {
           setErrorText('请先点击“测试当前配置”，确认 DeepSeek 配置可用。', '#c00');
+          return;
+        }
+        if (providerDraft.providerType !== 'deepseek' && !customOk) {
+          setErrorText('请先点击“测试当前配置”，确认兼容接口可用。', '#c00');
           return;
         }
 

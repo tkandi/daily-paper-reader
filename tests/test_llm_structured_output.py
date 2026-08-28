@@ -41,7 +41,7 @@ class LlmStructuredOutputTest(unittest.TestCase):
         )
         return resp
 
-    @patch.dict("llm.os.environ", {}, clear=False)
+    @patch.dict("llm.os.environ", {"DPR_LLM_MAX_OUTPUT_TOKENS": ""}, clear=False)
     @patch("llm.requests.post")
     def test_chat_allows_deepseek_v4_large_output_window_by_default(self, mock_post):
         mock_post.return_value = self._mock_success_response({"content": "ok"})

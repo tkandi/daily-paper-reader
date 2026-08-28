@@ -3,11 +3,14 @@ const assert = require('node:assert/strict');
 const {
   normalizeBaseUrlForStorage,
   buildChatCompletionsEndpoint,
+  buildModelsEndpoint,
+  extractModelIds,
   sanitizeModelList,
   resolveChatModels,
   resolveSummaryLLM,
   inferProviderType,
   getDeepSeekPreset,
+  getOpenAICompatiblePreset,
   inferChatApiProfile,
   resolveJsonResponseMode,
   isDeepSeekV4Model,
@@ -36,6 +39,15 @@ function testBuildChatCompletionsEndpoint() {
   assert.equal(
     buildChatCompletionsEndpoint('https://api.example.com/custom-root'),
     'https://api.example.com/custom-root/v1/chat/completions',
+  );
+}
+
+function testBuildModelsEndpointAndExtractIds() {
+  assert.equal(buildModelsEndpoint('http://127.0.0.1:8317'), 'http://127.0.0.1:8317/v1/models');
+  assert.equal(buildModelsEndpoint('https://api.example.com/v1'), 'https://api.example.com/v1/models');
+  assert.deepEqual(
+    extractModelIds({ data: [{ id: 'gpt-a' }, { id: 'gpt-b' }, { id: 'gpt-a' }] }),
+    ['gpt-a', 'gpt-b'],
   );
 }
 
@@ -87,13 +99,24 @@ function testInferProviderType() {
   );
   assert.equal(
     inferProviderType({
+      llmProvider: { type: 'cliproxyapi' },
+      summarizedLLM: {
+        apiKey: 'local-key',
+        baseUrl: 'http://127.0.0.1:8317',
+        model: 'gpt-5.4-mini',
+      },
+    }),
+    'cliproxyapi',
+  );
+  assert.equal(
+    inferProviderType({
       summarizedLLM: {
         apiKey: 'sk',
         baseUrl: 'https://example.com/v1',
         model: 'other-model',
       },
     }),
-    'deepseek',
+    'openai-compatible',
   );
 }
 
@@ -111,6 +134,15 @@ function testGetDeepSeekPreset() {
   assert.equal(getDeepSeekPreset('other-b'), null);
   assert.equal(getDeepSeekPreset('other-c'), null);
   assert.equal(getDeepSeekPreset('other-d'), null);
+  assert.deepEqual(
+    getOpenAICompatiblePreset('cliproxyapi'),
+    {
+      key: 'cliproxyapi',
+      label: '本机 CLIProxyAPI',
+      baseUrl: 'http://127.0.0.1:8317',
+      models: [],
+    },
+  );
 }
 
 function testInferChatApiProfile() {
@@ -118,8 +150,8 @@ function testInferChatApiProfile() {
     inferChatApiProfile('https://api.deepseek.com', 'deepseek-v4-flash'),
     'deepseek',
   );
-  assert.equal(inferChatApiProfile('https://example.com/v1', 'other-model'), 'unsupported');
-  assert.equal(inferChatApiProfile('https://example.com/v1', 'other-model'), 'unsupported');
+  assert.equal(inferChatApiProfile('https://example.com/v1', 'other-model'), 'openai-compatible');
+  assert.equal(inferChatApiProfile('http://127.0.0.1:8317', 'gpt-5.4-mini'), 'cliproxyapi');
 }
 
 function testResolveJsonResponseMode() {
@@ -227,6 +259,7 @@ function testBuildConnectivityTestPayload() {
         { role: 'system', content: 'Reply with exactly: hello world' },
         { role: 'user', content: 'hello world' },
       ],
+      stream: false,
       temperature: 0,
       max_tokens: 256,
     },
@@ -243,8 +276,24 @@ function testBuildConnectivityTestPayload() {
         { role: 'system', content: 'Reply with exactly: hello world' },
         { role: 'user', content: 'hello world' },
       ],
+      stream: false,
       temperature: 0,
       max_tokens: 256,
+    },
+  );
+
+  assert.deepEqual(
+    buildConnectivityTestPayload({
+      baseUrl: 'http://127.0.0.1:8317',
+      model: 'gpt-5.4-mini',
+    }),
+    {
+      model: 'gpt-5.4-mini',
+      messages: [
+        { role: 'system', content: 'Reply with exactly: hello world' },
+        { role: 'user', content: 'hello world' },
+      ],
+      stream: false,
     },
   );
 
@@ -252,6 +301,7 @@ function testBuildConnectivityTestPayload() {
 
 testNormalizeBaseUrlForStorage();
 testBuildChatCompletionsEndpoint();
+testBuildModelsEndpointAndExtractIds();
 testSanitizeModelList();
 testResolveChatModelsAndSummary();
 testInferProviderType();

@@ -46,6 +46,13 @@ window.PrivateDiscussionChat = (function () {
 
   // 从 secret.private 解密结果中生成可用的 Chat 模型列表
   const getChatLLMConfig = () => {
+    const localModels =
+      window.DPRLocalLLM && typeof window.DPRLocalLLM.getChatModels === 'function'
+        ? window.DPRLocalLLM.getChatModels()
+        : [];
+    if (Array.isArray(localModels) && localModels.length) {
+      return localModels;
+    }
     const secret = window.decoded_secret_private || {};
     const utils = window.DPRLLMConfigUtils || {};
     if (typeof utils.resolveChatModels === 'function') {
@@ -1086,6 +1093,10 @@ window.PrivateDiscussionChat = (function () {
     }
 
     const endpoint = (() => {
+      const explicitEndpoint = (
+        modelEntry && modelEntry.endpoint ? modelEntry.endpoint : ''
+      ).trim();
+      if (explicitEndpoint) return explicitEndpoint;
       const raw = (modelEntry && modelEntry.baseUrl ? modelEntry.baseUrl : '').trim();
       if (!raw) return '';
       if (
@@ -1583,8 +1594,10 @@ window.PrivateDiscussionChat = (function () {
     fillQuickRunOptions(chatQuickRunYearSelect, chatQuickRunConferenceSelect);
     bindChatModelPickerOnce();
 
+    const localModelsAvailable = getChatLLMConfig().some((item) => item && item.localProxy);
     const inGuestMode =
-      window.DPR_ACCESS_MODE === 'guest' || window.DPR_ACCESS_MODE === 'locked';
+      !localModelsAvailable &&
+      (window.DPR_ACCESS_MODE === 'guest' || window.DPR_ACCESS_MODE === 'locked');
 
     const enableChatControls = () => {
       const sendBtn = document.getElementById('send-btn');
@@ -1649,6 +1662,9 @@ window.PrivateDiscussionChat = (function () {
           status.textContent =
             '未检测到可用 Chat 模型，请在新配置指引中配置 chatLLMs。';
           status.style.color = '#c00';
+        } else if (chatModels.some((item) => item && item.localProxy) && status) {
+          status.textContent = '已连接本机 LLM 服务，API Key 仅保留在本地后端。';
+          status.style.color = '#4caf50';
         }
         syncChatModelPicker(names);
 
@@ -1700,6 +1716,22 @@ window.PrivateDiscussionChat = (function () {
         }
       };
       document.addEventListener('dpr-access-mode-changed', handler);
+    }
+
+    const enableWhenLocalLlmReady = (event) => {
+      const configured = Boolean(event && event.detail && event.detail.configured);
+      if (!configured) return;
+      enableChatControls();
+    };
+    document.addEventListener('dpr-local-llm-ready', enableWhenLocalLlmReady, { once: true });
+    if (window.DPRLocalLLM && typeof window.DPRLocalLLM.load === 'function') {
+      window.DPRLocalLLM.load().then((localState) => {
+        if (localState && localState.configured) {
+          enableChatControls();
+        }
+      }).catch(() => {
+        // 本地服务未运行时继续使用 secret.private 配置。
+      });
     }
 
     // 小屏幕下聊天区侧边栏开关与后台管理按钮

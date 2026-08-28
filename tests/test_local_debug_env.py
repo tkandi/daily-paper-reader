@@ -28,6 +28,14 @@ class LocalDebugEnvTest(unittest.TestCase):
                     "baseUrl": "https://api.deepseek.com",
                     "model": "deepseek-v4-flash",
                 },
+                "llmProvider": {"type": "cliproxyapi"},
+                "chatLLMs": [
+                    {
+                        "apiKey": "sk-new-key",
+                        "baseUrl": "https://api.deepseek.com",
+                        "models": ["deepseek-v4-flash", "deepseek-v4-pro"],
+                    }
+                ],
                 "rerankerLLM": {
                     "profile": "public-zwwen-rerank",
                     "provider": "public_zwwen",
@@ -40,6 +48,9 @@ class LocalDebugEnvTest(unittest.TestCase):
 
         self.assertEqual(env["DEEPSEEK_API_KEY"], "sk-new-key")
         self.assertEqual(env["SUMMARY_API_KEY"], "sk-new-key")
+        self.assertEqual(env["LLM_API_KEY"], "sk-new-key")
+        self.assertEqual(env["LLM_PROVIDER"], "cliproxyapi")
+        self.assertEqual(env["DPR_LOCAL_CHAT_MODELS"], "deepseek-v4-flash,deepseek-v4-pro")
         self.assertEqual(env["DEEPSEEK_BASE_URL"], "https://api.deepseek.com")
         self.assertEqual(env["RERANK_PROFILE"], "public-zwwen-rerank")
         self.assertEqual(env["PUBLIC_RERANK_API_KEY"], "")

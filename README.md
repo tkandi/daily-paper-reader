@@ -181,7 +181,58 @@ https://<你的用户名>.github.io/daily-paper-reader
 
 完成以上步骤后，后续大多数日常使用和配置都可以直接在网页端完成。后续教程参考：[daily-paper-reader 指引](https://ziwenhahaha.github.io/daily-paper-reader/#/tutorial/README)
 
-## 🧪 本地调试模式
+## 💻 本地部署与调试
+
+项目可以完整运行在本机，并通过 OpenAI-compatible 接口连接同一台 Mac 上的 CLIProxyAPI。推荐部署顺序：
+
+```bash
+# 1. 创建 .venv、安装远程 embedding/rerank 模式依赖，但暂不启动服务
+scripts/bootstrap_local.sh --prepare-only
+
+# 2. 从本机 CLIProxyAPI 配置安全读取客户端 key，并验证模型目录
+.venv/bin/python scripts/configure_local_cliproxyapi.py
+
+# 3. 部署到不受 macOS Desktop 后台权限影响的 ~/Services，并安装每天 02:30 的 LaunchAgent
+.venv/bin/python scripts/deploy_local_runtime.py --sync-private
+```
+
+配置脚本只读取 CLIProxyAPI `api-keys` 中的客户端调用密钥，不读取或修改 management key；密钥写入 Git 忽略的 `.env`，权限设为 `0600`，不会打印到终端。安装完成后访问：
+
+部署脚本要求源仓库代码已提交且工作树干净；它会创建独立的 `~/Services/daily-paper-reader` 运行副本，避免 LaunchAgent 因 macOS 对 Desktop/Documents 后台访问的保护而卡住。后续从已更新且干净的源码目录再次运行同一命令，会对运行副本执行快进更新并保留其运行数据。
+
+```text
+http://127.0.0.1:8567
+```
+
+本地网页的聊天请求默认经过 `/api/local/llm/v1/chat/completions` 同源代理，真实 API Key 只保留在本地后端，不发送给浏览器。query enrich、LLM refine 和文档总结读取同一份 `.env`。
+
+查看服务状态：
+
+```bash
+~/Services/daily-paper-reader/.venv/bin/python \
+  ~/Services/daily-paper-reader/scripts/manage_local_launchagents.py \
+  --root ~/Services/daily-paper-reader status
+curl http://127.0.0.1:8567/api/local/health
+```
+
+默认只在本地生成结果，不会自动提交或 push。若希望继续通过原 GitHub Pages 地址阅读最新日报，在 `.env` 中显式设置：
+
+```dotenv
+DPR_LOCAL_PUBLISH=1
+DPR_LOCAL_PUBLISH_BRANCH=main
+```
+
+发布脚本只允许提交 `docs/` 与必要的 `archive` 运行状态；默认不会提交个性化 `config.yaml`。检测到代码或其它非运行产物改动时会拒绝自动发布。
+
+如需停用，plist 会被移到废纸篓而不是直接删除：
+
+```bash
+~/Services/daily-paper-reader/.venv/bin/python \
+  ~/Services/daily-paper-reader/scripts/manage_local_launchagents.py \
+  --root ~/Services/daily-paper-reader uninstall
+```
+
+### 手动调试模式
 
 如果你在本机开发，不想点击按钮后触发 GitHub Actions，可以启动本地调试后端：
 
@@ -189,7 +240,7 @@ https://<你的用户名>.github.io/daily-paper-reader
 scripts/bootstrap_local.sh
 ```
 
-这个脚本会自动创建 `.venv`、安装远程服务模式依赖、按需从 `.env.example` 生成 `.env`，然后启动本地后端。默认不会下载 `torch` 等重依赖。启动完成后访问：
+这个脚本会自动创建 `.venv`、安装远程服务模式依赖、按需从 `.env.example` 生成 `.env`，然后以前台模式启动本地后端。默认不会下载 `torch` 等重依赖。
 
 ```text
 http://127.0.0.1:8567
@@ -225,7 +276,7 @@ DPR_INSTALL_MODE=minimal scripts/bootstrap_local.sh
 DPR_INSTALL_MODE=full scripts/bootstrap_local.sh
 ```
 
-完整依赖模式默认先安装 **CPU 版 PyTorch**，避免普通本机部署时误下载 CUDA 大包。如果你确实需要自定义 PyTorch 源，可以设置：
+完整依赖模式在 macOS 使用 PyPI 原生 PyTorch wheel（Apple Silicon 可使用 MPS）；Linux 默认安装 CPU 版，避免误下载 CUDA 大包。如果你在 Linux 上需要自定义 PyTorch 源，可以设置：
 
 ```bash
 DPR_INSTALL_MODE=full DPR_TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu scripts/bootstrap_local.sh
