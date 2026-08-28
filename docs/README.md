@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-26</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-28</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-26 21:33:44 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-28 04:14:10 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 6 篇推荐（精读 4 篇，速读 2 篇）</p>
-<p>精读：《MCP-Universe RL: A Framework for Training MCP Tool-Use Agents via Reinforcement Learning》（9.0/10）, 《ShardMeter: Sharded and Geo-Distributed Training Without the Guesswork》（9.0/10）</p>
-<p>速读：《FlatLand: Personalized Graph Federated Learning via Tailored Lorentz Space》（6.0/10）, 《PRISM: Predictive Runtime In-place Scaling and Model Selection for Edge Microservices》（6.0/10）</p>
+<p>今日共生成 10 篇推荐（精读 5 篇，速读 5 篇）</p>
+<p>精读：《Resilient Decentralized Wireless Federated Learning via Gradient Tracking with AdamW》（9.0/10）, 《psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing》（9.0/10）</p>
+<p>速读：《Giga-Embeddings: Mixture-of-Experts Encoders for High-Throughput Text Embeddings》（7.0/10）, 《Flower Hub: A Reproducible Benchmarking Platform for Federated Learning in Simulation and Deployment》（6.0/10）, 《Cooperative Multi-Agent Reinforcement Learning for Adaptive Aggregation in Semi-Supervised Federated Learning with non-IID Data》（6.0/10）</p>
 <p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
@@ -74,12 +74,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MCP-Universe RL: A Framework for Training MCP Tool-Use Agents via Reinforcement Learning">MCP-Universe RL: A Framework for Training MCP Tool-Use Agents via Reinforcement Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="ShardMeter: Sharded and Geo-Distributed Training Without the Guesswork">ShardMeter: Sharded and Geo-Distributed Training Without the Guesswork</span></li><li><span class="dpr-home-dashboard-paper-title" title="Maia 200: A Software Defined Dataflow System for Large-scale AI Acceleration">Maia 200: A Software Defined Dataflow System for Large-scale AI Acceleration</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Resilient Decentralized Wireless Federated Learning via Gradient Tracking with AdamW">Resilient Decentralized Wireless Federated Learning via Gradient Tracking with AdamW</span></li><li><span class="dpr-home-dashboard-paper-title" title="psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing">psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing</span></li><li><span class="dpr-home-dashboard-paper-title" title="Distributed Training using an Intelligent Network">Distributed Training using an Intelligent Network</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FlatLand: Personalized Graph Federated Learning via Tailored Lorentz Space">FlatLand: Personalized Graph Federated Learning via Tailored Lorentz Space</span></li><li><span class="dpr-home-dashboard-paper-title" title="PRISM: Predictive Runtime In-place Scaling and Model Selection for Edge Microservices">PRISM: Predictive Runtime In-place Scaling and Model Selection for Edge Microservices</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Giga-Embeddings: Mixture-of-Experts Encoders for High-Throughput Text Embeddings">Giga-Embeddings: Mixture-of-Experts Encoders for High-Throughput Text Embeddings</span></li><li><span class="dpr-home-dashboard-paper-title" title="Flower Hub: A Reproducible Benchmarking Platform for Federated Learning in Simulation and Deployment">Flower Hub: A Reproducible Benchmarking Platform for Federated Learning in Simulation and Deployment</span></li><li><span class="dpr-home-dashboard-paper-title" title="Cooperative Multi-Agent Reinforcement Learning for Adaptive Aggregation in Semi-Supervised Federated Learning with non-IID Data">Cooperative Multi-Agent Reinforcement Learning for Adaptive Aggregation in Semi-Supervised Federated Learning with non-IID Data</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 </div>
 
