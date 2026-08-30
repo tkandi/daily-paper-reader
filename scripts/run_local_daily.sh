@@ -42,13 +42,25 @@ for env_key in \
   DPR_LOCAL_PROFILE_TAG \
   DPR_LOCAL_PUBLISH \
   DPR_LOCAL_PUBLISH_BRANCH \
-  DPR_LOCAL_PUBLISH_CONFIG; do
+  DPR_LOCAL_PUBLISH_CONFIG \
+  DPR_LOCAL_SKIP_COMPLETED_DAY \
+  DPR_LOCAL_FORCE_RUN; do
   if [[ -z "${(P)env_key:-}" ]]; then
     export "$env_key=$(read_env_value "$env_key")"
   fi
 done
 export DPR_DOTENV_PATH="${DPR_DOTENV_PATH:-$ROOT_DIR/.env}"
 export PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
+
+if [[ "${DPR_LOCAL_SKIP_COMPLETED_DAY:-1}" == "1" && "${DPR_LOCAL_FORCE_RUN:-0}" != "1" ]]; then
+  local_day="$(date '+%Y%m%d')"
+  for completed_log in "$RUNS_DIR"/daily-"$local_day"-*.log(N); do
+    if grep -Fq '[local-daily] completed_at=' "$completed_log"; then
+      print "[local-daily] 当天已有成功运行：$completed_log，跳过重复定时任务。"
+      exit 0
+    fi
+  done
+fi
 
 args=()
 if [[ "${DPR_LOCAL_RUN_ENRICH:-0}" == "1" ]]; then

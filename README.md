@@ -230,6 +230,12 @@ gh variable set DPR_DISABLE_HOSTED_DAILY --body true
 
 发布脚本只允许提交 `docs/` 与必要的 `archive` 运行状态；默认不会提交个性化 `config.yaml`。检测到代码或其它非运行产物改动时会拒绝自动发布。
 
+LaunchAgent 检测到同一自然日已经有成功日志时会跳过重复运行。确实需要在同一天再次累计生成时，可临时执行：
+
+```bash
+DPR_LOCAL_FORCE_RUN=1 ~/Services/daily-paper-reader/scripts/run_local_daily.sh
+```
+
 如需停用，plist 会被移到废纸篓而不是直接删除：
 
 ```bash

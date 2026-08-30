@@ -168,6 +168,12 @@ class LocalDeploymentTest(unittest.TestCase):
         self.assertNotIn("while IFS= read -r path", script)
         self.assertIn('changed_path="${line:3}"', script)
 
+    def test_daily_wrapper_skips_a_completed_local_day_unless_forced(self):
+        script = (ROOT / "scripts" / "run_local_daily.sh").read_text(encoding="utf-8")
+        self.assertIn("DPR_LOCAL_SKIP_COMPLETED_DAY", script)
+        self.assertIn("DPR_LOCAL_FORCE_RUN", script)
+        self.assertIn("grep -Fq '[local-daily] completed_at='", script)
+
 
 if __name__ == "__main__":
     unittest.main()
