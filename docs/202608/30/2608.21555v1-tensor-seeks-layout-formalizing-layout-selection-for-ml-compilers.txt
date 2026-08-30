@@ -1,0 +1,700 @@
+Title: Tensor Seeks Layout: Formalizing Layout Selection for ML Compilers
+
+URL Source: https://arxiv.org/pdf/2608.21555v1
+
+Published Time: Tue, 25 Aug 2026 00:08:40 GMT
+
+Number of Pages: 30
+
+Markdown Content:
+# Tensor Seeks Layout: Formalizing Layout Selection for ML Compilers 
+
+CLEMENS EISENHOFER, TU Wien, Austria 
+
+YUWEN JIA, Amazon, USA 
+
+DANIEL KROENING, Amazon, USA 
+
+SERGEY PUPYREV, Amazon, USA Modern machine learning compilers select memory layouts for tensors to minimize execution cost while satisfying hardware constraints. Layout selection is inherently global: an operator may be fastest under one layout while its consumers prefer another, and aligning these preferences requires explicit layout conversions that can regress model performance. Despite its practical importance, layout selection lacks a formal theoretical basis, causing current compilers to rely on ad-hoc heuristics. This paper presents the first formal study of layout selection in machine learning compilers. We formulate the problem as combinatorial optimization over dataflow graphs, minimizing the sum of operator execution costs and the per-tensor cost of these conversions. Our theoretical analysis shows that optimal layout selection is computationally hard, even when restricted to programs containing only matrix multiplications over two-dimensional tensors. On the positive side, we design an optimal polynomial-time algorithm for dataflow graphs of bounded treewidth. For general instances, we give a weighted MaxSAT encoding that an off-the-shelf solver can optimize. The formulation unifies several existing layout optimization strategies, including XLA’s layout assignment, partition dimension selection in systolic array compilers, and layout planning in mobile GPU optimizers. We implement the formalization in a production compiler for an AI accelerator and measure the execution time of the compiled models under greedy heuristics, the compiler’s rule-based strategy, and an optimal solver. Simple heuristics degrade execution time by up to 5 × on some workloads. Where the compiler’s cost model is accurate, the solver matches or beats the rule-based strategy. On workloads with complex data movement it falls behind, and since the solver minimizes the stated objective exactly, that gap isolates cost-model error from search quality, pointing to where compiler effort actually pays off. 
+
+Authors’ Contact Information: Clemens Eisenhofer, clemens.eisenhofer@tuwien.ac.at, TU Wien, Vienna, Vienna, Austria; Yuwen Jia, michelle2010tx@gmail.com, Amazon, Cupertino, California, USA; Daniel Kroening, daniel.kroening@gmail.com, Amazon, Cupertino, California, USA; Sergey Pupyrev, spupyrev@gmail.com, Amazon, Cupertino, California, USA. arXiv:2608.21555v1 [cs.PL] 21 Aug 2026 2 Eisenhofer et al. 
+
+1 Introduction 
+
+Executing large-scale deep learning models [9] efficiently requires specialized hardware accelerators such as GPUs, TPUs, and custom ASICs. Because workloads are large and models vary, compilers have become the natural place to make performance decisions, rather than hand-tuned libraries. In practice, a large fraction of end-to-end speedups in training and inference come not from new arithmetic kernels, but from reducing and reshaping data movement [25, 31, 53, 56]. Modern machine learning (ML) compilers [14, 26, 32, 51] perform various optimizations, includ-ing operator fusion, tiling, and instruction scheduling [15, 39, 59, 61, 63]. Among these, layout optimization, that is, the selection of how multi-dimensional tensors are arranged in memory or mapped to hardware resources, has a direct impact on execution performance [37, 43, 49, 57]. A tensor layout specifies the physical representation of a multi-dimensional array on the target hardware [10, 62]. For instance, a four-dimensional tensor storing batched images can be laid out as 
+
+NHWC (batch, height, width, channels) or NCHW (batch, channels, height, width), with each ordering favoring different access patterns [34, 58]. Operators are layout-sensitive [10, 52]: a convolution may prefer NHWC on one backend and NCHW on another [16, 34]; a matrix multiplication may admit two symmetric variants corresponding to transposing its operands; an accelerator instruction may require a specific dimension to be partitioned across on-chip processing elements or distributed across multiple devices [29, 54, 60]. When a producer emits a tensor in a layout incompatible with its consumer’s expectation, the compiler must insert an explicit layout conversion, often implemented as DMA (Direct Memory Access) transfers and reformatting code. Whether a conversion must be materialized at all is itself target-dependent. On CPUs and GPUs, a kernel can sometimes absorb a mismatch by iterating over the data in a different order: BLAS routines accept transposed operands, and loop interchange can emulate a layout change. On systolic array accelerators, by contrast, the dimension streamed into the compute array is fixed by the hardware datapath, so conversions involve physical data movement that cannot be folded into the consuming operator. We discuss this distinction in Section 2.3. As we argue in Section 4, these conversions add measurable overhead, which can lead to up to 5 × slowdown in model execution. The extra operators can also inflate compilation time by increasing graph size and reducing opportunities for operator fusion [25, 42]. 
+
+1.1 Layout Selection 
+
+This paper studies tensor layout selection as a first-class compilation problem. To illustrate, consider the computation shown in Figure 1a: a matrix multiplication followed by a reduction and an element-wise addition, where input tensor 𝐵 is shared between the matmul and the add . Each tensor can be stored in row-major (RM) or column-major (CM) order, and each operator’s execution time depends on the layouts of its inputs and outputs. On many accelerators, the matmul admits two equivalent forms, 𝐶 = 𝐴 × 𝐵 and 𝐶 ⊤ = 𝐵 ⊤ × 𝐴 ⊤, that produce 𝐶 in different layouts. The reduce 
+
+operator collapses the matrix 𝐶 to a vector by summing along columns, and its cost depends on the layout: columns are strided in RM but contiguous in CM. The add requires its operands to share a layout, coupling 𝐷 ’s layout back to 𝐵 ’s. Figure 1 compares two layout assignments for this computation. In (b), all tensors use RM: the 
+
+matmul is cheap but the reduce pays the strided-column cost. In (c), the function takes transposed inputs and applies the transposed matmul , so the reduction becomes cheap at the cost of an explicit layout conversion for the output tensor, 𝑅 . Which assignment is preferable depends on the costs: if the transpose costs more than the savings on the reduction, (b) is the better choice; otherwise, (c) is. In real models with hundreds or thousands of operators, such dependencies multiply across the dataflow graph. It is the compiler’s task to select layouts for all tensors such that the total operator and data transformation cost is minimized. Tensor Seeks Layout 3func f (A, B)       
+
+> C= matMul( A,B)
+> D= reduce( C,dim = 0)
+> R= add( D,B)return R
+
+(a) ML model matMul reduce (RM) add A [4 × 8] B [8 × 3] C [4 × 3] D [1 × 3] R [8 × 3] (b) matMul reduce (CM) add A⊤ [8 × 4] B⊤ [3 × 8] C⊤ [3 × 4] R [8 × 3] D⊤ [3 × 1] transpose R⊤ [3 × 8] (c) Fig. 1. Two layout assignments for the computation in (a). Layouts are row-major (RM) or column-major (CM); dimensions are in storage order. (b) All tensors remain in RM. (c) Inputs are transposed to CM, and the output tensor 𝑅 is transposed back. 
+
+This challenge arises across diverse hardware targets and compilation contexts: 
+
+• Systolic array accelerators (e.g., TPUs, AWS Trainium) distribute tensors across parallel processing elements by splitting along a chosen dimension, called the partition dimension .Different choices of partition dimension enable different instruction sequences with varying efficiency [5, 22]. 
+
+• GPU backends in compilers like XLA and TVM must choose between data formats such as NCHW and NHWC for convolutions, with the preferred choice depending on convolution parameters and downstream operations [14, 24]. 
+
+• Mobile and edge deployments operate under tight memory budgets where unnecessary layout conversions can degrade performance or prevent model execution altogether [37, 43]. In general, given a dataflow graph, each tensor admits a finite set of feasible layouts, each operator has a set of admissible input/output layout combinations with associated performance cost, and converting a tensor between layouts has an explicit cost. The compiler must assign layouts across the graph to minimize the total execution time of operators plus the time needed for inserted conversions, subject to hardware feasibility constraints. Although many tools implicitly target this objective, it is rarely formalized [14, 24, 36, 37, 43]. Instead, most modern compilers rely on a chain of heuristic graph passes: pick a “good” layout locally, propagate preferences forward and backward, and resolve remaining conflicts by inserting transposes. Unfortunately, such local approaches can produce poor results when operator preferences conflict across the graph, as an example in Figure 2 illustrates. Each Conv prefers NHWC and each BatchNorm prefers NCHW , so a per-operator strategy assigns different layouts to adjacent operators. Aligning them for the downstream Add then requires a Transpose after every BatchNorm (Figure 2a). A global view gives a better solution: choosing the less efficient NHWC for each BatchNorm removes all transposes (Figure 2b). 
+
+1.2 Our Contributions 
+
+Layout optimization requires an explicit mathematical model rather than an ad-hoc collection of heuristics. We propose a model built from a finite set of layout choices for each tensor, a cost function expressing the execution performance for each layout combination, and transpose costs for converting tensors between layouts. It subsumes several existing “ad hoc” layout optimizations 4 Eisenhofer et al. prefers NHWC convolution transpose prefers NCHW batch norm NHWC | NCHW add Input . . . Output NHWC NCHW transpose transpose NHWC NHWC NCHW 
+
+> (a) Locally-optimal layout
+
+## . . . Output Input NHWC NHWC NHWC NHWC NHWC (b) An optimized layout Fig. 2. Local versus global layout selection on a graph of Conv and BatchNorm operators feeding a shared       
+
+> Add . Layouts are NHWC or NCHW ; inserted Transpose operators are shown explicitly.
+
+under a single objective. XLA’s layout assignment chooses minor-to-major dimension orderings while paying copy costs to reconcile mismatches [24, 44]. On systolic array accelerators, compilers such as AWS Neuron Graph Compiler (see Appendix A and [5, 22]) select partition dimensions for tensors in on-chip buffers, which maps directly to our formulation. Heuristic systems such as SmartMem [43] and NeoCPU [37] correspond to restricted variants where layout domains are pruned and layout-flexible operators are treated as nearly indifferent, so propagation approximately minimizes transpose costs. Stating all four under one objective lets us compare their design choices and the restriction each one makes for tractability. Layout Selection is NP -hard even when each operator has only a constant number of inputs and each tensor admits only a small number of layouts, and hardness persists in restricted settings that resemble common matmul-heavy graphs. This rules out a universal polynomial-time algorithm with strong worst-case guarantees. The formulation does, however, expose structure that can be exploited. For dataflow graphs with bounded treewidth (a structural property of graphs measuring their “tree-likeness” [11, 48]), the problem admits an optimal polynomial-time algorithm; that is, the problem is fixed-parameter tractable with respect to treewidth together with the number of layout configurations per operator. Such tractability is a known phenomenon in algorithm design [6, 17, 50]; our contribution is an explicit dynamic program for Layout Selection that is directly implementable inside a compiler (Section 3.2.1). For general instances, we encode the problem as a weighted MaxSAT instance and invoke a general-purpose solver [20, 35]. We validate the formulation by integrating it into a production graph compiler for an AI acceler-ator, AWS Trainium [4, 5]. The prototype instantiates layout domains and cost functions using a cycle-based cost model and hardware feasibility checks. We then evaluate a range of algorithms: local and greedy baselines that mirror common compiler practice, a manual rule-based strategy, and exact solver-based encodings that compute optimal solutions, enabling direct measurement of heuristic optimality gaps. Across a diverse suite of models, we find that (i) layout selection has a substantial impact on performance, with simple heuristics degrading execution time by up to 5× compared to a domain-aware strategy, (ii) solver-based methods are viable for the majority of models, completing within seconds on most instances, and (iii) the benefit of exact solving is limited by cost model fidelity. Sections 4.3 and 4.5 take up the third point. In summary, our main contributions are as follows: (1) A unified formulation of automatic layout selection for tensors as a graph optimization problem parameterized by layout domains, operator costs, and transpose costs. Tensor Seeks Layout 5
+
+(2) Algorithmic results establishing NP -hardness and inapproximability in general, an explicit fixed-parameter algorithm for graphs of bounded treewidth, and a weighted MaxSAT encoding for general instances. (3) A framework and evaluation in a production compiler setting, comparing heuristic and solver-based approaches for tensor layout selection, together with an analysis methodology that uses provably optimal solutions to separate algorithmic quality from cost-model fidelity. 
+
+2 A Mathematical Formulation of Layout Selection 
+
+This section develops a model of layout selection that formalizes its constraints and costs. 
+
+Tensors, operators, and dataflow graphs. A tensor is a multi-dimensional array, and an operator is a function on tensors that takes as input a tuple of tensors, denoted In (𝑜 ), and produces output tensors, denoted Out (𝑜 ). We model an ML program as a directed acyclic dataflow graph 𝐺 = (𝑉 , 𝐸 ),a standard representation in optimizing compilers [1, 14, 55]. Let T denote the set of all tensors in 
+
+𝐺 . Each vertex 𝑜 ∈ 𝑉 represents an operator, and each directed edge (𝑜 1, 𝑜 2) ∈ 𝐸 carries a tensor 
+
+𝑡 ∈ T produced by 𝑜 1 and consumed by 𝑜 2. We treat 𝐸 as a multiset and distinguish repeated uses of the same tensor by argument position. We assume each operator has at most Δ inputs, that is, 
+
+| In (𝑜 )| ≤ Δ for every operator 𝑜 ; in practice Δ is a small constant. We also assume exactly one output, that is, | Out (𝑜 )| = 1, which is without loss of generality: operators with multiple outputs can be handled by introducing auxiliary single-output operators, each producing one of the outputs. 
+
+Tensor layouts. A layout of a tensor specifies how its elements are represented on the target hardware, such as a permutation of dimensions (e.g., row-major vs. column-major), memory placement (e.g., shared vs. global memory), or a partition dimension for on-chip buffers. We abstract these details by assuming that each tensor 𝑡 has a finite set of admissible layouts 𝐿 (𝑡 ). The size of 𝐿 (𝑡 ) is determined by the layout interpretation on the target. For a 𝑘 -dimensional tensor, there are, for example, at most 𝑘 choices of a partition dimension and at most 𝑘 ! dimension orderings; in practice the set is small. For a sequence of tensors 𝑇 = ⟨𝑡 1, . . . , 𝑡 𝑟 ⟩, we write 𝐿 (𝑇 ) = 𝐿 (𝑡 1) ×· · ·× 𝐿 (𝑡 𝑟 )
+
+for the set of joint layout choices for 𝑇 . A layout assignment (defined formally below) selects, for every operator 𝑜 and every tensor 𝑡 that is an input or output of 𝑜 (i.e., 𝑡 ∈ In (𝑜 ) ∪ Out (𝑜 )), a layout 
+
+ℓ (𝑡, 𝑜 ) ∈ 𝐿 (𝑡 ) in which 𝑜 accesses 𝑡 . For a sequence 𝑇 = ⟨𝑡 1, . . . , 𝑡 𝑟 ⟩ of input or output tensors of 𝑜 ,we write ℓ (𝑇 , 𝑜 ) for the tuple  ℓ (𝑡 1, 𝑜 ), . . . , ℓ (𝑡 𝑟 , 𝑜 ) of layouts selected at 𝑜 ; for example, ℓ (In (𝑜 ), 𝑜 )
+
+is the tuple of layouts in which 𝑜 reads its inputs. 
+
+Operator costs and feasibility. Operators impose constraints and preferences on the layouts of their inputs and outputs. We model this via a set of non-negative operator cost functions 
+
+𝐶 op  
+
+> 𝑜
+
+: 𝐿 (In (𝑜 )) × 𝐿 (Out (𝑜 )) → R≥0 ∪ {∞} ,
+
+where In (𝑜 ) and Out (𝑜 ) denote the input and output tensors of 𝑜 . A cost of ∞ denotes an infeasible or unsupported layout combination on the target hardware. Finite values encode relative performance differences between supported layout choices. 
+
+Layout conversion costs. When a tensor is produced in one layout but consumed in one or more different layouts, the compiler must insert an explicit layout conversion (a transpose, copy, or reformat). For each tensor 𝑡 , we model its cost using a transpose cost function 
+
+𝐶 tr  
+
+> 𝑡
+
+: 𝐿 (𝑡 ) × 𝐿 (𝑡 ) → R≥0,
+
+with 𝐶 tr  
+
+> 𝑡
+
+(ℓ, ℓ ) = 0. This cost abstracts the data movement, reformatting overhead, and associated synchronization required to convert 𝑡 from one layout to another. When multiple consumers require 6 Eisenhofer et al. 
+
+the same layout, a single transpose suffices and its cost is incurred once. In practice, transpose costs can be estimated via a cost model. 
+
+The layout selection problem. A layout assignment chooses a layout ℓ (𝑡, 𝑜 ) ∈ 𝐿 (𝑡 ) for every operator 𝑜 and each tensor 𝑡 ∈ In (𝑜 ) ∪ Out (𝑜 ). For each tensor 𝑡 , let prod (𝑡 ) denote the layout 
+
+ℓ (𝑡, 𝑜 prod ) assigned at its producer 𝑜 prod and let cons (𝑡 ) = { ℓ (𝑡, 𝑜 ) | 𝑜 consumes 𝑡 } denote the set of distinct layouts required by its consumers. This formulation captures the tradeoff between choosing layouts that are efficient for individual operators and avoiding expensive layout conversions. Problem (Layout Selection). Given a dataflow graph 𝐺 = (𝑉 , 𝐸 ), feasible layout sets 𝐿 (𝑡 ) for each tensor 𝑡 ∈ T , operator and transpose costs, find layouts ℓ (𝑡, 𝑜 ) ∈ 𝐿 (𝑡 ) for every operator 𝑜 and tensor 𝑡 ∈ In (𝑜 ) ∪ Out (𝑜 ) minimizing ∑︁  
+
+> 𝑜 ∈𝑉
+
+𝐶 op 
+
+> 𝑜
+
+ ℓ (In (𝑜 ), 𝑜 ), ℓ (Out (𝑜 ), 𝑜 ) +∑︁  
+
+> 𝑡 ∈ T
+
+∑︁ ℓ ∈cons (𝑡 )
+
+𝐶 tr 
+
+> 𝑡
+
+ prod (𝑡 ), ℓ .
+
+The first sum captures operator execution costs. The second captures layout conversion costs: for each tensor 𝑡 , the compiler converts from prod (𝑡 ) to each distinct layout in cons (𝑡 ). Since 
+
+𝐶 tr  
+
+> 𝑡
+
+(ℓ, ℓ ) = 0, consumers that agree with the producer incur no cost. The formulation abstracts over the specific interpretation of tensor layouts, accommodating dimension orderings, partition dimensions, memory placements, and combinations thereof. This generality enables our theoretical results and algorithms to apply across diverse hardware targets. For example, our model subsumes VTensor’s formulation [58] as a special case with uniform operator costs, and provides a formal objective that systems such as SmartMem [43] and NeoCPU [37] heuristically optimize. Next, we describe two concrete instantiations of Layout Selection in existing ML compilers. 
+
+2.1 Instantiation: Layout Assignment in XLA 
+
+Our formulation directly captures the layout assignment problem in XLA and similar GPU-oriented compilers [14, 24]. In this context, a tensor layout specifies the minor-to-major ordering of dimensions in memory. A 𝑘 -dimensional tensor admits up to 𝑘 ! layouts, which are a subset of permutations on 
+
+⟨1, . . . , 𝑘 ⟩, forming 𝐿 (𝑡 ). For instance, a 4-dimensional tensor in NHWC format has layout ⟨𝐶,𝑊 , 𝐻, 𝑁 ⟩
+
+while NCHW corresponds to ⟨𝑊 , 𝐻, 𝐶, 𝑁 ⟩.The operator cost function encodes hardware preferences: convolutions on GPUs typically perform best with specific layouts (e.g., NHWC for certain cuDNN kernels), while other layouts incur overhead or may be unsupported (that is, have ∞ cost). Matrix multiplications prefer layouts where the inner (contracted) dimension is contiguous in memory. Layout-agnostic operators like elementwise operations have constant cost across all layouts. The transpose cost corresponds to inserting a copy operation that physically rearranges tensor data in memory; XLA’s layout assignment pass inserts such copies whenever adjacent operators require incompatible layouts [44]. Our formulation thus provides a precise characterization of the optimization problem that XLA’s greedy heuristic attempts to solve. 
+
+2.2 Instantiation: Partition Dimension Selection in AWS Trainium 
+
+Our formulation also captures layout optimization in compilers for systolic array accelerators such as AWS Trainium [4, 5, 22]; refer to Appendix A for details. In these systems, tensors residing in on-chip scratchpad memory must specify a partition dimension , that is, the axis along which the tensor is distributed across parallel processing elements. For a 𝑘 -dimensional tensor, admissible layouts are 𝐿 (𝑡 ) = {1, 2, . . . , 𝑘 }, indicating which dimension serves as the partition dimension. Tensor Seeks Layout 7
+
+The operator cost function encodes hardware constraints imposed by the systolic array archi-tecture. Matrix multiplication on Trainium requires specific partition dimensions for its operands: computing 𝐶 = 𝐴 × 𝐵 requires 𝐴 to be partitioned along its second dimension and 𝐵 along its first dimension. The cost function assigns finite values to valid partition configurations (derived from a cost model reflecting instruction latency) and ∞ to invalid configurations. The transpose cost corresponds to layout conversions across partitions (typically implemented via dedicated hardware engines), an overhead that the compiler seeks to minimize. 
+
+2.3 Layout Conversions versus Loop Transformations 
+
+On general-purpose hardware, explicit layout conversions are often avoidable: many of the benefits of a different physical layout can be handled by changing the iteration order of the consuming kernel instead. BLAS interfaces such as cublasSgemm accept transposed operands via op(A) and 
+
+op(B) flags, folding the conversion into the kernel itself, and on CPUs a loop interchange (e.g., the classic 𝑖𝑘 𝑗 matmul ordering) restores unit-stride access to a row-major operand without ever materializing its transpose. The dependency also runs the other way: physically reordering data can be what enables a loop optimization, since transposing or packing operands exposes the contiguous access patterns that let compilers vectorize transformer kernels [3], and blocked formats serve the same purpose for CNN inference on CPUs [37]. Whether the layout or the loop nest should give way depends on the target. Our cost framework is agnostic to this choice. If a kernel can absorb a layout mismatch by iterating differently, that combination is simply another admissible configuration of the operator, with a finite (possibly higher) operator cost and no transpose cost. If it cannot, the mismatch requires an explicit conversion and the transpose cost is charged. On the systolic array accelerators we target, a kernel generally cannot absorb a mismatch in the partition dimension. As detailed in Appendix A, each of the 128 on-chip memory partitions feeds exactly one row of the systolic array, so the tensor dimension streamed into the array must be the one laid out across partitions. No reordering of the surrounding loop nest can change which dimension that is. Switching the partition dimension requires physically moving every element to a different partition, an operation performed by dedicated transpose hardware or DMA engines and impossible to fuse into the consuming matmul instruction (in contrast to the op(A) /op(B) 
+
+flags above). The same holds for related targets such as TPUs, where tensors are blocked into fixed hardware tiles [46]. This is why our formulation charges transpose costs explicitly, while their 
+
+magnitude is target-specific (see Section 5). 
+
+3 Theoretical Considerations 
+
+Unless stated otherwise, we consider the general formulation from Section 2, with a constant upper bound Δ on operator arity. 
+
+3.1 Computational Hardness 
+
+Theorem 1. The Layout Selection problem is NP -hard, even when every operator has at most three inputs ( Δ = 3). 
+
+Proof. We reduce from 3-SAT [23]. Given a formula, we build an instance of Layout Selection in which variables correspond to tensors and clauses correspond to operators, such that the formula is satisfiable if and only if the minimum cost is 0. Every tensor has two layouts, T (“true”) and F (“false”). For every tensor 𝑡 , set 𝐶 tr  
+
+> 𝑡
+
+(T, F) = 1and 𝐶 tr  
+
+> 𝑡
+
+(F, T) = 1. For each Boolean variable 𝑥 𝑗 , create a source operator 𝑠 𝑗 with no inputs and output tensor 𝑡 𝑗 , with 𝐶 op  
+
+> 𝑠 𝑗
+
+= 0 for both layouts. For each clause 𝐶 𝑖 over variables 𝑥 𝑗 1 , 𝑥 𝑗 2 , 𝑥 𝑗 3 , create 8 Eisenhofer et al. vuwx
+
+(a) Graph 𝐻 = (𝑈 , 𝐹 )func f()   
+
+> // one tensor per vertex, layout ∈ { A,B}
+
+tu = source() 
+
+tv = source() 
+
+tw = source() 
+
+tx = source() 
+
+> // one matmul per edge
+
+ruv = matmul( tu , tv ) // edge {u, v }
+
+rvw = matmul( tv , tw) // edge {v, w }
+
+ruw = matmul( tu , tw) // edge {u, w }
+
+rux = matmul( tu , tx) // edge {u, x }
+
+rwx = matmul( tw, tx) // edge {w, x }      
+
+> // matmul cost 0iff inputs differ // transpose cost( A,B) = transpose cost( B,A) = 1
+
+(b) Constructed Layout Selection instance Fig. 3. Reduction from Odd Cycle Transversal to Layout Selection (Theorem 3). (a) An undirected graph 𝐻 
+
+with a triangle {𝑢, 𝑣, 𝑤 }. (b) The corresponding ML program: each vertex becomes a tensor with two layouts 
+
+{A, B}, and each edge becomes a matmul requiring its inputs in different layouts (cost 0) or infeasible (cost ∞). The triangle forms an odd cycle of opposite-layout constraints that cannot be two-colored with one layout per tensor; at least one tensor must be read in both layouts, incurring a transpose cost of 1.
+
+an operator 𝑜 𝑖 whose three inputs are tensors 𝑡 𝑗 1 , 𝑡 𝑗 2 , 𝑡 𝑗 3 and whose output is a fresh tensor used nowhere else. Define 𝐶 op  
+
+> 𝑜 𝑖
+
+to be 0 exactly on those input-layout triples that satisfy 𝐶 𝑖 (where layout 
+
+T represents a positive literal and F a negative literal), and 1 otherwise; the output layout does not affect cost. If the formula is satisfiable, set ℓ (𝑡 𝑗 , 𝑠 𝑗 ) according to a satisfying assignment; then every clause-operator has zero cost and all consumers of each 𝑡 𝑗 agree with its producer, so no transpose cost is incurred and the total cost is 0. Conversely, if there exist layouts ℓ (𝑡, 𝑜 ) with total cost 0, then no tensor incurs a transpose cost, so all consumers of each 𝑡 𝑗 use the same layout as its producer, and every operator must have operator cost 0, which implies the induced truth assignment satisfies every clause. □
+
+Note that the proof above implies that it is NP -hard to distinguish instances of optimum cost 0 from instances of optimum cost at least 1. Since any solution with positive cost has an unbounded ratio relative to an optimum of 0, the hardness result rules out approximation algorithms with any finite guarantee. Corollary 2. Unless P = NP , Layout Selection admits no polynomial-time approximation algorithm with a finite approximation ratio. 
+
+Given this negative result, finding algorithms with strong guarantees requires structural or cost restrictions. One apparent strategy is limiting the operator types. However, as the next theorem shows, Layout Selection remains computationally hard even when all operators are matrix multiplications with Δ = 2. Note that the inapproximability result of Corollary 2 does not follow from this restricted setting, since the underlying Odd Cycle Transversal problem admits approximation algorithms [2]; this is why the two reductions are complementary. Tensor Seeks Layout 9
+
+Theorem 3. Layout Selection is NP -hard even when all non-source operators are matrix multi-plications over two-dimensional tensors, each tensor admits exactly two layouts, transpose costs are binary, and operator costs are 0 or ∞.
+
+Proof. We reduce from Odd Cycle Transversal (deleting the fewest vertices to make a graph bipartite). Given an undirected graph 𝐻 = (𝑈 , 𝐹 ), create a tensor 𝑡 𝑢 for each vertex 𝑢 ∈ 𝑈 with exactly two layouts {A, B}. For each vertex 𝑢 , create a source operator 𝑠 𝑢 with no inputs and output 
+
+𝑡 𝑢 , with 𝐶 op  
+
+> 𝑠 𝑢
+
+= 0 for both layouts. For each edge {𝑢, 𝑣 } ∈ 𝐹 , create a matrix-multiplication operator 
+
+𝑜 𝑢𝑣 whose inputs are (𝑡 𝑢 , 𝑡 𝑣 ) and whose output is a fresh tensor used nowhere else. Define 𝐶 op  
+
+> 𝑜 𝑢𝑣
+
+to be 0 when 𝑡 𝑢 and 𝑡 𝑣 use different layouts (capturing the two symmetric matmul variants), and ∞
+
+otherwise. For every tensor 𝑡 𝑢 , set 𝐶 tr  
+
+> 𝑡 𝑢
+
+(A, B) = 𝐶 tr  
+
+> 𝑡 𝑢
+
+(B, A) = 1. Figure 3 illustrates the construction. Call 𝑢 split if its incident matmuls read 𝑡 𝑢 in both layouts. Since its source layout is free, 𝑡 𝑢 costs 1 exactly when 𝑢 is split. If 𝑊 is the set of split vertices, the single layouts of vertices outside 𝑊 
+
+two-color 𝐻 − 𝑊 . Conversely, any bipartition of 𝐻 − 𝑊 satisfies edges outside 𝑊 , while endpoints in 𝑊 can use the opposite layout per incident edge. Hence the optimum equals the minimum odd-cycle transversal size. Since Odd Cycle Transversal is NP -hard [23], the result follows. □
+
+3.2 Optimal Algorithms for Layout Selection 
+
+Hardness in general does not preclude solving the instances that actually arise, and we give two exact algorithms for Layout Selection. The first exploits the structural property of bounded treewidth 
+
+in real-world dataflow graphs [11, 48]: when the treewidth is bounded, Layout Selection can be solved in polynomial time via dynamic programming (DP). Prior work suggests that real-world ML graphs often have small treewidth [30]; we confirm the observation empirically in Section 4. The second approach encodes the problem as a weighted MaxSAT instance [35], enabling off-the-shelf solvers to find optimal solutions for general instances. 
+
+3.2.1 Treewidth-based Exact Algorithm. 
+
+Treewidth. Let 𝐻 = (𝑈 , 𝐹 ) be an undirected graph. A tree decomposition of 𝐻 is a pair (𝑇 , {𝑋 𝑖 }) 
+
+consisting of a tree 𝑇 with node set 𝑉 (𝑇 ) and, for each tree node 𝑖 ∈ 𝑉 (𝑇 ), a set 𝑋 𝑖 ⊆ 𝑈 of graph vertices (called a bag ), such that: (1) Ð𝑖 ∈𝑉 (𝑇 ) 𝑋 𝑖 = 𝑈 ;(2) for every edge {𝑢, 𝑣 } ∈ 𝐹 there exists 𝑖 with {𝑢, 𝑣 } ⊆ 𝑋 𝑖 ;(3) for every 𝑢 ∈ 𝑈 , the set {𝑖 | 𝑢 ∈ 𝑋 𝑖 } induces a connected subtree of 𝑇 .The width of the decomposition is max 𝑖 |𝑋 𝑖 | − 1. The treewidth tw (𝐻 ) is the minimum width over all tree decompositions of 𝐻 . Intuitively, a tree decomposition organizes the graph into a tree of small separators, where each bag separates the vertices appearing in the subtree below it from the rest of the graph. A dynamic programming algorithm can therefore sweep over the tree bottom-up and, at any point, reason only about the small “frontier” of vertices in the current bag. Such a sweep is simplest when the tree has a restricted form. A tree decomposition is nice if 𝑇 is rooted at a node 𝑟 with 𝑋 𝑟 = ∅, and each tree node 𝑖 has one of the following four types: 
+
+• Leaf: no children, 𝑋 𝑖 = ∅.
+
+• Introduce: one child 𝑗 , 𝑋 𝑖 = 𝑋 𝑗 ∪ { 𝑣 } for some vertex 𝑣 ∈ 𝑈 \ 𝑋 𝑗 (vertex 𝑣 enters the frontier). 
+
+• Forget: one child 𝑗 , 𝑋 𝑖 = 𝑋 𝑗 \ { 𝑣 } for some 𝑣 ∈ 𝑋 𝑗 (vertex 𝑣 leaves the frontier, never to reappear above 𝑖 ). 
+
+• Join: two children 𝑗 1, 𝑗 2 with 𝑋 𝑖 = 𝑋 𝑗 1 = 𝑋 𝑗 2 (two independently processed subtrees are merged). 10 Eisenhofer et al. 
+
+Any tree decomposition can be transformed into a nice one of the same width, with 𝑂 (tw ·| 𝑈 |) 
+
+nodes, in linear time [28]. Its sole purpose is to simplify the dynamic program; since each step changes the bag by at most one vertex, the algorithm only needs transition rules for the four node types above. In a nice tree decomposition, every vertex of the underlying graph is introduced exactly once and forgotten exactly once. Figure 4 illustrates a nice tree decomposition for the example in Figure 1. While computing the treewidth of a graph is itself NP -hard in general, it is fixed-parameter tractable, and practical exact and heuristic tools produce decompositions of near-optimal width for graphs of small width [11]; we report the treewidth of our benchmark graphs in Section 4. To simplify the presentation and make the problem amenable to dynamic programming over a tree decomposition, we reformulate Layout Selection as a constrained vertex labeling problem. For each operator 𝑜 ∈ 𝑉 , define its local state space :state (𝑜 ) = 𝐿  In (𝑜 ) × 𝐿  Out (𝑜 ).
+
+Since | In (𝑜 )| ≤ Δ and each 𝐿 (𝑡 ) is finite, we have | state (𝑜 )| ≤ 𝑀 for a constant 𝑀 that depends only on Δ and the maximum number of admissible layouts per tensor, but is independent of |𝑉 |.A layout assignment is equivalently a labeling 𝑔 : 𝑉 → Ò𝑜 ∈𝑉 state (𝑜 ) with 𝑔 (𝑜 ) ∈ state (𝑜 ) for every 𝑜 . We write 𝑔 (𝑜 )| 𝑡 for the component of 𝑔 (𝑜 ) that gives the layout of tensor 𝑡 : the output layout if 𝑡 ∈ Out (𝑜 ), or the corresponding input layout if 𝑡 ∈ In (𝑜 ). If 𝑜 prod is the producing operator of tensor 𝑡 , then the producer layout is prod (𝑡 ) = 𝑔 (𝑜 prod )| 𝑡 .Theorem 4. Given a tree decomposition of width tw of the underlying undirected dataflow graph, Layout Selection can be solved optimally in time 𝑂  |𝑉 | · tw 2 ·𝑀 tw +2 · 4𝑀 (tw +1) , where 𝑀 bounds the number of layout configurations per operator. In particular, the problem is fixed-parameter tractable in (tw , 𝑀 ), with runtime linear in the number of operators for fixed tw and 𝑀 .The algorithm. The algorithm sweeps a nice tree decomposition of the underlying undirected dataflow graph bottom-up, from the leaves to the root, maintaining a table of partial solutions at every tree node. A table entry at node 𝑖 summarizes one way of laying out the part of the graph already processed (the operators that occur in the subtree below 𝑖 ) and is indexed by two pieces of information: 
+
+• a configuration 𝑓 (𝑜 ) ∈ state (𝑜 ) for every operator 𝑜 in the current bag 𝑋 𝑖 , fixing the layouts of all tensors that 𝑜 touches, and 
+
+• for every tensor 𝑡 produced by a bag operator, the set 𝑆 𝑡 ⊆ 𝐿 (𝑡 ) of layouts that already-processed consumers of 𝑡 have requested. The value of the entry is the minimum cost attainable by the processed part of the graph, consistent with that index. The four node types of the nice decomposition translate into four transition rules. At a leaf , the table is trivial (empty index, cost 0). At an introduce node, operator 𝑣 enters the frontier: its candidate configurations are enumerated and recorded in the index, but no cost is charged yet, and the consumer-request set of its output tensor starts out empty. At a forget node, operator 𝑣 
+
+disappears from the frontier and never reappears above 𝑖 . Three things happen: 𝑣 ’s operator cost is charged; 𝑣 ’s input-layout requirements are registered in the request sets of its producers that are still in the bag; and the transpose costs of 𝑣 ’s output tensor (once per distinct requested layout) are charged, since by now every consumer of that tensor has either been forgotten (its request is recorded in the request set) or still resides in the bag (its request is visible in the bag configuration), so the tensor’s full set of consumer layouts is known. Finally, at a join node, the tables of two independently processed subtrees with identical bags are combined: entries with the same bag configuration are merged, and their request sets are united point-wise, so a layout requested in Tensor Seeks Layout 11 mm red add ABR
+
+(a) Dataflow graph {B, add }{B}{B, add }{B, add }{R, add }{add }{B, add, red }{B, red, mm }{A, B, mm }{B, mm }{B}forget R forget B introduce add join introduce add leaf leaf leaf introduce red forget mm forget A forget add introduce mm forget red introduce A (b) Nice tree decomposition of width 2
+
+Fig. 4. Treewidth-based layout selection applied to the dataflow graph from Figure 1. Each node in the tree decomposition is labeled by type (leaf, introduce, forget, or join), and annotated with its bag contents. The algorithm of Theorem 4 traverses this decomposition bottom-up: introduce nodes record operator configurations, forget nodes charge operator and transpose costs, and the join node combines two subtrees. 
+
+both subtrees is charged only once. At the root, the bag is empty and the single remaining entry is the global optimum; the optimal assignment is recovered by standard backtracking from the root to the leaves. Correctness follows from the connectedness property of tree decompositions. A producer shares a bag with each of its consumers, so every consumer is introduced below the forget node. When the transpose cost is charged, the layouts requested by all consumers are therefore known. The runtime is dominated by join nodes, which combine pairs of request sets. The complete dynamic program, with formal transition rules and the correctness and runtime analysis, is given in Appendix B. In Figure 4, for instance, the configuration of the matrix multiplication ( mm ) is recorded at the introduce node containing it; its operator cost and the transpose costs of its output tensor are charged at the forget node where it leaves the frontier, by which point all of its consumers have registered their layout requests; and the join node combines the independently processed branches of the graph. 
+
+3.2.2 MaxSAT-based Encoding. Our second exact algorithm encodes Layout Selection as a weighted MaxSAT instance [35]. Since the runtime and the memory usage of the exact dynamic programming (Theorem 4) scale exponentially in the width, the algorithm quickly exhausts the memory budget on wider graphs. The MaxSAT encoding provides an alternative that does not rely on a tree decomposition. 
+
+Operator variables and clauses. For each operator 𝑜 ∈ 𝑉 , we introduce a Boolean variable 𝑥 𝑜, ®ℓin ,ℓ out 
+
+for each configuration ®ℓin ∈ 𝐿 (In (𝑜 )) and ℓout ∈ 𝐿 (Out (𝑜 )) , which is true if and only if 𝑜 uses input layouts ®ℓin and output layout ℓout .12 Eisenhofer et al. 
+
+The following hard clauses enforce that each operator selects exactly one feasible configuration. Every operator must pick at least one configuration, and no two distinct configurations may be active simultaneously: 
+
+Ü
+
+> ®ℓin ,ℓ out
+
+𝑥 𝑜, ®ℓin ,ℓ out ∀𝑜 ∈ 𝑉 , 
+
+¬𝑥 𝑜, ®ℓin ,ℓ out ∨ ¬ 𝑥 𝑜, ®ℓ′
+
+> in ,ℓ ′
+> out
+
+∀𝑜 ∈ 𝑉 , ( ® ℓin , ℓ out ) ≠ ( ® ℓ′
+
+> in
+
+, ℓ ′
+
+> out
+
+).
+
+Infeasible configurations, those with 𝐶 op  
+
+> 𝑜
+
+( ® ℓin , ℓ out ) = ∞, receive no variable at all, so they cannot be selected; this keeps the encoding polynomial in the number of feasible configurations and the graph size. Equivalently one could introduce the variable and exclude it with a unit clause ¬𝑥 𝑜, ®ℓin ,ℓ out .Soft clauses penalize operator costs. For each 𝑜 ∈ 𝑉 and feasible configuration ( ® ℓin , ℓ out ):
+
+¬𝑥 𝑜, ®ℓin ,ℓ out with weight 𝐶 op  
+
+> 𝑜
+
+( ® ℓin , ℓ out ).
+
+Transpose variables and clauses. For each tensor 𝑡 ∈ T and layout ℓ ∈ 𝐿 (𝑡 ), we introduce a variable 𝑦 𝑡,ℓ , which is true if some consumer of 𝑡 requires layout ℓ.Hard clauses link operator configurations to required tensor layouts. If operator 𝑜 consumes tensor 𝑡 in layout ℓ under configuration 𝑐 :
+
+¬𝑥 𝑜,𝑐 ∨ 𝑦 𝑡,ℓ .
+
+Soft clauses penalize transpose costs. For each tensor 𝑡 ∈ T and its unique producing operator 
+
+𝑜 prod , we add a clause for each configuration 𝑐 of 𝑜 prod that outputs 𝑡 in layout ℓ, and each distinct layout ℓ′ ≠ ℓ:
+
+¬𝑥 𝑜 prod ,𝑐 ∨ ¬ 𝑦 𝑡,ℓ ′ with weight 𝐶 tr  
+
+> 𝑡
+
+(ℓ, ℓ ′).
+
+This clause is violated when tensor 𝑡 is produced in layout ℓ (because its producing operator 
+
+𝑜 prod selects configuration 𝑐 ) but consumed in layout ℓ′. The cost is charged once per distinct consumer layout, regardless of how many operators share that layout. The total weight of the violated soft clauses therefore equals the objective of Layout Selection, so a weighted MaxSAT solver minimizing that weight returns an optimal layout assignment. 
+
+4 Experimental Evaluation 
+
+We evaluate our layout selection model on a specialized AI hardware accelerator, AWS Trainium [4]. The accelerator uses an established production compiler [5] to compile ML models from various frameworks (TensorFlow, PyTorch, XLA HLO) into optimized code; see Appendix A for a high-level overview. The experiments address four research questions: 
+
+RQ1 (Practical Impact of Layout Selection ) Is sophisticated layout selection beneficial, and how much execution-time performance is sacrificed by adopting a fast heuristic over an optimized approach? 
+
+RQ2 (Solver-based Algorithms in Practice ) Are exact methods (MaxSAT, Treewidth) viable within a production compiler? What is the empirical treewidth of real ML dataflow graphs, and at what scale do these methods become impractical? 
+
+RQ3 (Algorithm Comparison ) How do the studied layout selection algorithms compare on formal objective value, on resulting model execution time, and on compilation time? 
+
+RQ4 (Cost Model Fidelity ) How well does the formal objective predict actual execution time? In particular, can we reliably rank algorithms based on estimated costs alone? Tensor Seeks Layout 13 
+
+4.1 Experimental Setup 
+
+We consider four different layout selection strategies within our compiler setup: 
+
+Local : For each operator independently, select the layout configuration with minimum operator cost, ignoring transpose costs entirely. This baseline isolates the contribution of operator costs alone. 
+
+Greedy : First, an initial assignment is constructed by processing operators in topological order, selecting for each the configuration minimizing its operator cost plus transpose costs to already-assigned predecessors. The assignment is then refined iteratively, re-optimizing each operator’s layout choice against the total objective (operator costs plus transpose costs) with all other assignments held fixed, until no single-operator change yields an improvement. This mimics XLA’s greedy heuristic [44]. 
+
+Rule-Based : We first group tensor dimensions that refer to the same logical dimension across operators. Starting from operators whose preferred layout is known (such as matrix multiplications) we propagate layout constraints to neighboring operators. We then split the graph into small components, apply domain-specific rules inside each component (for example, preferring layouts that avoid known-expensive instruction patterns), and search the remaining choices exhaustively. This is the strategy the AWS Neuron Graph Compiler ships with [5]. 
+
+Solver-Based : We compute an optimal solution minimizing the overall costs in two ways: Treewidth runs the dynamic program of Section 3.2.1, and MaxSAT solves the weighted MaxSAT encoding of Section 3.2.2 with an off-the-shelf solver. Below we write MaxSAT for the problem and MaxSAT for the strategy that solves our encoding of it. We evaluate on open-source models from HuggingFace spanning diverse architectural families: decoder-only LLMs (OLMo, Qwen, Ministral, VaultGemma), encoder-only and encoder-decoder transformers (BERT, ALBERT, Electra, XLM-RoBERTa, BART, DistilBART), CNN-based vision models (ResNet, CNN), diffusion models, mixture-of-experts models (OLMoE, FlexOlmo, Gran-ite), multimodal architectures (Perceiver, Kosmos, PaLiGemma, Qwen3-VL), and audio models (Whisper, Qwen2-Audio, MusicGen), covering both sequence- and spatial-dominated workloads. By varying model parameters (hidden dimensions, number of layers) and context lengths, we obtain a benchmark suite of over 200 model configurations ranging from 43 to 10 ,056 operators. An operator here is a vertex of the dataflow graph, such as a matmul or a convolution; the compiler later expands one operator into many hardware instructions. We report aggregate statistics across the full suite and present detailed measurements for a representative subset of 24 configurations. For each architecture family, we selected the largest configuration whose compiled execution is dominated by the model itself rather than by fixed overheads, excluding trivially small variants (which all algorithms handle equally well) and configurations exceeding the memory budget of our compilation environment. We track two primary metrics: model performance (end-to-end execution time of a compiled model processing an inference request in hardware cycles) and algorithm efficiency (wall-clock compilation time and peak memory consumption of the layout selection pass). The experiments are conducted on an Amazon EC2 trn1.32xlarge instance, which provides 16 Trainium chips and 128 vCPUs of Intel Xeon Platinum 8375C processors (2.90 GHz, 54 MB L3 cache); each compiled model is executed on a single Trainium chip of that instance, and the layout selection pass runs on the host CPUs. Two aspects of the setup matter for interpreting the results. First, all four strategies run at the same (early) position in the Neuron compilation pipeline: operator fusion, tiling, instruction scheduling, and memory allocation all execute after layout selection. The cost model therefore 14 Eisenhofer et al. 0 10 20 30 40 50 60 70 80 90 100 
+
+> % of models
+> 010 20 30 40 50 60 70 80 90 100
+> Model performance on HW (% of the best known)
+> Rule-Based Greedy Local
+
+(a) All models 0 10 20 30 40 50 60 70 80 90 100  
+
+> % of models
+> 010 20 30 40 50 60 70 80 90 100
+> Model performance on HW (% of the best known)
+> Rule-Based Greedy Local
+
+(b) Dense Transformers Fig. 5. RQ1 (Practical Impact of Layout Selection): Relative model performance (as fraction of best known result) on Trainium instances. 
+
+estimates costs on the pre-fusion operator graph, and the same downstream passes are applied to the output of every strategy, so the comparison is not confounded by differing fusion decisions. Second, Local, Greedy, and Solver-Based use the same cost model: Local minimizes only operator costs, Greedy locally improves the full objective, and Solver-Based minimizes it exactly. Rule-Based instead follows domain rules, though we evaluate the objective on its output. 
+
+4.2 Results 
+
+RQ1 (Practical Impact of Layout Selection ). To quantify the value of layout selection, we compare the production Rule-Based algorithm against the two baseline approaches, Local and Greedy. Figure 5a summarizes the results across our full benchmark suite by plotting the relative model performance (as a fraction of the best known result) achieved by each algorithm, with models sorted from best to worst. The best known result for a model is the minimum hardware execution time across all four evaluated algorithms. A value of 100 indicates that the algorithm matches the best known performance for that model; lower values indicate worse model execution time. Compared to Rule-Based, which is the default strategy in the compiler, the simpler strategies lose about 20% of performance on average, and in the worst decile they reach only one fifth of the best known result, corresponding to a 5 × slowdown. Greedy improves over Local, but the difference is modest. We found that the severity of the regression depends on the model family. For regular dense transformer architectures (such as BERT, ALBERT, Electra, BART), even the simplest Local baseline, which ignores transpose costs entirely, stays within 5% of the best result on most such models; see Figure 5b. Complex vision models behave differently: Local takes 96.0 million cycles on ResNet-50 versus 20.9 for Rule-Based (a 4 .6× slowdown) and Greedy fares only slightly better at 73.5 million cycles; refer to Table 1 for the measurements. The root cause is an increase in inserted transpose operations: 20% more on average over the benchmark suite, rising to 2 × at the 90th percentile (p90). The conversions are expensive for the reasons discussed in Section 2.3: on Trainium, a partition-dimension change physically moves every element across on-chip memory partitions through dedicated hardware engines and, unlike, e.g., the op(A) /op(B) operand flags of cuBLAS kernels on GPUs, cannot be fused into the consuming operator. In addition to directly increasing model execution time on hardware, the extra conversions complicate subsequent compiler passes in the Trainium compilation pipeline. In particular, the Tensor Seeks Layout 15 1 2 3 4 5 6 7 8    
+
+> Treewidth
+> 010 20 30 40 50 60
+> % of dataflow graphs
+> 5.3% 54.2% 25.2% 7.6% 4.6% 1.5% 0.8% 0.8%
+
+(a) Treewidth of dataflow graphs 0 10 20 30 40 50 60 70 80 90 100 0.001 0.01 0.1 110 100 600 Treewidth MaxSAT % of models Runtime (seconds, log scale) (b) Runtime of Treewidth and MaxSAT Fig. 6. RQ2 (Solver-based Algorithms in Practice): Most real-world dataflow graphs exhibit low treewidth, yet Treewidth exceeds the memory budget on 8% of instances, whereas MaxSAT remains practical. 
+
+tiling pass, which runs after layout selection, decomposes each operator into hardware instructions by splitting large tensors into tiles that fit in on-chip memory. Each tile requires a separate DMA transfer between device memory and the scratchpad buffer, and each transfer incurs a fixed setup overhead. Layout conversions inserted between operators force the tiler to generate many more small, strided DMA transfers than a consistent layout would require. This explains the regression on ResNet-50: Local produces 24 × higher estimated DMA cost after tiling compared to Rule-Based. 
+
+RQ2 (Solver-based Algorithms in Practice ). The treewidth-based algorithm runs in time polynomial in graph size but exponential in treewidth; see Theorem 4. To assess its practicality, we first estimate the treewidth of dataflow graphs extracted from models in our benchmark suite. Figure 6a reports the results: while 92% of instances have treewidth not exceeding 4, occasionally we encounter an instance with larger treewidth (the maximum is 8 in our evaluation). This observation aligns with prior observations that ML dataflow graphs have bounded treewidth [30]. However, the dynamic program of Theorem 4 can build tables too large to fit in memory, making the approach impractical for large instances. This is confirmed by Figure 6b, where we plot the runtime (in log scale) needed to solve a given fraction of benchmark instances. The dynamic programming finds an optimal solution to Layout Selection within a few seconds for graphs with treewidth at most 4, covering the same 92% of our benchmark suite. However, larger instances require substantially more memory (over 10 GB for treewidth-5 graphs and over 64 GB for larger ones), which exceeds the memory budget of a typical compilation environment. Unlike MaxSAT, the DP algorithm is all-or-nothing, in that it either completes with an optimal solution or produces no result at all. Figure 6b also illustrates runtimes of MaxSAT for the considered models. We solve the MaxSAT encoding using Z3’s optimization module [20] with a 10-minute timeout. For transformer models, MaxSAT is viable. It completes within seconds on most configurations, at an additional compilation overhead under 10 seconds, usually less than 5% of the total model compilation time. In the rare cases when the solver times out (observed only on the large models, e.g., Vision Perceiver with 3,205 operators), the best feasible solution found within the first 10 seconds is not improved during the remaining time. The solver spends the bulk of its budget proving optimality rather than finding better assignments, which suggests the partial solutions returned at timeout are close to optimal, though we cannot bound the gap. We therefore use MaxSAT as the primary exact method in the following sections. The usefulness of an exact solver rests on the cost model being accurate enough that improve-ments in the formal objective show up as improvements on hardware. Where that fails, provably 16 Eisenhofer et al.                                                                                                        
+
+> Table 1. Model execution time (millions of cycles). Lower is better. The best result per model, and every result within 1% of it, is bold.
+> Type Model Local Greedy Rule-Based Solver-Based Dense Transformers ALBERT-large 53.4 45.8 44.7 45.3 BERT-base 19.2 19.3 18.5 18.5
+> BERT-large 29.0 29.6 28.7 28.7
+> BART-base 2.4 2.6 2.4 2.4
+> DistilBART 2.2 2.3 2.2 2.1
+> Electra-large 23.2 23.7 23.0 23.0
+> Ministral-4B 3.5 3.5 3.3 3.5 OLMo-7B 51.1 51.4 50.1 51.6 VaultGemma-1B 13.8 10.2 10.1 10.1
+> Whisper enc 225 226 258 225
+> Whisper dec 7.2 7.1 7.2 7.2 XLM-RoBERTa 3.1 3.1 2.9 2.9
+> Vision, Multimodal, MoE CNN 1.8 1.1 0.9 1.1 FlexOlmo-7x7B 146 138 139 154 Granite-3.1-3B 184 188 198 185
+> Kosmos-2.5 17.7 23.0 19.2 17.3
+> Language Perceiver 462 480 346 516 MusicGen 44.3 27.0 27.0 38.5 OLMoE-1B-7B 100 109 96.5 96.9
+> PaLiGemma-3B 10.8 11.0 11.7 13.3 Qwen2-Audio 9.9 9.9 9.6 9.9 Qwen3-VL 34.9 31.6 30.7 35.9 ResNet-50 96.0 73.5 20.9 63.9 Vision Perceiver 14.1 14.8 10.2 11.3
+
+optimal solutions to Layout Selection can underperform simpler strategies, the gap we examine in RQ3 and RQ4 .
+
+RQ3 (Algorithm Comparison ). We first compare the algorithms with respect to the formal objective used in layout selection. Figure 7a reports the optimality gap of each algorithm relative to the Solver-Based optimum (0% = optimal). Greedy produces solutions typically within 1% of optimal, while the Rule-Based heuristic is within 3% on average (5% at p90). Despite these small objective differences, the resulting hardware performance can differ significantly. Table 1 summarizes execution cycles for each algorithm across a representative subset of our benchmark suite. We categorize models into two groups. Dense transformers (BERT, ALBERT, Electra, BART, OLMo, Whisper, etc.) have regular data flow where layout preferences are mostly consistent across operators, resulting in few layout conflicts. Complex architectures (vision models, multimodal, mixture-of-experts) contain heterogeneous operators (convolutions, cross-attention, modality encoders, expert routing) along with skip connections and varying tensor shapes, creating many layout conflicts between adjacent operators. We note that the measurement noise (execution time variation across repeated runs) is below 0 .5% in our experiments; the differences discussed below all exceed this margin. Tensor Seeks Layout 17 0 10 20 30 40 50 60 70 80 90 100 
+
+> % of models
+> 0510 15
+> Optimality gap, %
+> Rule-Based Greedy Local Solver-Based
+
+(a) Optimality gap relative to the Solver-Based opti-mum ( 0% = optimal) under the cost model Min Max 
+
+> Layout cost
+> Min Max
+> Model performance on HW
+> frequency
+
+(b) Agreement between cost-model predic-tions and hardware execution time Fig. 7. RQ4 (Cost Model Fidelity): Algorithms achieve near-optimal objective values under the cost model, yet predicted costs can diverge from actual hardware execution time. 
+
+For dense transformers, the four algorithms perform comparably. Local and Solver-Based frequently match Rule-Based: all three tie for the best execution time on Electra-large and BART-base, and Solver-Based also matches it on BERT-base and BERT-large. This confirms the finding from RQ1 that for regular architectures with uniform layout preferences, even ignoring transpose costs often yields near-optimal results. Rule-Based is 15% slower only on Whisper enc (258 vs. 225); elsewhere it wins by small margins (e.g., Ministral-4B, OLMo-7B), likely due to domain-specific heuristics tuned for these decoder-only architectures. Complex architectures behave differently. Rule-Based is the winner on most models, sometimes by a wide margin: ResNet-50 (20.9 vs. 96.0 for Local), MusicGen (27.0 vs. 44.3), Vision Perceiver (10.2 vs. 14.1), and Qwen3-VL (30.7 vs. 34.9). Greedy often improves over Local but still falls far short of Rule-Based. More surprisingly, Solver-Based, which computes provably optimal solutions under the cost model, sometimes performs worse than simple heuristics, as on ResNet-50 (63.9 vs. 20.9 for Rule-Based), Language Perceiver (516 vs. 346), and PaLiGemma-3B (13.3 vs. 10.8 for Local). Minimizing the formal objective evidently does not guarantee good hardware performance when the cost model is inaccurate. Rule-Based produces the best results on complex architectures and competitive results on dense transformers. The product of multi-year development, it encodes domain-specific knowledge (e.g., preferred partition dimensions for convolutions) that the cost model does not capture; Section 4.3 dissects why such a heuristic can beat a provably optimal algorithm. 
+
+RQ4 (Cost Model Fidelity ). To evaluate cost model accuracy, we use a pairwise comparison methodology. For each benchmark model and each pair of layout selection algorithms, we compare the predicted layout cost (operator costs plus transpose costs) and check whether the algorithm with the lower predicted cost also achieves lower hardware execution time. We define accuracy as the fraction of comparisons where the cost model’s ranking agrees with the hardware outcome. This metric is related to Kendall’s rank correlation coefficient [27], but applied to algorithm pairs rather than full rankings. To avoid disagreements caused by measurement noise, we treat two values as equal when their relative difference is below 0 .5%. 18 Eisenhofer et al. 
+
+In our evaluation, the cost model correctly ranks approximately 87% of pairwise comparisons; in contrast, a random predictor, which would guess uniformly among the three possible outcomes (“better,” “worse,” or “equal”), achieves 33% accuracy. Figure 7b provides a complementary view of cost model fidelity. Each point represents one algorithm applied to one benchmark model. The 𝑥 -coordinate shows the predicted layout cost normalized to [0, 1] across all algorithms for that model (0 = lowest cost, 1 = highest), and the 
+
+𝑦 -coordinate shows the hardware execution time normalized in the same way. A perfectly accurate cost model would place all points on the diagonal, meaning the algorithm with the lowest predicted cost also achieves the lowest execution time. To visualize the distribution, we aggregate the points into a 5 × 5 frequency histogram. The off-diagonal mass indicates disagreement between predicted costs and hardware performance. This inaccuracy primarily originates from how the cost model handles DMA transfer costs between device memory and the on-chip scratchpad ( RQ1 ). While the cost model captures operator execution costs reasonably well, its transpose cost estimates fail to account for these downstream memory access patterns. 
+
+4.3 Analysis: Why Does a Provably Optimal Algorithm Underperform? 
+
+We now discuss why Rule-Based can beat an algorithm with an optimality guarantee, and derive a criterion for when exact solving pays off. 
+
+What the solver measures. For any algorithm, the hardware execution time is the objective value of its solution plus the error of the cost model on that solution. Solver-Based minimizes the first term exactly, so whenever it loses on hardware, the loss comes entirely from the second term. A losing solver run therefore isolates the error of the cost model. A heuristic’s losses mix both terms and cannot be read this way. 
+
+Why the error grows under optimization. Where the cost model is accurate, the guarantee carries over to hardware: Solver-Based matches or beats every other algorithm on 8 of the 12 dense transformers in Table 1. Where it is not, small model errors turn into large regressions, for two reasons. First, the solver searches the whole feasible space and selects the configuration with the lowest predicted cost, which favors configurations whose cost is underestimated. It therefore does not see the average error of the model but its largest error. Heuristics search a much smaller set of conventional layouts and are exposed only to the average error. This also explains why Greedy, whose objective value is worse than the solver’s, can be faster on hardware (MusicGen: 27 .0 versus 38 .5 million cycles): it starts from a topological order and changes one operator at a time, so it stays close to conventional layouts. Second, layout selection runs before tiling, scheduling, and memory allocation, so an underestimated layout also changes how the tiler splits operators, and the objective does not account for the resulting DMA transfers ( RQ1 ). 
+
+A criterion for exact solving. All evaluated algorithms are within a few percent of the objective optimum, while their hardware execution times differ by up to 4 .6× (RQ3 ). Optimizing the objective more precisely therefore pays off only while the optimality gap of the heuristic is larger than the error of the cost model on the workloads of interest. For dense transformers this holds and the solver is the better strategy; for vision and multimodal models it does not, and no algorithmic improvement is visible behind the model error. The limit is not specific to exact solvers: any strategy driven by the formal objective inherits the same cost model, so on the vision and multimodal workloads a better search algorithm would not help either. Tensor Seeks Layout 19 
+
+4.4 The Role of Cost Models 
+
+Analytical cost models are standard practice in production compilers: XLA and TVM use them for fusion and scheduling decisions [14, 24], Cadence’s Xtensa Neural Network Compiler drives its operator fusion with an analytical profitability model [13], and the production Trainium compiler in our study is built around a cycle-based analytical model. At the same time, accuracy varies between models: a comparison of an academic analytical model against the industrial XNNC model reports substantial differences on the same kernels [12], which matches our observation that the same model can be reliable for one class of decisions and unreliable for another. Our evaluation uses the most accurate model available for this hardware target, the production compiler’s own cycle-based model, so the gaps observed in RQ4 are not an artifact of a simplified academic model. 
+
+RQ3 and RQ4 thus leave open how a cost model can be made accurate enough to optimize against. Two established options are to replace the analytical model with a learned predictor , or to sidestep explicit models via autotuning or profile-guided optimization .Learned cost models have shown promising results in TPU performance prediction [46], through-put estimation [40], and Halide scheduling [1], continuing a long line of work that uses program features and machine learning to steer compiler decisions [18, 19, 33]. In principle, they can capture complex effects, such as the impact of layout on memory behavior, without explicit modeling. In practice, they require large amounts of hardware-specific training data, which must be regenerated as compilers and architectures evolve [7]. They are also hard to debug, since fixing a wrong pre-diction often means retraining without clear insight into the cause [33], and they transfer poorly across platforms [15, 19]. Autotuning and profile-guided approaches measure actual performance instead [7, 14, 59]. This works when decisions can be evaluated in isolation, but layout selection does not fit that model, because its decisions propagate through later passes. Attributing a performance change to an individual layout choice is therefore unreliable, and each measurement requires compiling and profiling the full model, an expense that profile-reuse techniques can amortize but not eliminate [8]. A third option is to refine the analytical model in place. Small amounts of profiling data can calibrate individual components of a cost model, such as transpose and DMA costs, while the overall structure stays intact [21, 41]. Section 4.3 shows where such calibration should aim, since the solver identifies exactly those configurations on which predicted and measured rankings disagree, and the dominant error in our setting, the DMA cost of transposes after tiling, is an isolated term that a small profile set can fit. Calibrating a few analytical terms this way is a bounded and repeatable task, in contrast to the years of manual tuning behind Rule-Based. It also pays off more broadly: every strategy built on the cost model benefits from a more accurate one, while hand-written rules must be re-tuned for each new model family and hardware generation. 
+
+4.5 Practical Suggestions for Compiler Developers 
+
+Our results have several practical consequences. Layout selection should be written down as an optimization problem even when it is solved heuristically. A formal objective gives a reference point for debugging and for comparing strategies, and it makes external solvers usable; without one, layout logic tends to grow into an opaque collection of rules. But the objective is only as good as the cost model instantiating it. Since even a provably optimal solution can lose on hardware ( RQ3 ), once the heuristic’s optimality gap is smaller than the model’s error, further work is better spent on cost-model fidelity than on the search algorithm (Section 4.3). How much machinery a layout pass needs depends on the workload. For transformer architectures with regular data flow, layout preferences are largely uniform and local decisions rarely cascade, so 20 Eisenhofer et al. 
+
+even Local performs well; for vision models with complex spatial data flow the gap between Local and Rule-Based is large (Table 1). A simple greedy pass may therefore suffice for transformer-dominated workloads, while vision and multimodal pipelines warrant domain-specific heuristics. Finally, an exact solver is useful in the compiler’s testing infrastructure even where it is not the production strategy. It quantifies the optimality gap of the shipping heuristic, supplies reference layouts for tuning new heuristics, and catches regressions when heuristic cost is compared against the optimum on small benchmarks. On workloads where the cost model holds up, such as trans-former models, it can serve as the primary strategy as well, though its optimality is always with respect to the cost model and should be checked against measured execution time first. 
+
+5 Threats to Validity 
+
+Even though our evaluation used a specific end-to-end compilation stack, the layout constraints we optimize are shared among modern architectures. Several boundaries nonetheless limit how far the results carry. 
+
+Internal validity. Our framework requires a cost model that maps layout configurations to execution costs. In practice, such models are always approximate. At the point where layout selection occurs in the compilation pipeline, downstream decisions such as memory allocation and instruction scheduling have not yet been made, so their effects have to be estimated. As seen in RQ4 , provably optimal solutions under an imperfect cost model may not translate to the best wall-clock performance. Closing this gap requires sustained investment in cost model accuracy, as we discuss in Section 4.4. 
+
+External validity. Our evaluation is conducted on a single hardware target (AWS Trainium) using one production compiler (Neuron Graph Compiler). The specific cost tradeoffs, e.g., which operator configurations are cheap and how expensive transposes are, may differ on other accelerators (e.g., GPUs or TPUs, mobile NPUs). In particular, as discussed in Section 2.3, on CPUs and GPUs a layout mismatch can often be absorbed by the consuming kernel through loop transformations such as interchange or through transposed-operand interfaces, making explicit conversions cheaper or unnecessary; on partitioned systolic array targets this escape hatch does not exist. While our formulation is hardware-agnostic, the relative performance of the studied algorithms may not fully generalize to other targets. Similarly, our benchmark suite, though diverse, consists of open-source models from HuggingFace; proprietary or domain-specific models may exhibit different dataflow graph structures and layout characteristics. 
+
+Construct validity. Our formulation captures layout selection in isolation, but production com-pilers often make layout, tiling, and operator fusion decisions jointly. Interactions among these passes can shift the cost landscape: fusing two operators may eliminate an intermediate tensor and its associated transpose, changing the optimal layout assignment. In the compiler we study, fusion and tiling run after layout selection, so all strategies are evaluated against the same downstream pipeline and the cost model targets the pre-fusion graph (Section 4.1). In pipelines that fuse opera-tors before assigning layouts, the problem instance would differ. Additionally, our objective treats operator costs and transpose costs as independent and additive under sequential execution. Modern accelerators often overlap computation with data movement or execute independent operators in parallel; incorporating such parallelism would require moving from a sum-of-costs objective to a scheduling-aware formulation. Tensor Seeks Layout 21 
+
+6 Related Work 
+
+Layout selection in ML compilers. Modern ML compilers treat layout optimization as important, but approach it heuristically. XLA [24] includes a layout assignment pass that selects physical layouts (minor-to-major dimension orderings) for tensors in the computational graph. The algorithm operates in three phases: first assigning locally-optimal layouts to “influential” operators such as convolutions and matrix multiplications, then propagating layouts forward and backward through the graph, and finally inserting copy operations where layout mismatches remain. This greedy approach provides no formal guarantees and can produce suboptimal solutions when local decisions conflict. Similarly, TVM [14] specifies preferred layouts per operator and inserts layout transformations when producer and consumer expectations diverge. The oneDNN Graph Compiler [36] handles layouts as part of a hybrid approach combining expert-tuned kernels with graph-wide optimizations, though layout decisions are primarily driven by predefined templates rather than systematic optimization. Several recent systems have developed specialized heuristics for particular deployment scenar-ios. SmartMem [43] addresses layout transformation elimination for mobile GPUs by classifying operators by layout sensitivity and applying rule-based propagation to reduce conversions. In our framework, SmartMem can be understood as a greedy heuristic that restricts layout domains, fixes layouts at sensitive operators by minimizing local operator cost, and propagates layouts through flexible operators to minimize local transpose cost. NeoCPU [37] applies similar ideas to CNN inference on CPUs, selecting efficient blocked formats for convolutions and propagating these choices through the graph, with layout-oblivious operators absorbing the propagated layout with-out conversion cost. ALT [57] extends this line of work by jointly optimizing graph-level layouts and operator-level loop transformations, using reinforcement learning to search the combined space. When layout requirements conflict between operators, ALT propagates layouts trying to avoid inserting transposes. These systems all show that layout matters in practice, but each relies on hand-tuned heuristics, and none defines the problem those heuristics are approximating. 
+
+Formal optimization approaches for layout selection. Despite the ubiquity of layout decisions in ML compilers, there has been little formal analysis of their computational complexity. Prior work often notes that layout optimization is “ NP -hard” or “combinatorial” without proof or qualification [37, 43, 57]. To our knowledge, this is the first work to formally prove NP -hardness for layout selection under realistic restrictions and to identify graph-structural assumptions under which optimal solutions with guarantees are possible. Our treewidth-based algorithm builds on standard machinery from parameterized complexity. Courcelle’s theorem shows that a broad class of graph problems can be solved in linear time on graphs of bounded treewidth [17], and later work extends this to optimization objectives like ours [6]. Treewidth is also familiar in compilers, where the small treewidth of structured programs enables efficient register allocation [50]. These results show that a polynomial-time algorithm exists, but the generic constructions have very large constants. We therefore give an explicit dynamic program for the layout selection objective (Section 3.2.1), with a concrete state space and runtime bound. Several works formulate layout-related decisions as constraint problems. VTensor [58] introduces a programming framework based on “virtual tensors” that abstracts away physical layouts from the programmer, applying global optimization via integer linear programming (ILP) to minimize layout transformations. While the authors claim the search space is large and related to NP -hard problems, they provide minimal algorithmic details and no formal complexity analysis. Similarly, Mirage [55] searches layout strategies while generating candidate programs and checks their equivalence using probabilistic finite-field testing backed by an SMT solver. Rieber et al. [47] address joint program 22 Eisenhofer et al. 
+
+and layout transformations for specialized hardware using constraint programming, with a focus on enabling specific operators on hardware with restrictive requirements. Our NP -hardness results explain why these systems resort to ILP or MaxSAT solvers, and our tractable cases show when simpler algorithms might suffice. Complementary work has developed mathematical frameworks for representing layouts. Linear Layouts [62] models tensor layouts as linear maps over F2, enabling generic layout-to-layout conver-sions, while recent work [10] unifies CuTe and Triton layout abstractions using integer set relations. These contributions are largely orthogonal to ours: they provide expressive representations for layouts or motivate the importance of layout optimization, while we study the computational problem of selecting among layouts. 
+
+Related compiler optimizations. Layout selection intersects with other compiler optimizations, such as loop transformations or scheduling. On general-purpose hardware, the two are partially interchangeable: loop interchange can recover the locality benefits of a transposed operand without materializing it, while physically transposing or packing data can expose contiguous accesses that enable auto-vectorization of transformer kernels [3]; we discuss this interplay, and why it largely disappears on partitioned systolic arrays, in Section 2.3. ALT jointly optimizes data layouts and loop schedules over a set of layout transformation primitives, propagating layouts rather than materializing explicit transposes when possible [57]. Autoschedulers such as Halide’s tree-search-based scheduler [1] and Ansor [59] explore large spaces of schedules using learned cost models that implicitly capture layout effects, but neither formulates nor analyzes the layout selection subproblem. A related line of research, originating in feature-based iterative compilation and autotuning, learns from program characteristics how to set optimization parameters [7, 18, 19]; our per-family findings ( RQ1 ) suggest layout selection as a natural application for such workload-adaptive policy selection. TpuGraphs dataset [46] provides benchmarks for learning cost models over tensor computational graphs including layout configurations, documenting the practical importance of layout decisions and the challenges of accurate cost modeling for tensor programs. Work on specialized accelerators faces layout optimization challenges due to hardware constraints. AutoSA [54] automatically generates systolic arrays for FPGAs using polyhedral analysis, while FlexSA [38] and ArrayFlex [45] explore flexible systolic array architectures. Spatial [29] provides a language and compiler for application accelerators with explicit constructs for memory hierarchies. Our work is complementary, since our formulation can serve as a subproblem within such compilers. 
+
+7 Conclusions 
+
+This paper establishes Layout Selection as a first-class optimization problem for ML compilers. We formalized the problem as cost minimization over dataflow graphs, proved its NP -hardness, and gave an explicit dynamic program for the tractable bounded-treewidth regime, alongside a MaxSAT encoding for general instances. Our evaluation within a production compiler for AWS Trainium demonstrates that the formalization is practical. Solver-based methods are viable for transformer workloads, where they match and sometimes outperform the production heuristic. On vision and multimodal models they do not. Since the solver is optimal under the objective, the remaining gap lies in the cost model rather than in the search. 
+
+Future directions. On the modeling side, extending the formulation to capture joint layout and tiling decisions, or to account for operator parallelism, would widen its applicability. On the algorithmic side, our treewidth results suggest hybrid solvers that retain domain-specific heuristics while providing guarantees on solution quality. On the empirical side, learned cost models trained on hardware profiling data could improve the fidelity of the objective and close the gap between solver-optimal and hardware-optimal layouts. Tensor Seeks Layout 23 
+
+References 
+
+[1] Andrew Adams, Karima Ma, Luke Anderson, Riyadh Baghdadi, Tzu-Mao Li, Michaël Gharbi, Benoit Steiner, Steven Johnson, Kayvon Fatahalian, Frédo Durand, and Jonathan Ragan-Kelley. 2019. Learning to Optimize Halide with Tree Search and Random Programs. ACM Transactions on Graphics 38, 4 (2019), 121:1–121:12. doi:10.1145/3306346.3322967 [2] Amit Agarwal, Moses Charikar, Konstantin Makarychev, and Yury Makarychev. 2005. 𝑂 (√︁ log 𝑛 ) Approximation Algorithms for Min UnCut, Min 2CNF Deletion, and Directed Cut Problems. In Proceedings of the 37th Annual ACM Symposium on Theory of Computing, Baltimore, MD, USA, May 22-24, 2005 , Harold N. Gabow and Ronald Fagin (Eds.). ACM, New York, NY, USA, 573–581. doi:10.1145/1060590.1060675 [3] Shreya Alladi, Alberto Ros, and Alexandra Jimborean. 2026. Enabling Automatic Compiler-Driven Vectorization of Transformers. In IEEE/ACM International Symposium on Code Generation and Optimization (CGO 2026) , Stephen M. Blackburn, Albert Cohen, and Timothy M. Jones (Eds.). IEEE, Piscataway, NJ, USA, 319–333. doi:10.1109/CGO68049. 2026.11395226 [4] Amazon Web Services. [n. d.]. AWS Trainium. https://aws.amazon.com/ai/machine-learning/trainium/. Accessed February 12, 2026. [5] Amazon Web Services. 2019. Neuron Graph Compiler. https://awsdocs-neuron.readthedocs-hosted.com/en/latest/ compiler/index.html. Accessed February 12, 2026. [6] Stefan Arnborg, Jens Lagergren, and Detlef Seese. 1991. Easy Problems for Tree-Decomposable Graphs. Journal of Algorithms 12, 2 (1991), 308–340. doi:10.1016/0196-6774(91)90006-K [7] Amir H. Ashouri, William Killian, John Cavazos, Gianluca Palermo, and Cristina Silvano. 2018. A Survey on Compiler Autotuning using Machine Learning. Comput. Surveys 51, 5 (2018), 96:1–96:42. doi:10.1145/3197978 [8] Amir Ayupov, Maksim Panchenko, and Sergey Pupyrev. 2024. Stale Profile Matching. In Proceedings of the 33rd ACM SIGPLAN International Conference on Compiler Construction, CC 2024, Edinburgh, United Kingdom, March 2-3, 2024 , Gabriel Rodríguez, P. Sadayappan, and Aravind Sukumaran-Rajam (Eds.). ACM, New York, NY, USA, 162–173. doi:10.1145/3640537.3641573 [9] Yoshua Bengio, Yann LeCun, and Geoffrey E. Hinton. 2021. Deep Learning for AI. Commun. ACM 64, 7 (2021), 58–65. doi:10.1145/3448250 [10] Somashekaracharya Gunasagara Bhaskaracharya, Aravind Acharya, Bastian Hagedorn, and Vinod Grover. 2025. Modeling Layout Abstractions Using Integer Set Relations. arXiv:2511.10374 doi:10.48550/arXiv.2511.10374 [11] Hans L. Bodlaender. 1993. A Tourist Guide through Treewidth. Acta Cybernetica 11, 1–2 (1993), 1–21. https: //cyber.bibl.u-szeged.hu/index.php/actcybern/article/view/3417 [12] Michael Canesche, Vanderson Martins do Rosario, Edson Borin, and Fernando Magno Quintão Pereira. 2024. The Droplet Search Algorithm for Kernel Scheduling. ACM Transactions on Architecture and Code Optimization 21, 2 (2024), 35:1–35:28. doi:10.1145/3650109 [13] Michael Canesche, Vanderson Martins do Rosario, Edson Borin, and Fernando Magno Quintão Pereira. 2025. Fusion of Operators of Computational Graphs via Greedy Clustering: The XNNC Experience. In Proceedings of the 34th ACM SIGPLAN International Conference on Compiler Construction (CC ’25) . ACM, New York, NY, USA, 117–127. doi:10.1145/3708493.3712689 [14] Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin Zheng, Eddie Q. Yan, Haichen Shen, Meghan Cowan, Leyuan Wang, Yuwei Hu, Luis Ceze, Carlos Guestrin, and Arvind Krishnamurthy. 2018. TVM: An Automated End-to-End Optimizing Compiler for Deep Learning. In Proceedings of the 13th USENIX Conference on Operating Systems Design and Implementation (OSDI) , Andrea C. Arpaci-Dusseau and Geoff Voelker (Eds.). USENIX Association, Berkeley, CA, USA, 578–594. https://www.usenix.org/conference/osdi18/presentation/chen [15] Tianqi Chen, Lianmin Zheng, Eddie Yan, Ziheng Jiang, Thierry Moreau, Luis Ceze, Carlos Guestrin, and Arvind Krishnamurthy. 2018. Learning to Optimize Tensor Programs. In Advances in Neural Information Processing Systems ,Vol. 31. Curran Associates, Inc., Red Hook, NY, USA, 3389–3400. https://proceedings.neurips.cc/paper/2018/hash/ 8b5700012be65c9da25f49408d959ca0-Abstract.html [16] Sharan Chetlur, Cliff Woolley, Philippe Vandermersch, Jonathan Cohen, John Tran, Bryan Catanzaro, and Evan Shelhamer. 2014. cuDNN: Efficient Primitives for Deep Learning. arXiv:1410.0759 doi:10.48550/arXiv.1410.0759 [17] Bruno Courcelle. 1990. The Monadic Second-Order Logic of Graphs. I. Recognizable Sets of Finite Graphs. Information and Computation 85, 1 (1990), 12–75. doi:10.1016/0890-5401(90)90043-H [18] Chris Cummins, Pavlos Petoumenos, Michel Steuwer, and Hugh Leather. 2016. Autotuning OpenCL Workgroup Size for Stencil Patterns. In Proceedings of the 6th International Workshop on Adaptive Self-Tuning Computing Systems (ADAPT) . HiPEAC, Prague, Czech Republic, 8 pages. https://arxiv.org/abs/1511.02490 [19] Chris Cummins, Pavlos Petoumenos, Zheng Wang, and Hugh Leather. 2017. End-to-End Deep Learning of Optimization Heuristics. In 26th International Conference on Parallel Architectures and Compilation Techniques, PACT 2017, Portland, OR, USA, September 9-13, 2017 . IEEE Computer Society, Los Alamitos, CA, USA, 219–232. doi:10.1109/PACT.2017.24 24 Eisenhofer et al. 
+
+[20] Leonardo Mendonça de Moura and Nikolaj S. Bjørner. 2008. Z3: An Efficient SMT Solver. In Tools and Algorithms for the Construction and Analysis of Systems, 14th International Conference, TACAS 2008, Held as Part of the Joint European Conferences on Theory and Practice of Software, ETAPS 2008, Budapest, Hungary, March 29-April 6, 2008. Proceedings (Lecture Notes in Computer Science, Vol. 4963) , C. R. Ramakrishnan and Jakob Rehof (Eds.). Springer, Berlin, Heidelberg, 337–340. doi:10.1007/978-3-540-78800-3_24 [21] Christophe Dubach, Timothy M. Jones, Edwin V. Bonilla, Grigori Fursin, and Michael F. P. O’Boyle. 2009. Portable compiler optimisation across embedded programs and microarchitectures using machine learning. In Proceedings of the 42nd Annual IEEE/ACM International Symposium on Microarchitecture (MICRO 42) (MICRO 42) . ACM, New York, NY, USA, 78–88. doi:10.1145/1669112.1669124 [22] Xinwei Fu, Zhen Zhang, Haozheng Fan, Guangtai Huang, Mohammad El-Shabani, Randy Huang, Rahul Solanki, Fei Wu, Ron Diamant, and Yida Wang. 2024. Distributed Training of Large Language Models on AWS Trainium. In Proceedings of the 2024 ACM Symposium on Cloud Computing (SoCC) . ACM, New York, NY, USA, 961–976. doi:10.1145/3698038.3698535 [23] M. R. Garey and David S. Johnson. 1979. Computers and Intractability: A Guide to the Theory of NP-Completeness . W. H. Freeman, San Francisco, CA, USA. [24] Google. 2017. XLA: Optimizing Compiler for Machine Learning. https://openxla.org/xla. Accessed February 12, 2026. [25] Andrei Ivanov, Nikoli Dryden, Tal Ben-Nun, Shigang Li, and Torsten Hoefler. 2021. Data Movement Is All You Need: A Case Study on Optimizing Transformers. In Proceedings of Machine Learning and Systems (MLSys 2021) , Vol. 3. MLSys, San Jose, CA, USA, 711–732. https://proceedings.mlsys.org/paper_files/paper/2021/hash/ bc86e95606a6392f51f95a8de106728d-Abstract.html [26] Zhihao Jia, Oded Padon, James Thomas, Todd Warszawski, Matei Zaharia, and Alex Aiken. 2019. TASO: Optimizing Deep Learning Computation with Automatic Generation of Graph Substitutions. In Proceedings of the 27th ACM Symposium on Operating Systems Principles . ACM, New York, NY, USA, 47–62. doi:10.1145/3341301.3359630 [27] Maurice G. Kendall. 1938. A New Measure of Rank Correlation. Biometrika 30, 1–2 (1938), 81–93. doi:10.1093/biomet/ 30.1-2.81 [28] Ton Kloks. 1994. Treewidth: Computations and Approximations . Lecture Notes in Computer Science, Vol. 842. Springer, Berlin, Heidelberg. doi:10.1007/BFB0045375 [29] David Koeplinger, Matthew Feldman, Raghu Prabhakar, Yaqi Zhang, Stefan Hadjis, Ruben Fiszel, Tian Zhao, Luigi Nardi, Ardavan Pedram, Christos Kozyrakis, and Kunle Olukotun. 2018. Spatial: A Language and Compiler for Application Accelerators. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation (PLDI 2018) . ACM, New York, NY, USA, 296–311. doi:10.1145/3192366.3192379 [30] Ravi Kumar, Manish Purohit, Zoya Svitkina, Erik Vee, and Joshua R. Wang. 2019. Efficient Rematerialization for Deep Networks. In Advances in Neural Information Processing Systems 32: Annual Conference on Neural Information Processing Systems 2019, NeurIPS 2019, December 8–14, 2019, Vancouver, BC, Canada , Hanna M. Wallach, Hugo Larochelle, Alina Beygelzimer, Florence d’Alché-Buc, Emily B. Fox, and Roman Garnett (Eds.). Curran Associates, Inc., Red Hook, NY, USA, 15172–15181. https://proceedings.neurips.cc/paper/2019/hash/ffe10334251de1dc98339d99ae4743ba-Abstract.html [31] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles, SOSP 2023, Koblenz, Germany, October 23-26, 2023 , Jason Flinn, Margo I. Seltzer, Peter Druschel, Antoine Kaufmann, and Jonathan Mace (Eds.). ACM, New York, NY, USA, 611–626. doi:10.1145/3600006.3613165 [32] Chris Lattner, Mehdi Amini, Uday Bondhugula, Albert Cohen, Andy Davis, Jacques Pienaar, River Riddle, Tatiana Shpeisman, Nicolas Vasilache, and Oleksandr Zinenko. 2021. MLIR: Scaling Compiler Infrastructure for Domain Specific Computation. In 2021 IEEE/ACM International Symposium on Code Generation and Optimization (CGO) . IEEE, Piscataway, NJ, USA, 2–14. doi:10.1109/CGO51591.2021.9370308 [33] Hugh Leather and Chris Cummins. 2020. Machine Learning in Compilers: Past, Present and Future. In Forum for Specification and Design Languages, FDL 2020, Kiel, Germany, September 15-17, 2020 . IEEE, Piscataway, NJ, USA, 1–8. doi:10.1109/FDL50818.2020.9232934 [34] Bingyao Li, Qi Xue, Geng Yuan, Sheng Li, Xiaolong Ma, Yanzhi Wang, and Xulong Tang. 2022. Optimizing Data Layout for Training Deep Neural Networks. In Companion Proceedings of the Web Conference 2022 (WWW ’22) . ACM, New York, NY, USA, 548–554. doi:10.1145/3487553.3524856 [35] Chu Min Li and Felip Manyà. 2021. MaxSAT, Hard and Soft Constraints. In Handbook of Satisfiability, Second Edition , Armin Biere, Marijn Heule, Hans van Maaren, and Toby Walsh (Eds.). Frontiers in Artificial Intelligence and Applications, Vol. 336. IOS Press, Amsterdam, Netherlands, 903–927. doi:10.3233/FAIA201007 [36] Jianhui Li, Zhennan Qin, Yijie Mei, Jingze Cui, Yunfei Song, Ciyong Chen, Yifei Zhang, Longsheng Du, Xianhang Cheng, Baihui Jin, Yan Zhang, Jason Ye, Eric Lin, and Dan Lavery. 2024. oneDNN Graph Compiler: A Hybrid Approach for High-Performance Deep Learning Compilation. In Proceedings of the International Symposium on Code Generation and Optimization (CGO 2024) . IEEE, Piscataway, NJ, USA, 460–470. doi:10.1109/CGO57630.2024.10444871 Tensor Seeks Layout 25 
+
+[37] Yizhi Liu, Yao Wang, Ruofei Yu, Mu Li, Vin Sharma, and Yida Wang. 2019. Optimizing CNN Model Inference on CPUs. In Proceedings of the 2019 USENIX Annual Technical Conference (ATC) , Dahlia Malkhi and Dan Tsafrir (Eds.). USENIX Association, Berkeley, CA, USA, 1025–1040. [38] Sangkug Lym and Mattan Erez. 2020. FlexSA: Flexible Systolic Array Architecture for Efficient Pruned DNN Model Training. arXiv:2004.13027 doi:10.48550/arXiv.2004.13027 [39] Lingxiao Ma, Zhiqiang Xie, Zhi Yang, Jilong Xue, Youshan Miao, Wei Cui, Wenxiang Hu, Fan Yang, Lintao Zhang, and Lidong Zhou. 2020. Rammer: Enabling Holistic Deep Learning Compiler Optimizations with rTasks. In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI 20) . USENIX Association, Berkeley, CA, USA, 881–897. https://www.usenix.org/conference/osdi20/presentation/ma [40] Charith Mendis, Alex Renda, Saman P. Amarasinghe, and Michael Carbin. 2019. Ithemal: Accurate, Portable and Fast Basic Block Throughput Estimation using Deep Neural Networks. In Proceedings of the 36th International Conference on Machine Learning, ICML 2019, 9-15 June 2019, Long Beach, California, USA (Proceedings of Machine Learning Research, Vol. 97) , Kamalika Chaudhuri and Ruslan Salakhutdinov (Eds.). PMLR, Long Beach, CA, USA, 4505–4515. http://proceedings.mlr.press/v97/mendis19a.html [41] Andy Newell and Sergey Pupyrev. 2020. Improved Basic Block Reordering. IEEE Trans. Comput. 69, 12 (2020), 1784–1794. doi:10.1109/TC.2020.2982888 [42] Wei Niu, Jiexiong Guan, Yanzhi Wang, Gagan Agrawal, and Bin Ren. 2021. DNNFusion: Accelerating Deep Neural Networks Execution with Advanced Operator Fusion. In PLDI ’21: 42nd ACM SIGPLAN International Conference on Programming Language Design and Implementation, Virtual Event, Canada, June 20–25, 2021 , Stephen N. Freund and Eran Yahav (Eds.). ACM, New York, NY, USA, 883–898. doi:10.1145/3453483.3454083 [43] Wei Niu, Md. Musfiqur Rahman Sanim, Zhihao Shu, Jiexiong Guan, Xipeng Shen, Miao Yin, Gagan Agrawal, and Bin Ren. 2024. SmartMem: Layout Transformation Elimination and Adaptation for Efficient DNN Execution on Mobile. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 (ASPLOS 2024) , Rajiv Gupta, Nael B. Abu-Ghazaleh, Madan Musuvathi, and Dan Tsafrir (Eds.). ACM, New York, NY, USA, 916–931. doi:10.1145/3620666.3651384 [44] OpenXLA. [n. d.]. XLA Layout Assignment. https://github.com/openxla/xla/blob/main/xla/service/layout_assignment. cc. Accessed February 12, 2026. [45] Christodoulos Peltekis, Dionysios Filippas, Giorgos Dimitrakopoulos, Chrysostomos Nicopoulos, and Dionisios Pnevmatikatos. 2023. ArrayFlex: A Systolic Array Architecture with Configurable Transparent Pipelining. In Pro-ceedings of the Design, Automation and Test in Europe Conference (DATE 2023) . IEEE, Piscataway, NJ, USA, 1–6. doi:10.23919/DATE56975.2023.10136913 [46] Phitchaya Mangpo Phothilimthana, Sami Abu-El-Haija, Kaidi Cao, Bahare Fatemi, Michael Burrows, Charith Mendis, and Bryan Perozzi. 2023. TpuGraphs: A Performance Prediction Dataset on Large Tensor Computational Graphs. In 
+
+Advances in Neural Information Processing Systems (NeurIPS 2023) , Vol. 36. Curran Associates, Inc., Red Hook, NY, USA, 70355–70375. doi:10.52202/075280-3083 [47] Dennis Rieber, Axel Acosta, and Holger Fröning. 2022. Joint Program and Layout Transformations to Enable Convolu-tional Operators on Specialized Hardware Based on Constraint Programming. ACM Transactions on Architecture and Code Optimization 19, 1 (2022), 7:1–7:26. doi:10.1145/3487922 [48] Neil Robertson and Paul D. Seymour. 1984. Graph Minors. III. Planar Tree-Width. Journal of Combinatorial Theory, Series B 36, 1 (1984), 49–64. doi:10.1016/0095-8956(84)90013-3 [49] Yining Shi, Zhi Yang, Jilong Xue, Lingxiao Ma, Yuqing Xia, Ziming Miao, Yuxiao Guo, Fan Yang, and Lidong Zhou. 2023. Welder: Scheduling Deep Learning Memory Access via Tile-graph. In 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI 23) . USENIX Association, Berkeley, CA, USA, 701–718. https://www.usenix. org/conference/osdi23/presentation/shi [50] Mikkel Thorup. 1998. All Structured Programs Have Small Tree Width and Good Register Allocation. Information and Computation 142, 2 (1998), 159–181. doi:10.1006/inco.1997.2697 [51] Philippe Tillet, Hsiang-Tsung Kung, and David D. Cox. 2019. Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages (MAPL 2019) . ACM, New York, NY, USA, 10–19. doi:10.1145/3315508.3329973 [52] Nicolas Vasilache, Oleksandr Zinenko, Theodoros Theodoridis, Priya Goyal, Zachary DeVito, William S Moses, Sven Verdoolaege, Andrew Adams, and Albert Cohen. 2018. Tensor Comprehensions: Framework-Agnostic High-Performance Machine Learning Abstractions. arXiv:1802.04730 doi:10.48550/arXiv.1802.04730 [53] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention Is All You Need. In Annual Conference on Neural Information Processing Systems , Isabelle Guyon, Ulrike von Luxburg, Samy Bengio, Hanna M. Wallach, Rob Fergus, S. V. N. Vishwanathan, and Roman Garnett (Eds.). Curran Associates, Inc., Red Hook, NY, USA, 5998–6008. https://proceedings.neurips.cc/paper/2017/hash/ 3f5ee243547dee91fbd053c1c4a845aa-Abstract.html 26 Eisenhofer et al. 
+
+[54] Jie Wang, Licheng Guo, and Jason Cong. 2021. AutoSA: A Polyhedral Compiler for High-Performance Systolic Arrays on FPGA. In Proceedings of the ACM/SIGDA International Symposium on Field-Programmable Gate Arrays (FPGA 2021) .ACM, New York, NY, USA, 93–104. doi:10.1145/3431920.3439292 [55] Mengdi Wu, Xinhao Cheng, Shengyu Liu, Chunan Shi, Jianan Ji, Man Kit Ao, Praveen Velliengiri, Xupeng Miao, Oded Padon, and Zhihao Jia. 2025. Mirage: A Multi-Level Superoptimizer for Tensor Programs. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . USENIX Association, Berkeley, CA, USA, 221–238. https://www.usenix.org/conference/osdi25/presentation/wu-mengdi [56] Bin Xu, Ayan Banerjee, and Sandeep Gupta. 2025. Hardware Acceleration for Neural Networks: A Comprehensive Survey. arXiv:2512.23914 doi:10.48550/arXiv.2512.23914 [57] Zhiying Xu, Jiafan Xu, Hongding Peng, Wei Wang, Xiaoliang Wang, Haoran Wan, Haipeng Dai, Yixu Xu, Hao Cheng, Kun Wang, and Guihai Chen. 2023. ALT: Breaking the Wall between Data Layout and Loop Optimizations for Deep Learning Compilation. In Proceedings of the Eighteenth European Conference on Computer Systems (EuroSys ’23) . ACM, New York, NY, USA, 199–214. doi:10.1145/3552326.3587440 [58] Feng Yu, Jiacheng Zhao, Hui-Min Cui, Xiaobing Feng, and Jingling Xue. 2023. VTensor: Using Virtual Tensors to Build a Layout-Oblivious AI Programming Framework. Journal of Computer Science and Technology 38, 5 (2023), 1074–1097. doi:10.1007/S11390-022-1457-6 [59] Lianmin Zheng, Chengfan Jia, Minmin Sun, Zhao Wu, Cody Hao Yu, Ameer Haj-Ali, Yida Wang, Jun Yang, Danyang Zhuo, Koushik Sen, Joseph E. Gonzalez, and Ion Stoica. 2020. Ansor: Generating High-Performance Tensor Programs for Deep Learning. In Proceedings of the USENIX Symposium on Operating Systems Design and Implementation (OSDI 2020) .USENIX Association, Berkeley, CA, USA, 863–879. https://www.usenix.org/conference/osdi20/presentation/zheng [60] Lianmin Zheng, Zhuohan Li, Hao Zhang, Yonghao Zhuang, Zhifeng Chen, Yanping Huang, Yida Wang, Yuanzhong Xu, Danyang Zhuo, Eric P. Xing, Joseph E. Gonzalez, and Ion Stoica. 2022. Alpa: Automating Inter- and Intra-Operator Parallelism for Distributed Deep Learning. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . USENIX Association, Berkeley, CA, USA, 559–578. https://www.usenix.org/conference/osdi22/presentation/ zheng-lianmin [61] Size Zheng, Yun Liang, Shuo Wang, Renze Chen, and Kaiwen Sheng. 2020. FlexTensor: An Automatic Schedule Exploration and Optimization Framework for Tensor Computation on Heterogeneous System. In Proceedings of the 25th International Conference on Architectural Support for Programming Languages and Operating Systems . ACM, New York, NY, USA, 859–873. doi:10.1145/3373376.3378508 [62] Keren Zhou, Mario Lezcano Casado, Adam P. Goucher, Akhmed Rakhmati, Jeff Niu, Justin Lebar, Pawel Szczerbuk, Peter Bell, Phil Tillet, Thomas Raoux, and Zahi Moudallal. 2026. Linear Layouts: Robust Code Generation of Efficient Tensor Computation Using 𝐹 2. In Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1, ASPLOS 2026, Pittsburgh, PA, USA, March 22-26, 2026 , Benjamin C. Lee, Harry Xu, Mark Silberstein, and Bingyao Li (Eds.). ACM, New York, NY, USA, 132–146. doi:10.1145/3760250.3762221 [63] Hongyu Zhu, Ruofan Wu, Yijia Diao, Shanbin Ke, Haoyu Li, Chen Zhang, Jilong Xue, Lingxiao Ma, Yuqing Xia, Wei Cui, Fan Yang, Mao Yang, Lidong Zhou, Asaf Cidon, and Gennady Pekhimenko. 2022. ROLLER: Fast and Efficient Tensor Compilation for Deep Learning. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . USENIX Association, Berkeley, CA, USA, 233–248. https://www.usenix.org/conference/osdi22/presentation/zhu Tensor Seeks Layout 27 
+
+A Details on Trainium Graph Compiler Tensor Engine SBUF PSUM 128 partitions 128 partitions 128 columns 128 rows · · · PF    
+
+> Fig. 8. The NeuronCore tensor engine: a 128 ×128 systolic array connected to two on-chip SRAMs. The state buffer (SBUF) stores input tensors partitioned across 128 partitions, each feeding one row of the array. The partial sum buffer (PSUM) accumulates output results. A tensor (red) has layout [P,F]. Illustration adapted from [5].
+
+AWS Trainium [4] is a machine learning accelerator designed to efficiently execute deep learning workloads using specialized compute engines. Each Trainium device contains multiple NeuronCores, which perform tensor operations such as matrix multiplication and vector computations. Each NeuronCore includes a 128 ×128 systolic array optimized for matrix multiplication and convolutions, along with vector and scalar engines for reductions, activations, and other operations. A key component of the NeuronCore architecture is the state buffer (SBUF), a 24 MB high-bandwidth on-chip scratchpad memory used to store tensors and intermediate results during execution. Unlike conventional hardware caches, SBUF is software-managed, meaning the compiler is responsible for organizing and placing data so that the compute engines can access it efficiently. SBUF is organized into 128 independent partitions , each feeding one row of the systolic array; refer to Figure 8. The Neuron Graph Compiler [5] compiles computation graphs from machine learning frame-works into executable binaries for NeuronCores. The compiler performs graph-level and loop-level optimizations to map tensor operations onto hardware instructions, determining how tensors are tiled, scheduled, and placed in on-chip memory. Because data movement between device memory and SBUF is expensive, the compiler structures execution so that active tensors remain in SBUF while operators consume them. Tensor layout plays a central role because SBUF’s partitioned organization exposes hardware parallelism. Tensors in SBUF are described using two logical axes: a partition axis (P), which distributes elements across the 128 hardware partitions for parallel execution, and a free axis (F), which stores the remaining elements within each partition. The dimension mapped to the partition axis determines the degree of parallelism available to the hardware, while the free axis is processed sequentially within each partition. Since each partition feeds one row of the systolic array, the dimension streamed into the array must lie within partitions, not across them. For instance, computing 𝐶 = 𝐴 × 𝐵 requires 𝐴 in [F,P] layout (columns partitioned across the array rows) and 𝐵 
+
+in [P,F] layout (rows partitioned); the result 𝐶 is produced in [F,P] layout. Hardware instructions expect specific mappings of tensor dimensions to these axes, and mismatches between adjacent operators require explicit layout conversions. To support high hardware utilization, the Neuron 28 Eisenhofer et al. 
+
+compiler must select tensor layouts that both satisfy architectural constraints and minimize costly layout conversions, making layout selection an important component of the compilation pipeline. 
+
+B Proof of Theorem 4 
+
+We give the formal dynamic program sketched in Section 3.2.1, followed by its correctness and runtime analysis. Proof. Let 𝐺 = (𝑉 , 𝐸 ) be the directed dataflow graph and let 𝐻 be its underlying undirected graph. Let (𝑇 , {𝑋 𝑖 }) be the given tree decomposition of 𝐻 with width tw; transform it into a nice decomposition of the same width with root 𝑟 in linear time [28]. We use dynamic programming over the decomposition. 
+
+DP table. For each node 𝑖 of 𝑇 , let 𝑉 𝑖 be the set of vertices occurring in some bag in the subtree rooted at 𝑖 , and let Out (𝑋 𝑖 ) be the set of tensors produced by operators currently in 𝑋 𝑖 . For each tensor 𝑡 ∈ Out (𝑋 𝑖 ), let S = (𝑆 𝑡 )𝑡 ∈Out (𝑋 𝑖 ) track the set of distinct consumer layouts 𝑆 𝑡 ⊆ 𝐿 (𝑡 ) that have been requested by consumer operators strictly inside 𝑉 𝑖 \ 𝑋 𝑖 (i.e., those already forgotten). For a labeling 𝑓 of the bag 𝑋 𝑖 with 𝑓 (𝑜 ) ∈ state (𝑜 ), define OPT (𝑖, 𝑓 , S) as the minimum cost for the subtree at 𝑖 . This cost accounts for all operator costs belonging to 𝑉 𝑖 \ 𝑋 𝑖 and all transpose costs for tensors produced in 𝑉 𝑖 \ 𝑋 𝑖 . Note that when a tensor’s producer is forgotten (moves from 𝑋 𝑖 
+
+to 𝑉 𝑖 \ 𝑋 𝑖 ), its aggregated consumer set is complete, and its full transpose penalty is paid. At the root 𝑟 , 𝑋 𝑟 = ∅ and 𝑉 𝑟 = 𝑉 , thus OPT (𝑟, ∅, ∅) equals the global optimum. 
+
+Inductive computation. We compute OPT bottom-up by node type. 
+
+• Leaf: OPT (𝑖, ∅, ∅) = 0. 
+
+• Introduce 𝑣 : (𝑋 𝑖 = 𝑋 𝑗 ∪ { 𝑣 } for some 𝑣 ∈ 𝑉 \ 𝑋 𝑗 ): OPT (𝑖, 𝑓 , S) =
+
+(
+
+OPT  𝑗, 𝑓 |𝑋 𝑗 , S|𝑋 𝑗 
+
+ if 𝑆 𝑡 = ∅ for 𝑡 ∈ Out (𝑣 ),
+
+∞ otherwise. The configuration 𝑓 (𝑣 ) is recorded. If 𝑣 produces a tensor 𝑡 , its tracked consumer set 𝑆 𝑡 
+
+must be strictly empty, since no operators in the subtree 𝑉 𝑖 \ 𝑋 𝑖 could have requested it before 𝑣 was introduced. 
+
+• Forget 𝑣 : (𝑋 𝑗 = 𝑋 𝑖 ∪ { 𝑣 } for some 𝑣 ∈ 𝑋 𝑗 ): Let 𝑓 𝑣 = 𝑓 ∪ { 𝑣 ↦ → 𝑐 𝑣 }. When 𝑣 is forgotten, two things happen. First, 𝑣 ’s input layout requirements are recorded in S. Since S tracks requests from forgotten operators, and 𝑣 becomes forgotten here, the parent state must include 𝑣 ’s request for each of its input tensors that is still tracked. Thus, for every 𝑢 ∈ In (𝑣 ) ∩ Out (𝑋 𝑖 ),the parent state S must satisfy 𝑆 𝑢 = 𝑆 ′ 
+
+> 𝑢
+
+∪ { 𝑐 𝑣 |𝑢 }, and 𝑆 𝑢 = 𝑆 ′ 
+
+> 𝑢
+
+for all other 𝑢 ∈ Out (𝑋 𝑖 ).Second, for the tensor 𝑡 ∈ Out (𝑣 ) produced by 𝑣 , its consumer set is now fully determined: it is the union of requests from previously forgotten descendants ( 𝑆 ′ 
+
+> 𝑡
+
+) and requests from any still-active consumers currently in 𝑋 𝑖 . Let 𝑆 final  
+
+> 𝑡
+
+= 𝑆 ′ 
+
+> 𝑡
+
+∪ { 𝑓 (𝑜 )| 𝑡 | 𝑜 ∈ 𝑋 𝑖 , 𝑡 ∈ In (𝑜 )} . Since 𝑡 
+
+is removed from Out (𝑋 𝑖 ), 𝑆 𝑡 no longer exists in S and we must minimize over all feasible subsets 𝑆 ′ 
+
+> 𝑡
+
+. We compute: OPT (𝑖, 𝑓 , S) = min  
+
+> 𝑐 𝑣 ∈state (𝑣 )
+
+
+
+min  
+
+> compatible S′
+
+n
+
+OPT  𝑗, 𝑓 𝑣 , S′ + 𝐶 op  
+
+> 𝑣
+
+(𝑐 𝑣 ) + ∑︁  
+
+> 𝑡 ∈Out (𝑣 )
+
+∑︁ ℓ′ ∈𝑆 final 
+
+> 𝑡
+
+𝐶 tr 
+
+> 𝑡
+
+ 𝑐 𝑣 |𝑡 , ℓ ′o
+
+,
+
+where the inner minimum is over all states S′ satisfying the subset relations defined above. We evaluate this transition forward, so each child entry determines and updates one parent entry and is processed once. Tensor Seeks Layout 29 
+
+• Join (𝑋 𝑖 = 𝑋 𝑗 1 = 𝑋 𝑗 2 ): OPT (𝑖, 𝑓 , S) = min 
+
+> S=S1∪S2
+
+
+
+OPT ( 𝑗 1, 𝑓 , S1) + OPT ( 𝑗 2, 𝑓 , S2)
+
+
+
+,
+
+where S1 ∪ S2 takes the point-wise union 𝑆 (1) 
+
+> 𝑡
+
+∪𝑆 (2) 
+
+> 𝑡
+
+for each tensor 𝑡 , ensuring that identical consumer layouts requested in both subtrees merge without double-counting. 
+
+Correctness. We argue by induction on 𝑇 , from the leaves upwards, that OPT (𝑖, 𝑓 , S) equals the minimum of ∑︁   
+
+> 𝑜 ∈𝑉 𝑖 \𝑋 𝑖
+
+𝐶 op 
+
+> 𝑜
+
+ 𝑔 (𝑜 ) +∑︁    
+
+> 𝑡 ∈Out (𝑉 𝑖 \𝑋 𝑖 )
+
+∑︁ ℓ ∈cons (𝑡 )
+
+𝐶 tr 
+
+> 𝑡
+
+ prod (𝑡 ), ℓ 
+
+over all labelings 𝑔 of 𝑉 𝑖 that agree with 𝑓 on 𝑋 𝑖 and induce exactly the request sets S. Call this the invariant . We use two properties of a nice decomposition. Every vertex is introduced exactly once and forgotten exactly once, so the bags containing a vertex 𝑣 form a contiguous stretch of 𝑇 
+
+reaching from its introduce node up to the child of its forget node. And at a join node, 𝑉 𝑗 1 ∩𝑉 𝑗 2 = 𝑋 𝑖 ,with no edge of 𝐻 between 𝑉 𝑗 1 \ 𝑋 𝑖 and 𝑉 𝑗 2 \ 𝑋 𝑖 .
+
+Leaf. 𝑉 𝑖 = 𝑋 𝑖 = ∅, both sums are empty, and the invariant holds with value 0. 
+
+Introduce 𝑣 . Since 𝑣 is introduced here, 𝑣 ∉ 𝑉 𝑗 , and 𝑉 𝑖 \ 𝑋 𝑖 = 𝑉 𝑗 \ 𝑋 𝑗 . Neither sum changes: no operator leaves the frontier, and no tensor’s producer does either. The recurrence accordingly copies the child value, so it remains to justify the guard. Let 𝑡 ∈ Out (𝑣 ) and suppose some consumer 
+
+𝑜 of 𝑡 lay in 𝑉 𝑖 \ 𝑋 𝑖 . Then 𝑜 was forgotten strictly below 𝑖 , so no bag at or above 𝑖 contains 𝑜 ; but 𝑜 
+
+is adjacent to 𝑣 in 𝐻 and must share a bag with it, and every bag containing 𝑣 is at or above 𝑖 , a contradiction. Hence 𝑆 𝑡 = ∅ is the only request set consistent with the invariant, and entries with 
+
+𝑆 𝑡 ≠ ∅ are correctly assigned cost ∞.
+
+Forget 𝑣 . Here 𝑉 𝑖 = 𝑉 𝑗 and 𝑉 𝑖 \ 𝑋 𝑖 = (𝑉 𝑗 \ 𝑋 𝑗 ) ∪ { 𝑣 }, so relative to the child the first sum grows by exactly 𝐶 op  
+
+> 𝑣
+
+(𝑐 𝑣 ) and the second grows by the transpose term of the tensor 𝑡 ∈ Out (𝑣 ), whose producer has just left the frontier. The claim to verify is that 𝑆 final  
+
+> 𝑡
+
+= cons (𝑡 ). Every consumer 𝑜 
+
+of 𝑡 is adjacent to 𝑣 , so 𝑜 and 𝑣 share a bag; that bag lies in the subtree rooted at 𝑗 , because all bags containing 𝑣 do, and therefore 𝑜 ∈ 𝑉 𝑗 = 𝑉 𝑖 . Each such 𝑜 is thus either in 𝑋 𝑖 , where its request 
+
+𝑓 (𝑜 )| 𝑡 is read off the bag labeling, or in 𝑉 𝑖 \ 𝑋 𝑖 , where it was forgotten at some node below 𝑖 and the same rule added its request to 𝑆 ′ 
+
+> 𝑡
+
+. So 𝑆 final  
+
+> 𝑡
+
+lists the layouts of cons (𝑡 ), each exactly once, and Íℓ′ ∈𝑆 final  
+
+> 𝑡
+
+𝐶 tr  
+
+> 𝑡
+
+(𝑐 𝑣 |𝑡 , ℓ ′) is precisely the term the objective charges for 𝑡 . Minimizing over 𝑐 𝑣 and over the compatible S′ ranges over exactly those labelings of 𝑉 𝑗 that restrict to 𝑓 on 𝑋 𝑖 and induce S.
+
+Join. The two subtrees share no operator outside 𝑋 𝑖 and no edge between their private parts, so every labeling of 𝑉 𝑖 agreeing with 𝑓 splits uniquely into labelings of 𝑉 𝑗 1 and 𝑉 𝑗 2 , and the two child costs are sums over the disjoint sets 𝑉 𝑗 1 \ 𝑋 𝑖 and 𝑉 𝑗 2 \ 𝑋 𝑖 . A layout requested in both subtrees belongs to a tensor still produced in 𝑋 𝑖 , whose transpose cost has not been charged yet. Taking the point-wise union instead of a multiset sum therefore avoids charging that layout twice once the producer is forgotten. Minimizing over all splits S = S1 ∪ S2 therefore establishes the invariant at 𝑖 .At the root, 𝑋 𝑟 = ∅ and 𝑉 𝑟 = 𝑉 , so the invariant makes OPT (𝑟, ∅, ∅) the optimum of Layout Selection. 
+
+Runtime. Each bag has size at most tw +1. The base state 𝑓 has at most 𝑀 tw +1 entries per node. The augmented state S tracks a subset 𝑆 𝑡 ⊆ 𝐿 (𝑡 ) only for the tensors actively produced by operators in 𝑋 𝑖 . This adds at most (2𝑀 )tw +1 combinations. A forget node processes at most 𝑀 tw +22𝑀 (tw +2)
+
+child entries in 𝑂 (tw ) time each. At a join node, each layout may occur in neither, either, or both child request sets, giving at most 4 𝑀 (tw +1) pairs per bag labeling. Since a nice decomposition has 
+
+𝑂 (tw |𝑉 |) nodes, the total running time is 𝑂  |𝑉 | · tw 2 ·𝑀 tw +2 · 4𝑀 (tw +1) , which is polynomial in 
+
+|𝑉 | for fixed tw and 𝑀 .30 Eisenhofer et al. 
+
+The optimal assignment itself can be recovered via standard backtracking: at each node, record the minimizing configuration, then trace from root to leaves. □

@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-29</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-30</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-29 18:40:09 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-30 17:01:43 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今天快速浏览了8篇论文，重点覆盖了4位量化大模型修复、测试时训练，以及通信受限下的去中心化公平个性化学习。</p>
-<p>最值得看的方向是“量化模型如何恢复性能”和“测试时训练如何兼顾表达力与效率”，一个更贴近落地，一个更偏方法设计。</p>
-<p>如果你是普通读者，建议先看前两篇相关主题，能最快把握今天最核心的技术趋势。</p>
+<p>今天共筛选 13 篇论文，精读 2 篇、速读 11 篇，重点聚焦 GPU 训练同步开销、卫星分布式学习，以及编译器布局和硬件加速等方向。</p>
+<p>最值得看的两篇是《Understanding the Synchronization Tax in GPU Scale-Up Domains》和《SatDL: Jointly Optimizing Data Redistribution and Training for Satellite-Based Distributed Learning》，前者盯住训练系统效率瓶颈，后者关注数据重分配与训练协同优化。</p>
+<p>如果你只想快速抓重点，建议先看这两篇精读，再顺手扫一眼“ML 编译布局选择”和“FPGA 深度学习加速”两条线，基本能把今天的技术主线串起来。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Understanding the Synchronization Tax in GPU Scale-Up Domains">Understanding the Synchronization Tax in GPU Scale-Up Domains</span></li><li><span class="dpr-home-dashboard-paper-title" title="SatDL: Jointly Optimizing Data Redistribution and Training for Satellite-Based Distributed Learning">SatDL: Jointly Optimizing Data Redistribution and Training for Satellite-Based Distributed Learning</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Quantization-Aware Healing: A Practical Recipe for Recovering Compressed, 4-Bit LLMs">Quantization-Aware Healing: A Practical Recipe for Recovering Compressed, 4-Bit LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Rethinking Expressivity and Efficiency in Test-Time Training">Rethinking Expressivity and Efficiency in Test-Time Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Unified Framework for Fair and Personalized Decentralized Learning under Communication Constraints">A Unified Framework for Fair and Personalized Decentralized Learning under Communication Constraints</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tensor Seeks Layout: Formalizing Layout Selection for ML Compilers">Tensor Seeks Layout: Formalizing Layout Selection for ML Compilers</span></li><li><span class="dpr-home-dashboard-paper-title" title="Model Compression and Hardware-Aware Acceleration for Deep Learning on FPGAs: A Co-Design Taxonomy and Comparative Analysis">Model Compression and Hardware-Aware Acceleration for Deep Learning on FPGAs: A Co-Design Taxonomy and Comparative Analysis</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Dense Adam States: Adaptive Log-Space Quantization for Memory-Efficient Optimizers">Beyond Dense Adam States: Adaptive Log-Space Quantization for Memory-Efficient Optimizers</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>8</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 
