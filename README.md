@@ -222,6 +222,12 @@ DPR_LOCAL_PUBLISH=1
 DPR_LOCAL_PUBLISH_BRANCH=main
 ```
 
+同时在个人 fork 中设置仓库变量，停用 GitHub-hosted cron，避免云端与 Mac 重复生成；手动 `workflow_dispatch` 仍然可用：
+
+```bash
+gh variable set DPR_DISABLE_HOSTED_DAILY --body true
+```
+
 发布脚本只允许提交 `docs/` 与必要的 `archive` 运行状态；默认不会提交个性化 `config.yaml`。检测到代码或其它非运行产物改动时会拒绝自动发布。
 
 如需停用，plist 会被移到废纸篓而不是直接删除：

@@ -154,6 +154,14 @@ class LocalDeploymentTest(unittest.TestCase):
         self.assertIn("window.DPRLocalLLM.getChatModels", chat)
         self.assertIn("modelEntry.endpoint", chat)
 
+    def test_hosted_daily_can_be_disabled_without_breaking_manual_dispatch(self):
+        workflow = (ROOT / ".github" / "workflows" / "daily-paper-reader.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("workflow_dispatch:", workflow)
+        self.assertIn("vars.DPR_DISABLE_HOSTED_DAILY != 'true'", workflow)
+        self.assertIn("github.event_name != 'schedule'", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
