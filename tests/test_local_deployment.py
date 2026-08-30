@@ -162,6 +162,12 @@ class LocalDeploymentTest(unittest.TestCase):
         self.assertIn("vars.DPR_DISABLE_HOSTED_DAILY != 'true'", workflow)
         self.assertIn("github.event_name != 'schedule'", workflow)
 
+    def test_zsh_publish_script_does_not_shadow_path(self):
+        script = (ROOT / "scripts" / "publish_local_results.sh").read_text(encoding="utf-8")
+        self.assertNotIn('\n  path="${line:3}"', script)
+        self.assertNotIn("while IFS= read -r path", script)
+        self.assertIn('changed_path="${line:3}"', script)
+
 
 if __name__ == "__main__":
     unittest.main()

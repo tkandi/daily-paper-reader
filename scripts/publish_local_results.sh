@@ -38,10 +38,10 @@ fi
 unrelated=()
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
-  path="${line:3}"
-  case "$path" in
+  changed_path="${line:3}"
+  case "$changed_path" in
     docs/*|archive/*|config.yaml) ;;
-    *) unrelated+=("$path") ;;
+    *) unrelated+=("$changed_path") ;;
   esac
 done < <(git status --porcelain)
 if (( ${#unrelated[@]} > 0 )); then
@@ -65,14 +65,14 @@ git add -- "${paths[@]}"
 git add -u -- docs archive
 
 invalid_staged=()
-while IFS= read -r path; do
-  [[ -z "$path" ]] && continue
-  case "$path" in
+while IFS= read -r staged_path; do
+  [[ -z "$staged_path" ]] && continue
+  case "$staged_path" in
     docs/*|archive/arxiv_seen.json|archive/crawl_state.json|archive/carryover.json|archive/*/recommend/*) ;;
     config.yaml)
-      [[ "${DPR_LOCAL_PUBLISH_CONFIG:-0}" == "1" ]] || invalid_staged+=("$path")
+      [[ "${DPR_LOCAL_PUBLISH_CONFIG:-0}" == "1" ]] || invalid_staged+=("$staged_path")
       ;;
-    *) invalid_staged+=("$path") ;;
+    *) invalid_staged+=("$staged_path") ;;
   esac
 done < <(git diff --cached --name-only)
 if (( ${#invalid_staged[@]} > 0 )); then
