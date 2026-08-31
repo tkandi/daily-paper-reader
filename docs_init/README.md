@@ -4,6 +4,13 @@
     <a class="dpr-home-notice-tutorial" href="#/tutorial/README">使用教程 <span aria-hidden="true">›</span></a>
   </div>
   <div class="dpr-home-notice-entry">
+    <time class="dpr-home-notice-date" datetime="2026-08-31">08.31</time>
+    <div>
+      <strong class="dpr-home-notice-entry-title">Mac mini 本地运行已上线</strong>
+      <span class="dpr-home-notice-entry-summary">论文流水线已切换为 Mac mini 定时运行，调用本机 CLIProxyAPI，并在成功后自动更新 GitHub Pages。</span>
+    </div>
+  </div>
+  <div class="dpr-home-notice-entry">
     <time class="dpr-home-notice-date" datetime="2026-07-20">07.20</time>
     <div>
       <strong class="dpr-home-notice-entry-title">反馈功能上线</strong>
