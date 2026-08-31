@@ -4,6 +4,13 @@
     <a class="dpr-home-notice-tutorial" href="#/tutorial/README">使用教程 <span aria-hidden="true">›</span></a>
   </div>
   <div class="dpr-home-notice-entry">
+    <time class="dpr-home-notice-date" datetime="2026-08-31">08.31</time>
+    <div>
+      <strong class="dpr-home-notice-entry-title">Mac mini 本地运行已上线</strong>
+      <span class="dpr-home-notice-entry-summary">论文流水线已切换为 Mac mini 定时运行，调用本机 CLIProxyAPI，并在成功后自动更新 GitHub Pages。</span>
+    </div>
+  </div>
+  <div class="dpr-home-notice-entry">
     <time class="dpr-home-notice-date" datetime="2026-07-20">07.20</time>
     <div>
       <strong class="dpr-home-notice-entry-title">反馈功能上线</strong>
@@ -41,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-30</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-31</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-30 17:01:43 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-31 19:22:33 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今天共筛选 13 篇论文，精读 2 篇、速读 11 篇，重点聚焦 GPU 训练同步开销、卫星分布式学习，以及编译器布局和硬件加速等方向。</p>
-<p>最值得看的两篇是《Understanding the Synchronization Tax in GPU Scale-Up Domains》和《SatDL: Jointly Optimizing Data Redistribution and Training for Satellite-Based Distributed Learning》，前者盯住训练系统效率瓶颈，后者关注数据重分配与训练协同优化。</p>
-<p>如果你只想快速抓重点，建议先看这两篇精读，再顺手扫一眼“ML 编译布局选择”和“FPGA 深度学习加速”两条线，基本能把今天的技术主线串起来。</p>
+<p>AI 基础设施日报：聚焦大模型硬件加速、MoE 训练通信优化与无线 GPU 计算。</p>
+<p>最值得精读的是 LLM 加速器如何突破“内存墙”，以及通过层重配置提升 MoE 训练通信效率的方案。</p>
+<p>普通读者可先从硬件与通信两篇入手，再关注 WiCi 等新型 GPU 基础设施对算力获取方式的改变。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Understanding the Synchronization Tax in GPU Scale-Up Domains">Understanding the Synchronization Tax in GPU Scale-Up Domains</span></li><li><span class="dpr-home-dashboard-paper-title" title="SatDL: Jointly Optimizing Data Redistribution and Training for Satellite-Based Distributed Learning">SatDL: Jointly Optimizing Data Redistribution and Training for Satellite-Based Distributed Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="AI Hardware Accelerators for Large Language Models: Architectures and the Memory Wall">AI Hardware Accelerators for Large Language Models: Architectures and the Memory Wall</span></li><li><span class="dpr-home-dashboard-paper-title" title="Training Communication-Efficient Mixture-of-Experts Language Models with Layer Re-Configuration">Training Communication-Efficient Mixture-of-Experts Language Models with Layer Re-Configuration</span></li><li><span class="dpr-home-dashboard-paper-title" title="Chimera: Efficient Multi-Vector Retrieval via GPU-CPU Co-Processing">Chimera: Efficient Multi-Vector Retrieval via GPU-CPU Co-Processing</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -89,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tensor Seeks Layout: Formalizing Layout Selection for ML Compilers">Tensor Seeks Layout: Formalizing Layout Selection for ML Compilers</span></li><li><span class="dpr-home-dashboard-paper-title" title="Model Compression and Hardware-Aware Acceleration for Deep Learning on FPGAs: A Co-Design Taxonomy and Comparative Analysis">Model Compression and Hardware-Aware Acceleration for Deep Learning on FPGAs: A Co-Design Taxonomy and Comparative Analysis</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Dense Adam States: Adaptive Log-Space Quantization for Memory-Efficient Optimizers">Beyond Dense Adam States: Adaptive Log-Space Quantization for Memory-Efficient Optimizers</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="WiCi: Wireless GPU Computing Infrastructure">WiCi: Wireless GPU Computing Infrastructure</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Contract-Centered Architecture for Scalable and Manageable Agentic Runtimes">A Contract-Centered Architecture for Scalable and Manageable Agentic Runtimes</span></li><li><span class="dpr-home-dashboard-paper-title" title="DAMP: Decay-Aware Mixed-Precision Recurrent-State Quantization">DAMP: Decay-Aware Mixed-Precision Recurrent-State Quantization</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
