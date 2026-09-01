@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-31</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-01</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 16 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-31 19:22:33 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-01 19:18:37 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>AI 基础设施日报：聚焦大模型硬件加速、MoE 训练通信优化与无线 GPU 计算。</p>
-<p>最值得精读的是 LLM 加速器如何突破“内存墙”，以及通过层重配置提升 MoE 训练通信效率的方案。</p>
-<p>普通读者可先从硬件与通信两篇入手，再关注 WiCi 等新型 GPU 基础设施对算力获取方式的改变。</p>
+<p>今日完成 16 篇论文推荐梳理：5 篇精读、11 篇速读，聚焦云端 MLOps、编码计算与大模型推理。</p>
+<p>最值得关注的是《Forward-Deployed Full-Stack Engineering for Autonomous Cloud MLOps》（9.0/10）与《Learning-Theoretic Foundation for General Coded Computing: The Straggler Setting》（8.0/10）。</p>
+<p>建议普通读者先精读上述两篇，再按兴趣延伸阅读 LLM 推理能耗、KV Cache 压缩和联邦学习方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="AI Hardware Accelerators for Large Language Models: Architectures and the Memory Wall">AI Hardware Accelerators for Large Language Models: Architectures and the Memory Wall</span></li><li><span class="dpr-home-dashboard-paper-title" title="Training Communication-Efficient Mixture-of-Experts Language Models with Layer Re-Configuration">Training Communication-Efficient Mixture-of-Experts Language Models with Layer Re-Configuration</span></li><li><span class="dpr-home-dashboard-paper-title" title="Chimera: Efficient Multi-Vector Retrieval via GPU-CPU Co-Processing">Chimera: Efficient Multi-Vector Retrieval via GPU-CPU Co-Processing</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Forward-Deployed Full-Stack Engineering for Autonomous Cloud MLOps">Forward-Deployed Full-Stack Engineering for Autonomous Cloud MLOps</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning-Theoretic Foundation for General Coded Computing: The Straggler Setting">Learning-Theoretic Foundation for General Coded Computing: The Straggler Setting</span></li><li><span class="dpr-home-dashboard-paper-title" title="A-MADiff: Attention-Guided Multi-Agent DRL with Diffusion Policies for Memory-Aware Task Orchestration in Mobile AIGC Networks">A-MADiff: Attention-Guided Multi-Agent DRL with Diffusion Policies for Memory-Aware Task Orchestration in Mobile AIGC Networks</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="WiCi: Wireless GPU Computing Infrastructure">WiCi: Wireless GPU Computing Infrastructure</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Contract-Centered Architecture for Scalable and Manageable Agentic Runtimes">A Contract-Centered Architecture for Scalable and Manageable Agentic Runtimes</span></li><li><span class="dpr-home-dashboard-paper-title" title="DAMP: Decay-Aware Mixed-Precision Recurrent-State Quantization">DAMP: Decay-Aware Mixed-Precision Recurrent-State Quantization</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Characterization of Request and Token Energy Costs for LLM Inference Workloads on GPU Platforms">Characterization of Request and Token Energy Costs for LLM Inference Workloads on GPU Platforms</span></li><li><span class="dpr-home-dashboard-paper-title" title="SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference">SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="CARVY-FL: Client Anticlustering for Robust Voting in Provably Secure Federated Learning">CARVY-FL: Client Anticlustering for Robust Voting in Provably Secure Federated Learning</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
