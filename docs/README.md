@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-01</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-02</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-01 19:18:37 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-02 19:19:05 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成 16 篇论文推荐梳理：5 篇精读、11 篇速读，聚焦云端 MLOps、编码计算与大模型推理。</p>
-<p>最值得关注的是《Forward-Deployed Full-Stack Engineering for Autonomous Cloud MLOps》（9.0/10）与《Learning-Theoretic Foundation for General Coded Computing: The Straggler Setting》（8.0/10）。</p>
-<p>建议普通读者先精读上述两篇，再按兴趣延伸阅读 LLM 推理能耗、KV Cache 压缩和联邦学习方向。</p>
+<p>今日完成 17 篇 AI 论文筛选与阅读，涵盖大规模训练、联邦学习、边缘推理与硬件架构等方向。</p>
+<p>最值得关注的是多租户大规模 AI 训练的扩展性与性能，以及通过随机游走降低通信成本的去中心化 LoRA 微调。</p>
+<p>建议普通读者优先精读这两篇，重点了解 AI 系统如何提升训练效率、协作能力与资源利用率。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Forward-Deployed Full-Stack Engineering for Autonomous Cloud MLOps">Forward-Deployed Full-Stack Engineering for Autonomous Cloud MLOps</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning-Theoretic Foundation for General Coded Computing: The Straggler Setting">Learning-Theoretic Foundation for General Coded Computing: The Straggler Setting</span></li><li><span class="dpr-home-dashboard-paper-title" title="A-MADiff: Attention-Guided Multi-Agent DRL with Diffusion Policies for Memory-Aware Task Orchestration in Mobile AIGC Networks">A-MADiff: Attention-Guided Multi-Agent DRL with Diffusion Policies for Memory-Aware Task Orchestration in Mobile AIGC Networks</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Characterizing the Scalability and Performance of Large-Scale AI Training Under Multi-Tenancy">Characterizing the Scalability and Performance of Large-Scale AI Training Under Multi-Tenancy</span></li><li><span class="dpr-home-dashboard-paper-title" title="RW-LoRA: Communication-Efficient Decentralized LoRA Fine-Tuning via Random Walks">RW-LoRA: Communication-Efficient Decentralized LoRA Fine-Tuning via Random Walks</span></li><li><span class="dpr-home-dashboard-paper-title" title="Just Talk Once: Communication-Efficient Split Federated LLM Fine-Tuning on Edge Devices">Just Talk Once: Communication-Efficient Split Federated LLM Fine-Tuning on Edge Devices</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Characterization of Request and Token Energy Costs for LLM Inference Workloads on GPU Platforms">Characterization of Request and Token Energy Costs for LLM Inference Workloads on GPU Platforms</span></li><li><span class="dpr-home-dashboard-paper-title" title="SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference">SemKV: Semantic Mixed-Precision KV Cache Quantization Guided by the Quality Cliff for Long-Context LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="CARVY-FL: Client Anticlustering for Robust Voting in Provably Secure Federated Learning">CARVY-FL: Client Anticlustering for Robust Voting in Provably Secure Federated Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DRLM: Deep Reinforcement Learning-Based LLM Query Orchestration in Edge Environments">DRLM: Deep Reinforcement Learning-Based LLM Query Orchestration in Edge Environments</span></li><li><span class="dpr-home-dashboard-paper-title" title="CRAD: Class-wise Reliability-Aware Distillation for Decentralized Heterogeneous Federated Learning">CRAD: Class-wise Reliability-Aware Distillation for Decentralized Heterogeneous Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="LLM Inference on IMC-NoC Architecture with Balanced Dataflow and Fine-Grained Parallelism">LLM Inference on IMC-NoC Architecture with Balanced Dataflow and Fine-Grained Parallelism</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
