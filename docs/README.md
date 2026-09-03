@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-02</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-03</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-02 19:19:05 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-03 19:13:15 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成 17 篇 AI 论文筛选与阅读，涵盖大规模训练、联邦学习、边缘推理与硬件架构等方向。</p>
-<p>最值得关注的是多租户大规模 AI 训练的扩展性与性能，以及通过随机游走降低通信成本的去中心化 LoRA 微调。</p>
-<p>建议普通读者优先精读这两篇，重点了解 AI 系统如何提升训练效率、协作能力与资源利用率。</p>
+<p>今日完成16篇论文筛选：5篇精读、11篇速读，聚焦AI学习、推理调度与系统优化。</p>
+<p>最值得关注的是异步P2P知识蒸馏的收敛理论，以及面向共享GPU的并发异构AI推理运行时调度。</p>
+<p>普通读者可优先了解“如何让AI协作学习更稳定、让多模型共享GPU更高效”这两条主线。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Characterizing the Scalability and Performance of Large-Scale AI Training Under Multi-Tenancy">Characterizing the Scalability and Performance of Large-Scale AI Training Under Multi-Tenancy</span></li><li><span class="dpr-home-dashboard-paper-title" title="RW-LoRA: Communication-Efficient Decentralized LoRA Fine-Tuning via Random Walks">RW-LoRA: Communication-Efficient Decentralized LoRA Fine-Tuning via Random Walks</span></li><li><span class="dpr-home-dashboard-paper-title" title="Just Talk Once: Communication-Efficient Split Federated LLM Fine-Tuning on Edge Devices">Just Talk Once: Communication-Efficient Split Federated LLM Fine-Tuning on Edge Devices</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Convergence Theory of Knowledge Distillation in Asynchronous P2P Gossip Learning Network">Convergence Theory of Knowledge Distillation in Asynchronous P2P Gossip Learning Network</span></li><li><span class="dpr-home-dashboard-paper-title" title="MeanField Surrogate Modeling for Scalable Runtime Scheduling of Concurrent Heterogeneous AI Inference on Shared GPUs">MeanField Surrogate Modeling for Scalable Runtime Scheduling of Concurrent Heterogeneous AI Inference on Shared GPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="RouteSparse: Input-Conditional Pattern Routing for Budgeted Long-Context Prefilling">RouteSparse: Input-Conditional Pattern Routing for Budgeted Long-Context Prefilling</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DRLM: Deep Reinforcement Learning-Based LLM Query Orchestration in Edge Environments">DRLM: Deep Reinforcement Learning-Based LLM Query Orchestration in Edge Environments</span></li><li><span class="dpr-home-dashboard-paper-title" title="CRAD: Class-wise Reliability-Aware Distillation for Decentralized Heterogeneous Federated Learning">CRAD: Class-wise Reliability-Aware Distillation for Decentralized Heterogeneous Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="LLM Inference on IMC-NoC Architecture with Balanced Dataflow and Fine-Grained Parallelism">LLM Inference on IMC-NoC Architecture with Balanced Dataflow and Fine-Grained Parallelism</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Compositional Online Learning for Semantic Data Processing Systems">Compositional Online Learning for Semantic Data Processing Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Minimizing Grid Interconnection Capacity Requirements for AI Data Centers: A Developer-Side Planning Framework with Onsite Resources and Workload Flexibility">Minimizing Grid Interconnection Capacity Requirements for AI Data Centers: A Developer-Side Planning Framework with Onsite Resources and Workload Flexibility</span></li><li><span class="dpr-home-dashboard-paper-title" title="CHIPSMORE: Compute-in-Interconnect and -Memory Chiplets for Multi-Mode Multi-Request LLM Inference Acceleration">CHIPSMORE: Compute-in-Interconnect and -Memory Chiplets for Multi-Mode Multi-Request LLM Inference Acceleration</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

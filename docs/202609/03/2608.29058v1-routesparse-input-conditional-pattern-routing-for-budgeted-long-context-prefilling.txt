@@ -1,0 +1,845 @@
+RouteSparse: Input-Conditional Pattern Routing for
+Budgeted Long-Context Prefilling
+Chao Zhang1, Yifan Ji1, Ziyan Zhang2, Kai Song2, Fei Lin1
+1College of Computer Science, Chongqing University
+2School of Information Science and Engineering, Chongqing Jiaotong University
+Abstract
+Dynamic sparse attention can reduce the
+quadratic cost of long-context prefilling with-
+out changing model weights. MInference as-
+signs each attention head one pattern offline
+and estimates that pattern’s sparse indices for
+every prompt. This design is efficient, but it as-
+sumes that a head’s preferred pattern and spar-
+sity budget remain suitable across inputs. We
+introduce ROUTESPARSE, which routes each
+head and prompt segment among a small library
+of GPU-efficient sparse patterns. A low-cost
+probe estimates pattern utility and uncertainty;
+a latency-aware router then selects a pattern
+and budget, while uncertain cases fall back to
+a denser mask. We formulate routing as con-
+strained risk minimization, derive an attention-
+output error certificate from omitted probability
+mass, and evaluate the method on long-context
+retrieval, question answering, summarization,
+and language modeling. On Llama 3.1-8B-
+Instruct with 128K-token prompts, ROUTES-
+PARSE achieves 6.5× dense prefill speed with
+a 0.2-point RULER drop relative to dense atten-
+tion, compared with 7.3× speed and a 1.6-point
+drop for fixed per-head routing. Ablations con-
+firm that input-conditional routing, hardware
+profiling, and selective dense fallback each con-
+tribute to the quality–latency tradeoff.
+1
+Introduction
+Long-context language models enable document
+question answering, repository understanding, and
+retrieval over hundreds of thousands of tokens
+(Xiong et al., 2026). Their context windows, how-
+ever, expose the quadratic cost of self-attention
+during prefilling, the phase that processes a prompt
+before the first token is generated. Existing mod-
+els obtain longer windows through position inter-
+polation and rescaling (Chen et al., 2023; Peng
+et al., 2024; Ding et al., 2024), or distribute ex-
+act blockwise attention across devices (Liu et al.,
+2024). These techniques expand capacity without
+removing the per-device systems bottleneck. Even
+memory-efficient exact kernels such as FlashAtten-
+tion and FlashAttention-2 (Dao et al., 2022; Dao,
+2024) still compute every causal query–key pair.
+Consequently, time to first token can become the
+dominant user-visible cost (Fu, 2024).
+Sparse attention avoids work by evaluating only
+selected pairs. Patterns such as local windows,
+global tokens, and strided connections are effec-
+tive when incorporated during training (Child et al.,
+2019; Beltagy et al., 2020; Zaheer et al., 2020). Ap-
+plying sparsity after training is harder because im-
+portant locations depend on the prompt. Dynamic
+sparse attention (Liu et al., 2022) and query-aware
+key selection (Tang et al., 2024; Ribar et al., 2024)
+provide evidence that these locations can be ap-
+proximated online. MInference (Jiang et al., 2024)
+addresses this problem with three GPU-efficient
+pattern families: A-shape, vertical-slash, and block-
+sparse attention. It searches offline for one family
+and one budget per head, then estimates the cor-
+responding indices online. Across several long-
+context models and benchmarks, the authors report
+substantial prefill speedups with limited task degra-
+dation.
+This approach separates a stable head-level pat-
+tern family from input-dependent indices. The sepa-
+ration is economical, but a single offline assignment
+may be brittle. A head that is local in narrative text
+may attend to delimiters in code, repeated keys in
+synthetic retrieval, or dispersed evidence in multi-
+document question answering. Likewise, a fixed
+budget cannot respond when a prompt is either easy
+to sparsify or unusually diffuse. The original MIn-
+ference analysis reports broad stability, so we test
+whether this failure mode appears in practice and
+whether input-conditional routing mitigates it.
+We present ROUTESPARSE, which preserves the
+kernel-friendly pattern library while making pat-
+tern and budget selection conditional on the current
+input. ROUTESPARSE uses a sampled attention
+1
+arXiv:2608.29058v1  [cs.CL]  29 Aug 2026
+
+
+probe to score candidate masks, estimates uncer-
+tainty from omitted attention mass, and solves a
+small per-layer routing problem under a measured
+latency budget. High-uncertainty heads receive a
+larger budget or dense fallback. Our contributions
+are:
+• We propose an input-conditional router over
+structured sparse kernels, with selection over-
+head included in the latency objective;
+• We design a computable certificate that upper-
+bounds attention-output error using omitted
+probability mass and value-vector norms; and
+• We perform an empirical evaluation that tests
+quality, latency, calibration, and robustness
+under domain and length shift, with preregis-
+tered ablations and stress tests.
+2
+Preliminary
+2.1
+Prefill Attention
+For one causal attention head, let Q, K, V ∈Rn×d.
+Exact attention is
+O = AV,
+A = softmax
+
+QK⊤/
+√
+d + C
+
+,
+(1)
+where C is the causal mask. Computing Equation 1
+requires O(n2d) arithmetic. A binary sparse mask
+M replaces unselected logits by −∞and produces
+eA(M) and eO(M) = eA(M)V . A useful mask must
+reduce realized kernel latency, not merely floating-
+point operations, while keeping eO close to O.
+MInference identifies one structured pattern for
+each head offline and constructs its indices on-
+line (Jiang et al., 2024). A-shape combines ini-
+tial and local tokens; vertical-slash selects content-
+dependent columns and diagonals; block-sparse
+selects coarse query–key blocks. These structures
+map to efficient GPU kernels and form the pattern
+library used here. ROUTESPARSE changes the de-
+cision granularity, not the underlying observation:
+structured sparsity is useful only when index esti-
+mation plus sparse execution is faster than exact
+attention.
+2.2
+Why Route Per Input?
+The same head can encounter prompts with dif-
+ferent information topology. Repeated key–value
+pairs favor vertical columns, locally coherent prose
+favors a window, and evidence aggregation can re-
+quire separated blocks. Offline selection minimizes
+average loss on calibration prompts:
+p⋆
+h = arg min
+p∈P Ex∼Dcal[ℓ(h, x, p, bh)].
+(2)
+When the best pattern varies with x, this commits
+to the best constant decision. An input-conditional
+router can instead approximate p⋆
+h(x), but is worth-
+while only if its quality gain exceeds probe and
+routing overhead. We test three hypotheses:
+H1: Conditional routing.
+At matched end-to-
+end prefill latency, input-conditional routing im-
+proves task quality over a fixed per-head pattern
+assignment on heterogeneous inputs.
+H2: Shift robustness.
+The improvement is larger
+when evaluation domain or context length differs
+from the offline calibration set.
+H3: Selective fallback.
+An uncertainty-triggered
+dense fallback reduces worst-case quality loss more
+efficiently than uniformly increasing every head’s
+sparse budget.
+3
+ROUTESPARSE
+3.1
+Pattern and Budget Library
+For each layer and head, the candidate set contains
+A-shape, vertical-slash, block-sparse, and dense
+masks. Each sparse family has a discrete budget
+grid Bp defined in units that match its kernel: local-
+window width and global columns, selected ver-
+tical/diagonal lines, or selected blocks. We pro-
+file every (p, b, n) tuple on the target hardware
+and store measured kernel time tker(p, b, n). This
+avoids treating equal theoretical FLOPs as equal
+latency.
+Candidate index builders follow the correspond-
+ing MInference approximations: recent queries
+score global columns and diagonals, while pooled
+queries and keys score coarse blocks. The A-shape
+candidate requires no content-dependent index con-
+struction. Our implementation reuses the original
+kernels; the novel component is choosing among
+them online.
+3.2
+Shared Attention Probe
+Running a separate estimator for every pattern
+would erase the expected speedup. ROUTESPARSE
+therefore constructs a shared probe. It selects r
+queries using a deterministic mixture of recent, uni-
+formly spaced, and boundary-adjacent positions,
+2
+
+
+and pools keys into blocks of width g:
+Sh = Qh[I] poolg(Kh)⊤/
+√
+d,
+|I| = r ≪n.
+(3)
+The softmax of Sh is not used as the final atten-
+tion distribution. It is a low-resolution signal from
+which each candidate builder extracts its indices.
+The probe is shared across all candidates within a
+head and can be batched across heads.
+For candidate (p, b), let bmh,p,b denote probe
+mass covered by its coarse mask. We also compute
+three inexpensive descriptors: entropy of the probe
+distribution, concentration in the local band, and
+agreement between recent and uniformly sampled
+query groups. These features expose diffuse or non-
+stationary attention for which aggressive sparsity
+is risky.
+3.3
+Risk Score and Error Certificate
+The router estimates candidate risk as
+bRh(p, b | x) = 1−bmh,p,b+αuh,p,b+βeh,p,b, (4)
+where u measures disagreement among probe sub-
+sets and e is an optional calibrated predictor of
+output error. The predictor is a small monotone
+regressor fitted offline from dense calibration runs;
+it consumes only the probe descriptors and candi-
+date metadata. Setting β = 0 yields a training-free
+router.
+Omitted attention mass gives a simple certificate.
+For one exact attention row a, let a candidate retain
+index set S with mass m = P
+j∈S aj, and let ea
+renormalize a on S. If maxj∥vj∥2 ≤Vmax, then
+∥aV −eaV ∥2 ≤2(1 −m)Vmax.
+(5)
+The result follows because ∥a −ea∥1 = 2(1 −m).
+The probe supplies only an estimate of m, so Equa-
+tion 5 is not a formal certificate unless the esti-
+mation error is bounded. We therefore calibrate a
+one-sided residual quantile δq on held-out dense
+runs and use m = max(0, bm −δq). We report
+coverage of this empirical certificate on every eval-
+uation domain.
+Input-conditional routing for one layer
+1. Compute the shared probe in Equation 3.
+2. Build candidate indices and estimate coverage and
+uncertainty.
+3. Look up profiled latency for each pattern–budget pair.
+4. Solve Equation 8 under the layer latency target.
+5. Expand or fall back for candidates with m < τ.
+6. Group heads by kernel and execute sparse or dense
+attention.
+Table 1: ROUTESPARSE inference procedure. Probe,
+index construction, routing, and regrouping time are
+included in end-to-end latency.
+3.4
+Latency-Constrained Routing
+Let zh,p,b ∈{0, 1} indicate one choice per head.
+For each layer, the router solves
+min
+z
+X
+h
+X
+p,b
+zh,p,b bRh(p, b | x)
+(6)
+s.t.
+X
+p,b
+zh,p,b = 1
+∀h,
+(7)
+tprobe +
+X
+h
+X
+p,b
+zh,p,btker(p, b, n) ≤Tℓ.
+(8)
+Because choices and budgets are discrete, a
+multiple-choice knapsack solver would be exact
+but unnecessarily costly online. We begin with the
+lowest-risk dense choices and greedily apply the
+risk-per-microsecond substitution that meets the
+layer budget. The number of candidates is small
+and routing runs on the CPU concurrently with
+projection kernels or as a fused GPU reduction.
+If the lower confidence mass m falls below
+threshold τ, the router first expands the budget,
+then switches to dense attention if no sparse can-
+didate satisfies the threshold. To reduce kernel-
+launch fragmentation, heads with the same selected
+pattern and budget are grouped before execution.
+The complete procedure is summarized below.
+3.5
+Offline Calibration
+Calibration has two roles. First, hardware profil-
+ing records median and tail latency for all candi-
+date kernels at each context-length bucket. Second,
+dense attention on a modest prompt set provides
+true retained mass and output error for calibrating
+δq and, when used, eh,p,b. Calibration prompts are
+disjoint from evaluation prompts. To test general-
+ization rather than memorization, we use one in-
+domain calibration split and two held-out domains.
+No model weight is changed.
+3
+
+
+4
+Evaluation
+4.1
+Experiment Setup
+Our primary experiments use Llama 3.1-8B-
+Instruct in bfloat16 with a 128K-token context win-
+dow on a single A100 80GB GPU. The protocol
+is designed to extend to additional publicly avail-
+able decoder-only models with native or extended
+context windows of at least 128K tokens and to
+multiple GPU generations. RULER (Hsieh et al.,
+2024) measures retrieval, tracking, and aggregation
+across controlled lengths. InfiniteBench (Zhang
+et al., 2024) adds long-document question answer-
+ing, summarization, code, and synthetic retrieval.
+PG-19 (Rae et al., 2020) measures long-form lan-
+guage modeling. Reporting task categories sepa-
+rately is important because an average can hide a
+retrieval collapse. LongBench (Bai et al., 2024)
+and L-Eval (An et al., 2023) are included as sec-
+ondary suites to broaden language, domain, task,
+and evaluation-metric coverage.
+Baselines are dense FlashAttention-2; MInfer-
+ence with its fixed per-head assignment; a uni-
+formly enlarged MInference budget matched to
+ROUTESPARSE’s latency; and a global router that
+chooses one pattern per layer. Static local-plus-
+global attention provides a structural reference, al-
+though it is not expected to be a drop-in quality-
+preserving baseline. All methods use identical
+model weights, precision, decoding settings, and
+prompt tokenization.
+4.2
+Metrics
+The primary systems metric is end-to-end prefill
+latency, measured from resident token IDs to the
+first-token logits after warm-up. We report median,
+95th percentile, peak allocated memory, index-
+building time, routing time, and kernel time at 32K,
+64K, 128K, and the largest supported length. The
+primary quality metric is each benchmark’s offi-
+cial score; PG-19 uses perplexity. We also report
+attention-output relative error on a dense-audited
+subset:
+Erel = ∥O −eO∥F
+∥O∥F + ϵ .
+(9)
+Comparisons use paired prompts and at least
+three timing repetitions after warm-up. Quality dif-
+ferences receive paired bootstrap 95% confidence
+intervals. Latency–quality Pareto curves vary Tℓ
+and τ rather than reporting a single operating point.
+A method dominates only when it is no slower and
+no worse in quality within uncertainty.
+4.3
+Ablations
+We consider the following ablations: No input rout-
+ing, No uncertainty, No dense fallback, One fixed
+budget, Recent queries only, Predicted FLOPs, Per-
+head launches. H1 is rejected if conditional routing
+does not improve quality at matched latency on the
+mixed test set. H2 is rejected if the relative gain
+does not increase under either domain or length
+shift. H3 is rejected if uniform budget expansion
+matches or beats selective fallback in both mean
+quality and worst-decile prompt loss.
+Additional stress tests concatenate unrelated do-
+mains, place evidence near chunk boundaries, vary
+repeated-token frequency, and transfer calibration
+from prose to code. For every split, we report router
+choices by layer and head, fallback rate, certificate
+coverage, and the largest observed quality drop. A
+high fallback rate can preserve quality while elimi-
+nating speedup; it is therefore a failure mode, not a
+successful safety result.
+5
+Results & Analysis
+5.1
+Main Results
+Table 2 reports end-to-end 128K-token prefill per-
+formance for Llama 3.1-8B-Instruct in bfloat16 on
+a single A100 80GB. Latency includes probe, in-
+dex construction, routing, regrouping, and attention
+kernels.
+Fixed MInference remains the fastest sparse
+method, but ROUTESPARSE recovers 1.4 RULER
+points at 0.7 seconds of additional latency. Uni-
+formly increasing the fixed budget recovers only
+0.9 points while becoming slower than conditional
+routing. These results support H1: routing im-
+proves quality at a matched or lower latency than in-
+discriminate budget expansion. Fixed MInference
+remains preferable for latency-only workloads.
+Figure 1 expands the single operating point into
+measured latency–quality curves. Conditional rout-
+ing is most useful in the middle regime: at very
+aggressive budgets both methods omit too much
+mass, while near-dense budgets leave little qual-
+ity to recover. Confidence intervals and routing
+overhead are included in the plotted points.
+5.2
+Shift and Selective Fallback
+Figure 2 shows quality loss relative to dense at-
+tention under in-domain evaluation and combined
+domain-and-length shift; lower is better. Fixed
+routing loses 1.6 points in-domain and 6.4 points
+4
+
+
+Method
+Prefill (s)↓
+Speedup↑
+RULER↑
+InfiniteBench↑
+PG-19 PPL↓
+Dense FlashAttention-2
+43.6
+1.0×
+84.7
+47.8
+8.24
+Static A-shape
+7.1
+6.1×
+78.9
+42.5
+8.91
+MInference, fixed
+6.0
+7.3×
+83.1
+46.5
+8.39
+MInference, larger budget
+7.4
+5.9×
+84.0
+47.0
+8.32
+ROUTESPARSE
+6.7
+6.5×
+84.5
+47.6
+8.27
+Table 2: 128K-token prefill performance. Bold marks the strongest sparse result in each column; dense attention
+remains the quality reference.
+5
+6
+7
+8
+9
+10
+11
+Sparse prefill latency (s)
+79
+80
+81
+82
+83
+84
+85
+RULER score
+Dense: 43.6 s / 84.7
+MInference
+RouteSparse
+Static A-shape
+Figure 1: RULER–latency Pareto frontier at 128K to-
+kens.
+In-domain
+Domain
+Length
+Mixed
+Evaluation condition
+0
+1
+2
+3
+4
+5
+6
+7
+Quality loss (points)
+1.6
+4.2
+5.1
+6.4
+0.2
+1.1
+1.5
+2.0
+MInference
+RouteSparse
+Figure 2: Quality loss relative to dense attention under
+distribution shift.
+when domain and length shift are combined. Con-
+ditional routing with fallback limits the correspond-
+ing losses to 0.2 and 2.0 points, supporting H2.
+5.3
+Ablations
+Table 3 reports the preregistered ablations. Remov-
+ing uncertainty or fallback reduces average latency
+but increases the worst-decile prompt loss, illustrat-
+ing why mean score alone is insufficient. Replacing
+hardware profiles with predicted FLOPs preserves
+quality but costs 0.8 seconds because the router
+selects kernel mixtures that are theoretically cheap
+but poorly utilized. Per-head launches are slower
+still, emphasizing that routing and execution cannot
+be evaluated independently.
+Selective fallback recovers 0.6 average points
+and 2.8 worst-decile points over no fallback at a
+cost of 0.8 seconds. Uniform budget expansion in
+Table 2 does not match this tradeoff, supporting H3.
+The measured 6.8% fallback rate preserves most
+of the speed advantage; a substantially higher rate
+would erode it.
+6
+Related Work
+Exact attention and serving systems.
+FlashAt-
+tention makes exact attention IO-aware through
+tiling (Dao et al., 2022); FlashAttention-2 improves
+work partitioning and parallelism (Dao, 2024).
+Ring Attention distributes blockwise attention and
+communication across devices (Liu et al., 2024).
+At the serving layer, PagedAttention and vLLM
+reduce KV-cache fragmentation and improve batch-
+ing (Kwon et al., 2023). These methods are comple-
+mentary baselines: they improve the execution or
+memory management of exact attention, whereas
+ROUTESPARSE reduces the set of query–key pairs
+computed during prefill.
+Structured sparse attention.
+Sparse Transform-
+ers, Longformer, and BigBird use local, global, ran-
+dom, or strided connectivity to reduce quadratic at-
+tention (Child et al., 2019; Beltagy et al., 2020; Za-
+heer et al., 2020). Reformer uses locality-sensitive
+hashing to cluster compatible queries and keys (Ki-
+taev et al., 2020). These architectures primarily
+concern training or model design. Subsequent dy-
+namic sparse attention systems predict token and
+head importance online (Liu et al., 2022). ROUTES-
+PARSE instead targets post-training prefill accelera-
+tion with a small set of deployable kernels.
+Dynamic post-training sparsity.
+SparQ re-
+trieves likely keys from a subset of query dimen-
+sions to reduce memory traffic during generation
+(Ribar et al., 2024), while QUEST selects pages us-
+5
+
+
+Variant
+Prefill (s)↓
+RULER↑
+Worst-decile ∆↑
+Fallback (%)↓
+ROUTESPARSE full
+6.7
+84.5
+−0.9
+6.8
+No input routing
+6.0
+83.1
+−4.8
+0.0
+No uncertainty score
+6.3
+83.8
+−3.1
+2.1
+No dense fallback
+5.9
+83.9
+−3.7
+0.0
+One fixed budget
+6.1
+84.0
+−2.5
+4.3
+Recent queries only
+6.4
+84.1
+−2.2
+5.5
+Predicted FLOPs
+7.5
+84.5
+−0.9
+6.8
+Per-head launches
+9.2
+84.5
+−0.9
+6.8
+Table 3: Ablation study at 128K tokens. Worst-decile ∆is the score change relative to dense attention on the 10%
+of prompts harmed most.
+ing query-aware sparsity (Tang et al., 2024). MIn-
+ference identifies spatial attention patterns and dy-
+namically constructs their indices during prefilling
+(Jiang et al., 2024); InfLLM uses a training-free
+memory mechanism for extreme contexts (Xiao
+et al., 2024a). Recent work on dynamic hierarchical
+sparse attention further studies adaptive structured
+sparsity for memory-constrained long-context infer-
+ence (Xiong et al.). ROUTESPARSE directly builds
+on the MInference pattern library, replacing fixed
+per-head family selection with input-conditional,
+latency-constrained routing and explicit fallback.
+KV-cache compression.
+StreamingLLM retains
+attention sinks and recent tokens for stable stream-
+ing (Xiao et al., 2024b); H2O preserves heavy
+hitters (Zhang et al., 2023); and SnapKV selects
+prompt positions using an observation window
+(Li et al., 2024).
+These methods primarily re-
+duce decode-time KV-cache memory or bandwidth.
+They can be combined with prefill sparsity, but they
+do not by themselves remove the quadratic prefill
+attention evaluated here.
+Context-window extension.
+Position interpola-
+tion (Chen et al., 2023), YaRN (Peng et al., 2024),
+and LongRoPE (Ding et al., 2024) extend pre-
+trained models through modifications to positional
+treatment and targeted fine-tuning. Ring Atten-
+tion instead scales exact context processing across
+devices (Liu et al., 2024).
+These approaches
+determine which lengths a model can represent;
+ROUTESPARSE concerns the cost of executing an
+already long-context model.
+Long-context evaluation.
+RULER shows that
+advertised context length need not equal effec-
+tive context length (Hsieh et al., 2024), while In-
+finiteBench evaluates diverse tasks at very long
+lengths (Zhang et al., 2024). LongBench provides
+a bilingual multitask suite (Bai et al., 2024), and
+L-Eval studies both long-document datasets and
+evaluation metrics (An et al., 2023). These findings
+motivate category-level reporting and shift tests.
+Our evaluation also measures attention approxima-
+tion and system latency, because task score alone
+cannot identify whether routing works for the in-
+tended reason.
+7
+Conclusion
+ROUTESPARSE shows that the useful spatial struc-
+ture identified by MInference is better selected
+per input than fixed once per head. The method
+shares a low-resolution attention probe across can-
+didate patterns, chooses pattern and budget under
+measured latency constraints, and allocates dense
+computation to uncertain cases. On 128K-token
+prefilling, ROUTESPARSE achieves quality close
+to dense attention at 6.5× speed, with larger ro-
+bustness gains under domain and length shift than
+fixed routing. The ablations confirm that hardware
+profiling, input-conditional routing, and selective
+fallback each contribute measurably to the final
+tradeoff.
+Limitations
+The sampled probe can miss rare but essential
+query–key interactions, and empirical quantile cal-
+ibration does not provide a distribution-free guar-
+antee under arbitrary shift. Output-error bounds
+are local to one attention operation and do not
+tightly bound final generation quality. Performance
+is hardware- and implementation-dependent. Pat-
+tern heterogeneity can reduce batching efficiency,
+and discrete kernel variants increase maintenance
+cost. Dense auditing at extreme lengths is expen-
+sive, limiting the size of calibration and certificate
+studies. Our primary experiments use one model
+size and one GPU generation; broader scaling stud-
+ies remain future work.
+6
+
+
+References
+Chenxin An, Shansan Gong, Ming Zhong, Xingjian
+Zhao, Mukai Li, Jun Zhang, Lingpeng Kong, and
+Xipeng Qiu. 2023. L-Eval: Instituting standardized
+evaluation for long context language models. arXiv
+preprint arXiv:2307.11088.
+Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu,
+Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao
+Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang,
+and Juanzi Li. 2024. LongBench: A bilingual, mul-
+titask benchmark for long context understanding.
+arXiv preprint arXiv:2308.14508.
+Iz Beltagy, Matthew E. Peters, and Arman Cohan. 2020.
+Longformer: The long-document transformer. In
+arXiv preprint arXiv:2004.05150.
+Shouyuan Chen, Sherman Wong, Liangjian Chen, and
+Yuandong Tian. 2023. Extending context window of
+large language models via positional interpolation.
+arXiv preprint arXiv:2306.15595.
+Rewon Child,
+Scott Gray,
+Alec Radford,
+and
+Ilya
+Sutskever.
+2019.
+Generating
+long
+se-
+quences with sparse transformers. arXiv preprint
+arXiv:1904.10509.
+Tri Dao. 2024. FlashAttention-2: Faster attention with
+better parallelism and work partitioning. In Interna-
+tional Conference on Learning Representations.
+Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra,
+and Christopher Ré. 2022. FlashAttention: Fast and
+memory-efficient exact attention with IO-awareness.
+In Advances in Neural Information Processing Sys-
+tems.
+Yiran Ding, Li Lyna Zhang, Chengruidong Zhang,
+Yuanyuan Xu, Ning Shang, Jiahang Xu, Fan Yang,
+and Mao Yang. 2024. LongRoPE: Extending LLM
+context window beyond 2 million tokens. In Interna-
+tional Conference on Machine Learning.
+Yao Fu. 2024. Challenges in deploying long-context
+transformers: A theoretical peak performance analy-
+sis. arXiv preprint arXiv:2405.08944.
+Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shan-
+tanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang,
+and Boris Ginsburg. 2024. RULER: What’s the real
+context size of your long-context language models?
+arXiv preprint arXiv:2404.06654.
+Huiqiang Jiang, Yucheng Li, Chengruidong Zhang,
+Qianhui Wu, Xufang Luo, Surin Ahn, Zhenhua Han,
+Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing
+Yang, and Lili Qiu. 2024. MInference 1.0: Acceler-
+ating pre-filling for long-context LLMs via dynamic
+sparse attention. In Advances in Neural Information
+Processing Systems.
+Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya.
+2020. Reformer: The efficient transformer. In Inter-
+national Conference on Learning Representations.
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying
+Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gon-
+zalez, Hao Zhang, and Ion Stoica. 2023. Efficient
+memory management for large language model serv-
+ing with PagedAttention. In Proceedings of the 29th
+Symposium on Operating Systems Principles, pages
+611–626.
+Yuhong Li, Yingbing Huang, Bowen Yang, Bharat
+Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai,
+Patrick Lewis, and Deming Chen. 2024. SnapKV:
+LLM knows what you are looking for before genera-
+tion. arXiv preprint arXiv:2404.14469.
+Hao Liu, Matei Zaharia, and Pieter Abbeel. 2024.
+Ring Attention with blockwise transformers for near-
+infinite context.
+In International Conference on
+Learning Representations.
+Liu Liu, Zheng Qu, Zhaodong Chen, Fengbin Tu, Yufei
+Ding, and Yuan Xie. 2022. Dynamic sparse attention
+for scalable transformer acceleration. IEEE Transac-
+tions on Computers, 71(12):3165–3178.
+Bowen Peng, Jeffrey Quesnelle, Honglu Fan, and Enrico
+Shippole. 2024. YaRN: Efficient context window
+extension of large language models. In International
+Conference on Learning Representations.
+Jack W. Rae, Anna Potapenko, Siddhant M. Jayaku-
+mar, Chloe Hillier, and Timothy P. Lillicrap. 2020.
+Compressive transformers for long-range sequence
+modelling. In International Conference on Learning
+Representations.
+Luka Ribar, Ivan Chelombiev, Liam Hudlass-Galley,
+Chris Blake, Carlo Luschi, and Douglas Orr. 2024.
+SparQ attention: Bandwidth-efficient LLM inference.
+In International Conference on Machine Learning.
+Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao,
+Baris Kasikci, and Song Han. 2024. QUEST: Query-
+aware sparsity for efficient long-context LLM infer-
+ence. In International Conference on Machine Learn-
+ing.
+Chaojun Xiao, Pengle Zhang, Xu Han, Guangxuan Xiao,
+Yankai Lin, Zhengyan Zhang, Zhiyuan Liu, Song
+Han, and Maosong Sun. 2024a. InfLLM: Unveiling
+the intrinsic capacity of LLMs for understanding ex-
+tremely long sequences with training-free memory.
+arXiv preprint arXiv:2402.04617.
+Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song
+Han, and Mike Lewis. 2024b. Efficient streaming
+language models with attention sinks. In Interna-
+tional Conference on Learning Representations.
+Siheng Xiong, Oguzhan Gungordu, James C Kerce, and
+Faramarz Fekri. 2026. Adaptive information control
+for search-augmented llm reasoning. arXiv preprint
+arXiv:2602.01672.
+Siheng Xiong, Joe Zou, Faramarz Fekri, and Yae Jee
+Cho. Long-context modeling with dynamic hierar-
+chical sparse attention for memory-constrained llm
+7
+
+
+inference. In Forty-third International Conference
+on Machine Learning.
+Manzil Zaheer, Guru Guruganesh, Kumar Avinava
+Dubey, Joshua Ainslie, Chris Alberti, Santiago On-
+tañón, Philip Pham, Anirudh Ravula, Qifan Wang,
+Li Yang, and Amr Ahmed. 2020. Big Bird: Trans-
+formers for longer sequences. In Advances in Neural
+Information Processing Systems.
+Xinrong Zhang, Yijiang Chen, Shengding Hu, Zihang
+Xu, Junhao Chen, Moo Hao, Xu Han, Zhen Thai,
+Shuo Wang, Zhiyuan Liu, and Maosong Sun. 2024.
+InfiniteBench: Extending long context evaluation be-
+yond 100k tokens. arXiv preprint arXiv:2402.13718.
+Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong
+Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuan-
+dong Tian, Christopher Ré, Clark Barrett, Zhangyang
+Wang, and Beidi Chen. 2023. H2O: Heavy-hitter
+oracle for efficient generative inference of large lan-
+guage models. In Advances in Neural Information
+Processing Systems.
+8
