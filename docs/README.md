@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-03</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-04</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-03 19:13:15 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-04 18:42:39 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成16篇论文筛选：5篇精读、11篇速读，聚焦AI学习、推理调度与系统优化。</p>
-<p>最值得关注的是异步P2P知识蒸馏的收敛理论，以及面向共享GPU的并发异构AI推理运行时调度。</p>
-<p>普通读者可优先了解“如何让AI协作学习更稳定、让多模型共享GPU更高效”这两条主线。</p>
+<p>今日完成 17 篇论文筛选与分层阅读，其中 6 篇精读、11 篇速读，聚焦 AI 系统与大模型训练效率。</p>
+<p>最值得关注的是自动化多 GPU 并行的 Einsummable，以及面向 LLM 训练的通信高效批感知序列并行 BASP。</p>
+<p>建议先阅读这两篇精读论文了解并行计算趋势，再按兴趣浏览 SoC 算子并行与长程 Agent 上下文组装方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Convergence Theory of Knowledge Distillation in Asynchronous P2P Gossip Learning Network">Convergence Theory of Knowledge Distillation in Asynchronous P2P Gossip Learning Network</span></li><li><span class="dpr-home-dashboard-paper-title" title="MeanField Surrogate Modeling for Scalable Runtime Scheduling of Concurrent Heterogeneous AI Inference on Shared GPUs">MeanField Surrogate Modeling for Scalable Runtime Scheduling of Concurrent Heterogeneous AI Inference on Shared GPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="RouteSparse: Input-Conditional Pattern Routing for Budgeted Long-Context Prefilling">RouteSparse: Input-Conditional Pattern Routing for Budgeted Long-Context Prefilling</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Every Kernel Is a Join: Automatic Multi-GPU Parallelism for AI Computations in Einsummable">Every Kernel Is a Join: Automatic Multi-GPU Parallelism for AI Computations in Einsummable</span></li><li><span class="dpr-home-dashboard-paper-title" title="BASP: Communication-Efficient Batch-Aware Sequence Parallelism for LLM Training">BASP: Communication-Efficient Batch-Aware Sequence Parallelism for LLM Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Latency-Aware Orchestration for Multi-Agent LLM Workflows on Heterogeneous GPUs">Latency-Aware Orchestration for Multi-Agent LLM Workflows on Heterogeneous GPUs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Compositional Online Learning for Semantic Data Processing Systems">Compositional Online Learning for Semantic Data Processing Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Minimizing Grid Interconnection Capacity Requirements for AI Data Centers: A Developer-Side Planning Framework with Onsite Resources and Workload Flexibility">Minimizing Grid Interconnection Capacity Requirements for AI Data Centers: A Developer-Side Planning Framework with Onsite Resources and Workload Flexibility</span></li><li><span class="dpr-home-dashboard-paper-title" title="CHIPSMORE: Compute-in-Interconnect and -Memory Chiplets for Multi-Mode Multi-Request LLM Inference Acceleration">CHIPSMORE: Compute-in-Interconnect and -Memory Chiplets for Multi-Mode Multi-Request LLM Inference Acceleration</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Para-Pipe: Exploiting Hierarchical Operator Parallelism of ML Computational Graphs on SoCs">Para-Pipe: Exploiting Hierarchical Operator Parallelism of ML Computational Graphs on SoCs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents">ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="D-FROST: Decentralized Federated pRompt-tuning via Optimal tranSporT for Non-IID and Imbalanced Data">D-FROST: Decentralized Federated pRompt-tuning via Optimal tranSporT for Non-IID and Imbalanced Data</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
