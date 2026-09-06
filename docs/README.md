@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-04</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-06</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-04 18:42:39 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-06 19:20:04 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成 17 篇论文筛选与分层阅读，其中 6 篇精读、11 篇速读，聚焦 AI 系统与大模型训练效率。</p>
-<p>最值得关注的是自动化多 GPU 并行的 Einsummable，以及面向 LLM 训练的通信高效批感知序列并行 BASP。</p>
-<p>建议先阅读这两篇精读论文了解并行计算趋势，再按兴趣浏览 SoC 算子并行与长程 Agent 上下文组装方向。</p>
+<p>今日精选 13 篇前沿论文，聚焦跨模型推理缓存复用与高效图神经网络加速。</p>
+<p>最值得关注的是通用 KV Context 共享层（9.0）和自适应内核执行的 GCN 分区方案（8.0），共同指向更低成本、更高吞吐的 AI 推理与训练。</p>
+<p>普通读者可先精读两篇高分论文，再按兴趣延伸至联邦强化学习、零样本模型路由和协作学习综述。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Every Kernel Is a Join: Automatic Multi-GPU Parallelism for AI Computations in Einsummable">Every Kernel Is a Join: Automatic Multi-GPU Parallelism for AI Computations in Einsummable</span></li><li><span class="dpr-home-dashboard-paper-title" title="BASP: Communication-Efficient Batch-Aware Sequence Parallelism for LLM Training">BASP: Communication-Efficient Batch-Aware Sequence Parallelism for LLM Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Latency-Aware Orchestration for Multi-Agent LLM Workflows on Heterogeneous GPUs">Latency-Aware Orchestration for Multi-Agent LLM Workflows on Heterogeneous GPUs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="A Universal Context-Reuse Layer for Cross-Model KV Sharing">A Universal Context-Reuse Layer for Cross-Model KV Sharing</span></li><li><span class="dpr-home-dashboard-paper-title" title="Dual-Metric Partitioning with Adaptive Kernel Execution for Efficient GCN Acceleration">Dual-Metric Partitioning with Adaptive Kernel Execution for Efficient GCN Acceleration</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Para-Pipe: Exploiting Hierarchical Operator Parallelism of ML Computational Graphs on SoCs">Para-Pipe: Exploiting Hierarchical Operator Parallelism of ML Computational Graphs on SoCs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents">ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="D-FROST: Decentralized Federated pRompt-tuning via Optimal tranSporT for Non-IID and Imbalanced Data">D-FROST: Decentralized Federated pRompt-tuning via Optimal tranSporT for Non-IID and Imbalanced Data</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Provably Efficient Federated Reinforcement Learning with Linear Function Approximation and Logarithmic Communication Cost">Provably Efficient Federated Reinforcement Learning with Linear Function Approximation and Logarithmic Communication Cost</span></li><li><span class="dpr-home-dashboard-paper-title" title="SCX Router: Streaming Zero-Shot Model Selection with a Decoder-KV Classifier and a Real-World Task Ontology">SCX Router: Streaming Zero-Shot Model Selection with a Decoder-KV Classifier and a Real-World Task Ontology</span></li><li><span class="dpr-home-dashboard-paper-title" title="From Euclidean to Graph-Structured Data: A Survey of Collaborative Learning">From Euclidean to Graph-Structured Data: A Survey of Collaborative Learning</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
