@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-06</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-07</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-06 19:20:04 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-07 19:48:12 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选 13 篇前沿论文，聚焦跨模型推理缓存复用与高效图神经网络加速。</p>
-<p>最值得关注的是通用 KV Context 共享层（9.0）和自适应内核执行的 GCN 分区方案（8.0），共同指向更低成本、更高吞吐的 AI 推理与训练。</p>
-<p>普通读者可先精读两篇高分论文，再按兴趣延伸至联邦强化学习、零样本模型路由和协作学习综述。</p>
+<p>今日完成 17 篇论文推荐，精读 6 篇、速读 11 篇，聚焦 AI 集群、复合工作流与高效推理。</p>
+<p>最值得关注的是通过集群协同缓解共享 AI 资源拥塞，以及在异构集群上优化复合 AI 工作流部署。</p>
+<p>建议普通读者优先阅读这两个方向，先理解 AI 系统如何提升资源利用率与部署效率。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="A Universal Context-Reuse Layer for Cross-Model KV Sharing">A Universal Context-Reuse Layer for Cross-Model KV Sharing</span></li><li><span class="dpr-home-dashboard-paper-title" title="Dual-Metric Partitioning with Adaptive Kernel Execution for Efficient GCN Acceleration">Dual-Metric Partitioning with Adaptive Kernel Execution for Efficient GCN Acceleration</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tuning Collective Patterns to Alleviate Congestion in Shared AI Clusters">Tuning Collective Patterns to Alleviate Congestion in Shared AI Clusters</span></li><li><span class="dpr-home-dashboard-paper-title" title="Atlas: Optimizing Deployment of Compound AI Workflows on Heterogeneous Clusters">Atlas: Optimizing Deployment of Compound AI Workflows on Heterogeneous Clusters</span></li><li><span class="dpr-home-dashboard-paper-title" title="Adaptive Context Parallelism for Production LLM Serving">Adaptive Context Parallelism for Production LLM Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Provably Efficient Federated Reinforcement Learning with Linear Function Approximation and Logarithmic Communication Cost">Provably Efficient Federated Reinforcement Learning with Linear Function Approximation and Logarithmic Communication Cost</span></li><li><span class="dpr-home-dashboard-paper-title" title="SCX Router: Streaming Zero-Shot Model Selection with a Decoder-KV Classifier and a Real-World Task Ontology">SCX Router: Streaming Zero-Shot Model Selection with a Decoder-KV Classifier and a Real-World Task Ontology</span></li><li><span class="dpr-home-dashboard-paper-title" title="From Euclidean to Graph-Structured Data: A Survey of Collaborative Learning">From Euclidean to Graph-Structured Data: A Survey of Collaborative Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Cache-Aware Joint Router Adaptation for Memory-Efficient MoE Inference">Cache-Aware Joint Router Adaptation for Memory-Efficient MoE Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Task-oriented Framework for Communication-Efficient Federated Learning: From Isolated Optimization to Holistic Synergy">Task-oriented Framework for Communication-Efficient Federated Learning: From Isolated Optimization to Holistic Synergy</span></li><li><span class="dpr-home-dashboard-paper-title" title="Bandits in Prod: Hyperparameter Optimization at Inference Time">Bandits in Prod: Hyperparameter Optimization at Inference Time</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
