@@ -1,0 +1,1443 @@
+CIERA: Cross-Iteration Exponent Reuse for
+Lossless Allgather in Sharded MoE Training
+Ali Zafar Sadiq
+University of Virginia
+mzw2cu@virginia.edu
+Haiying Shen
+University of Virginia
+hs6ms@virginia.edu
+Masahiro Tanaka
+Anyscale
+mtanaka@anyscale.com
+September 7, 2026
+Abstract
+In training Mixture-of-Experts (MoE) models, sharded data parallelism
+partitions each expert’s parameters across GPUs, requiring an Allgather
+operation to reconstruct the full weight matrix before each layer exe-
+cutes. This communication often dominates iteration time. Prior work
+often reduces this overhead using lossy compression methods that sacrifice
+numerical fidelity, while existing lossless methods do not exploit cross-
+iteration exponent stability. In this paper, we propose Cross-Iteration
+Exponent Reuse Allgather (CIERA), a lossless, system-aware communi-
+cation method for sharded MoE training. We observe that after a brief
+warmup phase, the exponent values of most weights remain unchanged
+across iterations. Based on this, we cache exponents locally and transmit
+only the sign and mantissa when exponents are unchanged. The receiver
+reconstructs the original weights exactly by combining the cached expo-
+nents with the received data. Since parameter matrices vary in shape
+across layers, compression is applied only when it yields net time savings.
+Moreover, the compression operation is overlapped with both Allgather
+communication and computation. Our real experiments and large-scale
+trace-driven simulator show that on OLMoE-1B-7B at 16 GPUs, CIERA
+achieves a 3.70× speedup over the lossless baseline and 3.68× over the lossy
+baseline, projected to reach 4.28× and 4.42× respectively at 128 GPUs,
+while preserving bitwise-exact parameter reconstruction in all evaluated
+runs.
+1
+Introduction
+Large Language Models (LLMs) [1, 2] have become increasingly popular for
+natural language processing applications such as universal chatbots. As model
+sizes scale, training these models imposes substantial computational demands.
+1
+arXiv:2609.04609v1  [cs.DC]  4 Sep 2026
+
+
+Mixture-of-Experts (MoE) architectures alleviate this overhead by introducing
+sparsity, activating only a small subset of specialized sub-models (experts) per
+input token while maintaining model quality [2].
+Recent fine-grained MoE
+designs, such as the DeepSeek series, push this idea further by employing many
+smaller experts, enabling near-trillion-parameter training without a proportional
+increase in computational overhead [3, 4].
+However, while sparsity reduces computation and improves scalability, it
+introduces additional communication overhead during training. To distribute a
+large MoE model across multiple GPUs, sharded data parallelism [5, 6] partitions
+each expert’s parameters across GPUs. This design keeps tokens local but
+requires Allgather communication to reassemble weights before computation
+in the forward pass and aggregates gradients in the backward pass. However,
+Allgather communication becomes a critical bottleneck in MoE because of its
+low computation-to-communication ratio, which leaves insufficient computation
+to overlap and hide communication latency.
+To reduce communication overhead in sharded data parallelism, methods
+such as ZeRO++ [7] compress weights using block-based quantization, where
+a block is a small subset of a parameter tensor [8]. Each block is quantized
+independently with its own scale and rounding factors, making the quantization
+inherently lossy. gZCCL [9] compresses data by approximating values within
+a chosen error bound and encoding the approximated values more compactly
+before transfer, followed by decompression upon receipt. However, these lossy
+compression methods introduce numerical error between the original values
+and the re-constructed ones, degrading training accuracy. On the other hand,
+lossless methods [10] insert compression and decompression into communication
+operations, which can slow training [11].
+To address these problems, we propose Cross-Iteration Exponent Reuse
+Allgather (CIERA), a lossless Allgather method for sharded MoE training,
+motivated by our observations below:
+O1: Allgather accounts for 51.8–69.0% of communication time.
+O2: At least 99% of weights retain unchanged exponents across iterations after a
+brief warmup.
+O3: Block change rates vary substantially across shard types (attention and
+routing-gate shards change nearly every iteration, layer norm is consistently
+stable, and expert Feed-Forward Network (FFN) is stable for some models
+such as OLMoE but less so for others), and synchronous exponent checking on
+the critical path costs 25–30% of iteration time.
+CIERA consists of three components. First, exponent reuse based com-
+pression splits each weight into exponent, sign, and mantissa, caches the
+exponent, and sends only sign and mantissa when the exponent is unchanged.
+Second, benefit-driven selective compression compresses weights only for
+shard types where the expected communication savings exceed the compression
+overhead. Third, computation-communication pipelining schedules expo-
+nent checking and compression early so they run during preceding compute or
+communication, and overlaps receiver-side decompression with Allgather.
+We implement CIERA on top of ZeRO-3 [12] and evaluate it on up to 16
+2
+
+
+A100 GPUs across six MoE models in BF16 and FP16, achieving 3.70× speedup
+over ZeRO-3 (lossless) and 3.68× over ZeRO++ (lossy) on OLMoE-1B-7B at 16
+GPUs while preserving bitwise-exact parameter reconstruction in all evaluated
+runs.
+Contributions. First, we empirically characterize the Allgather bottleneck and
+exponent stability in sharded MoE training across multiple MoE models. Second,
+we present CIERA, a lossless, system-aware communication method that selec-
+tively compresses only profitable shards and overlaps most compress/decompress
+work with compute and communication via FX-graph scheduling, leaving only
+a short decompress on the critical path. Third, we evaluate CIERA against
+ZeRO-3, FSDP, and ZeRO++ on six MoE models in BF16 and FP16, and verify
+bitwise-exact parameter reconstruction on OLMoE-1B-7B.
+2
+Motivation and Observations
+We run all experiments on a single server with 4 NVIDIA A100-80GB SXM
+GPUs interconnected via NVLink 3.0 with NVSwitch, providing 600 GB/s
+bidirectional bandwidth per GPU. The server uses CUDA 12.4, PyTorch 2.7.0,
+and DeepSpeed 0.17.2. Unless otherwise stated, all runs use BF16 precision
+and the Adam optimizer [13] with the AG News [14] training dataset and a
+learning rate (LR) of 10−4. We use the following four MoE models: OLMoE-1B-
+7B [15] (64 experts per layer), DeepSeek-MoE-16B [4] (64 fine-grained experts),
+MiniCPM-MoE-8×2B [16] (8 experts per layer), and Qwen2-57B-A14B [17]
+(28 fine-grained experts). We run 30 warmup iterations, then 1000 subsequent
+iterations, and report the average iteration time over those 1000 steady-state
+iterations.
+2.1
+Allgather Bottleneck
+MiniCPM
+8x2B
+DeepSeek
+MoE-16B
+OLMoE
+1B-7B
+Qwen2
+57B-A14B
+0
+25
+50
+75
+100
+% of communication time
+58.7%
+55.3%
+51.8%
+69.0%
+Allgather
+ReduceScatter + other
+Figure 1: Allgather share of com-
+munication time.
+The Allgather operation is a significant com-
+munication bottleneck in sharded MoE train-
+ing.
+Under ZeRO-3 sharding, each weight
+matrix W is partitioned across GPUs and re-
+assembled on demand by an Allgather before
+each forward and backward layer [18, 19].
+Sharded data parallelism has two commu-
+nication phases every iteration: (1) Allgather, which reconstructs the full parame-
+ters from shards during the forward and backward passes, and (2) ReduceScatter,
+which aggregates gradients after the backward pass. Figure 1 quantifies these
+time overheads across four MoE models with BF16, L=4, and S=1024, where L
+denotes the number of layers and S denotes sequence length. The figure breaks
+down profiled GPU time into Allgather, ReduceScatter, and the other commu-
+nication operations, including AllReduce for gradient updates and layer-wise
+synchronization. Allgather accounts for 51.8–69.0% of total communication time.
+3
+
+
+Observation 1 Allgather becomes a dominant bottleneck in sharded MoE train-
+ing especially for large models (Figure 1).
+2.2
+Exponent Stability
+0
+200
+400
+600
+800
+1000
+Iteration
+0.1
+0.2
+0.3
+0.4
+Exponents changed (%)
+OLMoE
+DeepSeek
+MiniCPM
+(a) LR = 10−5
+0
+200
+400
+600
+800
+1000
+Iteration
+0
+1
+2
+3
+Exponents changed (%)
+OLMoE
+DeepSeek
+MiniCPM
+(b) LR = 10−4
+Figure 2: Exponent change rate during training.
+To
+check
+exponent
+sta-
+bility,
+we train OLMoE-
+1B-7B, DeepSeek-MoE-16B,
+and MiniCPM-MoE-8×2B
+with learning rates {10−5,
+10−4} and track exponent
+changes at every iteration,
+as shown in Figure 2. At iteration t, we extract the floating-point exponent field
+of each individual weight value in the weight matrices and compare it with that in
+iteration t−1. Fig. 2a shows the exponent change rate over 1000 iterations, which
+is the fraction of weight values whose exponent changes between two consecutive
+iterations. Across all three models, after the first 30 iterations of warmup, at
+least 99% of exponent values remain unchanged from one iteration to the next.
+Across three models, the exponent change rate stays very low. With LR=10−5,
+it averages 0.04% to 0.11% over 1000 iterations and falls to 0.04% to 0.06% by
+iteration 1000. Moreover, at LR=10−4, it averages 0.30% to 0.51% and falls to
+0.19% to 0.41% by iteration 1000.
+To check if the same results hold for other training datasets, we used the
+OpenWebText pretraining corpus [20]. Here, we observe post-warmup mean expo-
+nent change rates of 0.93% (OLMoE), 0.44% (DeepSeek), and 0.62% (MiniCPM)
+at LR=10−4.
+Observation 2 After the first 30 iterations of warmup, at least 99% of exponent
+values remain unchanged between consecutive iterations (Figure 2).
+2.3
+Shard-Level vs. Block-Level Exponent Reuse
+5
+10
+15
+20
+25
+30
+World size (W)
+60
+70
+80
+90
+100
+Shard change rate (%)
+OLMoE
+MiniCPM
+DeepSeek
+(a) Shard change rate.
+200
+400
+600
+800
+1000
+Block size (B)
+0
+20
+40
+60
+Block change rate (%)
+OLMoE
+MiniCPM
+DeepSeek
+(b) Block change rate.
+Figure 3: Shard-level and block-level exponent
+change rate.
+A ZeRO-3 shard can be
+reused only if each of its
+n≈106 exponent values stays
+unchanged.
+With
+per-
+element change rate c=0.003
+(Section
+2.2),
+a
+uniform
+per-element
+model
+gives
+Pr(shard unchanged) = (1−
+c)n ≈e−3000 ≈0. Fig. 3a
+shows the measured shard
+change rate versus the world
+size W.
+The shard/block
+change rate is the fraction
+of shards/blocks that contain at least one weight whose exponent changes be-
+tween consecutive iterations. The world size W is the number of GPUs used
+4
+
+
+for sharding, so each GPU stores 1/W of each parameter. The W=4 point is
+measured directly and the W ∈{8, 16, 32} points are projected by partitioning
+the measured per-shard exponent changes across the corresponding number of
+GPUs. After each parameter update, the shard change rate is high and nearly
+flat across world sizes, ranging from 59% for MiniCPM to 98.5% for DeepSeek.
+The fully unchanged fraction runs from about 1.5% for DeepSeek to 41% for
+MiniCPM, far above the near-zero prediction of the uniform model because
+exponent changes concentrate in a subset of shard types rather than spreading
+uniformly. The most stable shards, such as layer norms, stay entirely unchanged,
+and MiniCPM carries a larger share of these stable shards, which is why its
+shard change rate is markedly lower. Even so, most shards change every step for
+every model, so shard-level reuse leaves substantial redundancy unexploited and
+motivates the finer block-level granularity below.
+To facilitate exponent reuse, we divide each shard into fixed-size blocks of B
+weight values each. A block stays reusable with probability (1−c)B. Fig. 3b shows
+the block change rate for B∈{64, 128, 256, 512, 1024} across all three models;
+equivalently, the reuse rate (1 minus the change rate) ranges from 84–99% at
+B=64 down to 25–86% at B=1024. For MiniCPM the change rate grows slowly
+with B, while for OLMoE and DeepSeek it grows sharply.
+Observation 3 Shard-level exponent reuse is limited, as 59–99% of shards
+change each iteration. In contrast, block-level reuse is more effective, with 84–
+99% (B=64) and 25–86% (B=1024) of blocks remaining reusable across models
+(Figure 3).
+2.4
+Block Change Rate Heterogeneity Across Shards
+We group shards into five categories: expert FFN, attention, routing gate,
+layer norm, and embedding/LM head. Figure 4 shows the distribution of block
+change rate for each category at block size B=512. In OLMoE-1B-7B, expert
+FFN shards have the lowest median block change rate at 0.22. Attention and
+routing shards show much higher medians of 0.96 and 0.94, while layer norm and
+embedding/LM head shards fall in between at 0.64-0.65. In DeepSeek-MoE-16B
+and MiniCPM-MoE-8×2B, layer norm is the most stable category (medians 0.00
+and 0.13), while attention, routing-gate, and expert FFN medians sit in the
+0.66–0.84 range, leaving only the layer-norm shards reliably reusable.
+Observation 4 Block change rates vary widely across shard types within a
+model: layer norm is consistently the most stable, while expert FFN is highly
+stable for OLMoE but less stable for some other models, and attention and
+routing-gate shards have the highest change rates, so benefits from exponent reuse
+vary by shard type (Figure 4).
+2.5
+Time Overhead
+5
+
+
+Expert
+FFN
+Attn
+Q/K/V/O
+Routing
+Gate
+Layer
+Norm
+Embed/
+LM Head
+Shard type
+0.00
+0.25
+0.50
+0.75
+1.00
+Block change rate
+0.22
+0.96
+0.94
+0.65
+0.64
+OLMoE
+(a) OLMoE-1B-7B
+Expert
+FFN
+Attn
+Q/K/V/O
+Routing
+Gate
+Layer
+Norm
+Embed/
+LM Head
+Shard type
+0.00
+0.25
+0.50
+0.75
+1.00
+Block change rate
+0.66
+0.84
+0.81
+0.00
+0.48
+DeepSeek
+(b) DeepSeek-MoE-16B
+Expert
+FFN
+Attn
+Q/K/V/O
+Routing
+Gate
+Layer
+Norm
+Embed/
+LM Head
+Shard type
+0.00
+0.25
+0.50
+0.75
+1.00
+Block change rate
+0.80
+0.80
+0.88
+0.13
+0.66
+MiniCPM
+(c) MiniCPM-MoE-8×2B
+Figure 4: Block change rate.
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+Check interval (iterations)
+5
+10
+15
+20
+25
+30
+Exponent check
+time fraction (%)
+OLMoE
+DeepSeek
+MiniCPM
+(a) Exponent check
+time fraction
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+Check interval (iterations)
+1
+2
+3
+4
+Parameters with
+exponent change (%)
+OLMoE
+DeepSeek
+MiniCPM
+(b)
+Exponent
+change
+rate
+Figure 5: Exponent check time and fraction of
+exponents that changed between checks.
+We measure the runtime over-
+head of exponent checking by
+running it on the same CUDA
+stream as training computation,
+without overlapping it with for-
+ward, backward, or communi-
+cation operations. We measure
+the exponent check time frac-
+tion in the iteration time includ-
+ing the check time. Check interval denotes the number of iterations between
+successive exponent change checks. Figure 5(a) shows the exponent check time
+fraction for all three models. Checking every iteration adds 25–30% overhead
+on average, while checking every 10 iterations reduces the overhead to 3–4%.
+Figure 5(b) shows that with interval 1, only 0.3–0.7% of exponents change on
+average.
+Observation 5 When the exponent check is performed every iteration without
+operation overlap, exponent checking incurs a 25–30% time overhead (Figure 5).
+3
+System Design
+Benefit-driven
+Selection (BSC)
+Rank shards by benefit
+Exponent Reuse
+(ER)
+Send only changed exponents
+selected shards
+Computation–Communication Pipelining (CCP)
+FX graph rewrite that overlaps compress /
+decompress with adjacent compute and communication
+scheduled / overlapped via CCP
+Figure 6: Architecture overview of
+CIERA.
+Based on our observations from Section 2,
+we design three key components, as illus-
+trated in Figure 6. As shown in Figure 6,
+after model initialization and warmup,
+CIERA applies exponent reuse based
+compression to each selected shard when
+it reaches the Allgather path, splitting
+each value into exponent and sign-plus-
+mantissa and reusing cached exponents
+when unchanged. The set of shards that go through this path is chosen once by
+benefit-driven selective compression, which estimates the expected commu-
+nication savings of different parameter shards, ranks them by benefit-to-memory
+ratio, and selects the highest-ranked shards for exponent caching. This shard se-
+lection is performed once and then reused across the following training iterations.
+Finally, CIERA uses computation–communication pipelining to overlap
+the compression operations with GPU compute operations to hide compression
+6
+
+
+time overhead.
+3.1
+Exponent Reuse based Compression
+In floating-point formats such as FP16 and BF16, each value is encoded as sign,
+exponent, and mantissa bits. The exponent changes only when the magnitude
+crosses a power-of-two boundary, so it changes much less often than the mantissa
+during training. This matches our Observation 2, where the exponent change
+rate stays below 1% for most iterations. Therefore, repeatedly transmitting
+unchanged exponent bits is redundant and can instead be reused locally on
+GPUs. To further reduce communication overhead, we compress the exponents
+that are changed using ANS via nvCOMP [21].
+As shown in Observation 3, a shard-level reuse decision rarely triggers in
+practice. To make reuse practical, we check and reuse exponents at a finer
+block level inside each shard. Algorithm 1 (Appendix) illustrates the sender-side
+compress operations (split, hash, ANS-encode) and receiver-side decompress
+operations (ANS-decode, merge) for one Allgather of shard i. We partition each
+shard into Si
+b fixed-size blocks. Each GPU, as a sender, maintains a persistent
+per-block structure: HashCache, and as a receiver, maintains ExpCache. The
+sender splits each weight value into exponent bits and sign-plus-mantissa bits,
+and computes its 128-bit hash. In order to reduce collision probability, the 128-
+bit hash is built from two independent 64-bit SplitMix64 hashes [22, 23]. The
+hash value of block k in shard i is stored in HashCache[i, k]. We treat a block’s
+exponents as unchanged only when its hash matches the previous hash value.
+Assuming the two 64-bit SplitMix64 hashes are independent, the per-comparison
+collision probability is approximately 2−128; we observed no collisions across all
+our runs.
+The sender creates a bitmap for each shard indicating whether each block has
+changed; if yes, the sender sets the block’s bit in the bitmap and updates its hash
+in HashCache. The sender sends compressed exponents that are changed, and
+the sign-plus-mantissa values of all shard blocks, along with the bitmap to the
+receiver. The communication amount is reduced by not sending the unchanged
+exponents and compressing the changed exponents.
+After the receiver receives the data, it obtains the positions of changed
+blocks from the bitmap. It reads the previous exponents of all shard blocks
+from ExpCache[i, ·], ANS-decodes the exponents of changed blocks, replaces
+only the changed blocks with the decompressed blocks, and reconstructs the
+full shard by merging all the exponents with the received sign-plus-mantissa
+values.
+The hash, ANS encode, and ANS decode steps run on a separate
+CUDA stream so they overlap with communication and computation using our
+Computation–Communication Pipelining in 3.3.
+3.2
+Benefit-driven Selective Compression
+Based on Observation 4, CIERA compresses only shards where compression
+actually pays off. The gain formula (next paragraph) ranks shards by the ratio of
+7
+
+
+expected byte savings to extra cache memory; in practice this selects shards with
+low block change rates (predominantly layer norm and expert FFN) and skips
+shards with high change rates (attention, routing gate) because compression
+cannot pay for itself when almost every block changes.
+For the targeted shards, CIERA ranks the shards using a gain formula that
+takes each shard’s offline-measured block change rate qi as input. A shard with
+a low qi has a large gain and is compressed. A shard with a high qi has a zero
+or negative gain and is not compressed. Shard i has N i weight values in b-bit
+precision (16 for BF16/FP16), so it occupies Si = N i b/8 bytes, of which Si
+e are
+exponent bytes and Si
+s+m = Si −Si
+e are sign-plus-mantissa. We partition each
+shard into blocks of B values, giving Si
+b = ⌈N i/B⌉blocks and a one-bit-per-block
+bitmap of Si
+bm = ⌈Si
+b/8⌉bytes.
+Among the target shards, CIERA computes a per-iteration latency gain gi
+at initialization and keeps only shards with positive gain: gi = Comm(Si) −
+ Comm(Si
+s+m + Si
+bm + qiSi
+e) + T i
+hash + T i
+cmp + T i
+decmp
+
+, where Comm(·) maps a
+payload size to the measured Allgather latency (profiled at initialization), T i
+hash
+is the total block hashing time of the shard, T i
+cmp is the sender-side time for
+compressing, and T i
+decmp is the receiver-side time for decompressing the received
+exponents and reconstructing the full shard by merging them with the cached
+exponents and sign-plus-mantissa bytes.
+Using Computation–Communication Pipelining in Section 3.3, T i
+hash and
+T i
+cmp are effectively zero on the critical path because these kernels execute on a
+dedicated CUDA stream that runs concurrently with the Allgather. Only T i
+decmp
+remains on the critical path because reconstruction runs after the Allgather
+completes.
+With cache footprint Mi = (W −1) Si
+e per GPU at world size W, we rank
+shards in descending order of gi/Mi and select them until the cache budget is
+exhausted. The selected set is fixed for the training run. At runtime, only blocks
+whose hash differs from the previous iteration are transmitted, so the expected
+payload per iteration is Si
+s+m + Si
+bm + qiSi
+e bytes.
+3.3
+Computation–Communication Pipelining
+Compression and decompression operations add latency that can exceed the
+communication savings if executed sequentially. We address this by scheduling
+these operations early in the execution workflow to overlap them with preceding
+compute kernels and data transfers.
+We use a PyTorch FX graph [24] to represent the model’s execution. In
+the original graph, each shard S in layer Li is associated with an Allgather
+node Allgather(Li), which gathers the layer’s parameter shards from all GPUs.
+We insert four additional kernel nodes for each parameter shard chosen by
+benefit-driven selective compression: 1) the Hash(Li) node computes a hash
+over exponent bits to detect changes; 2) the PreDecmp(Li) node prepares
+the receiver’s cached exponents for reconstruction; 3) the Decmp(Li) node
+decompresses the received exponents in that iteration for reconstruction; and 4)
+the Cmp(Li) node builds the Allgather payload, packaging either compressed
+8
+
+
+NCCL
+(Allgather)
+Compute
+Allgather 0
+Compute 0
+Allgather 1
+Compute 1
+Allgather 2
+Compute 2
+Allgather 3
+Compute 3
+(a) Baseline ZeRO-3 
+ Sequential Allgather
+NCCL
+(Allgather)
+Receiver
+Sender
+Compute
+Hash 0
+Cmp 0
+Hash 1
+Cmp 1
+Hash 2
+Cmp 2
+Hash 3
+Cmp 3
+PreDecmp 0
+Decmp 0
+PreDecmp 1
+Decmp 1
+PreDecmp 2
+Decmp 2
+PreDecmp 3
+Decmp 3
+Allgather 0
+Allgather 1
+Allgather 2
+Allgather 3
+Compute 0
+Compute 1
+Compute 2
+Compute 3
+(b) CIERA pipelined schedule
+Hash
+Cmp = Compress
+PreDecmp = PreDecompress
+Decmp = Decompress
+Allgather
+Compute
+Figure 7: Graph scheduling for overlapping communication with computation.
+exponents plus sign-plus-mantissa bits when exponents changed, or only sign-
+plus-mantissa bits when exponents are reused.
+Figure 7 illustrates the transformation of the workflow. Figure 7(a) shows
+the baseline ZeRO-3 execution, where per-layer compute is followed by its corre-
+sponding Allgather in sequence. Figure 7(b) shows CIERA’s schedule, where
+hash, predecompress, and compression operations are inserted for compressed
+layers and moved earlier so they execute in parallel with the compute of the pre-
+ceding layer. This overlap effectively masks compression latency with concurrent
+computation. The subscript i in Figure 7(b) indexes one Allgather event in the
+fixed order A = [l1, . . . , lm], so Hashi, PreDecmpi, Cmpi, Allgatheri, Decmpi,
+and Computei are the operations that handle layer Li’s parameter shard in a
+single training iteration. The four squares Hash0, Hash1, Hash2, Hash3 on the
+sender row are the hash kernels for four example layers of the same iteration,
+not repeated hashes of one layer across four iterations. Each square is one GPU
+kernel and the rows group kernels by the GPU role or stream that executes them:
+NCCL Allgather, Receiver-side work, Sender-side work, and Compute.
+For each compressed layer Li (Figure 7(b)), the sender runs Hashi and
+Cmpi to detect changed blocks and pack the payload, while the receiver runs
+PreDecmpi over its local cache in parallel because it has no cross-GPU depen-
+dency. Allgatheri transmits the payload, then Decmpi replaces the changed
+blocks in the cached exponents and combines them with the received sign-plus-
+mantissa to reconstruct the layer for Computei. Since Hashi+1, Cmpi+1, and
+PreDecmpi+1 can begin while Allgatheri is still in flight, only Decmpi remains
+on the critical path before Computei launches.
+4
+Performance Evaluation
+4.1
+Experimental Settings
+The setup follows Section 2, extended with two additional MoE models: Mixtral-
+8×7B [2] (8 experts), and Llama-4-Scout-17B-16E [25] (16 experts). Adam [13]
+optimizer is used by default. Llama-4-Scout-17B-16E does not fit at L=4 on 4
+GPUs with Adam, so we use Adafactor [26] for that model. We enable activation
+checkpointing [27, 28] at Transformer-layer granularity in DeepSpeed 0.17.2.
+Multi-node experiments run on nodes of 8 A100-80GB GPUs, with 200 Gbps
+HDR InfiniBand between nodes (measured cross-node AllGather bus bandwidth
+9
+
+
+≈8 GB/s) and 600 GB/s NVLink (NVSwitch) within a node. The 8-GPU
+configuration is single-node and the 16-GPU configuration spans two nodes.
+Starred (⋆) entries in Tables 1 and 2 are measured on this testbed, and unstarred
+entries are simulator projections. Under FP16 only OLMoE is measured against
+ZeRO++ on the testbed, so the other FP16 entries such as MiniCPM are
+projections, whereas under BF16 both OLMoE and MiniCPM are measured
+against ZeRO-3. We set block size B=512 empirically, balancing exponent-reuse
+rate against per-block kernel-launch overhead. We project unmeasured 32–128
+GPU cases with a trace-driven simulator. We collect per-layer iteration traces
+for all six models at L ∈{2, 4, 6, 8} on 4 and 8 A100 GPUs and anchor the
+projection on the measured full-model speedups at 4, 8, and 16 GPUs. The
+simulator matches these measured iteration times within 4% on full OLMoE and
+MiniCPM at 8 and 16 GPUs.
+4.2
+Comparison Against Lossless Baselines
+OLMoE
+1B-7B
+DeepSeek
+MoE-16B
+Qwen2
+57B-A14B
+MiniCPM
+8x2B
+Mixtral
+8x7B
+Scout
+17B
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+Average iteration time (s)
+ZeRO-3
+FSDP
+CIERA
+(a) CIERA against
+lossless baselines.
+OLMoE
+1B-7B
+DeepSeek
+MoE-16B
+Qwen2
+57B-A14B
+MiniCPM
+8x2B
+Mixtral
+8x7B
+Scout
+17B
+0.0
+0.5
+1.0
+1.5
+2.0
+2.5
+3.0
+Average iteration time (s)
+ZeRO-3
+ZeRO++
+CIERA
+(b) CIERA against lossy
+baseline
+Figure 8: Performance of CIERA.
+We compare CIERA against
+two lossless baselines: Deep-
+Speed ZeRO-3 [12] and Py-
+Torch FSDP [27], both of
+which transmit full-precision
+parameters
+without
+com-
+pression.
+Figure 8a shows
+the per-model iteration time
+on
+4
+GPUs
+with
+error
+whiskers marking the 5th
+and 95th percentile over
+1000 post-warmup iterations.
+CIERA achieves 1.16–2.89× iteration-time speedup over ZeRO-3 on the five
+communication-bound models and up to 3.38× speedup over FSDP on OLMoE
+(higher speedup is better). Llama-4-Scout-17B stays at 1.00× on 4 GPUs because
+BSC selects no shards: high per-shard change rates plus fast intra-node NVLink
+keep every shard’s profiler score gi non-positive; Scout becomes profitable once
+inter-node bandwidth dominates, reaching 1.16× at 32 GPUs (Table 1). Ta-
+ble 1 extends to 8–128 GPUs (real measurements marked ⋆, others projected
+by the simulator), reaching 1.16–4.28× iteration-time speedup over ZeRO-3 as
+inter-node communication takes a larger share of iteration time.
+4.3
+Comparison Against Lossy Baseline
+We compare CIERA against ZeRO++ [7], a lossy baseline that uses int8 Allgather
+for parameters, int4 ReduceScatter for gradients, and per-node parameter replicas.
+ZeRO++ requires FP16, so all systems run under FP16 here. Other lossy systems
+are not directly comparable on sharded MoE: SDP4Bit [29] is dense-LLM only,
+gZCCL [9] is an MPI/MVAPICH framework rather than a NCCL/DeepSpeed
+plug-in, and TAGC [30] compresses gradients on the ReduceScatter path; we
+discuss them in Section 5.
+10
+
+
+Table 1: Speedup of CIERA over ZeRO-
+3 (BF16, S=1024, full model layers with
+Adam; Adafactor for Llama-4-Scout).
+Model/GPU#
+8
+16
+32
+64
+128
+OLMoE-1B-7B
+3.70⋆
+3.70⋆
+3.89
+4.08
+4.28
+MiniCPM-8×2B
+1.38⋆
+2.12⋆
+2.23
+2.34
+2.45
+DeepSeek-MoE-16B
+—
+3.34
+3.51
+3.68
+3.87
+Qwen2-57B-A14B
+—
+2.66
+2.79
+2.93
+3.08
+Mixtral-8×7B
+—
+1.33
+1.40
+1.47
+1.54
+Llama-4-Scout-17B
+—
+—
+1.16
+1.22
+1.28
+Table 2:
+Speedup of CIERA over
+ZeRO++ (FP16, S=1024, full model
+layers with Adam).
+Model/GPU#
+8
+16
+32
+64
+128
+OLMoE-1B-7B
+3.93⋆
+3.68⋆
+4.02
+4.22
+4.42
+MiniCPM-8×2B
+1.74
+2.60
+2.73
+2.87
+3.01
+DeepSeek-MoE-16B
+—
+1.93
+2.03
+2.13
+2.24
+Qwen2-57B-A14B
+—
+3.08
+3.23
+3.40
+3.57
+Mixtral-8×7B
+—
+1.67
+1.75
+1.84
+1.93
+Llama-4-Scout-17B
+—
+—
+2.03
+2.13
+2.24
+Figure 8b compares the average iteration time on 4 GPUs with FP16 (L=4
+layers, S=1024, six MoE models grouped on the x-axis with three bars per model
+for ZeRO-3 / ZeRO++ / CIERA). CIERA achieves 1.13–3.38× iteration-time
+speedup over ZeRO-3 and 1.21–3.80× iteration-time speedup over ZeRO++ on
+the five communication-bound models (higher speedup is better), while Scout
+stays at 1.00×, same iteration time as the baseline, due to zero-shard selection.
+Table 2 extends the comparison to 8–128 GPUs and reaches 1.67–4.42× iteration-
+time speedup over ZeRO++. On OLMoE the speedup over ZeRO++ is higher
+at 8 GPUs (3.93×) than at 16 (3.68×), which reflects the ZeRO++ baseline
+rather than CIERA. Within a single node NVLink is not the bottleneck, so
+ZeRO++’s weight quantization is almost pure overhead and its iteration time
+stays high. Across nodes the same quantization reduces inter-node traffic and
+speeds ZeRO++ up, which narrows CIERA’s relative margin. Against the
+unquantized ZeRO-3 baseline (Table 1), OLMoE is communication-bound at
+both 8 and 16 GPUs, so its speedup is flat at 3.70×. The scaling model fits a
+monotone log-linear trend through the measured 4/8/16-GPU anchors, so the
+32–128-GPU projections rise past these close or slightly non-monotone measured
+points.
+4.4
+Ablation Study
+We evaluate the incremental contribution of CIERA components by progressively
+enabling them on top of ZeRO-3 across all six MoE models (L=4, S=1024,
+4 A100 GPUs, BF16).
+ER is executed through our GraphATen rewrite of
+ZeRO-3’s gather/release scheduling, which provides the execution path required
+for compressed AllGather. The subsequent columns then add BSC and CCP
+incrementally, so every column’s speedup is cumulative over ZeRO-3. Table 3
+reports the per-iteration time of ZeRO-3 and the cumulative speedup of CIERA
+components.
+Table 3: Ablation study on 4 A100 GPUs
+(L=4, S=1024, BF16).
+Model
+ZeRO-3
++ER
++BSC
++CCP
+OLMoE-1B-7B
+1.840s
+1.76×
+2.84×
+2.89×
+DeepSeek-MoE-16B
+1.412s
+1.70×
+2.82×
+2.86×
+Qwen2-57B-A14B
+2.377s
+1.69×
+2.66×
+2.75×
+MiniCPM-8×2B
+0.349s
+1.27×
+1.74×
+1.75×
+Mixtral-8×7B
+0.508s
+0.96×
+1.15×
+1.16×
+Llama-4-Scout-17B
+1.053s
+1.00×
+1.00×
+1.00×
+Exponent Reuse (ER) based
+Compression. ER is evaluated us-
+ing our GraphATen execution path,
+which enables compressed AllGather
+within ZeRO-3’s gather/release sched-
+ule. The reported +ER configuration
+therefore measures exponent reuse to-
+11
+
+
+1
+2
+3
+4
+Number of layers
+1.0
+1.5
+2.0
+2.5
+3.0
+Speedup
+OLMoE
+DeepSeek
+Qwen2
+MiniCPM
+Mixtral
+Scout
+(a) Speedup vs. # of layers
+1024
+2048
+3072
+4096
+Sequence length
+1.0
+1.5
+2.0
+2.5
+3.0
+Speedup
+OLMoE
+DeepSeek
+Qwen2
+MiniCPM
+Mixtral
+Scout
+(b) Speedup vs. sequence
+length
+103
+Block size B
+1.0
+1.5
+2.0
+2.5
+3.0
+Speedup
+OLMoE
+DeepSeek
+Qwen2
+MiniCPM
+Mixtral
+Scout
+(c) Speedup vs. block size
+Figure 9: Sensitivity of CIERA speedup over ZeRO-3 to number of transformer
+layers, sequence length, and block size.
+gether with the execution support re-
+quired to realize it, rather than ER
+as an isolated codec. When enabled across all shards with no selection, this
+configuration reaches 1.27–1.76× over ZeRO-3 on OLMoE, DeepSeek, Qwen2,
+and MiniCPM while sending only the changed-exponent blocks across iterations.
+Mixtral, however, runs 0.96× slower than ZeRO-3: its block change rate is high,
+so the per-shard hash and packing overhead exceeds the bytes saved.
+Benefit-driven Selective Compression (BSC). Adding the benefit-driven
+profiler on top of ER skips shards where compression does not pay off. The
+largest gain is on Mixtral: BSC removes the unprofitable shards and the speedup
+goes from 0.96× to 1.15×. On the bytes-bound models the speedup also grows:
+OLMoE 1.76 × →2.84×, DeepSeek 1.70 × →2.82×, Qwen2 1.69 × →2.66×,
+MiniCPM 1.27 × →1.74×. Llama-4-Scout selects zero shards on 4-GPU NVLink,
+so it stays at 1.00×.
+Computation-Communication Pipelining (CCP). Overlapping hash,
+compress, and decompress kernels with preceding backward compute adds a
+small further gain on top of BSC+ER (+0.04–0.09× on OLMoE, DeepSeek, and
+Qwen2; under 1% on MiniCPM and Mixtral, where BSC+ER is near its ceiling).
+Scout stays at 1.00× because BSC selected zero shards, so CCP has nothing to
+overlap. Each column adds one component on top of the previous configuration,
+so all numbers are cumulative iteration-time speedups over ZeRO-3. We do not
+report standalone-component runs (e.g., CCP alone is undefined because there
+are no compress / decompress kernels to overlap).
+4.5
+Sensitivity Analysis
+Layer count. Figure 9a varies the number of layers, L, from 1 to 4 at sequence
+length, S=1024. Iteration-time speedup over ZeRO-3 (higher is faster) generally
+rises with more layers because of more Allgather calls: OLMoE, DeepSeek,
+Qwen2, and MiniCPM all improve significantly, with DeepSeek showing the
+largest gain (from 1.04× to 2.86× iteration-time speedup over ZeRO-3). Mixtral
+stays near 1.16× iteration-time speedup, and Scout stays at 1.00× (same iteration
+time as ZeRO-3) because the profiler selects zero shards on NVLink.
+Sequence length. Figure 9b varies sequence length S from 1024 to 4096 at
+12
+
+
+L=4. As S grows, compute increases while Allgather volume is fixed, so the
+relative benefit of compression shrinks: the iteration-time speedup over ZeRO-3
+falls but stays above 1×, e.g., OLMoE from 2.89× to 2.61×, MiniCPM from
+1.75× to 1.35×.
+Block size. Figure 9c varies B from 256 to 4096 at L=4, S=1024. Each block
+has a 128-bit hash kept locally on the sender and contributes one bit to the
+per-shard change bitmap that travels with every Allgather. Smaller B means
+more blocks per shard, which inflates the number of per-block kernel launches
+(hash, ANS-encode, ANS-decode) and slightly enlarges the bitmap. Larger B
+reduces these per-block kernel launches but each block is more likely to contain
+at least one changed exponent, which lowers reuse. B=512 balances the two
+and gives the headline speedups in Section 4.2. At B=256 each model loses a
+few percent of iteration time to the extra per-block kernel launches, and from
+B=1024 on the curves stay within a few percent of B=512. Scout stays at 1.00×
+as discussed earlier.
+4.6
+Correctness Evaluation
+0
+2500
+5000
+7500
+10000
+12500
+15000
+17500
+20000
+Iteration
+0
+5
+10
+15
+20
+25
+30
+35
+Training loss
+ZeRO-3
+CIERA
+Figure 10: Training loss for
+OLMoE-1B-7B (L=4, S=1024,
+BF16)
+We verify that CIERA produces bitwise identi-
+cal training dynamics to uncompressed ZeRO-
+3. Both runs on OLMoE-1B-7B. Figure 10
+shows the training loss of OLMoE-1B-7B over
+20,000 iterations. The two curves overlap ex-
+actly: across all 20,000 steps, the maximum
+absolute difference in loss is zero. Every gath-
+ered parameter is reconstructed bit-for-bit at
+each Allgather boundary, confirming that ex-
+ponent caching and block-level reuse introduce
+no numerical error.
+5
+Related Work
+Gradient compression and sparsification. Early work reduces backward
+traffic through quantization or sparsification: 1-bit SGD and QSGD for low-
+bit gradients, Top-k or threshold rules that drop small entries [31, 32], Deep
+Gradient Compression’s momentum correction and error feedback [33], and
+adaptive variants motivated by limited gains from fixed levels [34].
+TAGC
+targets transformer gradients with format-aware lossless compression on selected
+layers [30].
+Parameter compression and quantization. Recent systems compress param-
+eters during the forward path. ZeRO++ [7] integrates low-bit weight exchange
+inside FSDP. SDP4Bit [29] exploits cross-iteration redundancy by lossily quan-
+tizing ∆W = Wt −Wt−1 to four bits, but treats each weight as a single number
+with no field-level decomposition. NeuZip [35] compresses weights by entropy to
+reduce on-device memory. ZipServ [36] fuses a hardware-aware lossless format
+into the GEMM kernel to accelerate LLM inference weight loading.
+13
+
+
+System-aware communication. Prior work reduces distributed training com-
+munication by adapting compression, reducing collective traffic, or rescheduling
+communication with computation. Adaptive gradient compression methods
+such as AdaCGD [37], GraVAC [38], Kimad [39], and Accordion [40] tune
+compression based on signal quality or bandwidth, but focus on gradient com-
+munication through ReduceScatter or AllReduce. System-level approaches such
+as Cupcake [41], OmniReduce [42], SqueezeNIC [43], and gZCCL [9] reduce
+collective communication cost through traffic reduction or codec and network
+overlap. Other systems address related communication bottlenecks, including
+LSH-MoE [44] for MoE all-to-all token dispatch and Comet [45] or FlashOver-
+lap [46] for compute-communication rescheduling. Closest to us, ZipCCL [47]
+losslessly codes BF16 exponents by exploiting the concentrated exponent distribu-
+tion of approximately Gaussian LLM tensors, without exploiting cross-iteration
+exponent reuse, while UCCL-Zip [48] integrates lossless compression into NCCL
+collectives and P2P transfers and evaluates it for RL weight synchronization and
+distributed LLM inference.
+6
+Conclusion
+We observe that exponent values remain stable across most iterations of MoE
+training, and thus propose CIERA, which reuses cached exponents for compres-
+sion to reduce Allgather communication overhead, while selectively compressing
+only those shards where the benefits outweigh the associated costs. The key
+contribution of CIERA is enabling bit-exact, lossless compression with low de-
+compression overhead. Also, CIERA overlaps compression with computation and
+communication to hide runtime cost. Our experiments demonstrate that CIERA
+outperforms the evaluated baselines on communication-bound MoE models.
+Limitations and future work. CIERA targets sparse MoE training where
+exponent stability gives a large pool of compressible shards. On dense LLMs
+the same selection rule prunes most shards and the speedup collapses. Beyond
+16 GPUs we use a trace-driven simulator anchored on real 4-, 8-, and 16-GPU
+measurements (within 4% on 8–16 GPUs). The 32-GPU results are short-range
+extrapolations close to the measured range, while 64- and 128-GPU results
+require more caution. Multi-node measurements at 32+ GPUs and an online
+controller for BSC are future work.
+Broader impacts. CIERA can reduce the communication cost of sharded
+MoE training, which may lower GPU time, energy use, and training cost for
+large models. By preserving bitwise-exact parameter reconstruction, it avoids
+the accuracy risks introduced by lossy communication compression. This can
+help researchers train larger models under limited hardware budgets. At the
+same time, making large-scale training more efficient may also lower the marginal
+cost of scaling, potentially increasing overall demand for computation; thus, the
+net environmental and economic impact depends on how the resulting efficiency
+gains are ultimately utilized.
+14
+
+
+References
+[1] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. BERT:
+Pre-training of deep bidirectional transformers for language understanding.
+In Proceedings of the 2019 Conference of the North American Chapter of
+the Association for Computational Linguistics: Human Language Technolo-
+gies, Volume 1 (Long and Short Papers), pages 4171–4186. Association for
+Computational Linguistics, 2019.
+[2] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch,
+Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las
+Casas, Emma Bou Hanna, Florian Bressand, et al. Mixtral of experts. arXiv
+preprint arXiv:2401.04088, 2024.
+[3] Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang Zhao,
+Chengqi Deng, Chong Ruan, Damai Dai, Daya Guo, et al. Deepseek-v2: A
+strong, economical, and efficient mixture-of-experts language model. arXiv
+preprint arXiv:2405.04434, 2024.
+[4] Damai Dai, Chengqi Deng, Chenggang Zhao, R. X. Xu, Huazuo Gao, Deli
+Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y. K.
+Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wenfeng
+Liang. DeepSeekMoE: Towards ultimate expert specialization in mixture-
+of-experts language models. In Proceedings of the 62nd Annual Meeting of
+the Association for Computational Linguistics (Volume 1: Long Papers),
+pages 1280–1297, Bangkok, Thailand, 2024. Association for Computational
+Linguistics.
+[5] NVIDIA Corporation. MCore Custom Fully Sharded Data Parallel (FSDP).
+NVIDIA, 2025. Megatron Core Developer Guide, version 0.15.0.
+[6] NVIDIA Corporation. Mixture of Experts Package. NVIDIA, 2025. Megatron
+Core Developer Guide, version 0.15.0.
+[7] Guanhua Wang, Heyang Qin, Sam Ade Jacobs, Xiaoxia Wu, Connor Holmes,
+Zhewei Yao, Samyam Rajbhandari, Olatunji Ruwase, Feng Yan, Lei Yang,
+and Yuxiong He. ZeRO++: Extremely efficient collective communication
+for large model training. In Proc. of The Twelfth International Conference
+on Learning Representations, 2024.
+[8] Tim Dettmers, Mike Lewis, Sam Shleifer, and Luke Zettlemoyer. 8-bit
+optimizers via block-wise quantization. In Proc. of International Conference
+on Learning Representations, 2022.
+[9] Jiajun Huang, Sheng Di, Xiaodong Yu, Yujia Zhai, Jinyang Liu, Yafan
+Huang, Ken Raffenetti, Hui Zhou, Kai Zhao, Xiaoyi Lu, et al. gZCCL:
+Compression-accelerated collective communication framework for GPU
+clusters. In Proceedings of the 38th ACM International Conference on
+Supercomputing, pages 437–448. ACM, 2024.
+15
+
+
+[10] Qinghua Zhou, C. Chu, N. S. Kumar, Pouya Kousha, Seyedeh Mahdieh
+Ghazimirsaeed, Hari Subramoni, and Dhabaleswar K. Panda. Designing
+high-performance MPI libraries with on-the-fly compression for modern
+GPU clusters. In Proc. of 2021 IEEE International Parallel and Distributed
+Processing Symposium, pages 444–453. IEEE, 2021.
+[11] Qinghua Zhou, Quentin Anthony, Lang Xu, Aamir Shafi, Mustafa Ab-
+duljabbar, Hari Subramoni, and Dhabaleswar K. Panda.
+Accelerating
+distributed deep learning training with compression assisted allgather and
+reduce-scatter communication. In Proc. of 2023 IEEE International Parallel
+and Distributed Processing Symposium, pages 134–144. IEEE, 2023.
+[12] Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He.
+ZeRO: Memory optimizations toward training trillion parameter models. In
+Proc. of SC20: International Conference for High Performance Computing,
+Networking, Storage and Analysis, pages 1–16. IEEE, 2020.
+[13] Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic opti-
+mization. In Proc. of International Conference on Learning Representations,
+2015.
+[14] Xiang Zhang, Junbo Zhao, and Yann LeCun. Character-level convolutional
+networks for text classification. In Proc. of Advances in Neural Information
+Processing Systems, volume 28, 2015.
+[15] Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Jacob Morri-
+son, Sewon Min, Weijia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert,
+et al. OLMoE: Open mixture-of-experts language models. In Proc. of
+International Conference on Learning Representations, 2025.
+[16] Shengding Hu, Yuge Tu, Xu Han, Ganqu Cui, Chaoqun He, Weilin Zhao,
+Xiang Long, Zhi Zheng, Yewei Fang, Yuxiang Huang, et al. MiniCPM:
+Unveiling the potential of small language models with scalable training
+strategies. In Proc. of Conference on Language Modeling, 2024.
+[17] An Yang, Baosong Yang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Zhou,
+et al. Qwen2 technical report. arXiv preprint arXiv:2407.10671, 2024.
+[18] NVIDIA Corporation. Collective Communication Functions. NVIDIA, 2025.
+NCCL User Guide.
+[19] DeepSpeed Contributors. ZeRO. DeepSpeed, 2026. DeepSpeed Documenta-
+tion.
+[20] Aaron Gokaslan, Vanya Cohen, Ellie Pavlick, and Stefanie Tellex. Open-
+WebText corpus. Web resource, 2019.
+[21] NVIDIA. C++ API — nvCOMP. NVIDIA Documentation.
+16
+
+
+[22] Guy L. Jr. Steele, Doug Lea, and Christine H. Flood.
+Fast splittable
+pseudorandom number generators. ACM SIGPLAN Notices, 49(10):453–
+472, 2014.
+[23] Mikkel Thorup. High speed hashing for integers and strings. arXiv preprint
+arXiv:1504.06804, 2015.
+[24] James Reed, Zachary DeVito, Horace He, Ansley Ussery, and Jason Ansel.
+torch.fx: Practical program capture and transformation for deep learning in
+python. In Proceedings of Machine Learning and Systems, volume 4, pages
+638–651, 2022.
+[25] Meta
+AI.
+The
+Llama
+4
+herd:
+The
+beginning
+of
+a
+new
+era
+of natively multimodal AI innovation.
+https://ai.meta.com/blog/
+llama-4-multimodal-intelligence/, 2025.
+[26] Noam Shazeer and Mitchell Stern. Adafactor: Adaptive learning rates with
+sublinear memory cost. In Proceedings of the 35th International Conference
+on Machine Learning, pages 4596–4604. PMLR, 2018.
+[27] Yanli Zhao, Andrew Gu, Rohan Varma, Liang Luo, Chien-Chin Huang, Min
+Xu, Less Wright, Hamid Shojanazeri, Myle Ott, Sam Shleifer, et al. PyTorch
+FSDP: Experiences on scaling fully sharded data parallel. Proceedings of
+the VLDB Endowment, 16(12):3848–3860, 2023.
+[28] Avinash Maurya, Jie Ye, M. Mustafa Rafique, Franck Cappello, and Bogdan
+Nicolae. Deep optimizer states: Towards scalable training of transformer
+models using interleaved offloading. In Proceedings of the 25th International
+Middleware Conference, pages 404–416. ACM, 2024.
+[29] Jinda Jia, Cong Xie, Hanlin Lu, Daoce Wang, Hao Feng, Chengming Zhang,
+Baixi Sun, Haibin Lin, Zhi Zhang, Xin Liu, and Dingwen Tao. SDP4Bit:
+Toward 4-bit communication quantization in sharded data parallelism for
+LLM training. In Proc. of Advances in Neural Information Processing
+Systems, 2024.
+[30] Igor Polyakov, Alexey Dukhanov, and Egor Spirin. TAGC: Optimizing
+gradient communication in distributed transformer training. In Proceedings
+of the 5th Workshop on Machine Learning and Systems, pages 254–260.
+ACM, 2025.
+[31] Dan Alistarh, Demjan Grubic, Jerry Li, Ryota Tomioka, and Milan Vo-
+jnovic. QSGD: Communication-efficient SGD via gradient quantization and
+encoding. In Proc. of Advances in Neural Information Processing Systems,
+volume 30, 2017.
+[32] Alham Fikri Aji and Kenneth Heafield. Sparse communication for distributed
+gradient descent.
+In Proceedings of the 2017 Conference on Empirical
+Methods in Natural Language Processing, pages 440–445. Association for
+Computational Linguistics, 2017.
+17
+
+
+[33] Yujun Lin, Song Han, Huizi Mao, Yu Wang, and William J. Dally. Deep gra-
+dient compression: Reducing the communication bandwidth for distributed
+training. In Proc. of International Conference on Learning Representations,
+2018.
+[34] Saurabh Agarwal, Hongyi Wang, Shivaram Venkataraman, and Dimitris
+Papailiopoulos. On the utility of gradient compression in distributed training
+systems. In Proceedings of Machine Learning and Systems, volume 4, pages
+652–672, 2022.
+[35] Yongchang Hao, Yanshuai Cao, and Lili Mou. NeuZip: Memory-efficient
+training and inference with dynamic compression of neural networks. arXiv
+preprint arXiv:2410.20650, 2024.
+[36] Ruibo Fan, Xiangrui Yu, Xinglin Pan, Zeyu Li, Weile Luo, Qiang Wang,
+Wei Wang, and Xiaowen Chu. ZipServ: Fast and memory-efficient LLM in-
+ference with hardware-aware lossless compression. In Proceedings of the 31st
+ACM International Conference on Architectural Support for Programming
+Languages and Operating Systems, pages 2264–2280. ACM, 2026.
+[37] Maksim Makarenko, Elnur Gasanov, Rustem Islamov, Abdurakhmon Sadiev,
+and Peter Richtárik. Adaptive compression for communication-efficient
+distributed training. arXiv preprint arXiv:2211.00188, 2022.
+[38] Sahil Tyagi and Martin Swany.
+GraVAC: Adaptive compression for
+communication-efficient distributed DL training. In Proc. of 2023 IEEE
+16th International Conference on Cloud Computing, pages 319–329. IEEE,
+2023.
+[39] Jihao Xin, Ivan Ilin, Shunkang Zhang, Marco Canini, and Peter Richtárik.
+KIMAD: Adaptive gradient compression with bandwidth awareness. In
+Proceedings of the 4th International Workshop on Distributed Machine
+Learning, pages 35–48. ACM, 2023.
+[40] Saurabh Agarwal, Hongyi Wang, Kangwook Lee, Shivaram Venkataraman,
+and Dimitris Papailiopoulos. Accordion: Adaptive gradient communication
+via critical learning regime identification. In Proceedings of Machine Learning
+and Systems, volume 3, 2021.
+[41] Zhuang Wang, Xinyu Crystal Wu, Zhaozhuo Xu, and T. S. Eugene Ng.
+Cupcake: A compression optimizer for scalable communication-efficient
+distributed training. In Proceedings of the Sixth Conference on Machine
+Learning and Systems, 2023.
+[42] Jiawei Fei, Chen-Yu Ho, Atal N. Sahu, Marco Canini, and Amedeo Sapio.
+Efficient sparse collective communication and its application to accelerate
+distributed deep learning. In Proceedings of the ACM SIGCOMM 2021
+Conference, pages 676–691. ACM, 2021.
+18
+
+
+[43] Achref Rebai, Mubarak Adetunji Ojewale, Anees Ullah, Marco Canini,
+and Suhaib A. Fahmy. SqueezeNIC: Low-latency in-nic compression for
+distributed deep learning. In Proceedings of the 2024 SIGCOMM Workshop
+on Networks for AI Computing, pages 61–68. ACM, 2024.
+[44] Xiaonan Nie et al. LSH-MoE: Communication-efficient MoE training via
+locality-sensitive hashing. arXiv preprint arXiv:2411.08446, 2024.
+[45] Shulai Zhang, Ningxin Zheng, Haibin Lin, Ziheng Jiang, Wenlei Bao,
+Chengquan Jiang, Qi Hou, Weihao Cui, Size Zheng, Li-Wen Chang, et al.
+Comet: Fine-grained computation-communication overlapping for mixture-
+of-experts. In Proceedings of Machine Learning and Systems, volume 7,
+2025.
+[46] Ke Hong, Xiuhong Li, Minxu Liu, Qiuli Mao, Tianqi Wu, Zixiao Huang,
+Lufang Chen, Zhong Wang, Yichong Zhang, Zhenhua Zhu, Guohao Dai,
+and Yu Wang. Efficient and adaptable overlapping for computation and
+communication via signaling and reordering. In Proceedings of the European
+Conference on Computer Systems. ACM, 2026.
+[47] Wenxiang Lin, Xinglin Pan, Ruibo Fan, Shaohuai Shi, and Xiaowen Chu.
+ZipCCL: Efficient lossless data compression of communication collectives
+for accelerating LLM training. In Proceedings of the ACM SIGCOMM 2026
+Conference, SIGCOMM ’26, 2026.
+[48] Shuang Ma, Chon Lam Lao, Zhiying Xu, Zhuang Wang, Ziming Mao,
+Delong Meng, Jia Zhen, Jun Wu, Ion Stoica, Yida Wang, and Yang Zhou.
+UCCL-Zip: Lossless compression supercharged GPU communication. arXiv
+preprint arXiv:2604.17172, 2026.
+19
+
+
+A
+Block-level exponent reuse algorithm
+Algorithm 1: CIERA block-level exponent reuse for one Allgather of
+shard i.
+Input: shard i with Si
+b blocks of nb values; persistent HashCache[i, ·] on
+sender; persistent ExpCache[i, ·] on receiver.
+// Sender
+(exp, mant) ←SplitExpMant(shardi);
+bitmap ←[0]Si
+b;
+payload ←∅;
+for k ←1 to Si
+b do
+h ←Hash128(exp[k]);
+if h̸ = HashCache[i, k] then
+bitmap[k] ←1;
+HashCache[i, k] ←h;
+if any bit in bitmap is set then
+payload ←ANSEncode
+ {exp[k] | bitmap[k]=1}
+
+;
+Send(bitmap, mant, payload);
+// Receiver
+(bitmap, mant, payload) ←Recv();
+if payload̸ = ∅then
+newExp ←ANSDecode(payload);
+j ←0;
+for k ←1 to Si
+b do
+if bitmap[k] = 1 then
+ExpCache[i, k] ←newExp[j];
+j ←j+1;
+shardi ←Merge(ExpCache[i, ·], mant);
+20

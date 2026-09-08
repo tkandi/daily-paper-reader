@@ -1,0 +1,840 @@
+GreenPipe: Power Modeling for Containerized
+DNN Inference on Kubernetes Edge Nodes
+Mengxue Wang1 , Peini Liu2 , Amir Taherkordi3 , and Jordi Guitart1,2
+1 Universitat Politècnica de Catalunya, Barcelona, Spain
+{mengxue.wang,jordi.guitart}@upc.edu
+2 Barcelona Supercomputing Center, Barcelona, Spain
+{peini.liu,jordi.guitart}@bsc.es
+3 University of Oslo, Oslo, Norway
+amirhost@ifi.uio.no
+Abstract. Distributed DNN inference is increasingly deployed in con-
+tainerized edge–cloud environments, where workloads run on-device or
+are exposed to remote clients over the network. Accurate online power
+estimation on resource-constrained ARM nodes without hardware power
+counters such as RAPL remains a challenge, and CPU-only models fail to
+capture multi-resource behavior. We present GreenPipe, an automated
+profiling-training-validation pipeline that builds multi-resource regres-
+sion models from external power meter measurements and attributes
+power to containers proportionally. GreenPipe is evaluated on a Rasp-
+berry Pi 4 edge node in a K3s edge–cloud testbed, covering DNN infer-
+ence with three vision models, multiple precisions, thread counts, and
+both local and serving scenarios. System-level MAPE is 6.3–9.4%, im-
+proving over CPU-stress and utilization-only baselines by 26.9% MAPE
+on average. We jointly report inference latency and energy per inference,
+exposing performance–energy trade-offs across workload configurations.
+Keywords: Power modeling · DNN inference · Containerization · Edge-
+cloud systems.
+1
+Introduction
+Distributed DNN inference is increasingly deployed on the edge–cloud contin-
+uum, where services run locally on resource-constrained edge nodes or as network-
+accessible endpoints [1]. These deployments need power visibility for energy-
+aware orchestration, thermal control, and sustainable operation [2]. However,
+many ARM edge devices lack hardware power interfaces such as RAPL, while ex-
+ternal meters are usually impractical during normal runtime [3]. Software power
+models are therefore needed, but CPU-centric models can miss the cache, mem-
+ory, disk, and network behavior of containerized DNN inference [4].
+Container orchestration adds another challenge: power must be exposed at a
+granularity useful for workloads. Kubernetes and Docker provide isolation and
+cgroup-scoped metrics, but node-level meters alone cannot identify the contri-
+bution of individual containers [5,6]. This is particularly relevant for edge–cloud
+arXiv:2609.04952v1  [cs.DC]  4 Sep 2026
+
+
+2
+M. Wang et al.
+inference, where local execution and network-served inference stress different
+resource paths and lead to different latency–energy behavior.
+This paper presents GreenPipe, a data-driven pipeline for building and de-
+ploying per-node power models for containerized DNN inference on Kubernetes
+ARM edge nodes. GreenPipe collects multi-resource metrics, aligns them with
+external meter measurements, trains and validates regression models, and de-
+ploys the selected model for per-second online estimation with heuristic container-
+level attribution. We evaluate GreenPipe on a Raspberry Pi 4 in a two-node
+K3s testbed, covering three image-classification models, multiple precisions and
+thread counts, and local versus network-served inference. GreenPipe achieves
+node-level MAPE of 6.3%–9.4% on validation workloads and reduces average
+MAPE by 26.9% over CPU-stress and utilization-only baselines. We also charac-
+terize latency–energy trade-offs across workload configurations and deployment
+modes. Our main contributions are:
+– a Kubernetes-compatible pipeline for multi-resource profiling, power model
+training, validation, and online estimation on ARM edge nodes;
+– DNN-oriented training and validation across local and network-served con-
+tainerized inference workloads;
+– runtime node-level estimation with heuristic container attribution, together
+with latency–energy characterization for deployment decisions.
+2
+Related Work
+Software-based power modeling on edge platforms. Software power models es-
+timate node power from observable resource metrics when direct hardware en-
+ergy counters are unavailable. Prior works have modeled full-system power using
+CPU utilization, performance counters, frequency features, and regression-based
+methods [6,7,8]. For Raspberry Pi devices, Kanso et al. [7] train utilization-based
+models from CPU stress workloads, while Wang et al. [8] study embedded devices
+using utilization and frequency features. These approaches demonstrate the feasi-
+bility of software power estimation, but their training data are often CPU-centric
+or based on micro-benchmarks, which limits accuracy for DNN inference work-
+loads that also exercise memory, cache, disk, and network resources. GreenPipe
+follows this software-modeling direction, but trains from meter-labeled multi-
+resource benchmarks and validates on containerized DNN inference under local
+and network-served execution.
+Container-aware power meters and orchestration frameworks. Containerized de-
+ployments require power visibility at both node and workload granularity. Ke-
+pler [9,10] exports process- and container-level energy metrics in Kubernetes
+clusters, but it relies on power interfaces such as RAPL, ACPI, or hwmon, which
+are often unavailable on ARM edge boards such as Raspberry Pis. The PowerAPI
+ecosystem [11] uses performance counters and calibration data to build container-
+level software-defined models (e.g., SmartWatts [12]). Kasioulis et al. [5] model
+Raspberry Pi power from containerized CPU and network stress workloads
+
+
+GreenPipe: Power Modeling on Kubernetes Edge Nodes
+3
+and evaluate on two ML inference workloads. GreenPipe differs by combining
+external-meter labeling, DNN-oriented multi-resource training, Kubernetes on-
+line deployment, and heuristic container attribution for ARM edge nodes.
+DNN inference: energy and performance. DNN inference is increasingly deployed
+across edge–cloud systems, where model architecture, precision, parallelism, and
+serving mode affect both latency and energy [1]. MLPerf Power [13] standardizes
+the methodology for measuring inference performance and power, but does not
+provide deployable per-node power models for Kubernetes edge nodes. Green-
+Pipe uses DNN-relevant training benchmarks, validates models on realistic infer-
+ence workloads, and reports latency–energy behavior for different deployments.
+3
+System Overview
+GreenPipe operates in two phases: an offline workflow as shown in Figure 1-2
+for model generation and validation, and an online operation phase as shown
+in Figure 3 for runtime power estimation. This section summarizes the main
+components and their interactions.
+Offline Workflow. GreenPipe first collects resource and power traces on the
+edge during containerized training benchmarks (Section 4.2) with an external
+power meter attached, then pre-processes data, trains and cross-validates regres-
+sion models on the server. The selected candidates are evaluated on validation
+benchmarks (Section 5.2)—DNN inference workloads under local and serving
+modes—before one model is chosen for online deployment. Three main compo-
+nents are active during offline workflow: benchmark workloads are launched as
+Kubernetes Jobs on the edge node; resource monitor exports node-, process-,
+and container-level metrics and run as DaemonSet; Prometheus is deployed as
+a StatefulSet on the server node and stores time-series metrics.
+Resource 
+Monitor
+Processed 
+data
+Candidate 
+Power Models
+Training 
+Benchmarks
+Validation 
+Benchmarks
+Feature 
+Selection
+Data 
+Alignment, 
+Pre- 
+processing
+Model 
+Training
+Container Level 
+Power Model
+Selected 
+Power Model
+Validation
+PowerMeter
+Generation
+Validation 
+Fig. 1. GreenPipe offline workflow.
+Bluetooth
+ResourceMonitor
+Candidate 
+Power Models
+Power 
+Model 
+Training 
+ServiceMonitor
+Endpoint
+Prometheus
+Benchmark 
+Workloads
+query
+Selected Power 
+Model
+Server Node
+Edge Node
+Power 
+Model 
+Validation 
+Fig. 2. Deployment of offline workflow:
+benchmarks running on the edge; data
+preprocessing, model training, validation
+on the server.
+Online operation. After validation, the selected regression power model is stored
+in a cluster-accessible volume. In addition to the components active during offline
+
+
+4
+M. Wang et al.
+workflow, an estimator sidecar that loads the trained model and predicts node-
+level power at runtime with per-second granularity from live metrics streamed by
+the monitor is added to the Daemonset. Container-level values are then derived
+on the edge by attributing predicted node power as described in Section 4.4.
+Predictions are exported to Prometheus for analysis and future energy-aware
+scheduling.
+Resource 
+Monitor & 
+Estimator 
+Sidecar
+Selected Power 
+Model
+ServiceMonitor
+Endpoint
+Prometheus
+Workloads
+Server Node
+Edge Node
+NFS
+Fig. 3. Power model prediction deployment
+GreenPipe produces a per-node power model for a given edge hardware con-
+figuration. The server acts as orchestrator, metrics backend, and—for served
+inference—request generator. We focus on reproducible per-node power model-
+ing and performance–energy characterization.
+4
+GreenPipe Methodology
+This section introduces the methodology for generating power models for edge
+nodes in a Kubernetes-based cluster. It begins with the resource and power
+monitoring methods, training benchmark design, model training and selection
+procedure and the container attribution approach.
+4.1
+Resource and Power Monitoring
+To enable real-time power prediction, our resource collecting system is developed
+based on Kepler [9], an open-source Kubernetes exporter that collects power-
+level metrics. However, Kepler is built for x86 architectures and collects power
+data based on RAPL, which is not applicable to Raspberry Pis. We customize
+the resource monitor and rebuild the image on ARM architecture and use an
+external meter at 1Hz to collect power.
+The resource monitor module is written in Go, providing different profil-
+ing granularity—process, container and node—and collecting different types of
+metrics related to CPU activity, cache behavior, memory/page-cache activity,
+disk I/O, and network traffic, which are the main resource dimensions exer-
+cised by local and served DNN inference. The components and their sources are
+summarized in Table 1. Container-level metrics are aggregated through cgroup
+identifiers, PIDs and network namespaces when applicable.
+During the online phase (Section 3) the collected resource usage metrics are
+passed to the estimator and the per-second power estimation is exported.
+
+
+GreenPipe: Power Modeling on Kubernetes Edge Nodes
+5
+Table 1. Monitored resources and their obtained sources
+Components
+Metrics
+Source
+CPU
+cpu_cycles, cpu_instructions Performance Monitoring Unit (PMU)
+cpu_time
+eBPF trace via kernel hooks
+memory
+cache_miss
+Performance Monitoring Unit (PMU)
+page_cache_hit
+eBPF trace via kernel hooks
+network
+net_tx_irq, net_rx_irq
+eBPF trace via kernel hooks
+network_bandwidth
+/proc/net/dev
+disk
+block_io_irq
+eBPF trace via kernel hooks
+disk_io
+cgroupPath/io.stat, /proc/diskstats
+4.2
+Training Benchmarks
+GreenPipe uses three benchmark groups to build training data: micro-benchmarks,
+combined benchmarks, and DNN inference-targeted benchmarks, summarized in
+Table 2. All benchmarks are containerized and executed on the edge node.
+Table 2. Training benchmarks
+Benchmark
+Workload
+Description
+stress-ng (v0.18.07)
+cpu_int8
+cpu_fp16
+stress CPU by intensive arithmetic
+cpu_fp32
+cpu_matrixprod
+stress CPU by matrix multiplication
+vm-rw
+stress memory by read/write operations
+hdd
+stress disk by read/write operations
+iperf (v3.12)
+network
+network packets transmission/receive
+Combined
+cpu & mem & disk stress multiple components by stress-ng
+all components
+stress all components by stress-ng and iperf
+DeepBench
+gemm_bench
+mixed precision dense GEMM
+sparse_bench
+mixed precision sparse GEMM
+conv_bench
+fp32 precision convolution computation
+Micro-benchmarks leverage stress-ng and iperf to create loads for different
+components. The results of micro-benchmarks show strong positive correlation
+of CPU-related features with power consumption.
+Combined benchmarks are included to reflect practical DNN inference behavior.
+For instance, the workload exercising CPU, memory and disk creates scenarios
+for offline local inference where loading models requires memory and disk read
+while storing results requires write. In addition, workloads that stress CPU,
+memory, disk and network simultaneously are designed to approximate serving
+inference scenarios, where the inference requests arrive over the network.
+
+
+6
+M. Wang et al.
+DNN inference-targeted benchmarks – DeepBench4 contains basic DNN kernel
+computations at low level, e.g., dense/sparse matrix multiplies and convolu-
+tion computations. These workloads do not rely on deep learning frameworks or
+models built for applications to capture the DNN inference behavior. For each
+benchmark, it computes for different sizes of matrices and convolutions at least
+10 times and 50 times, respectively.
+4.3
+Data Preparation, Model Training and Selection
+After running the training benchmarks, the collected resource metrics and me-
+ter power data are aligned by timestamps at 1 Hz. Samples with missing met-
+ric or power values are removed, and features are normalized before model fit-
+ting. Based on correlation analysis, seven representative features are selected:
+cpu_cycles, cpu_time, cpu_instructions, cache_miss, page_cache_hit,
+net_bandwidth, disk_io. At the end, the training dataset is obtained with
+13938 samples generated by 12 benchmarks.
+We treat power estimation as a supervised regression problem. GreenPipe
+compares representative linear and non-linear regressors from scikit-learn, in-
+cluding Linear Regression (LR), Lasso Regression (Lasso), Ridge Regression
+(Ridge), Linear Regression fitted with Stochastic Gradient Descent (SGD), Poly-
+nomial Regression (PR), Decision Tree (DT), Random Forest (RF), Gradi-
+ent Boosting (GB), eXtreme Gradient Boosting (XGB), K-Nearest Neighbors
+(KNN), and Support Vector Regression (SVR). Our goal is not to introduce a
+new regressor, but to select a robust model under the same training data. Mod-
+els are selected according to validation MAPE; the validation benchmarks are
+introduced in Section 5.2.
+4.4
+Container-level Power Model
+We heuristically attribute node-level power to containers by decomposing node
+power into idle and dynamic components. The node idle power P idle
+node is esti-
+mated as the steady-state minimum power observed during idle periods, and the
+remaining part is treated as dynamic power:
+P dyn
+node = Pnode −P idle
+node
+(1)
+This follows the common static/dynamic power decomposition used in software
+power meters [12,10]. For each container, dynamic power is attributed propor-
+tionally to its resource usage:
+P dyn
+container = Rcontainer
+Rnode
+· P dyn
+node
+(2)
+Here, R denotes a weighted sum of selected resource metrics, R = P
+i wiRi,
+where the weights wi are obtained from the trained LR model. We aggregate
+4 https://github.com/baidu-research/DeepBench
+
+
+GreenPipe: Power Modeling on Kubernetes Edge Nodes
+7
+resources ensuring P
+c Rc = Rnode over the containers on the node. Idle power
+is attributed according to the number of processes in each container:
+P idle
+container = Nproc,container
+Nproc,node
+· P idle
+node
+(3)
+The final container estimate is Pcontainer = P dyn
+container + P idle
+container.
+This attribution is a heuristic for operational visibility. Since the external
+meter provides only node-level ground truth, we do not claim validated per-
+container power accuracy.
+5
+Experimental setup
+5.1
+Experimental Settings
+Hardware. The server node is equipped with 8 x Intel Core i7-8650U CPU @
+1.90GHz. The edge node is a Raspberry Pi 4 Model B Rev 1.5 equipped with
+Broadcom BCM2711, Quad core Cortex-A72 (ARM v8) 64-bit SoC @ 1.8GHz,
+and an integrated dual-band (2.4 GHz/5 GHz) IEEE 802.11ac Wi-Fi interface.
+The power meter is the Ruideng UM25C USB meter.
+Platform Settings. The server node runs Ubuntu 22.04 with 6.8.0-85-generic
+kernel. The edge node runs Debian GNU/Linux 12 with 6.6.56-v8+ kernel. We
+customized and rebuilt the kernel to enable eBPF attachment to specific events
+on Raspberry Pi. The edge-server cluster is deployed using K3s5 v1.30.3+k3s1,
+a lightweight Kubernetes distribution designed for resource-constrained environ-
+ments, in which the server node runs the k3s server and the edge node runs the
+k3s agent. The container runtime used in the experiments is containerd://1.7.17-
+k3s1; cgroup version is v2 to enforce resource isolation for containerized work-
+loads. Prometheus (v2.53.1) is deployed with prometheus-operator (v0.75.2) to
+scrape metrics profiled by service monitor and store them as time-series. The
+DVFS governor on the edge node is ondemand.
+5.2
+Validation benchmarks
+We use Image Classification as the validation task considering the practical
+workloads deployed at the edge. Vision models for this inference task include Mo-
+bileNetV2, EfficientNetB0, and ResNetV2. These models and pretrained weights
+are obtained from Keras6 and transformed into saved_model.pb with float32
+(noted as pb model). Additionally, we generated light models (noted as tflite
+models) with float32 precision and quantized versions (int8 and float16) by
+LiteRT converter to evaluate the performance of different types of CPU cal-
+culations. To conduct the quantization, we use the calibration dataset7 provided
+5 https://k3s.io/
+6 https://keras.io/api/applications/
+7 https://github.com/mlcommons/inference/blob/master/calibration/
+ImageNet/cal_image_list_option_2.txt
+
+
+8
+M. Wang et al.
+by MLPerf. The dataset for the inference task is sampled from ImageNet (Large
+Scale Visual Recognition Challenge, ILSVRC2012) validation set.
+Our on-device inference scenarios consist of local inference and serving infer-
+ence. Local scenario represents applications inferring local data that are already
+collected on device and usually processed in batches. This scenario is imple-
+mented by LiteRT inference engine for tflite models. Serving scenario repre-
+sents online inference services deployed on the edge node where data are sent
+from other nodes on the fly. Requests are sent to the endpoint through gRPC
+API. This is implemented by TensorFlow Serving.
+Note that no validation inference trace is used for model training. Reported
+errors are computed over all aligned samples in the validation traces.
+6
+Evaluation
+In this section, we evaluate the power models on different DNN inference work-
+loads and deployment scenarios. The metrics for evaluating prediction accuracy
+are mean absolute error (MAE = 1
+n
+Pn
+i=1 |yi −ˆy|, unit in Watt) and mean ab-
+solute percentage error (MAPE = 1
+n
+Pn
+i=1 | yi−ˆy
+yi | ∗100%). We first compare our
+GreenPipe generated power models with the baseline power models, then anal-
+yse the impact of deployment and workload factors on power model prediction.
+We additionally provide the measured latency–energy trade-offs and show the
+results of online deployment and container power attribution.
+6.1
+System-level power model accuracy and comparison
+We compare the power predicted by our GreenPipe with Baseline Training [8]
+that collects the training dataset by only stressing CPU-related components, and
+Baseline LR [7] P = 4.5344×U +2.2857 using only CPU utilization calculated by
+cpu_time on our validation workloads. The prediction results of all the candidate
+power models are summarized in Table 3.
+MAPE of GreenPipe-trained power models ranges from 6.3% to 9.4%. Com-
+pared with Baseline Training, GreenPipe reduces MAE by 46.9% and MAPE
+by 26.9% on average, showing the validity and efficacy of comprehensive train-
+ing benchmarks. All the GreenPipe power models improve over the Baseline LR,
+indicating the considerable importance of non-CPU centric features for power
+modeling. Across those regressors, differences in inference validation are modest
+compared with the gap to CPU-stress and utilization-only baselines, confirm-
+ing that multi-resource benchmark coverage matters more than the choice of
+regressor.
+6.2
+Impact of deployment and workload factors
+Our validation workloads are categorized into several groups: workloads with
+different DNN architectures and precisions, number of threads doing inference,
+inference engines and scenarios. In this section, we study the impact of these
+workload factors on power model accuracy within these groups.
+
+
+GreenPipe: Power Modeling on Kubernetes Edge Nodes
+9
+Table 3. Power model prediction results on validation benchmarks
+Regressor
+LR Ridge Lasso SGD PR DT RF GB XGB SVR KNN BaselineLR
+Baseline
+MAE
+0.59 0.58
+0.60
+0.60 0.72 0.54 0.59 0.60 0.58 0.76 0.55
+0.71
+Training
+MAPE 10.8 13.1
+13.9
+12.8 13.3 8.8 10.4 11.3 11.1 13.2
+9.8
+14.2
+GreenPipe MAE
+0.36 0.37
+0.39 0.22 0.29 0.24 0.33 0.40 0.39 0.49 0.23
+-
+MAPE 8.2
+8.4
+8.9
+8.5
+6.3 7.3
+8.4
+6.9
+8.9
+9.4
+7.0
+-
+DNN model architecture and precision. Among the three distinct DNN models,
+the power predictions of MobileNet inference workloads are the least accurate
+(MAPE from 6.6% to 9.2%) compared to the other bigger models. Our power
+models predict better in floating-point inference than integer inference. Besides,
+non-linear models have smaller errors in prediction than the linear models, indi-
+cating the non-linear relation between selected features and power.
+Thread counts. As shown in Fig. 4, for inference workloads conducted with
+different numbers of threads, power prediction accuracy decreases as the number
+of threads increases. Both the linear and non-linear models provide reasonable
+power predictions.
+LR
+Lasso
+Ridge
+SGD
+PR
+DT
+RF
+GB
+XGB
+KNN
+SVR
+1
+2
+4
+avg
+6.7
+5.9
+6.7
+6.6
+5.0
+6.0
+4.3
+4.7
+4.6
+4.2
+5.4
+7.3
+5.5
+6.4
+8.4
+5.8
+6.4
+8.0
+6.8
+7.9
+5.7
+8.3
+10.1 9.4 10.1 8.6
+7.5
+5.9
+8.3
+9.1
+9.4
+7.3
+9.0
+8.0
+6.9
+7.7
+7.9
+6.1
+6.1
+6.9
+6.9
+7.3
+5.7
+7.6
+6
+8
+10
+Fig. 4. MAPE of power prediction on in-
+ference workloads with different threads.
+LR
+Lasso
+Ridge
+SGD
+PR
+DT
+RF
+GB
+XGB
+KNN
+SVR
+tflite-local
+tflite-serving
+pb-local
+pb-serving
+avg
+9.1
+9.6
+9.3
+9.6 11.4 10.6 10.7 11.2 13.7 9.2 13.6
+6.0
+7.5
+6.7
+4.5
+5.8
+6.4
+8.0
+6.8
+5.0
+4.7
+4.3
+4.3
+4.5
+5.4
+4.8
+6.8
+6.4
+8.0 11.8 7.9
+3.7 10.3
+4.3
+5.5
+6.4
+4.8
+2.8
+6.4
+5.4
+3.8
+4.1
+3.8
+2.5
+5.9
+6.8
+6.9
+5.9
+6.7
+7.5
+8.0
+8.4
+7.7
+5.3
+7.7
+2.5
+5.0
+7.5
+10.0
+12.5
+Fig. 5. MAPE of power prediction on in-
+ference workloads with different inference
+engines and scenarios.
+Inference engine/scenarios. Fig. 5 shows the comparison of the power prediction
+for different inference engines and inference scenarios. It is significant that the
+power model results for pb workloads are better than those for tflite workloads.
+The actual power of tflite workloads are consistently slightly larger than the
+predicted values. This may be because LiteRT inference engine is more optimized
+for edge devices than TensorFlow.
+These results show that GreenPipe remains effective across deployment schemes.
+Among workload factors, precision and model architecture have a limited impact
+on prediction error, whereas numbers of threads, inference engines and deploy-
+ment modes (local vs. network-served) dominate prediction difficulty.
+
+
+10
+M. Wang et al.
+6.3
+DNN workloads latency–energy trade-offs
+We characterize performance–energy trade-offs for validation workloads using
+measured latency and ground-truth node energy computed by integrating meter
+power during the inference, E =
+R
+Pgt dt. Among the models, ResNet exhibits
+the highest latency and energy. Among the precisions, int8 is the fastest and
+less energy consuming. The effect of thread count is model-dependent. Smaller
+models benefit more from parallelism in both latency and energy; while for
+larger models, it mainly reduces latency and the higher power draw from using
+more threads offset the shorter runtime and lead to higher energy consumption.
+Overall, precision and model family induce smaller shifts in the latency–energy
+frontier than deployment mode and thread count (cf. Section 6.2), suggesting
+that energy-aware placement should prioritize parallelism before model meta-
+data alone. These results complement power prediction accuracy by quantifying
+physical performance–energy behavior on the edge node.
+0
+100
+200
+300
+400
+500
+Latency(ms)
+0
+500
+1000
+1500
+2000
+2500
+Energy(mJ)
+model
+efficientnet
+mobilenet
+resnet
+precision
+fp16
+fp32
+int8
+Fig. 6. Energy-latency trade-off between
+models and precisions. Scenario: tflite
+running locally with thread 1.
+100
+200
+300
+400
+500
+600
+700
+Latency(ms)
+500
+1000
+1500
+2000
+2500
+3000
+Energy(mJ)
+model
+efficientnet
+mobilenet
+resnet
+threads
+1
+2
+3
+4
+Fig. 7. Energy-latency trade-off between
+models and threads. Scenario: tflite
+running locally with fp16 precision.
+6.4
+Online power estimation and container-level attribution
+This experiment illustrates runtime attribution rather than validating container-
+level accuracy, because the external meter only provides node-level ground truth.
+Fig. 8 presents the container-level attributed power (left) and one of the moni-
+tored resources, cpu_time (right), of an example inference workload. The node-
+level power is predicted by the trained LR model and then attributed to contain-
+ers using the method in Section 4.4. In this scenario, most cpu_time is consumed
+by the running workloads. Before the workload starts, the system remains idle;
+after the computation-intensive workload begins, the inference container dom-
+inates CPU usage. The power distribution differs from cpu_time because the
+power model accounts for idle power, dynamic power and multiple resource met-
+rics. Background system power, including standby activity, kernel execution,
+clocks, and DRAM refresh, is treated as an approximately constant component
+
+
+GreenPipe: Power Modeling on Kubernetes Edge Nodes
+11
+by the model. The exporter and estimator containers together account for less
+than 2% of total node power, indicating that the online monitoring and estima-
+tion overhead is small in this experiment.
+0
+100
+200
+300
+400
+500
+Time offset (s)
+0
+1
+2
+3
+4
+5
+power (W)
+power
+0
+100
+200
+300
+400
+500
+Time offset (s)
+0
+1000
+2000
+3000
+ms
+cpu_time
+system
+inference_workload
+exporter
+estimator
+Fig. 8. Container-level power and cpu_time attribution during online operation, in-
+cluding the inference workload, exporter, estimator containers and remaining system
+activity. Scenario: MobileNetV2 pb running locally with 4 threads.
+7
+Conclusion and Future Work
+In this work, we presented GreenPipe, a data-driven pipeline for building and
+deploying per-node power models for containerized DNN inference on ARM
+edge devices. GreenPipe integrates multi-resource profiling, benchmark-driven
+model training, and online estimation in a Kubernetes cluster, with heuristic
+container-level attribution derived from node-level predictions. On a Raspberry
+Pi 4 edge node, GreenPipe achieves system-level prediction errors of 6.3%–9.4%
+MAPE on validation inference workloads. We also report latency–energy trade-
+offs across workload configurations, showing that thread-level parallelism can
+reduce latency without always reducing energy. Future work will extend the
+study to additional edge platforms, GPU-equipped devices, and broader DVFS
+settings. Since online deployment does not provide synchronous ground-truth
+power labels, we will also investigate periodic meter-assisted recalibration when
+new labeled data are available.
+Acknowledgments. This work was partially supported by Spanish Ministry of
+Science (MICINN), the Research State Agency (AEI) and European Regional
+Development Funds (ERDF/FEDER) under contract PID2024-160996OB-I00,
+MICIU/AEI/10.13039/501100011033, and by the Generalitat de Catalunya (AGAUR)
+under contract 2021-SGR-00478. This work was also supported in part by the
+Norwegian Research Council under Grant 322473 (AirQMan project), as well as
+by the EU’s Digital Europe Programme under Grant 101123471 (EDGE-Skills
+project).
+
+
+12
+M. Wang et al.
+References
+1. D. Xu, T. Li, Y. Li, X. Su, S. Tarkoma, T. Jiang, J. Crowcroft, and P. Hui,
+“Edge Intelligence: Empowering Intelligence to the Edge of Network,” Proceedings
+of IEEE, vol. 109, no. 11, pp. 1778–1837, 2021.
+2. Y. Mao, X. Yu, K. Huang, Y.-J. A. Zhang, and J. Zhang, “Green Edge AI: A
+Contemporary Survey,” Proceedings of IEEE, vol. 112, no. 7, pp. 880–911, 2024.
+3. C. Centofanti, J. Santos, V. Gudepu, and K. Kondepu, “Impact of power con-
+sumption in containerized clouds: A comprehensive analysis of open-source power
+measurement tools,” Comput. Netw., vol. 245, no. C, May 2024.
+4. M. Jay, V. Ostapenco, L. Lefevre, D. Trystram, A.-C. Orgerie, and B. Fichel,
+“An experimental comparison of software-based power meters: focus on CPU and
+GPU,” in 2023 IEEE/ACM 23rd International Symposium on Cluster, Cloud and
+Internet Computing (CCGrid), 2023, pp. 106–118.
+5. M. Kasioulis, M. Symeonides, G. Pallis, and M. D. Dikaiakos, “Power Estimation
+Models for Edge Computing Devices,” in Euro-Par 2023: Parallel Processing Work-
+shops, Limassol, Cyprus, August 28 - September 1, 2023, Revised Selected Papers,
+Part I.
+Springer-Verlag, 2023, p. 257–269.
+6. M. Canuto, R. Bosch, M. Macias, and J. Guitart, “A methodology for full-system
+power modeling in heterogeneous data centers,” in Proceedings of the 9th Interna-
+tional Conference on Utility and Cloud Computing, ser. UCC’16.
+Association for
+Computing Machinery, 2016, pp. 20–29.
+7. H. Kanso, A. Noureddine, and E. Exposito, “Automated power modeling of com-
+puting devices: Implementation and use case for Raspberry Pis,” Sustainable Com-
+puting: Informatics and Systems, vol. 37, p. 100837, 2023.
+8. H. Wang, X. Li, T. Zhou, and M. Lin, “Data-driven software-based power estima-
+tion for embedded devices,” IEEE Transactions on Sustainable Computing, vol. 10,
+no. 05, pp. 937–948, 2025.
+9. M. Amaral, H. Chen, T. Chiba, R. Nakazawa, S. Choochotkaew, E. K. Lee, and
+T. Eilam, “Kepler: A framework to calculate the energy consumption of container-
+ized applications,” in 2023 IEEE 16th International Conference on Cloud Comput-
+ing (CLOUD), Jul. 2023, pp. 69–71.
+10. ——, “Process-based efficient power level exporter,” in 2024 IEEE 17th Interna-
+tional Conference on Cloud Computing (CLOUD), 2024, pp. 456–467.
+11. G. Fieni, D. R. Acero, P. Rust, and R. Rouvoy, “PowerAPI: A Python framework
+for building software-defined power meters,” Journal of Open Source Software,
+vol. 9, no. 98, p. 6670, Jun. 2024.
+12. G. Fieni, R. Rouvoy, and L. Seinturier, “Smartwatts: Self-calibrating software-
+defined power meter for containers,” in 2020 20th IEEE/ACM International Sym-
+posium on Cluster, Cloud and Internet Computing (CCGRID), 2020, pp. 479–488.
+13. A. Tschand, A. T. R. Rajan, S. Idgunji, A. Ghosh, J. Holleman, C. Király, P. Am-
+balkar, R. Borkar, R. Chukka, T. Cockrell, O. Curtis, G. Fursin, M. Hodak, H. T.
+Kassa, A. Lokhmotov, D. Miskovic, Y. Pan, M. P. Manmathan, L. Raymond, T. S.
+John, A. Suresh, R. Taubitz, S. Zhan, S. Wasson, D. Kanter, and V. J. Reddi,
+“Mlperf power: Benchmarking the energy efficiency of machine learning systems
+from µwatts to mwatts for sustainable ai,” 2025 IEEE International Symposium
+on High Performance Computer Architecture (HPCA), pp. 1201–1216, 2024.

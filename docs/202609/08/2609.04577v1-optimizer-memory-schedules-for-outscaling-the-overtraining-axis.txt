@@ -1,0 +1,6358 @@
+OPTIMIZER MEMORY SCHEDULES FOR
+OUTSCALING THE OVERTRAINING AXIS
+Katie Everett∗
+MIT CSAIL
+Shikai Qiu
+New York University
+ABSTRACT
+We investigate how optimizers scale across the overtraining axis and show that
+relative optimizer performance and optimal hyperparameters change substantially
+with training horizon. In particular, we study how matrix-preconditioned meth-
+ods (Muon and SOAP) and a momentum-scheduled method (ADANA) scale rel-
+ative to AdamW. We compare these four optimizers across models from 51M
+to 253M parameters and overtraining (OT) factors from 1× to 256×, sweep-
+ing the base learning rate at every setting. The preferred learning rate schedule
+can reverse across the overtraining axis, the best weight decay coefficient scales
+approximately as
+√
+OT, and longer horizons generally favor longer fixed mem-
+ory. ADANA’s scaling advantage over AdamW persists after tuning AdamW’s
+fixed memory separately at each horizon. Log-time weight decay and momen-
+tum cooldown provide substantial gains for ADANA that compound as training
+increases.
+With this treatment, ADANA outscales AdamW with an exponent
+advantage close to that predicted by DANA theory on power-law random fea-
+tures. Muon and SOAP instead provide roughly constant token-efficiency advan-
+tages over AdamW across most of the measured range, although SOAP may gain
+further at the highest overtraining factors. ADANA begins behind both matrix-
+preconditioned optimizers but closes the gaps as training increases, surpassing
+Muon and becoming competitive with SOAP at our highest OT factors. These
+results establish training horizon as an essential axis for optimizer evaluation and
+design.
+1
+INTRODUCTION
+Language models exhibit empirical scaling laws relating loss to model size, training data, and com-
+pute (Kaplan et al., 2020). In particular, the Chinchilla scaling law finds that model size and training
+tokens should grow together to minimize loss at fixed pretraining compute, corresponding to approx-
+imately 20 training tokens per parameter (Hoffmann et al., 2022). This result motivated subsequent
+model and optimizer scaling studies to evaluate performance near the Chinchilla-optimal training
+horizon. However, for widely deployed language models, recurring inference costs far exceed the
+one-time cost of pretraining. This can favor training smaller models on far more tokens to achieve
+similar performance with lower inference costs, a practice known as overtraining (Sardana et al.,
+2024; Gadre et al., 2024; Bian et al., 2025). For a particular model size, the overtraining factor
+expresses the number of training tokens as a multiple of the compute-optimal value.
+It is common for optimizer benchmarks to select hyperparameters and compare methods at a single
+training horizon or fixed token-to-parameter ratio. Optimizer rankings and optimal hyperparameter
+choices can change with training duration (Wen et al., 2025; Semenov et al., 2025; Wen et al., 2026),
+yet prior work covers a limited range of overtraining factors. We therefore study how optimizer
+performance and optimal hyperparameters scale across the overtraining axis.
+The optimizers we study combine different forms of preconditioning with different treatments of
+memory. AdamW uses coordinatewise adaptive preconditioning, whereas Muon and SOAP apply
+matrix-level preconditioning (Jordan et al., 2024; Vyas et al., 2025); all three use scalar momen-
+tum coefficients that keep their memory horizons fixed throughout training. DANA instead derives
+∗Correspondence to everettk@csail.mit.edu.
+1
+arXiv:2609.04577v1  [cs.LG]  4 Sep 2026
+
+
+1
+4
+16
+64
+256
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Final validation loss
+51M model
+AdamW
+ADANA
+Muon
+SOAP
+1
+4
+16
+32
+3.1
+3.2
+3.3
+3.4
+124M model
+1
+2
+4
+8
+2.90
+2.95
+3.00
+3.05
+3.10
+3.15
+253M model
+OT factor
+Figure 1: Optimizer rankings exhibit crossovers as training extends beyond the Chinchilla-
+optimal horizon. We report the lowest final validation loss after independently sweeping the base
+learning rate for AdamW, ADANA, Muon, and SOAP on 51M, 124M, and 253M models under
+uniform weight decay. Muon and SOAP lead at short horizons, whereas ADANA closes its initial
+gap as the OT factor increases, and SOAP overtakes Muon at the longest measured horizons for the
+51M and 124M models. Solid curves are fitted using our shared-m variant of the Skaling functional
+form (Videau et al., 2026); see Appendix G.
+a momentum schedule whose memory grows throughout training, and ADANA incorporates this
+schedule into an Adam-style adaptive optimizer (Ferbach et al., 2025; 2026). We compare AdamW,
+ADANA, Muon, and SOAP to ask how fixed memory, matrix preconditioning, and scheduled mem-
+ory affect optimizer scaling across the overtraining axis.
+To study this question, we train models spanning 51M to 253M parameters with each optimizer
+across overtraining factors ranging from 1× to 256×. For every optimizer, model size, and over-
+training factor, we independently sweep the base learning rate and use the lowest final validation
+loss. Following prior work, we measure relative token efficiency at fixed model size using the ratio
+of the training tokens required by a baseline optimizer to those used by the indicated optimizer at
+the same loss (Qiu et al., 2025; Ferbach et al., 2026; Wen et al., 2026). We call this ratio the token
+multiplier; values above one mean that the baseline requires more training tokens and therefore favor
+the indicated optimizer.
+Our experiments first show that optimizer treatments must themselves scale with the training hori-
+zon. The preferred learning rate schedule can reverse across the overtraining axis, and the best
+weight decay coefficient scales approximately as √f. For fixed-memory optimizers, longer horizons
+generally favor longer memory, while the optimal learning rate decreases as memory grows. Jointly
+tuning memory and learning rate at each horizon improves performance particularly at the lowest
+and highest OT factors. We also propose a momentum cooldown rule that bounds the optimizer’s
+memory timescale during terminal learning rate decay, yielding substantial gains for ADANA that
+compound with the benefits of log-time weight decay.
+Finally, we find clear optimizer outscaling across the overtraining axis. With log-time weight decay
+and momentum cooldown, ADANA outscales AdamW with an equivalent-OT exponent close to
+the 2 −κ prediction from DANA theory on power-law random features (Ferbach et al., 2025).
+By contrast, Muon and SOAP provide roughly constant token-multiplier advantages over AdamW
+across most of the overtraining axis, although SOAP may gain further at our highest OT factors.
+ADANA begins substantially behind these matrix-preconditioned optimizers but gains on both as
+the training horizon increases, surpassing Muon and becoming competitive with SOAP. We use
+joint model–token loss fits and floor–decay likelihood profiles to examine whether this outscaling
+arises from an improved token-decay exponent, a lower finite-model high-token loss limit, or both.
+2
+RELATED WORK
+Long and scheduled optimizer memory. Most optimizers use exponential averages with coef-
+ficients that keep their memory timescales fixed throughout training, but several recent methods
+instead combine or schedule multiple timescales. AdEMAMix combines separate fast and slow mo-
+2
+
+
+1
+4
+16
+64
+256
+1
+4
+16
+64
+256
+1024
+AdamW OT
+to match
+ADANA vs AdamW
+Model size
+51M
+124M
+253M
+1
+4
+16
+64
+256
+Muon vs AdamW
+1
+4
+16
+64
+256
+SOAP vs AdamW
+1
+4
+16
+64
+256
+ADANA OT factor
+1x
+2x
+4x
+AdamW-relative
+token mult
+1
+4
+16
+64
+256
+Muon OT factor
+1
+4
+16
+64
+256
+SOAP OT factor
+Figure 2: Across model sizes under uniform weight decay, ADANA improves relative to
+AdamW as the OT factor increases, whereas Muon and SOAP already have an advantage at
+short horizons. Muon’s advantage remains roughly constant across OT factors, while SOAP
+may improve further at the highest OT factors. Top: the vertical axis shows the OT factor
+AdamW requires to match the indicated optimizer’s loss at fixed model size; values above the equal-
+OT diagonal favor the indicated optimizer. Bottom: the AdamW-relative token multiplier is the
+equivalent AdamW OT factor divided by the optimizer’s OT factor, or equivalently the ratio of to-
+kens required by AdamW to those used by the optimizer. Curves compare the fitted optimizer and
+AdamW losses, while markers invert measured optimizer losses through the fitted AdamW curve.
+Dotted curve segments and translucent marker fills identify target losses below AdamW’s best mea-
+sured loss and therefore require extrapolating the AdamW fit.
+mentum buffers, with distinct coefficients controlling their memory timescales (Pagliardini et al.,
+2024). Schedule-free methods use iterate averaging, which can be viewed as a form of memory in
+parameter space that preserves information from earlier optimizer updates (Defazio et al., 2024).
+ScheduleFree+ reports that the benefit of this parameter-averaging memory increases with training
+duration (Defazio, 2026). Morwani et al. (2025) connect schedule-free optimizers and AdEMAMix
+to accelerated SGD variants that decouple momentum decay from the weight assigned to the current
+gradient. Their experiments find larger gains at small batch sizes, consistent with these approaches
+being particularly effective in noise-dominated optimization. DANA derives a momentum timescale
+that grows throughout training and improves loss-scaling exponents in the power-law random fea-
+tures model, while ADANA incorporates this schedule into an Adam-style adaptive optimizer (Fer-
+bach et al., 2025; 2026). Optimal hyperparameters also change with training horizon and batch size:
+Bj”orck et al. (2025) show empirically that the optimal learning rate decreases predictably with to-
+ken horizon, while Marek et al. (2025) find that Adam’s β2 should scale with batch size to keep the
+second-moment half-life fixed in tokens rather than optimizer updates.
+Weight decay controls a related form of memory: whereas momentum determines how long past
+gradient information influences the optimizer state, decoupled weight decay determines how long
+earlier optimizer updates remain influential in the parameters (Wang & Aitchison, 2025). Its optimal
+timescale depends on the data-to-model ratio (Bergsma et al., 2025a), and ADANA introduces a log-
+time weight decay schedule whose timescale grows throughout training (Ferbach et al., 2026).
+Matrix-preconditioned optimizers.
+Muon, SOAP, and Shampoo can be viewed as matrix-
+preconditioned optimizers, in contrast to adaptive optimizers such as Adam, whose coordinatewise
+normalization acts as a diagonal preconditioner. In a high-dimensional least-squares model, Paque-
+tte et al. (2026) show that an idealized version of Muon provides a square-root spectral speedup for
+eigenmodes large enough to be resolved at the given batch size, whereas unresolved modes behave
+3
+
+
+like SGD. Empirically, Qiu et al. (2025) find that Muon, SOAP, and Shampoo achieve approxi-
+mately constant 1.4× compute-multiplier gains over AdamW across model widths from 190M to
+1.4B when both the learning rate and weight decay are scaled appropriately.
+Scaling-law functional forms. For scaling analyses that vary both model size and training horizon,
+Videau et al. (2026) propose a functional form that couples model size and training data through an
+interaction exponent. We use this functional form with a model exponent shared across optimizers,
+similar to Volkova et al. (2026), who show that sharing scaling-law parameters across optimizers
+improves identifiability.
+Optimizer comparisons across training horizons. While many optimizer benchmarks compare
+methods at a single training horizon or fixed token-to-parameter ratio, recent studies have begun
+to investigate how relative optimizer performance changes across the overtraining axis. Wen et al.
+(2025) report that, relative to AdamW, the token multipliers for Muon and SOAP are approximately
+1.2×–1.4× on 130M–520M models from 1× to 8× Chinchilla. Muon performs better through
+4×, while SOAP catches or overtakes it at 8× and in their additional 16× experiments. On the
+1.2B model, both token multipliers decrease to approximately 1.1×. Semenov et al. (2025) find
+that AdamW narrows and eventually reverses SOAP’s short-horizon advantage as training extends.
+They also show that the long-horizon ordering between SOAP and AdEMAMix depends on retuning
+AdEMAMix’s slow-memory coefficient: SOAP overtakes AdEMAMix when its shorter-horizon
+coefficient is reused, whereas increasing β3 restores AdEMAMix’s lead. Wen et al. (2026) report
+that, relative to AdamW, the token multiplier for standard Muon remains approximately 1.1× across
+1×–8× Chinchilla, whereas the token multiplier for Muon Hyperball increases across the same
+range from approximately 1.2× to 1.3×. These results show that optimizer advantages can change
+with training horizon and experimental treatment, while leaving their behavior under substantially
+greater overtraining unresolved.
+3
+SCALING OPTIMIZERS ACROSS TRAINING HORIZONS
+3.1
+MOMENTUM AND WEIGHT DECAY AS MEMORY
+Throughout this paper, we use the term memory to refer to how long information from earlier opti-
+mizer updates remains influential.
+For a momentum state with constant coefficient β,
+mt = βmt−1 + (1 −β)gt = (1 −β)
+t
+X
+s=1
+βt−sgs,
+(1)
+where m0 = 0. The relative contribution of a gradient from a updates ago is therefore βa. Its
+half-life and effective memory window are
+H1/2 = log(1/2)
+log β
+,
+M =
+1
+1 −β ,
+(2)
+with H1/2 ≈(log 2)M near β = 1. Fixed-momentum optimizers use a coefficient that keeps this
+timescale constant across training steps, whereas scheduled-memory optimizers vary it throughout
+training. A similar interpretation applies to exponential moving averages of squared gradients.
+Whereas momentum controls how long the optimizer state remembers past gradient information,
+weight decay controls how quickly the parameters forget it (Wang & Aitchison, 2025). Under de-
+coupled weight decay (Loshchilov & Hutter, 2019), parameter decay is applied separately from the
+optimizer direction dt:
+θt+1 = (1 −αt)θt −ηtdt,
+(3)
+where ηt is the learning rate and αt is the fraction of the existing parameter removed at update t.
+When αt = α > 0 is constant, we can equivalently write
+θt+1 = (1 −α)θt + α
+
+−ηt
+α dt
+
+,
+(4)
+making the parameter iterate an exponential moving average of scaled optimizer updates. The in-
+fluence of an update from a steps ago decays as (1 −α)a, giving an effective memory window of
+4
+
+
+approximately 1/α updates. A time-varying weight decay schedule therefore changes how quickly
+the parameters forget updates from different parts of training.
+In our study of the overtraining axis, this perspective lets us interpret the effects of momentum and
+weight decay through memory timescales measured in optimizer updates.
+3.2
+EXPERIMENTAL SETUP
+We compare AdamW, ADANA, Muon, and SOAP at fixed model size as we scale the overtraining
+factor. We define f = T/(20P), where T is the number of training tokens and P is the nominal
+parameter count. For the 51M, 124M, and 253M models, we evaluate OT factors up to 256×, 32×,
+and 8×, respectively. All core comparisons use a sequence length of 2,048 and a global batch size
+of 256 sequences, so increasing the OT factor proportionally increases the number of optimizer
+updates. At every setting, we independently sweep the base learning rate and report the lowest final
+validation loss.
+To determine the experimental setup for our core optimizer comparisons, we first studied learn-
+ing rate schedule and weight decay choices across overtraining factors. We find that the preferred
+choices depend on the overtraining factor and that the ordering between candidates can reverse
+across the overtraining axis. After a shared linear warmup, we compared linear decay to zero with
+cosine decay to zero. For all four optimizers, linear decay performs better at 1× OT, whereas cosine
+decay performs better at 8× and 32× OT. We also find that the benefit of log-time weight decay de-
+pends on the learning rate endpoint, with larger gains under cosine decay to 10% than under cosine
+decay to zero.
+On the 51M model, we jointly sweep the base learning rate and weight decay coefficient for each
+optimizer, OT factor, and weight decay schedule. Consistent with the square-root scaling predicted
+for uniform AdamW by Bergsma et al. (2025a), the preferred coefficient scales approximately as √f
+for both uniform and log-time weight decay. For most experiments, we therefore use cuniform(f) =
+8√f or clog(f) = 2√f. For optimizers that benefit from log-time weight decay, its advantage over
+uniform weight decay increases with the overtraining factor.
+At 1× OT on the 253M model, we tune AdamW’s β2, Muon’s matrix momentum β, and SOAP’s
+β2; each selects 0.98. We hold the remaining memory coefficients at standard values: β1 = 0.9
+for AdamW, β1 = βSh = 0.95 for SOAP, and (β1, β2) = (0.9, 0.95) for Muon’s Adam-routed
+parameters. For ADANA, DANA theory relates κ to the power-law spectrum of the data (Ferbach
+et al., 2025), and the ADANA experiments find that κ = 0.85 performs well across model scales
+and architectures, consistent with κ being a transferable property of the data distribution (Ferbach
+et al., 2026). We therefore fix κ = 0.85 and δ = 8 and tune g3 at the same setting, selecting g3 = 8.
+These fixed ADANA coefficients define a memory schedule that evolves throughout training. The
+supporting experiments appear in Appendices D, E, and F; Appendix B gives the complete treatment
+definitions.
+3.3
+OUTSCALING AND TOKEN MULTIPLIERS
+We characterize outscaling through two closely related metrics that compare how many training
+tokens two optimizers require to reach the same loss at fixed model size. For an indicated optimizer
+and a specified baseline, the equivalent OT factor is the OT factor the baseline requires to match the
+indicated optimizer’s loss. The token multiplier is the ratio of the tokens required by the baseline to
+those used by the indicated optimizer; equivalently, it is the equivalent baseline OT factor divided
+by the indicated optimizer’s OT factor. Values above the equal-OT diagonal favor the indicated
+optimizer. At fixed model size, this ratio is the same quantity called the compute multiplier by Qiu
+et al. (2025); Ferbach et al. (2026) and token-equivalent speedup by Wen et al. (2026). We refer to
+it as the token multiplier: values above one mean that the baseline requires more training tokens and
+therefore favor the indicated optimizer.
+We say that an optimizer outscales a baseline optimizer across the overtraining axis when its token
+multiplier increases with the OT factor, or equivalently when its equivalent-OT curve grows faster
+than the equal-OT reference. Because different optimizers or treatments may approach different
+high-token validation-loss limits, this increase may arise from an improved token-decay exponent,
+a lower high-token validation-loss limit, or both.
+5
+
+
+1
+2
+4
+8
+16 32 64 128
+OT factor
+20
+40
+80
+160
+320
+640
+1280
+Best fixed memory
+Longer horizons favor
+longer fixed memory
+AdamW
+Muon
+SOAP
+20
+40
+80
+160 320 640 1280
+Effective memory
+2−10
+2−9
+2−8
+2−7
+2−6
+2−5
+Best base LR
+Longer memory requires
+a smaller learning rate (8x OT)
+0
+4
+8
+AdamW
+Per-horizon memory outperforms
+fixed M = 50 at short
+and long horizons
+0
+4
+8
+Within-optimizer improvement
+over fixed M = 50 (mpt)
+Muon
+1
+2
+4
+8
+16
+32
+64 128
+OT factor
+0
+4
+8
+SOAP
+Figure 3: Longer horizons favor longer optimizer memory, and longer memory requires a
+smaller learning rate. All panels use the 51M model. Left: the optimal fixed effective memory for
+AdamW, Muon, and SOAP after independently sweeping the base learning rate at every memory
+and OT factor. Middle: at 8× OT, the optimal base learning rate decreases as effective memory
+increases; Figure 17 shows the corresponding relationship at every measured OT factor. Right:
+the within-optimizer validation-loss improvement from replacing fixed M = 50 with the optimal
+(memory, base learning rate) pair at each horizon; positive values favor per-horizon tuning.
+We calculate these metrics by inverting baseline loss curves. Unless otherwise stated, we fit these
+curves using the Skaling functional form (Videau et al., 2026), with the model exponent shared
+across optimizers. Appendix G gives the complete definition and compares alternative functional
+forms. When the target loss lies below the baseline optimizer’s best measured loss, this inversion
+requires extrapolation rather than interpolation. We denote these regions with dotted curves and
+translucent markers.
+3.4
+OPTIMIZER RANKINGS ACROSS TRAINING HORIZONS
+Figures 1 and 2 show that optimizer rankings and relative token efficiency change with training
+horizon. Muon and SOAP perform best at most short and intermediate horizons, while ADANA
+improves relative to AdamW as the overtraining factor increases; at the longest measured horizons
+for the 51M and 124M models, SOAP also overtakes Muon. The token multipliers in Figure 2
+show that Muon provides an approximately constant advantage over AdamW, ADANA’s advantage
+increases consistently across model sizes, and SOAP may gain further at the highest OT factors. In
+the following sections, we investigate how per-horizon fixed-memory tuning, log-time weight decay,
+and momentum cooldown improve optimizer performance across OT factors, and then ask whether
+the resulting optimizer treatments outscale one another across the overtraining axis.
+4
+HORIZON-TUNED FIXED MEMORY
+Spectral analyses of learning dynamics suggest that optimization resolves progressively harder
+modes over the course of training; longer averaging windows may help accumulate the weak, per-
+sistent gradient signal needed to resolve modes learned later in training (Saxe et al., 2014; Bordelon
+et al., 2020). Longer windows also respond more slowly to changes in the gradient distribution and
+retain unusually large or stale gradients for more updates, creating a stability tradeoff. We therefore
+ask how the optimal fixed memory changes with overtraining factor and jointly tune memory and
+learning rate at every horizon on the 51M model. We note that the optimal momentum coefficient
+should depend on batch size (Marek et al., 2025), so these results are specific to our global batch
+size of 256.
+4.1
+LONGER HORIZONS FAVOR LONGER MEMORY
+We sweep AdamW’s second-moment coefficient β2, Muon’s momentum coefficient β, and SOAP’s
+second-moment coefficient β2, reporting each through the effective memory window M defined in
+6
+
+
+1
+4
+16
+64 128
+ADANA OT factor
+1
+4
+16
+64
+128
+Horizon-tuned AdamW
+OT to match
+(a) ADANA vs
+horizon-tuned AdamW
+51M model
+Equal OT: slope = 1
+1
+4
+16
+64 128
+Muon OT factor
+(b) Horizon-tuned Muon vs
+horizon-tuned AdamW
+1
+4
+16
+64 128
+SOAP OT factor
+(c) Horizon-tuned SOAP vs
+horizon-tuned AdamW
+Figure 4: After tuning fixed memory separately at every horizon, ADANA still gains on
+AdamW across OT, while Muon and SOAP retain roughly constant token-efficiency advan-
+tages over AdamW. On the 51M model under uniform weight decay, AdamW, Muon, and SOAP
+select the optimal (fixed memory, base learning rate) pair at every OT factor. ADANA uses the fixed
+scheduled-memory setting (κ, δ, g3) = (0.85, 8, 8) and sweeps only the base learning rate. The ver-
+tical axis gives the horizon-tuned AdamW OT factor required to attain the same validation loss.
+Due to the small number of points, we compute equivalent OT by piecewise-linear interpolation of
+horizon-tuned AdamW loss in log-OT; translucent markers require extrapolation beyond the mea-
+sured horizon-tuned AdamW loss range.
+Section 3.1. For every (optimizer, M, OT factor) setting, we independently sweep the base learning
+rate; at each horizon, we select the (M, base learning rate) pair with the lowest final validation loss.
+For experimental details and complete results, see Appendix F.
+We see in Figure 3 that longer horizons generally favor longer fixed memory. From 1× to 128×
+OT, the optimal memory increases from M = 20 to M = 1280 for AdamW, from M = 20 to
+M = 640 for Muon, and from M = 40 to M = 1280 for SOAP. We do not expect this trend to
+continue indefinitely: extremely long windows may become unstable, particularly early in training
+when the optimization dynamics change rapidly. Many horizons also have broad low-regret memory
+ranges, with several neighboring values performing similarly. We find that the optimal base learning
+rate decreases as memory grows, suggesting that using longer memory requires smaller steps for
+stability.
+4.2
+PER-HORIZON TUNING IMPROVES FIXED-MEMORY OPTIMIZERS
+Per-horizon memory tuning produces its largest gains at the low and high ends of our overtraining
+range; at moderate horizons, our M = 50 setting is already near-optimal. At 128× OT, it im-
+proves final validation loss by 3.3 mpt for AdamW, 3.6 mpt for Muon, and 1.3 mpt for SOAP. Thus,
+β = 0.98 is a strong choice at moderate OT factors but does not transfer uniformly across the full
+overtraining range.
+Figure 4a compares ADANA against AdamW with horizon-tuned memory. ADANA continues to
+gain on this stronger AdamW baseline as the overtraining factor increases, showing that its empirical
+advantage is not explained by holding AdamW’s β2 fixed across horizons and is consistent with a
+benefit from adapting memory within the run. Figures 4b–c show that horizon-tuned Muon and
+SOAP retain roughly constant advantages over horizon-tuned AdamW.
+5
+LOG-TIME WEIGHT DECAY ACROSS TRAINING HORIZONS
+Under the memory interpretation in Section 3.1, the weight decay schedule determines how quickly
+the parameters forget past updates during training. In our implementation, the per-update decay
+fraction is
+αt = stλt,
+(5)
+7
+
+
+1
+2
+4
+8
+16
+32
+64
+128
+0.5x
+1x
+2x
+Same-optimizer token mult
+AdamW
+ADANA
+Muon
+SOAP
+1
+8
+32 128
+0.75x
+1x
+2x
+3x
+AdamW-relative token mult
+AdamW
+Uniform WD
+Log-time WD
+1
+8
+32 128
+ADANA
+1
+8
+32 128
+Muon
+1
+8
+32 128
+SOAP
+Log-time WD impact depends on
+optimizer and horizon
+Optimizer advantages depend on WD schedule
+OT factor
+OT factor
+Figure 5: Log-time weight decay increasingly benefits ADANA, modestly benefits SOAP, has
+little consistent effect on AdamW, and harms Muon at high OT factors. On the 51M-parameter
+model, we compare uniform weight decay, c(f) = 8√f, with log-time weight decay, a(f) = 2√f,
+independently sweeping the base learning rate at every optimizer, weight decay schedule, and OT
+factor. Left: the token multiplier of log-time weight decay relative to the same optimizer under
+uniform weight decay. Right: AdamW-relative token multipliers for both weight decay schedules,
+using AdamW with uniform weight decay as the common baseline.
+where st ∈[0, 1] is the normalized learning rate schedule. Uniform weight decay keeps λt constant
+across optimizer updates:
+λuniform
+t
+= c(f)
+S .
+(6)
+Log-time weight decay instead decreases the coefficient over training (Ferbach et al., 2026):
+λlog
+t
+= a(f)
+τ + t
+(7)
+Here, S is the total number of optimizer updates and τ = 0.1S1×. We use the coefficient rules
+c(f) = 8√f and a(f) = 2√f, fitted from our joint weight decay coefficient and learning rate
+sweeps. Their √f dependence agrees with the scaling predicted by Bergsma et al. (2025a). These
+rules approximate the trend across optimizers rather than selecting the optimal weight decay co-
+efficient separately at every optimizer and overtraining factor. We independently sweep the base
+learning rate for every optimizer, weight decay schedule, and overtraining factor. See Appendix E
+for additional details.
+Figure 5 shows that, under these coefficient rules, the preferred weight decay schedule depends on
+both the optimizer and training horizon. Log-time weight decay increasingly benefits ADANA as the
+overtraining factor grows, modestly benefits SOAP, has little consistent effect on AdamW, and harms
+Muon at high OT. The Muon result may reflect a poorly matched log-time weight decay coefficient
+rather than the schedule itself. Figures 1 and 2 use uniform weight decay for all optimizers. In
+Section 7, we instead use the better-performing weight decay schedule for each optimizer when
+comparing their strongest treatments.
+6
+MOMENTUM COOLDOWN FOR GROWING MEMORY
+In this section, we propose a formulation of momentum cooldown, motivated by the idea that
+ADANA’s log-time momentum schedule makes its memory longest near the end of training, when
+the learning rate approaches zero and responsiveness may become more important. Our momentum
+cooldown bounds the optimizer’s memory timescale during terminal learning rate decay. Applied to
+ADANA, it preserves the growing memory window through most of training but shortens it near the
+end of the run. A similar idea to reduce momentum at the end of training has been used for Muon in
+nanochat (Karpathy, 2025).
+We define the current learning rate decay timescale as
+τη,t =
+ηt
+|ηt+1 −ηt|,
+(8)
+8
+
+
+1
+4
+16
+64
+256
+OT factor
+1x
+2x
+4x
+Token mult relative to
+uniform-WD AdamW
+(a) Momentum cooldown selectively
+helps log-time momentum
+Uniform WD
+AdamW
+AdamW + cooldown
+ADANA
+ADANA + cooldown
+1
+4
+16
+64 128
+OT factor
+(b) Log-time WD and cooldown
+provide complementary gains
+ADANA
+ADANA + cooldown
+Uniform WD
+Log-time WD
+1
+4
+16
+64
+256
+OT factor
+(c) Log WD + CD amplifies ADANA
+advantage across model sizes
+ADANA treatment
+Uniform WD
+Log-time WD + CD
+Model size
+51M
+124M
+253M
+Figure 6: Momentum cooldown selectively benefits ADANA’s log-time memory and combines
+with log-time weight decay to amplify ADANA’s advantage as the overtraining factor in-
+creases, consistently across model sizes. All panels use AdamW with uniform weight decay at
+the same model size as the token-multiplier baseline. Left: on the 51M model under uniform weight
+decay, momentum cooldown has little consistent effect on fixed-memory AdamW but substantially
+improves ADANA at long horizons. Middle: log-time weight decay and momentum cooldown each
+improve ADANA; combined, they yield the largest gains at long horizons. Right: across all three
+model sizes, the combined treatment outperforms ADANA with uniform weight decay. The result-
+ing ADANA token multiplier follows an approximately straight line on log–log axes. We therefore
+use ADANA with log-time weight decay and momentum cooldown in the subsequent comparisons
+of the strongest treatments.
+taking τη,t = ∞when the learning rate is constant or increasing. For any momentum state with
+coefficient βt, we define its original memory timescale as
+τmom,t =
+1
+1 −βt
+.
+(9)
+In momentum cooldown, we replace this timescale with
+τCD,t = max(1, min{τmom,t, τη,t}) ,
+βCD,t = 1 −
+1
+τCD,t
+.
+(10)
+See Appendix K for the complete definitions and ablations.
+Figure 6 shows that momentum cooldown has little consistent effect on fixed-memory AdamW but
+substantially improves ADANA at long horizons. Log-time weight decay and momentum cooldown
+each improve ADANA alone, and the gains compound when the two interventions are combined.
+Across all three model sizes, the combined treatment outperforms ADANA with uniform weight de-
+cay. In particular, its AdamW-relative token multiplier appears approximately straight when plotted
+on log–log axes, motivating the outscaling analysis in Section 7. We therefore use ADANA with
+log-time weight decay and momentum cooldown in the subsequent strongest-treatment comparisons.
+Our experiments measure improvements in final validation loss; we leave additional analysis of the
+mechanism behind this benefit and comparison of alternative momentum cooldown rules to future
+work.
+7
+OUTSCALING ACROSS THE OVERTRAINING AXIS
+Using the treatment choices identified in the preceding sections, we now compare how the resulting
+optimizer treatments scale relative to one another across the overtraining axis.
+7.1
+ADANA OUTSCALES ADAMW
+The DANA momentum schedule was originally derived to improve loss-scaling exponents relative
+to SGD in the power-law random features model (Ferbach et al., 2025). In this analysis, DANA
+9
+
+
+1
+4
+16
+64 128
+ADANA OT factor
+1
+4
+16
+64
+256
+AdamW OT to match
+(a) vs AdamW (uniform WD)
+Model size
+51M
+124M
+253M
+Reference slopes
+Equal OT: 1.0
+PLRF: 2 −κ = 1.15
+1
+4
+16
+64 128
+ADANA OT factor
+1
+4
+16
+64
+256
+(b) vs AdamW (log-time WD)
+Reference slopes
+Equal OT: 1.0
+PLRF: 2 −κ = 1.15
+−10
+0
+10
+High-token limit diff (mpt)
+−0.2
+−0.1
+0.0
+0.1
+0.2
+Token decay exponent diff
+AdamW
+better
+ADANA
+better
+(c) ADANA improves token
+decay, loss limit, or both
+Best fit
+Fit decay exp at
+fixed limit loss
+ADANA outscales AdamW with slope close to 2 −κ
+Figure 7: With log-time weight decay and momentum cooldown, ADANA outscales AdamW
+with an equivalent OT slope close to the DANA PLRF prediction 2 −κ. Left and middle:
+the AdamW OT factor required to match ADANA’s loss at fixed model size, using AdamW with
+uniform weight decay and log-time weight decay as baselines, respectively. Across model sizes
+and both baselines, the fitted log–log slopes range from 1.15 to 1.20, close to the PLRF prediction
+2 −κ = 1.15 for κ = 0.85. Dotted segments and translucent markers require extrapolating the
+AdamW fit. Right: relative to AdamW with log-time weight decay, we plot the ADANA token-decay
+exponent difference implied by each fixed high-token-limit difference under the shared-m Skaling
+fit. The exponent difference remains above zero even where the high-token limit favors AdamW,
+providing evidence for an improved ADANA token-decay exponent while leaving the high-token-
+limit difference less well identified.
+accelerates an effective optimization clock, which reparameterizes training time according to the
+rate at which spectral modes are learned. When the momentum damping schedule scales as t−κ, the
+momentum contribution to this clock grows as
+Z t
+0
+s−κ/2 ds
+2
+∝t2−κ,
+whereas the SGD clock grows linearly with t. Consequently, matching DANA after t updates re-
+quires SGD to train for a horizon proportional to t2−κ. In terms of our equivalent-OT metric, this
+would give DANA an equivalent-OT exponent of 2 −κ relative to SGD.
+The PLRF model provides a tractable setting for high-dimensional optimization theory, but whether
+this outscaling behavior transfers to the adaptive versions, ADANA and AdamW, and to transformers
+is an open empirical question. We therefore ask how ADANA’s token efficiency relative to AdamW
+evolves across the overtraining axis and how its equivalent-OT scaling compares with the 2 −κ
+prediction.
+Figure 7 compares ADANA with log-time weight decay and momentum cooldown against AdamW
+with either uniform or log-time weight decay. Across all three model sizes and both AdamW base-
+lines, the fitted equivalent-OT exponents range from 1.15 to 1.20, close to 2 −κ = 1.15 for the
+κ = 0.85 treatment used throughout our experiments. The floor–decay tradeoff analysis also shows
+that ADANA’s fitted token-decay exponent advantage remains positive throughout the range of high-
+token-limit differences consistent with the data. Appendix H gives the complete equivalent-OT and
+floor–decay analyses.
+7.2
+MATRIX-PRECONDITIONED OPTIMIZERS PROVIDE APPROXIMATELY CONSTANT GAINS
+OVER ADAMW
+Figure 8 compares Muon and SOAP with AdamW. Across most overtraining factors, Muon provides
+a 1.4×–1.7× token multiplier over AdamW, while SOAP provides a 1.3×–1.7× multiplier. These
+results are consistent with the matrix-preconditioned optimizers providing roughly constant token
+multipliers over AdamW across OT factors. Whether this behavior persists at still higher OT factors
+is unclear: SOAP’s token multiplier rises to approximately 1.9× at 128× OT on the 51M model,
+suggesting that it may gain further with additional overtraining.
+10
+
+
+1
+4
+16
+64
+256
+Muon or SOAP OT factor
+1
+4
+16
+64
+256
+1024
+AdamW OT to match
+Muon and SOAP
+vs AdamW
+Muon uniform WD
+SOAP log-time WD
+Equal OT
+Model size
+51M
+124M
+253M
+1
+4
+16
+64
+256
+ADANA OT factor
+1
+4
+16
+64
+256
+1024
+Muon OT to match
+ADANA vs Muon
+ADANA log-time WD + CD
+Equal OT
+1
+4
+16
+64
+256
+ADANA OT factor
+1
+4
+16
+64
+256
+1024
+SOAP OT to match
+ADANA vs SOAP
+Figure 8: ADANA versus matrix-preconditioned optimizers under their strongest treatments:
+ADANA closes the gap to Muon and SOAP as the overtraining factor increases. AdamW
+and Muon use uniform weight decay, SOAP uses log-time weight decay, and ADANA uses log-
+time weight decay with momentum cooldown. Left: Muon and SOAP provide roughly constant
+token-multiplier advantages over AdamW across most of the overtraining axis, although SOAP may
+gain further at the highest OT factors. This suggests that matrix preconditioning may provide an
+approximately constant efficiency multiplier over AdamW. ADANA begins behind both matrix-
+preconditioned optimizers, but has a larger fitted token-decay exponent and closes the gap as the
+training horizon increases, catching Muon and becoming competitive with SOAP. Dotted segments
+and translucent markers indicate baseline extrapolation.
+7.3
+ADANA OUTSCALES THE MATRIX-PRECONDITIONED OPTIMIZERS
+Finally, we compare ADANA’s horizon-dependent gains with the matrix-preconditioned optimizers.
+ADANA starts substantially behind: at 2× OT, its token multiplier is 0.59×–0.63× relative to Muon
+and 0.63×–0.69× relative to SOAP across the three model sizes. As the training horizon increases,
+ADANA closes these gaps, surpassing Muon and becoming competitive with SOAP at the highest
+OT factors we test. It appears that ADANA outscales Muon and may outscale SOAP, but these
+trends rely heavily on the highest OT factors we test; it remains uncertain whether they continue at
+even higher OT factors.
+8
+DISCUSSION AND LIMITATIONS
+Optimizer evaluation should treat training horizon as part of the experimental design. An optimizer
+selected near the compute-optimal horizon may not remain strongest when the same model is trained
+substantially longer, and its preferred learning rate schedule, weight decay treatment, and memory
+can also change across the overtraining axis. Long-horizon comparisons therefore require scaling
+rules for hyperparameters that are often selected using experiments at only one horizon.
+Our results suggest complementary roles for preconditioning and scheduled memory. In our ex-
+periments, Muon and SOAP provide large advantages over AdamW across most horizons, while
+ADANA’s relative efficiency increases with training horizon. Tuning fixed memory separately at
+every horizon improves the fixed-memory optimizers but does not explain ADANA’s scaling advan-
+tage, suggesting that adapting memory within a training run provides an additional benefit.
+Future work should establish how these conclusions transfer across larger models, architectures,
+datasets, and training horizons. Preliminary experiments in Appendix J show that reversing the or-
+der of adaptive preconditioning and scheduled momentum retains most of ADANA’s performance,
+indicating that scheduled memory can remain effective under another preconditioner ordering. Fu-
+ture work could extend these experiments to larger models and longer training horizons.
+Our main optimizer comparisons use a global sequence batch of 256. Appendix I reports a fixed-
+token experiment at 8× OT in which ADANA begins losing efficiency at smaller batch sizes than
+11
+
+
+AdamW, despite jointly optimizing the learning rate with β2 for AdamW and g3 for ADANA. Be-
+cause increasing batch size simultaneously reduces the number of optimizer updates and gradient
+noise, and because other optimizer hyperparameters remain fixed, this experiment does not identify
+the mechanism or establish a general batch scaling law for ADANA. We therefore treat batch depen-
+dence as an important limitation and leave a fully controlled study across batch size, update count,
+and effective batch size to future work.
+9
+CONCLUSION
+Optimizer rankings and optimal treatments change as models are trained beyond their compute-
+optimal token budgets. ADANA’s scaling advantage over AdamW persists after tuning AdamW’s
+fixed memory separately at each training horizon. Log-time weight decay and momentum cooldown
+further amplify this advantage, producing equivalent-OT scaling close to the 2 −κ prediction from
+DANA theory on power-law random features. Matrix-preconditioned optimizers provide large but
+approximately constant gains over AdamW across most of the measured range, while ADANA be-
+gins behind them and closes the gap as training increases. Treating training horizon as an essential
+experimental axis reveals optimizer behavior hidden by single-horizon comparisons and suggests
+that scheduling optimizer memory is a promising route to methods whose relative efficiency im-
+proves with additional training.
+ACKNOWLEDGMENTS
+The authors are grateful to the Google TPU Research Cloud program, MIT CSAIL, and Kaiming
+He for providing the compute that made this work possible. We thank Elliot Paquette and Ziyin Liu
+for technical discussions. We thank an anonymous reviewer of a prior paper for suggesting that we
+investigate the interaction between the learning rate schedule endpoint and the advantage of log-time
+weight decay. SQ thanks the support of the Two Sigma Fellowship.
+REFERENCES
+Rohan Anil, Vineet Gupta, Tomer Koren, Kevin Regan, and Yoram Singer. Scalable second or-
+der optimization for deep learning.
+arXiv preprint arXiv:2002.09018, 2020.
+URL https:
+//arxiv.org/abs/2002.09018.
+Jacob Austin, Sholto Douglas, Roy Frostig, Anselm Levskaya, Charlie Chen, Sharad Vikram,
+Federico Lebron, Peter Choy, Vinay Ramasesh, Albert Webson, and Reiner Pope.
+How to
+scale your model: A systems view of LLMs on TPUs. https://jax-ml.github.io/
+scaling-book/, 2025. Online book.
+Shane Bergsma, Nolan Dey, Gurpreet Gosal, Gavia Gray, Daria Soboleva, and Joel Hestness.
+Power lines: Scaling laws for weight decay and batch size in LLM pre-training. In Advances
+in Neural Information Processing Systems, volume 38, 2025a.
+doi: 10.52202/085713-4171.
+URL
+https://proceedings.neurips.cc/paper_files/paper/2025/hash/
+b5f78a17a94da3e34c935515d1b6adae-Abstract-Conference.html.
+Shane Bergsma, Nolan Dey, Gurpreet Gosal, Gavia Gray, Daria Soboleva, and Joel Hestness.
+Straight to zero: Why linearly decaying the learning rate to zero works best for LLMs. In In-
+ternational Conference on Learning Representations, 2025b. URL https://arxiv.org/
+abs/2502.15938.
+Shane Bergsma, Nolan Dey, and Joel Hestness. Predicting training re-evaluation curves enables
+effective data curriculums for LLMs. In International Conference on Learning Representations,
+2026a. URL https://arxiv.org/abs/2509.25380.
+Shane Bergsma, Bin Claire Zhang, Nolan Dey, Shaheer Muhammad, Gurpreet Gosal, and Joel Hes-
+tness. Scaling with collapse: Efficient and predictable training of LLM families. In International
+Conference on Learning Representations, 2026b. URL https://arxiv.org/abs/2509.
+25087.
+12
+
+
+Song Bian, Minghao Yan, and Shivaram Venkataraman. Scaling inference-efficient language mod-
+els. In Proceedings of the 42nd International Conference on Machine Learning, 2025. URL
+https://arxiv.org/abs/2501.18107.
+Johan Bj”orck, Alon Benhaim, Vishrav Chaudhary, Furu Wei, and Xia Song. Scaling optimal LR
+across token horizons. In International Conference on Learning Representations, 2025. URL
+https://openreview.net/forum?id=WYL4eFLcxG.
+Blake Bordelon, Abdulkadir Canatar, and Cengiz Pehlevan. Spectrum dependent learning curves in
+kernel regression and wide neural networks. In Proceedings of the 37th International Conference
+on Machine Learning, volume 119 of Proceedings of Machine Learning Research, pp. 1024–
+1034. PMLR, 2020. URL https://proceedings.mlr.press/v119/bordelon20a.
+html.
+James Bradbury, Roy Frostig, Peter Hawkins, Matthew James Johnson, Yash Katariya, Chris Leary,
+Dougal Maclaurin, George Necula, Adam Paszke, Jake VanderPlas, Skye Wanderman-Milne,
+and Qiao Zhang. JAX: Composable transformations of Python+NumPy programs.
+https:
+//github.com/jax-ml/jax, 2018. Version 0.6.2.
+Zachary Charles, Gabriel Teston, Lucio Dery, Keith Rush, Nova Fallen, Zachary Garrett, Arthur
+Szlam, and Arthur Douillard. Communication-efficient language model training scales reliably
+and robustly: Scaling laws for DiLoCo. arXiv preprint arXiv:2503.09799, 2025. URL https:
+//arxiv.org/abs/2503.09799.
+Tianqi Chen, Bing Xu, Chiyuan Zhang, and Carlos Guestrin. Training deep nets with sublinear
+memory cost. arXiv preprint arXiv:1604.06174, 2016. URL https://arxiv.org/abs/
+1604.06174.
+Aaron Defazio. Schedulefree+: Scaling learning-rate-free and schedule-free learning to large lan-
+guage models. arXiv preprint arXiv:2605.19095, 2026. URL https://arxiv.org/abs/
+2605.19095.
+Aaron Defazio, Xingyu Yang, Harsh Mehta, Konstantin Mishchenko, Ahmed Khaled, and Ashok
+Cutkosky. The road less scheduled. In Advances in Neural Information Processing Systems, 2024.
+URL https://arxiv.org/abs/2405.15682.
+Nolan Dey, Bin Claire Zhang, Lorenzo Noci, Mufan Li, Blake Bordelon, Shane Bergsma, Cengiz
+Pehlevan, Boris Hanin, and Joel Hestness. Don’t be lazy: CompleteP enables compute-efficient
+deep transformers. arXiv preprint arXiv:2505.01618, 2025. URL https://arxiv.org/
+abs/2505.01618.
+Katie E. Everett, Lechao Xiao, Mitchell Wortsman, Alexander A. Alemi, Roman Novak, Peter J.
+Liu, Izzeddin Gur, Jascha Sohl-Dickstein, Leslie Pack Kaelbling, Jaehoon Lee, and Jeffrey Pen-
+nington. Scaling exponents across parameterizations and optimizers. In Proceedings of the 41st
+International Conference on Machine Learning, volume 235 of Proceedings of Machine Learning
+Research, pp. 12666–12700. PMLR, 2024. URL https://proceedings.mlr.press/
+v235/everett24a.html.
+Damien Ferbach, Katie Everett, Gauthier Gidel, Elliot Paquette, and Courtney Paquette. Dimension-
+adapted momentum outscales sgd. arXiv preprint arXiv:2505.16098, 2025. URL https://
+arxiv.org/abs/2505.16098.
+Damien Ferbach, Courtney Paquette, Gauthier Gidel, Katie Everett, and Elliot Paquette.
+Logarithmic-time schedules for scaling language models with momentum.
+arXiv preprint
+arXiv:2602.05298, 2026. URL https://arxiv.org/abs/2602.05298.
+Samir Yitzhak Gadre, Georgios Smyrnis, Vaishaal Shankar, Suchin Gururangan, Mitchell Worts-
+man, Rulin Shao, Jean Mercat, Alex Fang, Jeffrey Li, Sedrick Keh, Rui Xin, Marianna Nezhurina,
+Igor Vasiljevic, Jenia Jitsev, Luca Soldaini, Alexandros G. Dimakis, Gabriel Ilharco, Pang Wei
+Koh, Shuran Song, Thomas Kollar, Yair Carmon, Achal Dave, Reinhard Heckel, Niklas Muen-
+nighoff, and Ludwig Schmidt. Language models scale reliably with over-training and on down-
+stream tasks. arXiv preprint arXiv:2403.08540, 2024. URL https://arxiv.org/abs/
+2403.08540.
+13
+
+
+Vineet Gupta, Tomer Koren, and Yoram Singer. Shampoo: Preconditioned stochastic tensor opti-
+mization. In Proceedings of the 35th International Conference on Machine Learning, 2018. URL
+https://proceedings.mlr.press/v80/gupta18a.html.
+Alexander H¨agele, Elie Bakouch, Atli Kosson, Loubna Ben Allal, Leandro von Werra, and Martin
+Jaggi. Scaling laws and compute-optimal training beyond fixed training durations. arXiv preprint
+arXiv:2405.18392, 2024. URL https://arxiv.org/abs/2405.18392.
+Jonathan Heek, Anselm Levskaya, Avital Oliver, Marvin Ritter, Bertrand Rondepierre, Andreas
+Steiner, and Marc van Zee. Flax: A neural network library and ecosystem for JAX. https:
+//github.com/google/flax, 2024. Version 0.10.6.
+Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza
+Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark,
+Thomas Hennigan, Eric Noland, Katherine Millican, George van den Driessche, Bogdan
+Damoc, Aurelia Guy, Simon Osindero, Kar´en Simonyan, Erich Elsen, Oriol Vinyals, Jack
+Rae, and Laurent Sifre.
+An empirical analysis of compute-optimal large language model
+training.
+In Advances in Neural Information Processing Systems, volume 35, pp. 30016–
+30030, 2022.
+URL https://papers.neurips.cc/paper_files/paper/2022/
+hash/c1e2faff6f588870935f114ebe04a3e5-Abstract-Conference.html.
+Shengding Hu, Yuge Tu, Xu Han, Chaoqun He, Ganqu Cui, Xiang Long, Zhi Zheng, Yewei Fang,
+Yuxiang Huang, Weilin Zhao, Xinrong Zhang, Zheng Leng Thai, Kaihuo Zhang, Chongyi Wang,
+Yuan Yao, Chenyang Zhao, Jie Zhou, Jie Cai, Zhongwu Zhai, Ning Ding, Chao Jia, Guoyang
+Zeng, Dahai Li, Zhiyuan Liu, and Maosong Sun. MiniCPM: Unveiling the potential of small
+language models with scalable training strategies. arXiv preprint arXiv:2404.06395, 2024. URL
+https://arxiv.org/abs/2404.06395.
+Keller Jordan, Yuchen Jin, Vlado Boza, Jiacheng You, Franz Cecista, Laker Newhouse, and Jeremy
+Bernstein. Muon: An optimizer for hidden layers in neural networks, 2024. URL https:
+//kellerjordan.github.io/posts/muon/.
+Norman P. Jouppi et al. In-datacenter performance analysis of a tensor processing unit. In Proceed-
+ings of the 44th Annual International Symposium on Computer Architecture, pp. 1–12, 2017. doi:
+10.1145/3079856.3080246.
+Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child,
+Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language
+models. arXiv preprint arXiv:2001.08361, 2020. URL https://arxiv.org/abs/2001.
+08361.
+Andrej Karpathy. nanochat: The best ChatGPT that $100 can buy. https://github.com/
+karpathy/nanochat, 2025. Software repository.
+Mikail Khona, Aditya Vavre, Boxiang Wang, Deyu Fu, Hao Wu, Mike Chrzanowski, Bryan Catan-
+zaro, Dheevatsa Mudigere, Jeff Pool, Michael Lightstone, Mohammad Shoeybi, Mostofa Patwary,
+Nima Tajbakhsh, and Tijmen Blankevoort. SOAP, Muon, and beyond: Pushing LLM pretraining
+scales. arXiv preprint arXiv:2607.20548, 2026. URL https://arxiv.org/abs/2607.
+20548.
+Diederik P. Kingma and Jimmy Ba. Adam: A method for stochastic optimization. In International
+Conference on Learning Representations, 2015. URL https://arxiv.org/abs/1412.
+6980.
+Jingyuan Liu, Jianlin Su, Xingcheng Yao, Zhejun Jiang, Guokun Lai, Yulun Du, Yidao Qin, Weixin
+Xu, Enzhe Lu, Junjie Yan, Yanru Chen, Huabin Zheng, Yibo Liu, Shaowei Liu, Bohong Yin,
+Weiran He, Han Zhu, Yuzhi Wang, Jianzhou Wang, Mengnan Dong, Zheng Zhang, Yongsheng
+Kang, Hao Zhang, Xinran Xu, Yutao Zhang, Yuxin Wu, Xinyu Zhou, and Zhilin Yang. Muon is
+scalable for LLM training. arXiv preprint arXiv:2502.16982, 2025. URL https://arxiv.
+org/abs/2502.16982.
+14
+
+
+Ziyin Liu, Zhikang T. Wang, and Masahito Ueda. LaProp: Separating momentum and adaptivity in
+Adam. arXiv preprint arXiv:2002.04839, 2020. doi: 10.48550/arXiv.2002.04839. URL https:
+//arxiv.org/abs/2002.04839.
+Ilya Loshchilov and Frank Hutter. SGDR: Stochastic gradient descent with warm restarts. In In-
+ternational Conference on Learning Representations, 2017. URL https://openreview.
+net/forum?id=Skq89Scxx.
+Ilya Loshchilov and Frank Hutter. Decoupled weight decay regularization. In International Confer-
+ence on Learning Representations, 2019. URL https://openreview.net/forum?id=
+Bkg6RiCqY7.
+Martin Marek, Sanae Lotfi, Aditya Somasundaram, Andrew Gordon Wilson, and Micah Goldblum.
+Small batch size training for language models: When vanilla SGD works, and why gradient
+accumulation is wasteful, 2025. URL https://arxiv.org/abs/2507.07101.
+Bruno Mlodozeniec, Pierre Ablin, Louis B´ethune, Dan Busbridge, Michal Klein, Jason Ramapuram,
+and Marco Cuturi. Completed hyperparameter transfer across modules, width, depth, batch and
+duration. arXiv preprint arXiv:2512.22382, 2025. URL https://arxiv.org/abs/2512.
+22382.
+Depen Morwani, Itai Shapira, Nikhil Vyas, Eran Malach, Sham Kakade, and Lucas Janson. A
+new perspective on shampoo’s preconditioner. arXiv preprint arXiv:2406.17748, 2024. URL
+https://arxiv.org/abs/2406.17748.
+Depen Morwani, Nikhil Vyas, Hanlin Zhang, and Sham Kakade. Connections between schedule-
+free optimizers, AdEMAMix, and accelerated SGD variants. arXiv preprint arXiv:2502.02431,
+2025. URL https://arxiv.org/abs/2502.02431.
+Niklas Muennighoff, Alexander M. Rush, Boaz Barak, Teven Le Scao, Aleksandra Piktus, Noua-
+mane Tazi, Sampo Pyysalo, Thomas Wolf, and Colin Raffel. Scaling data-constrained language
+models. arXiv preprint arXiv:2305.16264, 2023. URL https://arxiv.org/abs/2305.
+16264.
+Matteo Pagliardini, Pierre Ablin, and David Grangier. The ademamix optimizer: Better, faster, older.
+arXiv preprint arXiv:2409.03137, 2024. URL https://arxiv.org/abs/2409.03137.
+Elliot
+Paquette,
+Courtney
+Paquette,
+Lechao
+Xiao,
+and
+Jeffrey
+Pennington.
+4+3
+phases
+of
+compute-optimal
+neural
+scaling
+laws.
+In
+Advances
+in
+Neural
+In-
+formation
+Processing
+Systems,
+volume
+37,
+pp.
+16459–16537,
+2024.
+URL
+https://proceedings.neurips.cc/paper_files/paper/2024/hash/
+1dccfc3ee01871d05e33457c61037d59-Abstract-Conference.html.
+Elliot Paquette, Noah Marshall, Lucas Benigni, Guangyuan Wang, Atish Agarwala, and Courtney
+Paquette. Phases of Muon: When Muon eclipses SignSGD. arXiv preprint arXiv:2605.09552,
+2026. URL https://arxiv.org/abs/2605.09552.
+Guilherme Penedo, Hynek Kydl´ıˇcek, Loubna Ben Allal, Anton Lozhkov, Margaret Mitchell, Colin
+Raffel, Leandro von Werra, and Thomas Wolf. The FineWeb datasets: Decanting the web for the
+finest text data at scale. In Advances in Neural Information Processing Systems, volume 37, 2024.
+URL https://arxiv.org/abs/2406.17557.
+Project Apertus et al. Apertus: Democratizing open and compliant LLMs for global language envi-
+ronments, 2025. URL https://arxiv.org/abs/2509.14233.
+Shikai Qiu, Zixi Chen, Hoang Phan, Qi Lei, and Andrew Gordon Wilson. Hyperparameter trans-
+fer enables consistent gains of matrix-preconditioned optimizers across scales. arXiv preprint
+arXiv:2512.05620, 2025. URL https://arxiv.org/abs/2512.05620.
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. Language
+models are unsupervised multitask learners. Technical report, OpenAI, 2019. URL https:
+//cdn.openai.com/better-language-models/language-models.pdf.
+15
+
+
+Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. ZeRO: Memory optimizations
+toward training trillion parameter models. In Proceedings of the International Conference for
+High Performance Computing, Networking, Storage and Analysis, 2020. doi: 10.1109/SC41405.
+2020.00024.
+Nikhil Sardana, Jacob Portes, Sasha Doubov, and Jonathan Frankle. Beyond chinchilla-optimal:
+Accounting for inference in language model scaling laws. In Proceedings of the 41st International
+Conference on Machine Learning, 2024. URL https://arxiv.org/abs/2401.00448.
+Andrew M. Saxe, James L. McClelland, and Surya Ganguli. Exact solutions to the nonlinear dy-
+namics of learning in deep linear neural networks.
+In International Conference on Learning
+Representations, 2014. URL https://arxiv.org/abs/1312.6120.
+Andrei Semenov, Matteo Pagliardini, and Martin Jaggi. Benchmarking optimizers for large language
+model pretraining. arXiv preprint arXiv:2509.01440, 2025. URL https://arxiv.org/
+abs/2509.01440.
+Ishaan Shah, Anthony M. Polloreno, Karl Stratos, Philip Monk, Adarsh Chaluvaraju, Andrew
+Hojel, Andrew Ma, Anil Thomas, Ashish Tanwer, Darsh J. Shah, Khoi Nguyen, Kurt Smith,
+Michael Callahan, Michael Pust, Mohit Parmar, Peter Rushton, Platon Mazarakis, Ritvik Kapila,
+Saurabh Srivastava, Somanshu Singla, Tim Romanski, Yash Vanjani, and Ashish Vaswani.
+Practical efficiency of Muon for pretraining.
+arXiv preprint arXiv:2505.02222, 2025.
+URL
+https://arxiv.org/abs/2505.02222.
+Hao-Jun Michael Shi, Tsung-Hsien Lee, Shintaro Iwasaki, Jose Gallego-Posada, Zhijing Li,
+Kaushik Rangadurai, Dheevatsa Mudigere, and Michael Rabbat. A distributed data-parallel Py-
+Torch implementation of the distributed shampoo optimizer for training neural networks at-scale.
+arXiv preprint arXiv:2309.06497, 2023. URL https://arxiv.org/abs/2309.06497.
+Egor Shulgin, Dimitri von R”utte, Tianyue H. Zhang, Niccol`o Ajroldi, Bernhard Sch”olkopf, and
+Antonio Orvieto. Deriving hyperparameter scaling laws via modern optimization theory. arXiv
+preprint arXiv:2603.15958, 2026. URL https://arxiv.org/abs/2603.15958.
+The JAX Authors. Splash attention: Sparse flash attention for TPU. https://github.com/
+jax-ml/jax, 2023. JAX Pallas Splash Attention implementation.
+Hugo Touvron, Louis Martin, Kevin Stone, et al. Llama 2: Open foundation and fine-tuned chat
+models. arXiv preprint arXiv:2307.09288, 2023. URL https://arxiv.org/abs/2307.
+09288.
+Mathurin Videau, Badr Youbi-Idrissi, David Lopez-Paz, and Kartik Ahuja. Skaling: Chinchilla’s
+exponents meet kaplan’s coupling. arXiv preprint arXiv:2608.07222, 2026. doi: 10.48550/arXiv.
+2608.07222. URL https://arxiv.org/abs/2608.07222.
+Alexandra Volkova, Mher Safaryan, Christoph H. Lampert, and Dan Alistarh. Towards robust scal-
+ing laws for optimizers. arXiv preprint arXiv:2602.07712, 2026. URL https://arxiv.org/
+abs/2602.07712.
+Nikhil Vyas, Depen Morwani, Rosie Zhao, Mujin Kwun, Itai Shapira, David Brandfonbrener, Lucas
+Janson, and Sham Kakade. SOAP: Improving and stabilizing shampoo using adam. In Interna-
+tional Conference on Learning Representations, 2025. URL https://openreview.net/
+forum?id=IDxZhXrpNf.
+Xi Wang and Laurence Aitchison. How to set AdamW’s weight decay as you scale model and
+dataset size. In International Conference on Machine Learning, 2025. URL https://arxiv.
+org/abs/2405.13698.
+Kaiyue Wen, David Hall, Tengyu Ma, and Percy Liang. Fantastic pretraining optimizers and where
+to find them. arXiv preprint arXiv:2509.02046, 2025. URL https://arxiv.org/abs/
+2509.02046.
+Kaiyue Wen, Xingyu Dang, Kaifeng Lyu, Tengyu Ma, and Percy Liang. Fantastic pretraining op-
+timizers and where to find them II: Hyperball optimization. arXiv preprint arXiv:2606.16899,
+2026. URL https://arxiv.org/abs/2606.16899.
+16
+
+
+Greg Yang, Edward J. Hu, Igor Babuschkin, Szymon Sidor, Xiaodong Liu, David Farhi, Nick Ry-
+der, Jakub Pachocki, Weizhu Chen, and Jianfeng Gao. Tensor programs V: Tuning large neural
+networks via zero-shot hyperparameter transfer. In Advances in Neural Information Processing
+Systems, volume 34, 2021. URL https://arxiv.org/abs/2203.03466.
+17
+
+
+A
+EXTENDED RELATED WORK
+Training beyond compute-optimal horizons.
+Data-constrained scaling studies characterize how
+repeated data changes the benefit of continued training when the available unique data are limited
+(Muennighoff et al., 2023). Warmup-Stable-Decay schedules separate an extensible stable-training
+phase from terminal learning rate decay (Hu et al., 2024), while reusable training trajectories allow
+scaling behavior to be evaluated across multiple training durations without restarting each run from
+initialization (H¨agele et al., 2024). Together, these works treat training horizon as an experimental
+axis distinct from model size.
+Hyperparameter transfer across scale.
+The maximal-update parameterization and µTransfer en-
+able zero-shot hyperparameter transfer across model width by prescribing how initialization and
+learning rates should scale (Yang et al., 2021). Subsequent work derives optimizer-dependent width
+exponents, develops depth-aware parameterizations, and extends hyperparameter transfer across
+modules, width, depth, batch size, and training duration (Everett et al., 2024; Dey et al., 2025;
+Mlodozeniec et al., 2025). For matrix-preconditioned optimizers, preserving gains across model
+scale requires optimizer-appropriate learning rate and weight decay transfer (Qiu et al., 2025). Com-
+plementary theoretical work derives coupled scaling rules for learning rate, momentum, and batch
+size from the iteration or token budget (Shulgin et al., 2026).
+Optimizer memory and weight decay timescales.
+Recent work uses normalized optimizer
+timescales to align training curves across model scales and characterize how information from dif-
+ferent portions of training remains influential (Bergsma et al., 2026b;a). In particular, Bergsma et al.
+(2025a) fit a normalized AdamW weight decay timescale proportional to (D/N)−0.527, where D
+is the token horizon and N is model size. At fixed model size, this implies that the correspond-
+ing memory window measured in tokens grows approximately as D0.473. This provides additional
+context for studying momentum and weight decay as horizon-dependent memory timescales.
+Preconditioner order and scalable matrix optimizers.
+Adam accumulates momentum before
+applying coordinatewise adaptive normalization, whereas LaProp applies normalization before mo-
+mentum accumulation (Kingma & Ba, 2015; Liu et al., 2020). This distinction motivates our ex-
+periments on preconditioner order. Shampoo introduced structured matrix-valued preconditioning,
+with subsequent work developing scalable and distributed implementations (Gupta et al., 2018; Anil
+et al., 2020; Shi et al., 2023; Morwani et al., 2024). SOAP applies Adam-like updates in Sham-
+poo’s evolving eigenbasis, while Muon approximately orthogonalizes matrix-valued updates (Vyas
+et al., 2025; Jordan et al., 2024). Recent studies further examine the practical implementation and
+large-scale behavior of these optimizers (Liu et al., 2025; Shah et al., 2025; Khona et al., 2026).
+18
+
+
+B
+EXPERIMENTAL DETAILS
+Unless explicitly stated otherwise, all experiments use the model family, initialization, data, training,
+and evaluation protocols defined in this section.
+B.1
+NOTATION, ARCHITECTURE, AND MODEL SIZES
+Table 1 defines the notation used for the model family and for nominal compute accounting.
+Symbol
+Definition
+H
+Number of attention heads
+D
+Model dimension
+Dhead
+Dimension of each attention head
+N
+Number of Transformer blocks
+F
+Feed-forward intermediate dimension
+L
+Sequence length in tokens
+V
+Padded vocabulary size
+B
+Global batch size in sequences
+S
+Number of optimizer updates
+T = SBL
+Number of training tokens
+P
+Nominal parameter count used for scaling and compute accounting
+Pnonemb
+Number of non-embedding parameters
+Ptrain
+Exact trainable parameter count, including both vocabulary matrices and learned
+normalization scales
+C = 6PT
+Nominal training compute in FLOPs
+TPP = T/P
+Training tokens per nominal parameter
+f = T/(20P) = TPP/20
+OT factor: training-token horizon in multiples of 20 tokens per nominal param-
+eter
+Table 1: Notation used for the architecture, training budget, and nominal compute.
+We use decoder-only causal Transformers. The architecture, initialization, and width, depth, and
+attention co-scaling setup broadly follow the Enoki ladder in Ferbach et al. (2026). Relative to that
+setup, we replace GeLU with SwiGLU, LayerNorm with RMSNorm, and QK-LayerNorm with QK-
+RMSNorm, and use a constant token embedding initialization. The resulting Transformer blocks
+are architecturally similar to the Llama 2 style architecture (Touvron et al., 2023) used in Qiu et al.
+(2025).
+The co-scaling rule, introduced in Charles et al. (2025) and used in Ferbach et al. (2026), is
+Dhead = 64,
+D = 64H,
+N = ⌊3H/4⌋,
+F = 4D,
+The nominal count includes the readout matrix but omits the input embedding matrix, although the
+two are untied. Kaplan et al. (2020) found that excluding embedding parameters produced cleaner
+scaling trends across model depths. We nevertheless include the readout because it is applied as a
+dense vocabulary projection, whereas the input embedding is accessed by lookup.
+Throughout the paper, model size labels such as 51M and 253M refer to rounded nominal parameter
+counts P, not exact trainable parameter counts.
+We use overtraining (OT) factor as a concise convention for reporting training horizons: 1× OT
+denotes 20 training tokens per nominal parameter, 2× denotes 40, and so forth. The 20-tokens-per-
+parameter heuristic is motivated by Hoffmann et al. (2022), but we do not assume that this horizon
+is compute-optimal for every optimizer, model family or dataset. For each model, the 1× horizon
+uses S1× = ⌊20P/(BL)⌋optimizer updates. We report the realized token count after this integer
+rounding.
+Following Hoffmann et al. (2022) and Austin et al. (2025), we approximate training compute as
+C = 6PT,
+19
+
+
+Component
+Choice
+Block normalization
+Pre-RMSNorm; learned scale, no bias; ϵ = 10−6
+Attention
+Multi-head attention with Dhead = 64
+Q/K normalization
+QK-RMSNorm before RoPE; learned scale, no bias; ϵ = 10−6
+Positional encoding
+RoPE with base 10,000
+Activation
+SwiGLU
+Tokenizer
+GPT-2 with vocabulary padded to V = 50,304
+Embedding / readout tying
+Untied
+Biases
+None
+Dropout
+None
+Nominal parameter count
+P = 16ND2 + DV
+Table 2: Model architecture.
+where P is the nominal parameter count and T is the number of training tokens. This first-order
+estimate counts approximately 2PT FLOPs for the forward pass and 4PT FLOPs for the backward
+pass through the parameterized matrix multiplications.
+B.2
+INITIALIZATION
+Following the ScaledGPT initialization used in Ferbach et al. (2026), ordinary projections use fan-in
+scaling, while attention and feed-forward residual-output projections receive an additional 1/
+√
+2N
+depth factor. This depth correction follows the initialization used in GPT-2 (Radford et al., 2019).
+Because residual-output projections are initialized independently with zero-mean weights, distinct
+residual increments have zero cross-covariance in expectation over initialization. Scaling each of
+the 2N residual-output projections by 1/
+√
+2N therefore keeps the expected aggregate variance con-
+tributed by the residual branches of order one as depth changes. We initialize token embeddings sep-
+arately with the width-independent constant standard deviation 0.02. Residual branches are added
+to the residual stream with coefficient one; no additional residual multiplier is applied.
+All matrix entries are drawn independently from untruncated, zero-mean Gaussian distributions.
+Table 4 reports their standard deviations; learned normalization scales are initialized to one.
+B.3
+COMMON TRAINING CONTROLS
+Table 5 lists the training controls shared across the primary experiments unless explicitly stated oth-
+erwise. For an experiment with S optimizer updates and tuned peak learning rate η, every candidate
+learning rate schedule uses the same linear warmup.
+The learning rate schedule after warmup and the weight decay treatment are selected experimentally
+in Appendices D and E, respectively.
+B.4
+DATASET, TRAINING ORDER, SEEDS, AND EVALUATION
+We
+use
+the
+sample/350BT
+subset
+of
+FineWeb
+(Penedo
+et
+al.,
+2024)
+at
+revision
+9bb295ddab0e05d785b879661af7260fed5140fc. We encode each document with the
+GPT-2 tokenizer (Radford et al., 2019) and append one GPT-2 end-of-text token. We use source
+files 0–507 for training and reserve source files 508–509 for validation. The resulting training set
+contains 360.5 billion tokens. Training and validation are drawn from disjoint FineWeb source files;
+we do not perform additional deduplication across the two partitions.
+Training follows a fixed sequential order through the tokenized corpus. End-of-text tokens separate
+documents, and training sequences may span document boundaries. We do not shuffle the training
+data. All experiments begin at the start of the corpus and use this same ordering. Consequently,
+experiments with the same global batch size and training horizon process the same tokens in the
+same optimizer updates.
+20
+
+
+Model
+D N
+F
+Pnonemb
+P
+Ptrain
+S1×
+51M
+512
+6 2,048
+25,173,248
+50,921,472
+76,684,544
+1,942
+124M
+768
+9 3,072
+84,950,400
+123,568,128
+162,217,344
+4,713
+253M 1,024 12 4,096
+201,353,728
+252,837,888
+304,376,320
+9,645
+458M 1,280 15 5,120
+393,257,600
+457,605,120
+522,035,840 17,456
+757M 1,536 18 6,144
+679,536,384
+756,744,192
+834,070,272 28,867
+1.17B 1,792 21 7,168 1,079,064,448 1,169,129,472 1,259,353,984 44,598
+Table 3: Model sizes. Model names use rounded nominal parameter counts P = 16ND2 + DV .
+Non-embedding and exact trainable parameter counts include learned normalization scales.
+Unless explicitly stated otherwise, every hyperparameter configuration starts from a fresh initializa-
+tion with random seed 42. The training order is fixed independently of the seed, so configurations at
+the same model and training coordinate share both their initialization and their ordered training data.
+We use one seed per configuration for the hyperparameter sweeps in this paper. These matched com-
+parisons reduce nuisance variation between nearby configurations, but they do not estimate variation
+across random initializations.
+From the two held-out source files, we construct one fixed validation set containing 1,920 sequences
+and 3,932,160 scored next-token targets. Every model is evaluated on the same targets in the same
+order. We report mean per-token next-token cross-entropy over the complete validation set. This
+full-set loss is used for both hyperparameter selection and reported loss comparisons.
+B.5
+HYPERPARAMETER SWEEP INTERIORITY
+Throughout the paper, we assess hyperparameter sweeps using the same boundary-interiority crite-
+rion. We regard a one-dimensional sweep as interior only when its minimum and the complete set
+of points within one millipoint of that minimum lie away from both tested boundaries. For nested
+sweeps, we assess the inner learning rate sweep independently at every value of the outer hyperpa-
+rameter before interpreting regret or selecting a minimum along the outer axis. We then apply the
+same one-millipoint interiority criterion to the outer axis.
+B.6
+HARDWARE, NUMERICAL PRECISION, AND PARALLEL EXECUTION
+We implement the models in JAX (Bradbury et al., 2018) and Flax (Heek et al., 2024) and train on
+TPU v4-8 and v6e-4 accelerators (Jouppi et al., 2017) using causal Splash attention with 512-token
+kernel tiles and a fused backward pass.
+We use mixed-precision training. Model parameters and floating-point optimizer states are stored
+in float32; parameter gradients and RMSNorm statistics are computed in float32; and model
+activations and the operands of dense and attention matrix multiplications generally use bfloat16.
+The JAX Splash implementation uses float32 for selected attention accumulations (The JAX
+Authors, 2023). The training loss materializes the vocabulary logits and computes full-vocabulary
+cross-entropy. For validation, logits are promoted from bfloat16 to float32 before computing
+cross-entropy and device-local loss sums; the ordered batch sums are then combined on the host
+using float64 summation.
+For gradient accumulation, we divide the global batch contiguously into equal microbatches. We
+average the resulting gradients, apply global-norm clipping to the accumulated batch-mean gradi-
+ent, and then perform one optimizer update. Gradient accumulation therefore preserves the global
+batch size, data ordering, and number of optimizer updates. It produces the same batch-mean gra-
+dient in exact arithmetic, although the different reduction order can introduce small finite-precision
+differences.
+When activation rematerialization is enabled, we apply it independently to each Transformer
+block (Chen et al., 2016). Intermediate activations within the block are discarded after the for-
+ward pass and recomputed during the backward pass, reducing activation memory at the cost of
+additional computation.
+21
+
+
+Parameter
+Standard deviation
+Token embedding
+0.02
+Query, key, and value projections
+D−1/2
+Attention output projection
+(2ND)−1/2
+Feed-forward input projection
+D−1/2
+SwiGLU gate projection
+D−1/2
+Feed-forward output projection
+(2NF)−1/2
+Readout matrix
+D−1/2
+Learned normalization scales
+1
+Table 4: Initialization standard deviations.
+For configurations requiring parameter sharding, we use ZeRO Stage 3 fully sharded data parallelism
+over a one-dimensional TPU mesh (Rajbhandari et al., 2020). Model parameters, gradients, and
+optimizer states are partitioned across devices rather than replicated.
+C
+OPTIMIZER DEFINITIONS AND IMPLEMENTATION DETAILS
+C.1
+COMMON UPDATE WRAPPER
+Let gt denote the gradient averaged over the global batch after combining any accumulated micro-
+batch gradients. The optimizer receives the globally clipped gradient
+egt =
+gt
+max(1, ∥gt∥2/G),
+G = 1.
+(11)
+We write the scheduled base learning rate as ηt = ηst, where η is the tuned peak learning rate and
+st ∈[0, 1] is a dimensionless schedule multiplier that includes warmup and decay. To express lay-
+erwise learning rate tuning without carrying separate multipliers through every optimizer definition,
+we define the groupwise peak learning rate
+ηi = ηriγi,
+ηt,i = stηi,
+(12)
+where ri is an optimizer-native route multiplier and γi is the tunable layerwise multiplier, each
+constant within its parameter group. For optimizers without distinct native routes, ri = 1. The
+γ = 1 setting fixes γi = 1 for every group but does not remove optimizer-native route multipliers.
+Following decoupled weight decay (Loshchilov & Hutter, 2019), we implement weight decay as
+a separate parameter update term rather than as an L2 penalty in the training objective. Given an
+optimizer-specific direction dt,i, the common parameter update is
+θt+1,i = θt,i −stηidt,i −stλt,iθt,i.
+(13)
+The data and decay terms are computed from θt,i and applied in the same update. Decay is therefore
+not added to the gradient, accumulated in the optimizer moments, or transformed by an optimizer
+preconditioner. It follows the normalized schedule st, but is independent of the peak learning rate,
+the native route multiplier, and the layerwise multiplier.
+For the uniform WD schedule,
+λt,i = mWD
+i
+c
+S ,
+(14)
+where S is the number of optimizer updates, c is the weight decay coefficient, and mWD
+i
+∈{0, 1}
+is the decay mask. In the absence of a data update, a decayed parameter is therefore multiplied at
+update t by 1 −stc/S.
+C.2
+ADAMW
+We use AdamW (Loshchilov & Hutter, 2019; Kingma & Ba, 2015). Adam maintains exponential
+moving averages of the first and second elementwise moments of the clipped gradient,
+mt = β1mt−1 + (1 −β1)egt,
+(15)
+vt = β2vt−1 + (1 −β2)eg⊙2
+t
+,
+(16)
+22
+
+
+Control
+Default
+Sequence length
+L = 2,048 tokens
+Global batch size
+B = 256 sequences
+Gradient clipping
+Global ℓ2 norm of 1.0, applied after gradient accumulation
+Learning rate warmup
+Linear from 0.01η to η over W = max{100, min{⌊S/50⌋, 5,000}}
+updates
+Table 5: Common training controls.
+with m0 = v0 = 0. We apply the standard bias corrections
+bmt =
+mt
+1 −βt
+1
+,
+bvt =
+vt
+1 −βt
+2
+,
+(17)
+and define the Adam direction elementwise as
+dt =
+bmt
+√bvt + ϵ.
+(18)
+We use ϵ = 10−15. Substituting this direction into Equation 13 gives
+θt+1,i = θt,i −stηi
+bmt,i
+p
+bvt,i + ϵ −stλt,iθt,i.
+(19)
+The groupwise learning rate therefore affects the Adam data update, while independent weight decay
+remains independent of the peak learning rate and the layerwise multiplier.
+C.3
+MUON
+We apply Muon (Jordan et al., 2024) to the hidden-layer attention and feed-forward matrices. Muon
+applies Nesterov momentum followed by Newton–Schulz matrix orthogonalization. Following Qiu
+et al. (2025), we use Adam for token embeddings, the readout matrix, learned normalization scales,
+and biases. The Adam route has native learning rate multiplier ri = 1.6, while the Muon route has
+ri = 1.
+For an eligible hidden weight matrix, let Gt,i denote the effective matrix obtained from its clipped
+gradient. Rank-three attention kernels are reshaped to matrices before the Muon transformation
+and restored to their original shapes afterward. Muon updates its momentum buffer and forms the
+Nesterov lookahead as
+Bt,i = βBt−1,i + (1 −β)Gt,i,
+(20)
+Ht,i = βBt,i + (1 −β)Gt,i,
+(21)
+with B0,i = 0. Starting from
+X0 =
+Ht,i
+∥Ht,i∥F + ϵNS
+,
+ϵNS = 10−8,
+(22)
+we transpose X0 when necessary so that its shorter dimension comes first, then apply five Newton–
+Schulz iterations,
+Aj = XjX⊤
+j ,
+(23)
+Xj+1 = c0Xj + (c1Aj + c2A2
+j)Xj,
+(24)
+where
+(c0, c1, c2) = (3.4445, −4.7750, 2.0315).
+(25)
+After restoring the original orientation and tensor shape, we apply no additional shape-dependent
+multiplier, and the Muon direction is
+dt,i = X5.
+(26)
+Parameters assigned to the Adam route use the Adam direction from the preceding subsection.
+23
+
+
+C.4
+SOAP
+We use SOAP (Vyas et al., 2025), which applies Adam in the eigenbasis of a Shampoo precondi-
+tioner. Following Wen et al. (2025), we apply SOAP to every learned matrix, including the token
+embedding, attention and feed-forward kernels, and readout matrix. Rank-three attention kernels
+are reshaped to their effective matrix representations and restored afterward. Learned normalization
+scales and biases use the Adam direction defined above. Both routes use ri = 1.
+For each matrix, we partition every eligible axis into blocks of at most 512 coordinates, zero-padding
+and subsequently cropping ragged boundary blocks. An axis longer than 10,000 coordinates is
+left unpreconditioned. Consequently, the embedding and readout receive one-sided SOAP, with an
+identity basis on the vocabulary axis. For gradient block Gt,b, SOAP updates the left and right Gram
+matrices as
+Lt,b = βShLt−1,b + (1 −βSh)Gt,bG⊤
+t,b,
+(27)
+Rt,b = βShRt−1,b + (1 −βSh)G⊤
+t,bGt,b.
+(28)
+Let QL
+t,b and QR
+t,b denote the bases used for the current update. After an initialization-only optimizer
+call that constructs these bases by eigendecomposition, index t = 1, 2, . . . counts applied SOAP
+updates. SOAP maintains its first moment in the original coordinates and its second moment in the
+rotated coordinates:
+Mt,b = β1Mt−1,b + (1 −β1)Gt,b,
+(29)
+Gt,b = (QL
+t,b)⊤Gt,bQR
+t,b,
+(30)
+M t,b = (QL
+t,b)⊤Mt,bQR
+t,b,
+(31)
+Vt,b = β2Vt−1,b + (1 −β2)G
+⊙2
+t,b .
+(32)
+The blockwise SOAP direction is
+Dt,b =
+p
+1 −βt
+2
+1 −βt
+1
+M t,b
+p
+Vt,b + ϵ,
+(33)
+Dt,b = QL
+t,bDt,b(QR
+t,b)⊤.
+(34)
+We use ϵ = 10−15 in the denominator of the blockwise SOAP direction in Equation 33 and add no
+diagonal regularization to the Gram matrices (ϵmatrix = 0).
+We refresh the left and right bases after every K = 10 applied updates. Before each refresh, we
+compute the Rayleigh quotient of every current basis vector. For example, for a left-basis column
+qj,
+bλL
+t,b,j = q⊤
+j Lt,bqj,
+(35)
+which estimates the gradient variance along that direction. We sort the basis vectors in decreasing
+order of these estimates and apply the same permutation to the corresponding rows or columns of
+Vt,b. We then obtain the refreshed basis from a QR decomposition of the Gram matrix applied to the
+sorted basis,
+QL
+t+1,b = qr
+
+Lt,bQL,sorted
+t,b
+
+,
+(36)
+with the analogous operation on the right. Thus the second-moment slots are reordered by approxi-
+mate spectral rank but are not otherwise transported through the change of basis.
+Finally, we merge and crop the blocks, restore the original tensor shape, and set dt,i = Dt,i. We
+apply no additional spectral normalization or shape-dependent multiplier.
+C.5
+ADANA
+We use ADANA (Ferbach et al., 2025; 2026), following the released PyTorch implementation used
+for the language-model experiments. Let t = 1, 2, . . . count applied optimizer updates; gradient-
+accumulation microbatches do not advance this clock. ADANA uses the same log-time weight for
+its first and second moments,
+∆t =
+δ
+δ + t,
+(37)
+24
+
+
+Parameter class
+AdamW
+Muon
+SOAP
+ADANA
+Learning rate group
+Weight decay
+Token embedding
+Adam
+Adam
+SOAP
+ADANA
+γe
+Yes
+Attention and feed-forward matrices
+Adam
+Muon
+SOAP
+ADANA
+γh
+Yes
+Readout matrix
+Adam
+Adam
+SOAP
+ADANA
+γr
+Yes
+Learned normalization scales
+Adam
+Adam
+Adam
+ADANA
+γe
+No
+Table 6: Parameter routing for the four primary optimizers. The weight decay column gives the
+common independent weight decay mask.
+and updates
+mt = (1 −∆t)mt−1 + ∆tegt,
+(38)
+vt = (1 −∆t)vt−1 + ∆teg⊙2
+t
+,
+(39)
+with m0 = v0 = 0. We apply no additional bias correction.
+Define the time-dependent momentum amplification
+χt = (t + 1)1−κ + 1.
+(40)
+The ADANA direction is
+dt = g2egt + g3χtmt
+√vt + ϵ
+,
+(41)
+where all operations involving vt are elementwise. We use ϵ = 10−15. We fix g2 = 1 and δ = 8,
+while g3 and κ control the strength and growth rate of the momentum contribution and are treated as
+momentum hyperparameters. The additional +1 in χt and the first-update clock follow the released
+implementation rather than the displayed ADANA pseudocode.
+Our implementation exposes the optional ADANA–MK4 coordinatewise cap through clipsnr,
+but every ADANA experiment reported in this paper disables this option and uses no MK4 clipping.
+C.6
+PARAMETER ROUTING
+Table 6 summarizes the optimizer direction, layerwise learning rate group, and weight decay mask
+for each parameter class. The three layerwise factors are γe for the token embedding and other
+vector-like parameters, γh for hidden matrices, and γr for the readout matrix.
+All native route multipliers are ri = 1, except for Muon’s Adam route, which uses ri = 1.6. Models
+in the primary architecture contain no bias parameters. When adapting our methods to architectures
+with biases, we recommend treating them like learned normalization scales: use the same optimizer
+route and the γe embedding-group learning rate, and exclude them from weight decay.
+D
+LEARNING RATE SCHEDULE SELECTION
+We next investigate how the learning rate decay schedule interacts with training horizon and find a
+crossover between linear and cosine decay across OT factors. For each schedule, we jointly tune the
+base learning rate and weight decay coefficient at each OT factor. Linear decay performs better at 1×
+OT for all four optimizers, whereas cosine decay performs better at 8× and 32× OT. A learning rate
+schedule selected at a conventional training horizon therefore need not transfer to a substantially
+overtrained regime. Since our experiments focus primarily on high overtraining factors, we use
+cosine-decay-to-zero for the remainder of the paper.
+Both schedules begin with a linear warmup from 0.01η to the peak learning rate η over W =
+max{100, min{⌊S/50⌋, 5,000}} optimizer updates, where S is the total number of optimizer up-
+dates. For the remaining S −W updates, let ut ∈[0, 1] denote the fraction of post-warmup training
+completed, and write the learning rate as ηt = ηst. We compare linear decay to zero with cosine
+decay to zero (Loshchilov & Hutter, 2017),
+slinear
+t
+= 1 −ut,
+scosine
+t
+= 1 + cos(πut)
+2
+.
+(42)
+25
+
+
+0.00
+0.25
+0.50
+0.75
+1.00
+Post-warmup progress ut
+0.00
+0.25
+0.50
+0.75
+1.00
+LR multiplier st
+Linear decay
+Cosine decay
+Figure 9: Linear and cosine learning rate decay schedules after warmup. Both schedules use
+the same linear warmup before decaying from the peak learning rate to zero.
+We compare linear and cosine decay on the 51M model at 1×, 8×, and 32× OT for AdamW,
+ADANA, Muon, and SOAP. We hold the optimizer-specific momentum hyperparameters fixed
+throughout this comparison: β1 = 0.9 and β2 = 0.95 for AdamW; g3 = 8 and κ = 0.85 for
+ADANA; β = 0.95 for Muon; and β1 = 0.95, β2 = 0.99, and βSh = 0.95 for SOAP.
+To account for possible interactions between the learning rate schedule and weight decay coefficient,
+we sweep the base learning rate η and weight decay coefficient c separately for each optimizer, OT
+factor, and schedule. We use the uniform WD schedule, defined here by a per-update coefficient c/S
+before multiplication by the learning rate schedule st. In particular, st multiplies both the optimizer’s
+data-dependent update and the independent weight decay update, making an interaction between the
+learning rate schedule shape and the weight decay coefficient plausible. For each schedule, we
+extend the learning rate sweep at every weight decay coefficient, OT factor, and optimizer setting
+until the minimum is attained in the interior of the sweep. We likewise extend the weight decay
+range whenever the best pair lies on its boundary. We then report the lowest final validation loss
+over the resulting (learning rate, weight decay) grid for each optimizer and OT factor.
+Let L∗
+s denote the lowest final validation loss over the resulting (learning rate, weight decay) grid
+for schedule s ∈{linear, cosine}. We summarize the schedule advantage as
+103 (L∗
+linear −L∗
+cosine)
+in millipoints, so positive values indicate that cosine decay achieves the lower final validation loss.
+Appendix E separately selects the weight decay schedule and its WD coefficient scaling rule. The
+exact fixed momentum treatments, tested WD coefficients, and complete learning rate sweeps appear
+in Appendix L.
+Figure 11 summarizes the horizon-dependent crossover. After selecting the best learning rate and
+weight decay coefficient pair for each schedule, linear decay achieves the lower loss at 1× OT for
+all four optimizers, whereas cosine decay achieves the lower loss at 8× and 32× OT for all four.
+Thus, a schedule selected at 1× OT does not transfer unchanged to the more overtrained regimes
+studied here.
+Figure 10 shows that the crossover is not produced by a single favorable weight decay coefficient:
+the high-OT advantage of cosine decay appears across multiple coefficients. The same crossover
+remains in the row labeled “best,” where the weight decay coefficient is selected separately for each
+schedule and OT factor.
+Because the remaining experiments in this paper focus primarily on high OT factors, we use cosine
+decay to zero after warmup as the primary learning rate schedule. This is a protocol choice for the
+regimes studied here, rather than a claim that cosine decay is universally optimal.
+This comparison is restricted to the 51M model, the two schedule families considered here, fixed
+optimizer-specific momentum settings, and the uniform WD schedule. Appendix E next studies
+weight decay schedules and coefficient scaling, while Appendix L reports the complete learning rate
+sweeps underlying this comparison.
+26
+
+
+1×
+8×
+32×
+OT factor
+best
+2
+4
+8
+16
+32
+64
+128
+WD coefficient
+-11.0
++3.6
++5.3
+-9.2
+-13.7
+-1.9
+-11.0
+-0.1
+-6.9
++3.6
++1.1
++8.6
++5.3
++9.4
++13.9
+(a) AdamW
+1×
+8×
+32×
+OT factor
+best
+4
+8
+16
+32
+64
+128
+-9.9
++10.7
++10.6
+-12.2
+-9.9
++0.1
+-13.5
++9.0
++3.1
++10.7
++5.7
++14.5
++10.6
++9.0
+(b) ADANA
+1×
+8×
+32×
+OT factor
+best
+2
+4
+8
+16
+32
+64
+128
+-1.8
++6.6
++6.3
+-9.7
+-8.7
+-1.5
++1.8
++8.2
++5.9
++3.3
++12.0
++4.9
++18.2
++9.5
++14.7
+(c) Muon
+1×
+8×
+32×
+OT factor
+best
+2
+4
+8
+16
+32
+64
+128
+-4.8
++3.0
++6.8
+-11.2
+-6.0
+-2.3
+-3.2
+-1.1
++15.1
++3.0
++3.4
++11.9
++6.8
++18.7
++10.1
++15.1
+(d) SOAP
+−20
+−15
+−10
+−5
+0
+5
+10
+15
+20
+linear decay - cosine decay (mpt)
+Figure 10: Cosine decay vs linear decay learning rate schedule advantage across OT factor
+and coefficient of the uniform WD schedule on the 51M parameter model. Each cell reports
+103(Llinear −Lcosine) after selecting the best base learning rate separately for each schedule at the
+indicated weight decay coefficient; positive values favor cosine decay to zero. The row labeled
+“best” selects the best weight decay coefficient for each OT factor separately for each schedule.
+Momentum hyperparameters are fixed to AdamW (β1 = 0.9, β2 = 0.95), ADANA (g3 = 8, κ =
+0.85), Muon (β = 0.95), and SOAP (β1 = 0.95, β2 = 0.99, βSh = 0.95).
+E
+WEIGHT DECAY SCHEDULES AND COEFFICIENT SCALING
+After selecting cosine decay to zero as the learning rate schedule, we next study two decisions
+governing weight decay within and across training horizons. The WD schedule specifies how the
+per-update decay coefficient changes across optimizer updates, whereas the WD coefficient scaling
+rule specifies how its overall coefficient changes with OT factor. Such a scaling rule is needed when
+we do not retune weight decay at every training horizon, because the best WD coefficient at one
+OT factor does not generally remain best at another. We first define the two WD schedules and fix
+the log-time offset convention, then compare the schedules under cosine decay to zero and derive
+coefficient scaling rules for experiments where full per-horizon tuning is infeasible. Appendix L
+reports the complete learning rate-by-coefficient grids underlying these analyses.
+Following decoupled weight decay (Loshchilov & Hutter, 2019), we implement weight decay as
+a separate parameter update term rather than as an L2 penalty in the training objective. We apply
+weight decay to all learned parameters except learned normalization scales, including both the token
+embedding and readout matrices. Our models do not contain biases, but for architectures with
+learned biases, we recommend excluding them from weight decay. For parameters included in the
+weight decay mask, the independent decay contribution at update t is −stλtθt, where st ∈[0, 1]
+denotes the normalized learning rate schedule.
+We use uniform WD to denote the standard schedule in which the per-update coefficient, before
+multiplication by st, is constant across optimizer updates. Following Wang & Aitchison (2025), we
+divide the WD coefficient by the total number of optimizer updates S:
+λuniform
+t
+= cuniform
+S
+.
+(43)
+For a fixed learning rate schedule shape, this approximately prevents cumulative decay from increas-
+ing with the number of updates.
+We use log-time WD to denote the schedule proposed in Ferbach et al. (2026), in which the per-
+update coefficient decreases inversely with the shifted update index:
+λlog
+t
+= clog
+τ + t.
+(44)
+We use c for the WD coefficient throughout and add a schedule subscript only when multiple WD
+schedules appear in the same expression. The coefficient values are not directly comparable across
+schedules because they parameterize different decay shapes.
+27
+
+
+1×
+8×
+32×
+OT factor
+−10
+−5
+0
+5
+10
+linear − cosine (mpt)
+(a) AdamW
+1×
+8×
+32×
+OT factor
+(b) ADANA
+1×
+8×
+32×
+OT factor
+(c) Muon
+1×
+8×
+32×
+OT factor
+(d) SOAP
+Figure 11: High overtraining factors favor cosine decay over linear decay on the 51M parame-
+ter model for all optimizers. Each point reports 103(Llinear −Lcosine) after selecting the best base
+learning rate and weight decay coefficient pair for each schedule; positive values favor cosine decay
+to zero. Momentum hyperparameters are fixed as in Figure 10.
+E.1
+PROTOCOL CHOICE FOR THE LOG-TIME WD OFFSET
+Applying log-time WD across training horizons requires specifying how its offset changes when
+the number of optimizer updates changes. Let S denote the total number of optimizer updates in
+the current experiment and S1× the number at 1× OT. The schedule in Ferbach et al. (2026) uses
+an offset proportional to the current training horizon. We instead anchor the offset to the 1× OT
+horizon:
+λlog
+t,horizon =
+c
+0.1S + t
+|
+{z
+}
+horizon-normalized
+λlog
+t,1× =
+c
+0.1S1× + t
+|
+{z
+}
+1×-anchored, used here
+.
+(45)
+The two definitions coincide at 1× OT. At longer horizons, the horizon-normalized definition
+stretches the initial phase of the WD schedule with the full training horizon, whereas the 1×-
+anchored definition preserves the initial timescale used at 1× OT. We adopt τ = 0.1S1× as our
+protocol convention for extending log-time WD across the OT axis. This choice is not intended as
+a claim that the anchored offset is universally optimal. Unless otherwise stated, all log-time WD
+experiments in this paper use this convention.
+E.2
+INTERACTION WITH THE LEARNING RATE ENDPOINT
+The language model experiments in Ferbach et al. (2026) use cosine decay to 10% of the peak
+learning rate. Comparing log-time WD with uniform WD for AdamW and AdEMAMix, they report
+approximately 10% compute-efficiency gains that appear to increase with model scale. The literature
+generally finds that decaying the learning rate to zero outperforms schedules with higher endpoints.
+For example, Bergsma et al. (2025b) find that linear decay to zero consistently outperforms cosine
+decay to 10% across a range of language model pretraining settings. We therefore test whether the
+magnitude of the log-time WD advantage depends on the learning rate endpoint.
+To isolate this interaction, we hold the base learning rate fixed at log2 η = −8 for AdamW and
+−12.5 for ADANA and match the total parameter shrinkage produced by the two WD schedules
+in the absence of gradient updates. Within each optimizer and learning rate endpoint pair, all other
+training coordinates are identical. Under weight decay alone, a parameter evolves according to
+θt+1 = (1 −stλt)θt.
+(46)
+The fraction of its initial value retained after S updates is therefore
+R(λ) =
+S−1
+Y
+t=0
+(1 −stλt),
+θS = R(λ)θ0.
+(47)
+For a log-time WD coefficient clog = 2, we choose the uniform WD coefficient cuniform by solving
+S−1
+Y
+t=0
+
+1 −st
+cuniform
+S
+
+=
+S−1
+Y
+t=0
+
+1 −st
+clog
+τ + t
+
+.
+(48)
+28
+
+
+3.4
+3.6
+3.8
+4.0
+Cosine to 10%
+Validation loss
+Final Δ = +32.3 mpt
+AdamW
+Uniform WD schedule
+Log-time WD schedule
+Final Δ = +16.9 mpt
+ADANA
+20%
+40%
+60%
+80%
+100%
+Training fraction
+3.4
+3.6
+3.8
+4.0
+Cosine to zero
+Validation loss
+Final Δ = +1.3 mpt
+20%
+40%
+60%
+80%
+100%
+Training fraction
+Final Δ = +0.3 mpt
+Figure 12: The apparent advantage of the log-time WD schedule is substantially diminished
+when the learning rate decays to zero rather than to 10% of its peak. We compare the uniform
+and log-time WD schedules with the same base learning rate and matched total parameter shrinkage
+from weight decay alone on the 51M parameter model at 8× OT. Markers show validation evalua-
+tions at selected training steps, and lines linearly interpolate between them. With a 10% endpoint,
+the log-time WD schedule reduces final validation loss by 32.3 millipoints for AdamW and 16.9
+millipoints for ADANA; with a zero endpoint, the corresponding differences are 1.3 and 0.3 milli-
+points.
+We solve Equation 48 numerically in log space using the exact discrete learning rate schedule,
+including warmup. This gives cuniform = 11.500447 for cosine decay to 10% and cuniform =
+12.319252 for cosine decay to zero. The matching depends only on the learning rate schedule
+and training horizon, so we use the same coefficients for AdamW and ADANA. This comparison
+therefore isolates the effect of when weight decay is applied while holding its cumulative parameter
+shrinkage fixed. Because the coefficients are determined by retention matching rather than tuned
+separately, it does not compare the best achievable loss under the two WD schedules.
+Under both learning rate endpoints, log-time WD develops an advantage during training; with decay
+to zero, however, most of this advantage disappears during the final learning rate cooldown. The
+results in Ferbach et al. (2026) therefore do not by themselves determine which WD schedule is
+preferable under our cosine-decay-to-zero protocol.
+E.3
+COMPARING UNIFORM AND LOG-TIME WD SCHEDULES ACROSS OT FACTORS
+Because our primary learning rate schedule decays to zero, we next compare uniform and log-time
+WD under this endpoint. For each optimizer, WD schedule, and OT factor, we evaluate a two-
+dimensional grid over base learning rate and WD coefficient. At each WD coefficient, we sweep the
+base learning rate independently and then compare the resulting minimum losses across coefficients,
+following the sweep-interiority criteria in Section B.5. The summary figures report quantities min-
+imized over base learning rate, while Section L reports the coefficient grids in Table 13 and shows
+every evaluated point in Figures 32 and 33. This comparison therefore makes no assumption about
+how the WD coefficient should scale across training horizons.
+Uniform WD performs better at 1× OT for AdamW, ADANA, and Muon. At higher OT factors,
+log-time WD becomes competitive or better for some optimizers, including ADANA and SOAP at
+the longest measured horizons, but it is not uniformly superior across optimizers or horizons.
+29
+
+
+1
+8
+32
+64
+OT factor
+−5
+0
+5
+10
+Log-time - uniform loss (mpt)
+AdamW
+1
+8
+32
+64
+OT factor
+ADANA
+1
+8
+32
+64
+OT factor
+Muon
+1
+8
+32
+64
+OT factor
+SOAP
+Figure 13: The relative performance of the uniform and log-time WD schedules depends on
+both the optimizer and OT factor. On the 51M parameter model with cosine decay to zero and
+fixed optimizer-specific momentum, each point shows 103(Llog −Luniform) after selecting the best
+(base learning rate, WD coefficient) pair for each WD schedule. Positive values favor the uniform
+WD schedule, while negative values favor the log-time WD schedule.
+This comparison allows the WD coefficient to vary independently at every OT factor. It therefore
+compares the two WD schedules under per-horizon tuning rather than providing a coefficient scaling
+rule that transfers across training horizons.
+E.4
+WD COEFFICIENT SCALING RULES ACROSS OT FACTORS
+When computationally feasible, the best way to set weight decay is to jointly tune the base learning
+rate and WD coefficient at every training horizon. However, this joint sweep is often computationally
+impractical. We therefore investigate how the WD coefficient should scale with training horizon to
+determine a scaling rule that can be used in place of per-horizon WD tuning.
+An equivalent view of AdamW treats the parameter iterate itself as an exponential moving average
+of preconditioned updates: in conventional notation with constant learning rate η and weight decay
+λ, the averaging coefficient is ηλ and the resulting memory timescale is 1/(ηλ) updates (Wang &
+Aitchison, 2025). This view has recently been used to explain other horizon-dependent phenomena.
+Bergsma et al. (2026b) show that the normalized AdamW timescale controls training-loss-curve
+shape and must be matched, together with tokens per parameter, for curves to collapse across model
+scales. Bergsma et al. (2026a) predict when training data are retained from AdamW’s implicit EMA
+coefficients and use the resulting re-evaluation curves to design data curricula. We therefore interpret
+WD coefficient scaling as controlling a normalized optimizer memory, rather than only the strength
+of regularization.
+Prior work in Bergsma et al. (2025a) asks the same question for AdamW under a uniform WD
+schedule: how should the WD coefficient scale with model size, training horizon, and batch size?
+They define the normalized AdamW timescale
+τ =
+B
+ηλD =
+1
+ηλS ,
+(49)
+and find that the optimal timescale scales approximately as
+τopt ∝
+D
+N
+−0.527
+.
+(50)
+They also find that, at fixed model size and training horizon, the optimal raw AdamW coefficient
+λ scales approximately linearly with batch size below the critical batch size. In our uniform WD
+parameterization, c/S corresponds to the peak effective decay coefficient ηλ, and hence c = 1/τ.
+Thus, at fixed token horizon, their batch-scaling prescription corresponds to holding c fixed as batch
+size varies: the factor of B is already absorbed through S = D/B. Their horizon-scaling result then
+implies
+c(f)
+c(1) = f 0.527 ≈
+p
+f.
+(51)
+30
+
+
+4
+8
+16
+16√232
+32√264
+128
+256
+WD coeff
+0
+10
+20
+Uniform regret (mpt)
+AdamW
+4
+8
+16
+16√232
+32√264
+128
+256
+WD coeff
+ADANA
+4
+8
+16
+16√232
+32√264
+128
+256
+WD coeff
+Muon
+4
+8
+16
+16√232
+32√264
+128
+256
+WD coeff
+SOAP
+OT factor
+1x
+8x
+32x
+64x
+1
+2
+4
+8
+16
+32
+64
+WD coeff
+0
+10
+20
+Log time regret (mpt)
+1
+2
+4
+8
+16
+32
+64
+WD coeff
+1
+2
+4
+8
+16
+32
+64
+WD coeff
+1
+2
+4
+8
+16
+32
+64
+WD coeff
+Figure 14: The best WD coefficient changes with OT factor. Each curve shows coefficient regret
+at one OT factor for a fixed optimizer and WD schedule on the 51M parameter model. The regret
+of coefficient c is 103[L(c) −minc′ L(c′)], where L(c) is the best final validation loss over the
+base learning rate sweep at coefficient c. The movement of the minima across curves shows that a
+coefficient selected at one training horizon need not transfer to another. The learning rate schedule
+uses cosine decay to zero and optimizer-specific momentum is held fixed. Upward triangles at the
+upper boundary represent regrets greater than 25 millipoints.
+Power Lines studies uniform WD with AdamW; we extend this analysis to log-time WD and the
+broader set of optimizers considered here.
+Using the per-horizon joint sweeps described above, Figure 14 shows the resulting regret for each
+WD coefficient after minimizing over the base learning rate,
+R(c; f) = 103 h
+Lf(c) −min
+c′ Lf(c′)
+i
+,
+(52)
+where Lf(c) is the best final validation loss over the learning rate sweep at coefficient c.
+The best WD coefficient generally increases with OT factor for both WD schedules, although its
+precise value and the width of the low-regret region differ across optimizers. Consequently, fixing
+the coefficient selected at 1× OT can incur increasing regret at longer training horizons.
+To quantify this trend, let c∗
+o,s(f) denote the best coefficient for optimizer o, WD schedule s, and
+OT factor f after minimizing over the base learning rate. We anchor the uniform and log-time WD
+schedules at their 1× OT coefficients, cuniform(1) = 8 and clog(1) = 2, and fit a separate power-law
+exponent for each WD schedule across optimizers by least squares in log space:
+log2 c∗
+o,s(f) = log2 cs(1) + αs log2 f + ϵo,s,f.
+(53)
+The independently fitted exponents are 0.527 for uniform WD and 0.473 for log-time WD.
+Both fitted exponents are close to 1/2. We therefore use the square-root exponent for both schedules,
+with schedule-specific 1× OT coefficients determined by our sweeps:
+cuniform(f) = 8
+p
+f,
+clog(f) = 2
+p
+f.
+(54)
+We use these prescriptions when repeating the complete learning rate and WD coefficient grid is
+computationally impractical, but do not claim that either rule is universally optimal. When direct
+joint tuning is feasible, we instead use the best measured (base learning rate, WD coefficient) pair.
+31
+
+
+1
+8
+32
+64
+OT factor
+8
+16
+32
+64
+128
+Best WD coeff
+Uniform WD schedule
+Fit: 8f0.53
+Rule: 8√f
+1
+8
+32
+64
+OT factor
+2
+4
+8
+16
+Log-time WD schedule
+Fit: 2f0.47
+Rule: 2√f
+AdamW
+ADANA
+Muon
+SOAP
+Figure 15: The best WD coefficients are consistent with square-root scaling across OT factor.
+For each optimizer, WD schedule, and OT factor on the 51M parameter model, points show the WD
+coefficient from the best (base learning rate, WD coefficient) pair in the two-dimensional grid. The
+solid black curves show the separate power-law fits in Equation 53, while the dashed curves show
+the adopted square-root rules. The learning rate schedule uses cosine decay to zero and optimizer-
+specific momentum is held fixed.
+F
+FIXED-MEMORY TUNING ACROSS TRAINING HORIZONS
+Spectral analyses of deep linear and kernel learning show that higher-eigenvalue modes are learned
+earlier, whereas lower-eigenvalue modes require longer training (Saxe et al., 2014; Bordelon et al.,
+2020). This progression suggests that averaging gradients over longer windows may become in-
+creasingly useful at extended training horizons: longer windows can accumulate weak but persistent
+directional signal needed to resolve harder modes. This motivation is consistent with the long-
+memory benefits observed for AdEMAMix, the growing-memory construction of DANA, and the
+use of AdEMAMix in the long-duration Apertus pretraining runs (Pagliardini et al., 2024; Ferbach
+et al., 2025; Project Apertus et al., 2025). However, longer memory also responds more slowly
+to changes in the gradient distribution and can retain stale or unusually large gradients for longer,
+creating a competing stability consideration. For fixed-memory optimizers—which use scalar coef-
+ficients such as β to maintain a constant effective memory throughout a run—we therefore ask how
+the memory coefficient should vary across training horizons.
+F.1
+PER-HORIZON MEMORY TUNING
+We conduct this analysis on the 51M-parameter model, where it is computationally feasible to jointly
+sweep one optimizer-specific memory coefficient and the base learning rate at every overtraining
+factor. For AdamW, we vary the second-moment coefficient β2 and fix β1 = 0.9. For Muon, we vary
+its native momentum coefficient β and fix its non-matrix AdamW path at (β1, β2) = (0.9, 0.95).
+For SOAP, we vary the rotated-basis second-moment coefficient β2 and fix β1 = βSh = 0.95 with
+preconditioner refresh interval K = 10. Our choice to tune AdamW’s β2 is supported by Marek
+et al. (2025), who find that preserving the second-moment half-life transfers better across batch sizes
+while β1 = 0.9 remains effective.
+We report each momentum coefficient using the effective memory window M defined in Section 3.1.
+The M = 50 setting used in our uniform-weight-decay comparison corresponds to β = 0.98 and
+a half-life of approximately 34 optimizer updates. At fixed batch size, holding β constant as the
+overtraining factor increases makes this window a progressively smaller fraction of training.
+For every optimizer, overtraining factor, and value of M, we independently sweep the base learning
+rate. For all experiments, we sweep over the memory grid M ∈{20, 40, 80, 160, 320, 640, 1280}.
+We additionally test M = 10 at six short-horizon settings whose minima initially reached the
+lower boundary, and extend AdamW and SOAP to M = 2560 at 128× OT. We evaluate these
+sweeps using the interiority criteria in Appendix B.5. Within each (optimizer, M, OT factor) set-
+ting, we first require the optimal learning rate to be interior in the learning rate sweep. After min-
+imizing over learning rate, we require the optimal memory to be interior in the memory sweep
+32
+
+
+1
+2
+4
+8
+16
+32
+64 128
+OT factor
+20
+40
+50
+80
+160
+320
+640
+1280
+Effective memory M
+AdamW
+(β1 = . 9; sweep β2)
+0
+0
+1.7
+1.8
+2.4
+3.3
+7.1
+9.3
+4.0
+2.3
+2.0
+0
+0.6
+1.0
+2.1
+4.0
+3.5
+6.1
+0
+0.9
+0
+0
+3.2
+3.3
+8.5
+14.9
+4.1
+1.1
+1.6
+3.8
+0
+2.1
+>25
+>25
+15.3
+12.5
+4.0
+3.8
+0.5
+2.2
+>25
+>25
+>25
+>25
+4.7
+2.2
+0.7
+1.7
+>25
+>25
+>25
+>25
+20.5
+7.2
+0.2
+0.8
+>25
+>25
+>25
+>25
+22.3
+11.7
+1.0
+0
+1
+2
+4
+8
+16
+32
+64 128
+OT factor
+Muon
+(sweep β)
+0
+0.7
+2.7
+4.5
+2.9
+4.5
+4.0
+5.7
+2.3
+0
+0
+1.1
+0.9
+2.7
+1.9
+3.8
+7.9
+1.3
+0.8
+0.5
+1.0
+1.3
+2.0
+3.6
+20.6
+7.3
+2.0
+0
+0.5
+0.9
+1.3
+3.0
+>25
+23.6
+7.8
+3.2
+0
+0
+0.4
+1.7
+>25
+>25
+23.2
+10.3
+2.1
+0
+0
+0.4
+>25
+>25
+>25
+22.9
+9.4
+3.8
+2.1
+0
+>25
+>25
+>25
+>25
+21.4
+9.2
+5.1
+1.7
+1
+2
+4
+8
+16
+32
+64 128
+OT factor
+SOAP
+(β1 = βSh = . 95; sweep β2)
+2.6
+3.0
+2.2
+3.1
+3.9
+2.8
+3.7
+3.8
+0
+4.6
+0
+0.6
+0
+0.9
+1.4
+1.2
+2.8
+0
+0.6
+1.4
+1.4
+1.8
+2.7
+1.3
+2.6
+5.2
+0.9
+0
+0.2
+0.6
+0.5
+0.8
+8.4
+4.0
+4.0
+0.3
+2.0
+0.5
+0
+0.4
+11.3
+5.7
+4.8
+3.0
+1.8
+1.0
+0.3
+1.1
+17.1
+17.8
+6.1
+5.0
+0.8
+0
+1.4
+1.1
+22.6
+18.5
+9.2
+5.9
+2.0
+2.5
+2.8
+0
+0
+5
+10
+15
+20
+25
+Regret after learning-rate tuning (mpt)
+Figure 16: The low-regret region shifts toward longer fixed memory as the training horizon
+increases. For each optimizer, effective memory, and OT factor, we independently sweep the base
+learning rate and report regret relative to the best memory for that optimizer and horizon. Black
+outlines mark the minimizing memory. Diagonal slashes indicate points whose learning rate sweeps
+were incomplete.
+at every (optimizer, OT factor) setting.
+At each horizon, the per-horizon treatment selects the
+(M, base learning rate) pair with the lowest final validation loss.
+F.2
+HORIZON-TUNED MEMORY RESULTS
+Longer horizons favor longer memory.
+Figure 3 shows that longer training horizons generally
+favor longer fixed memory. From 1× to 128× OT, the optimal memory increases from M = 20 to
+M = 640 for Muon, from M = 20 to M = 1280 for AdamW, and from M = 40 to M = 1280 for
+SOAP, although the trajectories are not always monotonic.
+We do not infer a memory scaling rule from these optima. Figure 16 shows that many horizons
+have broad low-regret regions, so small loss differences can substantially change the minimizing
+M. We instead use the optimal memory at each horizon as a per-horizon tuned comparison and
+leave a transferable memory prescription to future work.
+Memory and learning rate must be tuned jointly.
+Figure 17 shows that the loss-minimizing
+base learning rate generally decreases as effective memory grows, although the relationship depends
+on optimizer and horizon. This coupling creates a tradeoff: longer memory becomes useful at long
+horizons but is typically paired with a smaller learning rate, which can slow learning throughout
+the run. A fixed-memory optimizer must accept one compromise between memory and learning
+rate throughout training, whereas scheduled memory can use shorter memory early and lengthen it
+as training proceeds. This provides one plausible explanation for why per-horizon tuned constant
+memory does not fully match scheduled memory.
+Per-horizon tuning improves fixed-memory optimizers.
+The fixed-memory comparison uses
+β2 = 0.98 for AdamW and SOAP and β = 0.98 for Muon, corresponding to M = 50. The per-
+horizon sweeps show that M = 50 is near-optimal at moderate horizons, but tends to provide too
+much memory at the shortest horizons and too little at the longest. The gains therefore appear at
+both ends of our overtraining range and are largest at 128× OT. At 128× OT, per-horizon tuning
+improves validation loss by 3.3 mpt for AdamW, 3.6 mpt for Muon, and 1.3 mpt for SOAP. Figure 18
+expresses the resulting performance as token multipliers relative to fixed-M = 50 AdamW.
+Interpretation and limitations.
+These experiments act as an oracle for constant-memory optimiz-
+ers: at each training horizon, they select the best combination of memory and learning rate under
+33
+
+
+10
+40
+160
+640
+2560
+2−10
+2−9
+2−8
+2−7
+2−6
+2−5
+Best base LR
+1x OT
+10
+40
+160
+640
+2560
+2x OT
+10
+40
+160
+640
+2560
+4x OT
+10
+40
+160
+640
+2560
+8x OT
+10
+40
+160
+640
+2560
+Effective memory
+2−10
+2−9
+2−8
+2−7
+2−6
+2−5
+Best base LR
+16x OT
+10
+40
+160
+640
+2560
+Effective memory
+32x OT
+10
+40
+160
+640
+2560
+Effective memory
+64x OT
+10
+40
+160
+640
+2560
+Effective memory
+128x OT
+AdamW
+Muon
+SOAP
+Figure 17: The best base learning rate generally decreases as fixed memory grows, with
+optimizer- and horizon-dependent deviations.
+Each panel fixes the OT factor and compares
+AdamW, Muon, and SOAP across effective memory. At each memory, the plotted value is the
+base learning rate attaining the lowest final validation loss in an independent learning rate sweep.
+Open circles indicate points whose learning rate sweeps were incomplete.
+1
+4
+16
+64 128
+1x
+1.5x
+2x
+Token multiplier relative
+to AdamW with M = 50
+AdamW
+Fixed M = 50
+Per-horizon memory
+1
+4
+16
+64 128
+Muon
+1
+4
+16
+64 128
+SOAP
+OT factor
+Figure 18: Per-horizon memory tuning improves fixed-memory optimizers. For the 51M model,
+circles show each optimizer with fixed effective memory M = 50, after independently sweeping
+the base learning rate at every OT factor. Triangles show the lowest measured loss after jointly
+sweeping fixed memory and base learning rate at each horizon. We convert these loss values to
+token multipliers relative to AdamW with M = 50, corresponding to β2 = 0.98, by inverting the
+fixed-M = 50 AdamW curve from the shared-m Skaling fit. Because scaling fits are not well
+identified from this small set of horizon-tuned points, we connect adjacent points with piecewise-
+linear segments rather than fitted curves. Per-horizon memory tuning provides modest gains for
+AdamW but substantially strengthens Muon and SOAP at the longest measured horizons.
+34
+
+
+Optimizer
+Prescribed optimizer-specific settings
+AdamW
+β1 = 0.9, β2 = 0.98
+Muon
+β = 0.98; Adam route β1 = 0.9, β2 = 0.95
+SOAP
+β1 = 0.95, β2 = 0.98, βSh = 0.95, K = 10
+ADANA
+g2 = 1, g3 = 8, κ = 0.85, δ = 8
+Table 7: Optimizer-specific settings used in the primary comparison. The settings are held fixed
+across model sizes and OT factors; ADANA’s memory changes within training according to its
+prescribed log-time rule. The base learning rate is swept independently at every coordinate.
+the setting where the memory remains fixed throughout training. The results are limited to the 51M
+model and one memory coefficient per optimizer.
+Complete learning rate sweeps for this section are included in Figures 36 and 37 of Appendix L.
+G
+SCALING FITS AND TOKEN MULTIPLIERS
+G.1
+PRIMARY COMPARISON AND MEASURED SUPPORT
+We fit the 76 uniform weight decay loss values used in Figures 1 and 2. These experiments contain
+nine OT factors from 1× through 256× for the 51M model, six from 1× through 32× for the 124M
+model, and four from 1× through 8× for the 253M model, for each of AdamW, ADANA, Muon,
+and SOAP. At every (optimizer, model size, OT factor) setting, we independently sweep the base
+learning rate and use the lowest final validation loss.
+In this section, we fit validation loss jointly as a function of model size and training tokens. We use
+these fits to estimate scaling exponents and high-token loss limits and to define the smooth AdamW
+reference curve used to calculate token multipliers. These quantities therefore depend on the chosen
+functional form.
+G.2
+JOINT MODEL–TOKEN FUNCTIONAL FORM
+Let P denote nominal model size and T denote the number of training tokens, and define the di-
+mensionless coordinates p = P/P0 and t = T/T0, with P0 = 108 parameters and T0 = 2 × 109
+tokens. Throughout the main text, we model the loss values with the joint model–token functional
+form proposed by Videau et al. (2026), with the residual loss floor E and high-token model exponent
+m shared across optimizers:
+Lo(P, T) = E +
+h
+Aop−m/ko + Bot−βoiko
+,
+where o indexes the optimizer. We refer to this specification as the shared-m Skaling fit. The
+parameters Ao, Bo, βo, and ko are optimizer specific, so the four-optimizer fit contains 18 free
+parameters.
+At fixed model size, the high-token limit is
+Lo,∞(P) = E + Ako
+o p−m,
+and the excess above this limit decays asymptotically as T −βo. Accordingly, we refer to βo as the
+fixed-model token-decay exponent under this functional form. In the infinite-model limit, the token
+exponent is koβo. At fixed model size, however, high-token excess loss decays with exponent βo.
+Because we have only three model sizes, we cannot reliably estimate a separate model exponent
+for each optimizer. We therefore share m across optimizers and report optimizer-specific model
+exponents as a sensitivity analysis; this modeling choice does not imply that their true exponents are
+equal.
+G.3
+ALTERNATIVE FUNCTIONAL FORMS AND MODEL SELECTION
+Before selecting the shared-m Skaling fit, we considered six alternative functional forms.
+35
+
+
+Functional form
+Parameters
+RMSE (mpt)
+AICc
+BIC
+Chinchilla additive
+17
+14.349
+-600.54
+-571.47
+Parameter–token interaction
+21
+14.850
+-580.77
+-548.94
+Additive OT, shared model exponent
+18
+3.272
+-821.82
+-791.86
+Additive OT, optimizer-specific model exponents
+21
+3.113
+-818.24
+-786.41
+Skaling, optimizer-specific model exponents
+21
+3.079
+-819.90
+-788.07
+Shared-m Skaling
+18
+3.251
+-822.78
+-792.83
+Skaling, shared inner exponent
+18
+3.290
+-820.96
+-791.01
+Table 8: In-sample fit and information criteria for the candidate scaling forms on the 76 uniform
+weight decay loss values.
+Our first alternative is the Chinchilla functional form, which uses separate additive terms for model
+size and training tokens (Hoffmann et al., 2022),
+Lo(P, T) = E + Aop−αo + Bot−βo.
+We use a shared residual floor E and optimizer-specific values of Ao, αo, Bo, and βo.
+Our second alternative is a parameter–token interaction model motivated by the loss decompositions
+on power-law random features models in Paquette et al. (2024),
+Lo(P, T) = E + Aop−αo + Cop−γot−δo,
+where the interaction amplitude Co and exponents γo and δo are positive. This form allows the
+marginal effect of training tokens to depend on model size while preserving monotonic improvement
+in either coordinate.
+We next compare two additive forms using the overtraining factor f,
+Lo(P, f) = E + Aop−αo + Cop−uof −δo,
+with one version sharing α across optimizers and one using optimizer-specific αo.
+Finally, we compare two additional variants within the Skaling family: a version with optimizer-
+specific high-token model exponents mo = koαo, and a version that shares the inner exponent α
+while retaining optimizer-specific ko, so that mo = koα remains optimizer specific.
+We compare the models using root mean squared error (RMSE), small-sample corrected Akaike in-
+formation criterion (AICc), Bayesian information criterion (BIC), residual structure, and structured
+holdout tests. Lower AICc and BIC indicate a better tradeoff between fit error and model complexity.
+In each structured holdout test, we remove a scientifically meaningful group of loss values, refit the
+model, and evaluate its predictions on that omitted group. We consider five tests: holding out an
+entire OT factor; holding out one complete model size; holding out each model size’s longest hori-
+zon; holding out each model size’s two longest horizons; and holding out the longest horizon from
+all three model sizes simultaneously. These tests evaluate prediction across horizon or model-size
+boundaries. Ordinary leave-one-loss-value-out prediction is less informative because neighboring
+optimizers and horizons remain in the fit.
+The Chinchilla and parameter–token interaction forms are not competitive on these experiments.
+Their RMSEs exceed 14 millipoints, compared with 3.08–3.29 millipoints for the remaining five
+candidates. As Figure 19 shows, both also leave a pronounced U-shaped residual pattern: they
+overpredict the lowest and highest losses while underpredicting intermediate losses. We therefore
+restrict the structured-holdout comparison below to the remaining five candidates, which fit the
+observed loss values substantially better.
+For the five better-fitting models, Table 9 reports pooled RMSE in millipoints for the structured
+holdout tests. We additionally report every fold’s training count, held-out count, and RMSE in
+Table 10.
+We select the shared-m Skaling fit as our primary scaling fit and use it throughout the main text.
+Among the candidate functional forms that also have 18 parameters, it has the lowest observed AICc
+and BIC, and its errors when predicting held-out long horizons are comparable to those of the best-
+performing alternative. Allowing optimizer-specific model exponents reduces the in-sample RMSE
+36
+
+
+−30
+−20
+−10
+0
+10
+20
+30
+Fitted − observed loss (mpt)
+RMSE 14.35 mpt
+Chinchilla additive
+RMSE 14.85 mpt
+Parameter-token interaction
+−30
+−20
+−10
+0
+10
+20
+30
+Fitted − observed loss (mpt)
+RMSE 3.27 mpt
+Additive OT, shared model exponent
+RMSE 3.11 mpt
+Additive OT, optimizer-specific model exponent
+3.0
+3.2
+3.4
+3.6
+3.8
+Fitted loss
+−30
+−20
+−10
+0
+10
+20
+30
+Fitted − observed loss (mpt)
+RMSE 3.08 mpt
+Skaling, optimizer-specific mo
+3.0
+3.2
+3.4
+3.6
+3.8
+Fitted loss
+RMSE 3.25 mpt
+Skaling, shared m
+3.0
+3.2
+3.4
+3.6
+3.8
+Fitted loss
+RMSE 3.29 mpt
+Skaling, shared inner α
+Optimizer
+AdamW
+Muon
+ADANA
+SOAP
+Model size
+51M
+124M
+253M
+Residual structure across candidate scaling models
+Figure 19: The separable Chinchilla model and the parameter–token interaction model leave
+systematic residuals.
+Residuals are fitted minus observed validation loss in millipoints.
+The
+Chinchilla-additive and parameter–token interaction models retain a pronounced U-shaped struc-
+ture, whereas the five additive-OT and Skaling candidates remain substantially closer to zero across
+the observed loss range.
+by 0.171 mpt, but adds three parameters. The paired-coordinate bootstrap does not consistently rank
+the candidate models, so this selection is not evidence that the shared-m form is uniquely correct.
+Predictions for a completely held-out model size are substantially less accurate than predictions
+across the OT axis for every candidate. Because only three model sizes are available, we share
+m across optimizers to reduce overfitting along the model-size axis; we do not interpret the cur-
+rent experiments as identifying optimizer-specific model-scaling laws. In Appendix H.1, we check
+whether the qualitative conclusions persist across both the Skaling and additive OT families rather
+than relying on a single parameterization.
+G.4
+TOKEN MULTIPLIERS
+Following prior work, we compare optimizers using the ratio of the training tokens required by a
+baseline optimizer to those used by an indicated optimizer at the same loss. At fixed model size,
+this is the same quantity called the compute multiplier by Qiu et al. (2025); Ferbach et al. (2026)
+and token-equivalent speedup by Wen et al. (2026). We refer to it as the token multiplier. A value
+above one means that the baseline requires more tokens to attain the same loss and therefore favors
+the indicated optimizer.
+At fixed model size p, let tb(ℓ; p) denote the normalized number of training tokens required by a
+baseline optimizer b to reach loss ℓ. If optimizer o achieves loss ℓo after normalized token count t,
+its token multiplier relative to b is
+MT,o|b(p, t) = tb(ℓo; p)
+t
+.
+37
+
+
+Functional form
+Hold out OT
+Hold out longest
+Hold out two longest
+Joint frontier
+Hold out model
+Additive OT, shared model exponent
+5.36
+5.89
+6.00
+6.92
+36.30
+Additive OT, optimizer-specific model exponents
+5.64
+6.06
+5.99
+7.65
+13.98
+Skaling, optimizer-specific model exponents
+5.94
+5.99
+5.49
+7.70
+184.49
+Shared-m Skaling
+5.73
+5.86
+5.53
+6.95
+59.45
+Skaling, shared inner exponent
+5.97
+6.11
+5.61
+7.32
+59.68
+Table 9: Pooled RMSE in millipoints for the structured holdout tests for the five better-fitting models.
+Additive OT
+Skaling
+Test
+Held-out group
+Train n Held-out n Shared α Optimizer-specific αo Optimizer-specific mo Shared m Shared α
+Hold out OT
+1×
+64
+12
+9.49
+10.35
+11.37
+10.75
+11.32
+2×
+64
+12
+3.51
+3.69
+4.12
+3.97
+4.21
+4×
+64
+12
+5.37
+5.46
+5.09
+5.02
+4.99
+8×
+64
+12
+3.80
+3.51
+3.45
+3.82
+4.03
+16×
+68
+8
+2.99
+2.76
+2.60
+2.80
+2.96
+32×
+68
+8
+5.42
+5.80
+5.34
+4.86
+4.93
+64×
+72
+4
+2.68
+2.76
+3.23
+3.17
+2.91
+128×
+72
+4
+2.18
+2.26
+1.24
+1.13
+1.48
+256×
+72
+4
+4.58
+4.43
+5.98
+6.10
+6.26
+Hold out model
+51M
+40
+36
+46.19
+19.74
+256.43
+35.72
+15.75
+124M
+52
+24
+18.73
+4.58
+64.19
+61.61
+76.52
+253M
+60
+16
+30.58
+4.50
+86.77
+90.69
+87.04
+Hold out longest horizon 51M, 256×
+72
+4
+4.58
+4.43
+5.98
+6.10
+6.26
+124M, 32×
+72
+4
+7.42
+8.11
+7.15
+6.31
+6.50
+253M, 8×
+72
+4
+5.29
+4.98
+4.55
+5.08
+5.53
+Hold out two longest
+51M, 128–256×
+68
+8
+4.81
+4.76
+5.53
+5.63
+5.60
+124M, 16–32×
+68
+8
+7.31
+7.73
+6.23
+5.73
+6.04
+253M, 4–8×
+68
+8
+5.60
+5.04
+4.58
+5.22
+5.15
+Joint frontier
+All longest horizons
+64
+12
+6.92
+7.65
+7.70
+6.95
+7.32
+Table 10: Per-fold support and RMSE in millipoints for each structured holdout test for the five
+better-fitting models.
+1
+4
+16
+64
+256
+OT factor
+−8
+−6
+−4
+−2
+0
+2
+4
+6
+8
+Fitted − observed loss (mpt)
+51M
+AdamW
+Muon
+ADANA
+SOAP
+1
+2
+4
+8
+16
+32
+OT factor
+124M
+1
+2
+4
+8
+OT factor
+253M
+Figure 20: Residuals of the selected shared-m Skaling fit remain small across model sizes and
+OT values. Residuals are fitted minus observed validation loss in millipoints, shown separately for
+the 51M, 124M, and 253M models. Lines connect adjacent OT factors for the same optimizer. The
+overall RMSE is 3.251 millipoints.
+38
+
+
+A value above one means that the baseline optimizer requires more training tokens to reach optimizer
+o’s loss, while a value below one favors the baseline. For most optimizer comparisons in this paper,
+we use AdamW as the baseline.
+Under the shared-m Skaling fit, the fitted token count required by a baseline optimizer b to reach
+loss ℓis
+btb(ℓ; p) =
+
+Bb
+(ℓ−E)1/kb −Abp−m/kb
+1/βb
+.
+This inverse is finite when ℓlies above the baseline’s fitted finite-model high-token limit,
+Lb,∞(p) = E + Akb
+b p−m.
+As ℓapproaches this limit from above, the required token count diverges. If ℓfalls below the fitted
+limit, the baseline cannot match it with any finite token count under the fitted model.
+For the smooth curves in the main text, we evaluate optimizer o’s fitted loss and invert the
+fitted baseline curve; we refer to these as fit-to-fit token multipliers.
+At each experimental
+(optimizer, model size, OT factor) setting, we instead compute a measured-to-fit token multiplier by
+inverting the observed validation loss through the fitted baseline curve. A measured-to-fit multiplier
+therefore depends on the baseline fit but not on a fitted curve for optimizer o.
+When the inferred baseline token count exceeds the largest token budget measured for that baseline
+at the same model size, the multiplier depends on extrapolating rather than interpolating the base-
+line fit. We denote extrapolated token multiplier points using translucent marker fills with opaque
+outlines. For fit-to-fit curves, the line becomes dotted starting at the OT factor where the equivalent
+baseline token count exceeds the largest token budget measured for that baseline at the same model
+size.
+H
+OUTSCALING ACROSS TRAINING HORIZONS
+As in the main text, we use outscaling to describe an improvement in an optimizer’s relative ef-
+ficiency as OT increases. Here we use the scaling fits from Appendix G to examine whether that
+improvement is better described by an improved token-decay exponent, a lower finite-model high-
+token loss limit, or both.
+H.1
+DEFINITION AND FLOOR–DECAY TRADEOFF
+Outscaling can arise through an improved token-decay exponent, a lower high-token validation-
+loss limit, or both. Optimizer treatments may approach different finite-model limits because they
+can select different solutions or retain different residual optimization and noise floors. Under our
+experiments, we typically cannot identify these two effects separately, so we propose a profile-
+fit analysis that traces their tradeoff and determines whether the observed outscaling requires an
+advantage in at least one.
+At fixed model size P, let Lo,∞(P) denote optimizer o’s finite-model high-token loss limit, and let
+βo denote its token-decay exponent under the shared-m Skaling fit. For optimizer o and baseline b,
+define
+∆∞(P) = Lb,∞(P) −Lo,∞(P),
+∆β = βo −βb.
+Positive ∆∞means that optimizer o approaches a lower finite-model loss limit, while positive ∆β
+means that its excess loss decays faster with additional training tokens. Outscaling across the over-
+training axis may therefore arise from either advantage or from both simultaneously.
+To expose this tradeoff, we fix a candidate value of ∆∞, refit the remaining scaling parameters,
+and record the corresponding best-fitting value of ∆β. Each profile therefore shows the token-decay
+exponent difference implied by a particular assumption about the high-token-limit difference.
+We plot the portion of each profile curve that contains the unconstrained optimum and satisfies a
+95% profile-likelihood threshold. Let R(d) be the minimum residual sum of squares after fixing
+∆∞= d, and let Rmin be the unconstrained minimum. We estimate a common residual variance
+as bσ2 = Rmin/(n −p), where n is the number of fitted loss values and p is the number of free
+39
+
+
+parameters in the unconstrained fit, and display the contiguous segment containing the optimum for
+which
+R(d) −Rmin
+bσ2
+≤χ2
+1,0.95 ≃3.84.
+The value 3.84 is the 95th percentile of a chi-squared distribution with one degree of freedom,
+corresponding to the 95% one-parameter profile-likelihood threshold under independent Gaussian
+residuals with common variance. Our loss values are selected experimental measurements rather
+than independent noisy replicates, so we use this threshold only as a common display criterion
+across functional forms, not as a calibrated confidence interval.
+We repeat this procedure for four of the alternative functional forms: the additive-OT and Skaling
+families each with either a model exponent shared across optimizers or optimizer-specific model
+exponents. This separates sensitivity to the model–token coupling from sensitivity to the model-
+exponent constraint.
+We interpret the profiles as sets of compatible floor–decay decompositions rather than precise in-
+dependent estimates of either quantity. We use them to determine whether the observed outscaling
+requires the compared optimizer to have an advantage in its token-decay exponent, its high-token
+loss limit, or both.
+H.2
+PAIRWISE COMPARISONS UNDER UNIFORM WEIGHT DECAY
+We first compare all optimizers under uniform weight decay, since this provides a fair comparison
+under the most standard weight decay setting.
+Relative to AdamW.
+The three non-Adam optimizers exhibit different horizon dependence (Fig-
+ure 21). ADANA begins slightly behind AdamW, but its AdamW-relative token multiplier increases
+with overtraining factor. Muon is strongest over most short and intermediate horizons, although its
+advantage over AdamW remains comparatively flat. SOAP’s advantage decreases through interme-
+diate OT factors and rises at the longest horizons. The floor–decay profiles show that these trends
+need not have the same asymptotic explanation: ADANA must improve upon AdamW in its token-
+decay exponent, its high-token loss limit, or both, whereas SOAP’s late gain is more compatible
+with a lower fitted high-token limit despite a worse token-decay exponent.
+Muon versus SOAP.
+We see that the two matrix-preconditioned optimizers have different scaling
+behavior and in fact reverse their ordering as the OT factor increases. Muon is stronger through
+most short and intermediate horizons, while SOAP overtakes it at the longest measured horizons
+for the 51M and 124M models (Figure 22). Across the profiled functional forms, this crossover
+is consistently associated with a tradeoff: SOAP approaches a lower fitted high-token limit, while
+Muon retains the better token-decay exponent.
+ADANA versus matrix-preconditioned optimizers.
+ADANA begins behind both Muon and
+SOAP but becomes increasingly competitive as the overtraining factor grows. It is the strongest
+primary treatment for the 51M model at 128× OT, while SOAP is strongest at 256× OT and for
+the 124M model at 32× OT. Thus, scheduled memory catches the matrix-preconditioned treatments
+over the measured overtraining axis without uniformly dominating them. The profile comparisons
+leave open whether ADANA would ultimately win through a better token-decay exponent, a lower
+high-token limit, or both.
+H.3
+STRONGEST TREATMENT COMPARISONS
+The uniform weight decay comparisons above provide a controlled comparison in which all opti-
+mizers use the same weight decay treatment. We next ask how the optimizers compare when each
+uses the strongest treatment among those we studied with sufficient coverage across model sizes and
+training horizons.
+For ADANA, we use log-time weight decay with momentum cooldown. For AdamW and SOAP,
+we use log-time weight decay because it improves performance relative to uniform weight decay.
+For Muon, we retain uniform weight decay because log-time weight decay does not improve its
+performance at high overtraining factors.
+40
+
+
+1
+4
+16
+64
+256
+ADANA OT factor
+1
+4
+16
+64
+256
+1024
+AdamW OT to match
+ADANA vs AdamW
+Model size
+51M
+124M
+253M
+Equal OT
+1
+4
+16
+64
+256
+Muon OT factor
+1
+4
+16
+64
+256
+1024
+AdamW OT to match
+Muon vs AdamW
+1
+4
+16
+64
+256
+SOAP OT factor
+1
+4
+16
+64
+256
+1024
+AdamW OT to match
+SOAP vs AdamW
+1
+4
+16
+64
+256
+ADANA OT factor
+1x
+2x
+4x
+AdamW-relative
+token mult
+1
+4
+16
+64
+256
+Muon OT factor
+1x
+2x
+4x
+AdamW-relative
+token mult
+1
+4
+16
+64
+256
+SOAP OT factor
+1x
+2x
+4x
+8x
+AdamW-relative
+token mult
+−20
+0
+20
+51M high-token
+limit diff (mpt)
+−0.050
+−0.025
+0.000
+0.025
+0.050
+Token decay
+exponent diff
+AdamW better
+ADANA better
+−10
+0
+10
+51M high-token
+limit diff (mpt)
+−0.05
+0.00
+0.05
+Token decay
+exponent diff
+AdamW better
+Muon better
+−20
+0
+20
+51M high-token
+limit diff (mpt)
+−0.1
+0.0
+0.1
+Token decay
+exponent diff
+AdamW better
+SOAP better
+Uniform WD optimizers versus AdamW
+Skaling, shared-m
+Skaling, optimizer-specific
+Additive OT, shared
+Additive OT, optimizer-specific
+Figure 21: Uniform-WD optimizers exhibit distinct outscaling behavior relative to AdamW.
+Columns compare ADANA, Muon, and SOAP with AdamW. The top row plots the AdamW OT
+factor required to match each optimizer at the OT factor on the horizontal axis; values above the
+equal-OT diagonal favor the optimizer named first. The middle row reports the corresponding
+AdamW-relative token multiplier. Curves are fit-to-fit comparisons under the shared-m Skaling fit,
+while markers invert measured loss values through the fitted AdamW curve. Dotted curve segments
+and translucent marker fills require extrapolating AdamW beyond its largest measured token budget
+at that model size. The bottom row profiles the tradeoff between the 51M high-token limit difference
+and token-decay exponent difference under four functional forms; symbols mark the unconstrained
+optima and the displayed curves satisfy the 95% profile threshold. Positive values on either profile
+axis favor the optimizer named first. ADANA’s token multiplier rises strongly with OT, Muon’s is
+comparatively flat, and SOAP’s turns upward at the longest horizons.
+41
+
+
+1
+4
+16
+64
+256
+SOAP OT factor
+1
+4
+16
+64
+256
+1024
+Muon OT to match
+SOAP vs Muon
+Model size
+51M
+124M
+253M
+Equal OT
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5
+1
+4
+16
+64
+256
+1024
+Muon OT to match
+ADANA vs Muon
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5
+1
+4
+16
+64
+256
+1024
+SOAP OT to match
+ADANA vs SOAP
+1
+4
+16
+64
+256
+SOAP OT factor
+1x
+2x
+4x
+Muon-relative
+token mult
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5x
+1x
+2x
+Muon-relative
+token mult
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5x
+1x
+2x
+SOAP-relative
+token mult
+−20
+0
+20
+51M high-token
+limit diff (mpt)
+−0.1
+0.0
+0.1
+Token decay
+exponent diff
+Muon better
+SOAP better
+−20
+0
+20
+51M high-token
+limit diff (mpt)
+−0.05
+0.00
+0.05
+Token decay
+exponent diff
+Muon better
+ADANA better
+−10
+0
+10
+51M high-token
+limit diff (mpt)
+−0.1
+0.0
+0.1
+Token decay
+exponent diff
+SOAP better
+ADANA better
+Pairwise comparisons among uniform WD optimizers
+Skaling, shared-m
+Skaling, optimizer-specific
+Additive OT, shared
+Additive OT, optimizer-specific
+Figure 22: Rankings among the non-Adam uniform-WD treatments also change with train-
+ing horizon. Columns compare SOAP with Muon, ADANA with Muon, and ADANA with SOAP.
+The top, middle, and bottom rows respectively show equivalent OT, baseline-relative token multi-
+pliers, and floor–decay profiles using the conventions of Figure 21. SOAP overtakes Muon only at
+the longest measured horizons, while ADANA gains on both matrix-preconditioned treatments and
+reaches or exceeds them at some of the highest measured model–horizon settings. The profiles show
+that these ranking changes need not have the same asymptotic explanation: SOAP’s late advantage
+over Muon is compatible with a lower fitted high-token limit despite a worse token-decay exponent,
+whereas ADANA’s comparisons retain a tradeoff between the two quantities.
+Our horizon-tuned momentum experiments show that fixed-memory optimizers can benefit from
+tuning momentum separately at each overtraining factor. However, these experiments are available
+only for the 51M model, so we cannot perform the full comparison using horizon-tuned momentum
+across all three model sizes.
+With each optimizer using its strongest available treatment, Figure 23 shows that ADANA’s rela-
+tive token efficiency increases with overtraining factor against each of the other three optimizers.
+ADANA begins behind at short horizons, then catches or overtakes log-time-WD AdamW, uniform-
+WD Muon, and log-time-WD SOAP as the training horizon increases.
+Overall, these comparisons provide evidence that the strongest ADANA treatment outscales AdamW
+and Muon and gains substantially on SOAP across the measured overtraining axis. We state the
+SOAP comparison more cautiously because SOAP performs particularly well for the 51M model
+at 256× OT. Across all four profiled functional forms, the data favor an improved ADANA token-
+42
+
+
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5
+1
+4
+16
+64
+256
+1024
+AdamW OT to match
+vs AdamW
+(log-time WD)
+Model size
+51M
+124M
+253M
+Equal OT
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5
+1
+4
+16
+64
+256
+1024
+Muon OT to match
+vs Muon
+(uniform WD)
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5
+1
+4
+16
+64
+256
+1024
+SOAP OT to match
+vs SOAP
+(log-time WD)
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5x
+1x
+2x
+4x
+AdamW-relative
+token mult
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5x
+1x
+2x
+4x
+Muon-relative
+token mult
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5x
+1x
+2x
+SOAP-relative
+token mult
+−20
+0
+20
+51M high-token
+limit diff (mpt)
+−0.2
+−0.1
+0.0
+0.1
+0.2
+Token decay
+exponent diff
+AdamW better
+ADANA better
+−20
+0
+20
+51M high-token
+limit diff (mpt)
+−0.2
+−0.1
+0.0
+0.1
+0.2
+Token decay
+exponent diff
+Muon better
+ADANA better
+−20
+−10
+0
+10
+20
+51M high-token
+limit diff (mpt)
+−0.2
+−0.1
+0.0
+0.1
+0.2
+Token decay
+exponent diff
+SOAP better
+ADANA better
+ADANA treatment: log-time WD + CD
+Skaling, shared-m
+Skaling, optimizer-specific
+Additive OT, shared
+Additive OT, optimizer-specific
+Figure 23: Log-time WD and momentum cooldown make ADANA increasingly competitive
+with the strongest measured versions of the three other optimizers. Columns compare ADANA
+using log-time WD and momentum cooldown with AdamW using log-time WD, Muon using uni-
+form WD, and SOAP using log-time WD. The top, middle, and bottom rows respectively show
+equivalent OT, baseline-relative token multipliers, and floor–decay profiles using the same con-
+ventions as Figure 21. Strong ADANA’s relative token efficiency increases with OT in all three
+comparisons. Across the profiled functional forms, the comparisons favor an improved ADANA
+token-decay exponent, while the corresponding high-token limit differences remain less well identi-
+fied. Open circles indicate points whose learning rate sweeps were incomplete; the fits use only the
+filled points.
+decay exponent, while the precise division between token-decay and high-token-limit advantages
+remains less well identified.
+H.4
+EQUIVALENT OT SCALING AND THE DANA PLRF PREDICTION
+Effective optimization time.
+An effective optimization clock is a reparameterization of training
+time that measures how much progress the optimizer has made through the problem’s spectrum,
+rather than simply counting updates. As an example, consider gradient descent on a quadratic with
+a time-dependent learning rate ηt. Along an eigendirection with curvature λ, the residual evolves
+approximately as
+rt,λ ≈exp
+ 
+−λ
+X
+s<t
+ηs
+!
+r0,λ.
+43
+
+
+The accumulated learning rate P
+s<t ηs, rather than the update count alone, therefore acts as an
+effective optimization clock. Two learning rate schedules that reach the same accumulated value
+make approximately the same progress along that eigendirection.
+The PLRF analysis of DANA derives an analogous clock for its coupled gradient and momentum
+dynamics (Ferbach et al., 2025). In the notation of that analysis,
+ϑ(t) = 1 + 2γ2Bt +
+Z t
+0
+p
+Bγ3(s) ds
+2
+,
+where B is the batch size, γ2 is the direct-gradient step size, and γ3(t) is the time-dependent step
+size for the momentum channel. Note that γ3(t) in the DANA notation is distinct from the constant
+ADANA coefficient g3 used elsewhere in this paper. The term linear in t is the direct-gradient con-
+tribution to the effective clock, while the squared-integral term arises from the coupled momentum
+dynamics. For the DANA schedule
+γ3(t) ∝t−κ,
+the latter term grows as
+Z t
+0
+s−κ/2 ds
+2
+∝t2−κ.
+ADANA retains this time exponent through its equivalent EMA formulation, in which the momen-
+tum direction is multiplied by (1 + t)1−κ (Ferbach et al., 2026).
+From optimizer updates to equivalent OT.
+In our experiments, batch size and sequence length
+are fixed, so the number of optimizer updates is proportional to the number of training tokens and
+hence to the overtraining factor at fixed model size. If the baseline follows a clock linear in update
+count while ADANA follows the DANA clock above, the corresponding equivalent-OT relation is
+fbaseline ∝f 2−κ
+ADANA.
+For our choice κ = 0.85, this gives a predicted log–log slope
+2 −κ = 1.15.
+Equivalently, DANA’s effective clock grows relative to the linear baseline with exponent 1 −κ =
+0.15.
+This prediction has a specific theoretical scope. In PLRF, DANA-decaying outscales SGD above
+the high-dimensional line across the signal- and noise-controlled phases before the model-capacity
+floor is reached. The exact loss exponent depends on the data and target spectra and on whether
+population bias, embedding bias, or variance controls the loss. Thus, 2 −κ is the exponent of
+DANA’s effective optimization clock, not a universal loss exponent shared by every PLRF phase.
+Comparison with the transformer experiments.
+Figure 24 compares this prediction with the
+equivalent AdamW OT required to match ADANA. With log-time weight decay and momentum
+cooldown, the fitted equivalent-OT slopes are 1.20, 1.16, and 1.15 for the 51M, 124M, and 253M
+models. These values are close to the PLRF prediction 2 −κ = 1.15 across all three model sizes.
+Under uniform weight decay, the corresponding slopes are 1.15, 1.06, and 1.03, indicating that the
+agreement is strongest for the ADANA treatment combining log-time weight decay and momentum
+cooldown.
+We treat 2 −κ as a theoretically motivated reference rather than a direct prediction for these trans-
+former experiments. DANA theory compares DANA with SGD on PLRF, whereas our experiments
+compare adaptively preconditioned ADANA with AdamW; the strongest ADANA treatment also in-
+cludes log-time weight decay and momentum cooldown. Moreover, the floor–decay profiles above
+show that a fitted token-decay exponent remains coupled to the assumed high-token loss limit. Our
+conclusion is therefore that ADANA’s measured equivalent-OT scaling is quantitatively close to the
+effective-clock prediction from DANA theory, not that these experiments identify a particular PLRF
+phase or establish that the complete PLRF theory transfers unchanged to transformers.
+44
+
+
+1
+4
+16
+64
+256
+ADANA OT factor
+0.5
+2
+8
+32
+128
+512
+AdamW OT to match
+51M
+ADANA treatment
+Uniform WD
+Log-time WD + CD
+Slopes
+Fit: 1.15
+Fit: 1.20
+Equal OT: 1.0
+PLRF 2 −κ: 1.15
+1
+4
+16
+ADANA OT factor
+0.5
+2
+8
+32
+124M
+Slopes
+Fit: 1.06
+Fit: 1.16
+1
+2
+4
+8
+ADANA OT factor
+0.5
+2
+8
+253M
+Slopes
+Fit: 1.03
+Fit: 1.15
+Figure 24: With log-time WD and momentum cooldown, ADANA outscaling is close to the
+PLRF prediction 2 −κ across model sizes. We plot equivalent OT scaling across model sizes:
+for each ADANA OT factor, the vertical axis gives the AdamW OT factor required to attain the
+same fitted validation loss. Lines compare uniform-WD ADANA with ADANA using log-time
+WD and momentum cooldown; markers instead invert measured ADANA loss values through the
+fitted AdamW curve. Translucent markers and dotted curve segments require extrapolating AdamW
+beyond its largest measured token budget. The displayed fit values are log–log slopes over each
+curve’s plotted range. The dashed reference has slope 1, while the dotted reference has the PLRF-
+predicted slope 2 −κ = 1.15; both pass through (1, 1). The combined-treatment slopes are 1.20,
+1.16, and 1.15 for the 51M, 124M, and 253M models, respectively, whereas the uniform-WD slopes
+are 1.15, 1.06, and 1.03.
+I
+BATCH SIZE AND OPTIMIZER UPDATE COUNT
+At fixed token count, changing the batch size also changes the number of sequential optimizer
+updates. If T is the token budget, B is the batch size in sequences, and L is the sequence length,
+then the number of updates is approximately
+S =
+T
+B × L.
+Increasing B therefore simultaneously reduces the number of optimizer updates and the stochastic
+variation between updates. This creates a fixed-token identifiability problem: an optimizer can
+appear to scale poorly with batch either because it benefits less from larger batches or because
+it benefits more from the additional updates available at smaller batches. The fixed-token batch
+comparisons in Ferbach et al. (2026) and Marek et al. (2025) have the same limitation.
+Figure 25 shows our initial batch scaling experiment at 8× OT. ADANA achieves a lower loss at
+B = 32, but its loss begins to increase at B = 64 and continues to rise with batch size. AdamW
+remains close to its B = 32 performance through approximately B = 256 before its loss increases
+at larger batch sizes. Both optimizers lose efficiency at the largest measured batch sizes.
+The optimal memory hyperparameters for both optimizers follow clear batch scaling trends. For
+AdamW, the optimal second-moment memory M2 = 1/(1 −β2) decreases approximately as
+1/B, keeping BM2 approximately constant and replicating the batch-transfer behavior observed
+by Marek et al. (2025). For ADANA, the optimal g3 increases approximately linearly with B, while
+its jointly optimized base learning rate decreases.
+We obtain these curves by jointly optimizing the base learning rate and β2 for AdamW, with β1 =
+0.9 fixed, and the base learning rate and g3 for ADANA, with κ = 0.85 and δ = 8 fixed. For both
+optimizers, we use uniform weight decay with c(f) = 8√f. Because the per-update decay is c/S
+and the number of updates S decreases inversely with batch size at fixed token count, holding c fixed
+implements the batch scaling prescription of Bergsma et al. (2025a).
+We propose three possible explanations for the observed differences in how the optimizers perform
+across batch sizes. First, ADANA’s advantage may depend on the number of sequential optimizer
+updates. In the PLRF derivation of DANA, when γ3(t) ∝t−κ, the momentum contribution to the
+effective optimization clock grows as BS2−κ, compared with a baseline contribution proportional
+to BS. Its relative contribution therefore grows as S1−κ. This suggests that ADANA’s advantage
+45
+
+
+32
+64
+128
+256
+512
+1024
+Batch size
+0
+20
+40
+60
+Loss vs B = 32 (mpt)
+Large batches reduce
+fixed-token efficiency
+AdamW
+ADANA
+10
+40
+160
+640
+2560
+Memory in updates
+1/(1 −β2)
+Best AdamW β2 keeps
+token memory constant
+∝1/B
+32
+64
+128
+256
+512
+1024
+Batch size
+2−10
+2−8
+2−6
+Base LR
+√2
+4
+16
+64
+g3
+Best ADANA g3 increases
+with batch size
+32
+64
+128
+256
+512
+1024
+Batch size
+2−16
+2−14
+2−12
+Base LR
+Figure 25: At fixed token count, ADANA loses efficiency at smaller batch sizes than AdamW in
+the measured 8×-OT slice. We train the 51M parameter model for 8× OT while holding the total
+number of training tokens fixed and varying the global batch size from 32 to 1,024. At each batch
+size, we jointly sweep the base learning rate and either AdamW β2 or ADANA g3; AdamW β1 = 0.9
+and ADANA κ = 0.85, δ = 8 remain fixed. Left: the best final validation loss relative to B = 32.
+Middle: the selected AdamW second-moment memory M2 = 1/(1 −β2); the M2 ∝1/B guide
+corresponds to approximately constant token memory BM2, consistent with Marek et al. (2025).
+Right: the selected ADANA g3. The lower panels show the base learning rate selected jointly with
+each optimizer hyperparameter. This fixed-token slice does not by itself establish a general batch
+scaling law for ADANA.
+should become more visible over longer training horizons at a fixed batch size. At fixed tokens,
+however, increasing B reduces S and may obscure this advantage.
+Second, ADANA may be particularly effective in the high-noise regime. Analyses of accelerated-
+SGD-style methods suggest that some multi-timescale methods derive their largest advantage from
+noisy, small-batch gradients (Morwani et al., 2025). Increasing the effective batch size could then
+reduce ADANA’s advantage independently of the accompanying reduction in optimizer updates.
+Third, we leave open whether broader joint hyperparameter optimization would change the relative
+batch scaling. Although the optimal g3 follows a clear batch-dependent trend, g3, κ, and δ jointly
+determine ADANA’s evolving first-moment timescale. Similarly, optimizing AdamW’s β2 at fixed
+β1 does not test whether its first- and second-moment timescales should be transferred together.
+We have separately studied how ADANA’s optimal weight-decay coefficient scales with training
+horizon at a fixed batch size, but not how it changes across batch sizes. Additional batch-conditioned
+weight-decay sweeps could therefore test whether weight-decay transfer contributes to the observed
+performance differences.
+Finally, in language model training, each batch element is a sequence rather than an independent
+token, making the appropriate notion of effective batch size ambiguous. One natural measure is the
+total number of tokens processed per update, B × L. However, tokens within the same sequence
+share context and are likely more correlated than tokens drawn from different batch elements. Two
+configurations with the same B ×L may therefore have different gradient noise: increasing B while
+shortening L may provide more independent information than decreasing B while lengthening L.
+Comparing different (B, L) factorizations at matched tokens per update would help identify which
+notion of batch size governs optimizer performance.
+Disentangling these mechanisms requires complementary experimental slices: varying the training
+horizon at fixed batch isolates dependence on sequential updates; varying batch at fixed update
+count probes the effect of batch and gradient noise; and varying batch at fixed tokens measures the
+operational efficiency tradeoff. Comparing different (B, L) factorizations at matched tokens per
+update would further test whether the relevant quantity is tokens per update or the effective number
+of independent sequences. The present experiment should therefore be interpreted as an observation
+about this fixed-token, fixed-sequence-length slice rather than as a general batch scaling law for
+ADANA.
+46
+
+
+1
+2
+4
+8
+16
+32
+64
+OT factor
+3.3
+3.4
+3.5
+3.6
+3.7
+Validation loss
+AdamW and LaProp remain close
+at matched β1
+1
+2
+4
+8
+16
+32
+64
+OT factor
+0.95x
+1x
+1.05x
+1.10x
+Token multiplier
+LaProp remains near AdamW
+β1 = . 90 scaling baseline
+AdamW β1 = 0.90
+AdamW β1 = 0.95
+LaProp β1 = 0.90
+LaProp β1 = 0.95
+Figure 26: AdamW and LaProp remain close at matched β1. We compare β1 ∈{.90, .95} at
+fixed β2 = .98, independently sweeping the base learning rate for every optimizer–β1–OT coor-
+dinate. Left: best validation loss. Right: token multiplier relative to AdamW with β1 = .90 and
+β2 = .98.
+J
+PRECONDITIONER ORDER IN FIXED- AND SCHEDULED-MEMORY
+OPTIMIZERS
+In this section, we propose the LADANA optimizer, which first applies adaptive preconditioning
+to each gradient and then applies the DANA log-time momentum rule. LADANA can therefore be
+viewed as an RMSProp-style preconditioner followed by DANA, reversing the order of precondi-
+tioning and momentum accumulation used by ADANA.
+The first scientific question is whether ADANA requires unpreconditioned gradient-scale informa-
+tion to outscale across the overtraining axis. ADANA accumulates raw gradients in a memory whose
+duration grows throughout training and applies the current adaptive preconditioner only after this ac-
+cumulation. Changes in gradient magnitude across coordinates and training time therefore remain
+represented in its long-memory state. LADANA instead normalizes each gradient before it enters
+that state. If ADANA’s advantage comes primarily from the growing memory clock, LADANA
+should preserve its improving token efficiency at longer horizons. If raw gradient magnitudes con-
+tain information that the mechanism relies on, preconditioning before accumulation may weaken
+the advantage. Comparing ADANA and LADANA therefore tests whether log-time momentum can
+produce outscaling when applied to preconditioned gradients.
+The second scientific question is how preconditioner ordering affects stability—in particular,
+whether LADANA has stability advantages over ADANA. LaProp motivates normalization-first
+ordering by identifying a potentially destabilizing interaction in Adam: Adam accumulates raw
+gradients in its momentum buffer and then preconditions the entire buffer using the current second-
+moment estimate. Past gradients are therefore rescaled using statistics from a later point in training,
+which can be problematic when the gradient distribution changes. LaProp instead normalizes each
+gradient using its contemporaneous second-moment estimate before storing it in momentum, de-
+coupling the momentum and adaptivity time scales and remaining stable in hyperparameter regimes
+where Adam can diverge (Liu et al., 2020). This concern may be especially important for log-time
+momentum. Because DANA’s effective memory grows during training, a gradient spike or a mis-
+match between past gradients and the current preconditioner can remain influential for much longer
+than under conventional fixed-memory momentum. LADANA may therefore offer a stability ad-
+vantage by normalizing unusual gradients before they enter the growing-memory state. Our present
+experiments compare final validation loss but do not yet directly establish this stability advantage.
+47
+
+
+J.1
+ADAMW AND LAPROP ISOLATE PRECONDITIONER ORDER
+AdamW and LaProp provide a fixed-memory comparison of the two possible preconditioner order-
+ings. Let
+vt = β2vt−1 + (1 −β2)eg⊙2
+t
+,
+bvt =
+vt
+1 −βt
+2
+.
+(55)
+AdamW first accumulates the raw gradient,
+mt = β1mt−1 + (1 −β1)egt,
+dAdamW
+t
+=
+bmt
+√bvt + ϵ,
+(56)
+and therefore applies the current preconditioner to the complete momentum buffer.
+LaProp reverses these operations (Liu et al., 2020). It first normalizes the current gradient,
+zt =
+egt
+√bvt + ϵ,
+(57)
+and then accumulates the normalized direction. We follow the official LaProp implementation,
+which places the scheduled learning rate inside the momentum state:
+µt = β1µt−1 + (1 −β1)ηtzt,
+(58)
+ct = β1ct−1 + (1 −β1)ηt,
+dLaProp
+t
+= µt
+ct
+.
+(59)
+For both optimizers, the outer update is
+θt = θt−1 −ηtΓdt −ωtθt−1,
+(60)
+where Γ denotes the parameter-group learning rate scale and ωt is the matched decoupled weight-
+decay transition. Thus, AdamW averages gradients and then normalizes, whereas LaProp normal-
+izes each gradient using the second-moment estimate available when it is observed and then averages
+the resulting directions.
+Figure 26 compares the two optimizers at matched β1 ∈{0.90, 0.95}, fixed β2 = 0.98, and the
+same uniform-WD prescription. We independently sweep the base learning rate for every optimizer,
+momentum, and OT coordinate. AdamW and LaProp remain close across the measured horizons.
+LaProp with β1 = 0.95 has a modest advantage at the shorter horizons, but reversing the precondi-
+tioner order does not produce a separation that grows systematically with OT.
+This comparison establishes the fixed-memory control for the experiments below: changing precon-
+ditioner order alone has only a modest effect on final validation loss performance under these treat-
+ments. It does not determine whether preconditioned gradients can support outscaling from log-time
+momentum, because both AdamW and LaProp retain a horizon-independent first-moment window.
+The corresponding scheduled-memory comparison is therefore between ADANA and LADANA.
+J.2
+LADANA APPLIES DANA AFTER PRECONDITIONING
+We now consider normalization-first ordering for log-time momentum. For the log-v variant of
+LADANA, the second-moment state follows the same log-time update as ADANA,
+vt = (1 −∆t)vt−1 + ∆teg⊙2
+t
+,
+∆t =
+δ
+δ + t.
+(61)
+Let Pt denote the elementwise linear operator
+Ptx =
+x
+√vt + ϵ,
+(62)
+and define the gradient normalized at the time it is observed as zt = Ptegt. LADANA applies the
+DANA memory update to these preconditioned gradients,
+nt = (1 −∆t)nt−1 + ∆tzt,
+(63)
+dLADANA
+t
+= g2zt + g3χtnt,
+χt = (t + 1)1−κ + 1,
+(64)
+48
+
+
+with n0 = v0 = 0. The scalar learning rate remains outside this state recursion.
+This notation makes the reversal relative to ADANA explicit. If mt is ADANA’s raw-gradient
+memory, its direction can be written as
+dADANA
+t
+= g2Ptegt + g3χtPtmt.
+(65)
+The two optimizers therefore share the same direct-gradient channel. Their long-memory channels
+differ: ADANA stores each unpreconditioned gradient and applies the current preconditioner Pt to
+the complete memory, whereas LADANA stores Psegs using the preconditioner available when the
+gradient was observed. More precisely, define
+wt,s = ∆s
+tY
+r=s+1
+(1 −∆r).
+(66)
+Then
+dLADANA
+t
+−dADANA
+t
+= g3χt
+t
+X
+s=1
+wt,s(Ps −Pt)egs.
+(67)
+Thus the two rules coincide when the adaptive preconditioner is constant over the effective memory
+window, and remain close when it changes little over that window. Equation 67 isolates precondi-
+tioner order rather than introducing a different direct-gradient update.
+We also consider a fixed-v ablation. In this variant,
+rt = β2rt−1 + (1 −β2)eg⊙2
+t
+,
+(68)
+brt =
+rt
+1 −βt
+2
+,
+zt =
+egt
+√brt + ϵ,
+(69)
+while nt retains the log-time update above. This separates the effect of preconditioner order from the
+effect of scheduling the denominator memory. Unless otherwise stated, our LADANA experiments
+use log-time memory for both nt and vt, with g2 = 1, g3 = 8, κ = 0.85, δ = 8, and ϵ = 10−15;
+fixed-v LADANA instead uses β2 = 0.98 for the denominator memory.
+J.3
+LADANA RESULTS AND LIMITATIONS
+Under uniform weight decay, LADANA with log-time second-moment memory performs similarly
+to ADANA through 128× OT on the 51M model and slightly underperforms it at 256×. The two
+optimizers also remain close across the shorter horizons measured for the 124M and 253M models.
+By contrast, fixed-v LADANA falls behind at long horizons on the 51M model. These results give
+a qualified positive answer to our first question: outscaling from log-time momentum can occur on
+preconditioned gradients, although scheduling the denominator memory appears important at long
+horizons.
+Under log-time weight decay, LADANA performs similarly to ADANA through 64× OT but dete-
+riorates sharply at 128×. We cannot yet determine whether this reflects a mismatched weight-decay
+coefficient, an interaction between preconditioner order and log-time weight decay, or genuine in-
+stability of the combined treatment. In particular, we used the log-time weight-decay coefficient
+rule determined from experiments on the other optimizers (Appendix E.4) without performing a
+LADANA-specific weight-decay coefficient sweep. We therefore treat the 128× result as an unre-
+solved interaction rather than evidence that LADANA is inherently unstable.
+We leave our second question about stability as future work, as final loss and learning rate sensitivity
+cannot establish whether LADANA is more robust to gradient spikes or changing gradient distri-
+butions. For the current results, our conclusion is narrower: preconditioning before accumulation
+preserves most of ADANA’s uniform-WD outscaling, while its stability properties and compatibility
+with log-time weight decay remain open.
+The complete learning rate sweep evidence for the retained preconditioner-order comparisons ap-
+pears in Figures 38, 39, and 40. Dashed curves and hollow markers are retained wherever the full
+≤1 millipoint set reaches a tested learning rate boundary.
+49
+
+
+1
+2
+4
+8
+16
+32
+64 128 256
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Final validation loss
+51M parameters
+1
+2
+4
+8
+16
+32
+3.1
+3.2
+3.3
+3.4
+124M parameters
+1
+2
+4
+8
+2.90
+2.95
+3.00
+3.05
+3.10
+3.15
+253M parameters
+1
+2
+4
+8
+16
+32
+64 128 256
+OT factor
+1.0
+1.5
+2.0
+2.5
+3.0
+AdamW-relative
+token mult
+1
+2
+4
+8
+16
+32
+OT factor
+1.0
+1.5
+2.0
+2.5
+3.0
+1
+2
+4
+8
+OT factor
+1.0
+1.5
+2.0
+2.5
+3.0
+ADANA
+LADANA
+LADANA, fixed v
+Figure 27: Preconditioner order under uniform weight decay across model sizes. The top row
+reports final validation loss for ADANA and LADANA with log-time denominator memory. The
+bottom row converts the same loss values to token multipliers relative to uniform-WD AdamW at
+each model size. The 51M panels additionally show the fixed-v LADANA ablation. Open circles
+indicate points whose learning rate sweeps were incomplete.
+1
+2
+4
+8
+16
+32
+64
+128
+256
+OT factor
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Final validation loss
+Final validation loss
+ADANA
+LADANA
+1
+2
+4
+8
+16
+32
+64
+128
+256
+OT factor
+1.0
+1.5
+2.0
+2.5
+AdamW-relative token mult
+AdamW-relative token efficiency
+Figure 28: Preconditioner order under log-time weight decay. Final validation loss (left) and
+token multipliers relative to uniform-WD AdamW (right) for ADANA and LADANA with log-time
+denominator memory on the 51M model. Both treatments use the log-time weight-decay coefficient
+rule from Appendix E.4.
+50
+
+
+K
+MOMENTUM COOLDOWN FOR LOG-TIME MEMORY
+K.1
+MOTIVATION: LONG MEMORY CAN BECOME STALE DURING TERMINAL DECAY
+Long memory improves gradient averaging, but reduces responsiveness to changes in the optimiza-
+tion trajectory. Under ADANA’s log-time rule, the momentum timescale grows approximately lin-
+early with the number of optimizer updates. While the training dynamics change slowly, the opti-
+mizer can average over an increasingly long history without fixing one memory length for the entire
+run.
+The same persistence may become undesirable during terminal learning rate decay. Although the
+learning rate is not stored in the momentum state, the buffer retains gradients evaluated at earlier
+parameter values reached using larger step sizes. When the learning rate changes faster than the mo-
+mentum state can respond, substantial kernel mass remains on directions from an earlier optimiza-
+tion regime. We refer to this mismatch as stale memory: the stored gradients are not intrinsically
+invalid, but are old relative to the timescale on which the current update rule is changing.
+This suggests a schedule-aware compromise: retain ADANA’s growing memory while the learning
+rate changes slowly, but shorten it once terminal decay becomes faster than the momentum response.
+Momentum cooldown implements this principle directly. We treat stale memory as its motivation
+rather than as an empirically established explanation of its gains.
+K.2
+DEFINITION OF MOMENTUM COOLDOWN
+Let
+τmom,t = 1
+∆t
+= δ + t
+δ
+(70)
+denote the momentum timescale of ADANA’s original log-time update. We define the local learning
+rate decay timescale as
+τη,t =
+ηt
+ηt −ηt+1
+(71)
+whenever ηt+1 < ηt, and set τη,t = ∞during constant or increasing portions of the schedule.
+Momentum cooldown replaces the original timescale with
+τCD,t = max(1, min{τmom,t, τη,t}) ,
+∆CD
+t
+=
+1
+τCD,t
+.
+(72)
+The cooled memory state therefore follows
+mCD
+t
+=
+ 1 −∆CD
+t
+
+mCD
+t−1 + ∆CD
+t
+egt.
+(73)
+Before the two timescales cross, τη,t ≥τmom,t, so cooldown leaves the original log-time memory
+rule unchanged. During sufficiently rapid learning rate decay, it increases the weight placed on the
+current gradient and concentrates the momentum kernel on more recent updates. The construction
+depends only on relative changes in the learning rate and is therefore invariant to its overall scalar
+scale.
+Because the standard ADANA implementation uses the same log-time coefficient for its first- and
+second-moment states, our principal ADANA treatment applies ∆CD
+t
+to both states. We separately
+examine which states should be cooled in the treatment-selection experiments below. Figure 29
+shows how this rule changes the momentum timescale and the age distribution of the resulting
+kernel.
+K.3
+MOMENTUM COOLDOWN TREATMENT SELECTION
+We distinguish two interventions on ADANA’s long-memory channel. Memory-window cooldown
+shortens the kernel used to update the long-memory state. Long-memory contribution cooldown
+leaves that kernel unchanged and instead multiplies the long-memory contribution g3χtmt by
+min(1, τη/τmom) during learning rate decay. The combined treatment applies both changes. For
+AdamW, we analogously apply the memory-window rule to the first moment, the second moment,
+or both moments.
+51
+
+
+0%
+20%
+40%
+60%
+80%
+100%
+Training progress
+100
+101
+102
+103
+104
+105
+106
+107
+Momentum timescale (updates)
+cooldown onset
+Cooldown shortens momentum
+during learning rate decay
+Log momentum
+Log momentum + CD
+Cosine LR decay timescale
+0%
+20%
+40%
+60%
+80%
+100%
+Training progress
+100
+101
+102
+103
+104
+105
+Gradient age (updates)
+Cooldown reduces momentum age
+during learning rate decay
+Log momentum, 50% kernel mass
+Log momentum + CD, 50% kernel mass
+Log momentum, 90% kernel mass
+Log momentum + CD, 90% kernel mass
+Figure 29: Mechanics of momentum cooldown. We illustrate the exact responsive-memory rule
+used in our experiments for a representative h8 ADANA run at 128× OT with cosine learning
+rate decay. Left: log-time momentum normally uses an increasingly long timescale. We define
+the learning rate decay timescale as ηt/|ηt+1 −ηt| and set the cooled momentum timescale to the
+minimum of this quantity and the original log-time momentum timescale. Right: the resulting
+median and 90th-percentile ages of the momentum kernel, defined as the shortest recent history
+containing 50% and 90% of its mass. Cooldown leaves the kernel unchanged earlier in training but
+makes it increasingly concentrated on recent gradients during terminal decay.
+Cooling AdamW’s first moment improves validation loss by 2.30 millipoints at 8× OT. Cooling both
+moments gives essentially the same improvement. By contrast, cooling only the second moment is
+unstable at every tested learning rate, producing validation losses from 15.2 to 42.9. This behavior
+is consistent with a response-time mismatch: the second-moment denominator becomes rapidly
+responsive during learning rate decay while the first-moment numerator continues to retain older
+gradients. Cooling both moments removes this mismatch and restores stable training, but provides
+no additional gain beyond cooling the first moment alone. We treat this explanation as a mechanistic
+interpretation rather than a demonstrated causal result.
+For ADANA, memory-window cooldown improves validation loss by 11.47 millipoints. Tapering
+only the long-memory contribution improves loss by 0.92 millipoints, while combining that taper
+with memory-window cooldown improves loss by 6.13 millipoints. All three selected minima come
+from learning rate sweeps satisfying the interiority criterion. Thus shortening the memory window
+is the most effective tested intervention; tapering the long-memory contribution alone helps only
+modestly, and combining the two interventions does not improve on memory-window cooldown
+alone.
+K.4
+WHERE MOMENTUM COOLDOWN HELPS AND WHAT REMAINS OPEN
+We show in Figure 6 that momentum cooldown provides a small benefit to AdamW but a substantial
+improvement to ADANA, consistent with our motivation that growing log-time memory can become
+stale during terminal learning rate decay. The ADANA benefit is consistent across all three model
+sizes.
+Moreover, in our experiments on the 51M parameter model, momentum cooldown and log-time
+weight decay provide complementary gains. Each intervention improves long-horizon ADANA, and
+combining them produces the lowest validation losses at the longest measured horizons. Figure 6
+reports these final-loss comparisons; Figures 41 and 43 provide the underlying learning rate sweeps.
+Several questions remain open. We have not tested analogous cooldown rules for Muon or SOAP,
+and the present rule has only been evaluated with cosine decay to zero. We set the crossover at the
+unit timescale ratio, but have not established that this threshold is optimal. Final validation losses
+also cannot determine whether downweighting older gradient history is the causal mechanism be-
+hind the improvement. Our present conclusion is therefore narrower: shortening ADANA’s memory
+52
+
+
+Optimizer
+Cooldown target
+Best base LR
+Validation loss
+Gain vs. standard
+(mpt)
+AdamW
+None
+2−7.0
+3.430405
+0.00
+AdamW
+First moment
+2−7.0
+3.428106
++2.30
+AdamW
+Second moment
+–
+Unstable
+–
+AdamW
+First and second moments
+2−7.0
+3.428112
++2.29
+ADANA
+None
+2−12.5
+3.432476
+0.00
+ADANA
+Memory window
+2−12.5
+3.421004
++11.47
+ADANA
+Long-memory contribution
+2−12.5
+3.431558
++0.92
+ADANA
+Window and contribution
+2−12.5
+3.426349
++6.13
+Table 11: Momentum cooldown treatment selection at 8× OT. Each reported minimum comes
+from an independent base learning rate sweep, and gains are measured relative to the same optimizer
+without cooldown.
+during terminal decay produces a substantial empirical gain, while the optimal rule and its mecha-
+nism remain unresolved.
+53
+
+
+L
+COMPLETE HYPERPARAMETER SWEEPS
+This section collects the complete learning rate and nested-hyperparameter sweeps that support fig-
+ures elsewhere in the paper. Solid curves with filled markers indicate sweeps that satisfy the one-
+millipoint interiority criterion in Section B.5; dashed curves with hollow markers indicate sweeps
+whose within-one-millipoint set reaches a tested boundary.
+L.1
+LEARNING RATE SCHEDULE SELECTION
+Optimizer
+Fixed momentum treatment
+c at 1×
+c at 8×
+c at 32×
+AdamW
+β1 = 0.9, β2 = 0.95
+{2, 4, 8, 16}
+{4, 8, 16, 32}
+{16, 32, 64, 128}
+ADANA
+g3 = 8, κ = 0.85
+{4, 8, 16}
+{8, 16, 32, 64}
+{16, 32, 64, 128}
+Muon
+β = 0.95
+{2, 4, 8, 16}
+{8, 16, 32, 64}
+{16, 32, 64, 128}
+SOAP
+β1 = 0.95, β2 = 0.99, βSh = 0.95
+{2, 4, 8, 16}
+{4, 8, 16, 32, 64}
+{16, 32, 64, 128}
+Table 12: Fixed momentum treatments and coefficients of the uniform WD schedule for the linear-
+to-zero and cosine-to-zero comparison on the 51M parameter model. At every listed coefficient,
+each schedule receives a separate base learning rate sweep.
+54
+
+
+-9
+-8
+-7
+-6
+-5
+3.750
+3.775
+3.800
+3.825
+3.850
+1× OT
+Val loss
+AdamW
+-14 -13 -12 -11 -10 -9
+3.78
+3.80
+3.82
+ADANA
+-7
+-6
+-5
+-4
+3.64
+3.65
+3.66
+3.67
+Muon
+-8
+-7
+-6
+-5
+-4
+3.66
+3.68
+SOAP
+-9
+-8
+-7
+-6
+-5
+3.44
+3.45
+3.46
+8× OT
+Val loss
+-14 -13 -12 -11 -10 -9
+3.440
+3.445
+3.450
+3.455
+-7
+-6
+-5
+-4
+3.41
+3.42
+3.43
+-8
+-7
+-6
+-5
+-4
+3.41
+3.42
+3.43
+3.44
+3.45
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.36
+3.37
+3.38
+32× OT
+Val loss
+-14 -13 -12 -11 -10 -9
+Base LR (log2 )
+3.345
+3.350
+3.355
+3.360
+-7
+-6
+-5
+-4
+Base LR (log2 )
+3.34
+3.35
+3.36
+3.37
+3.38
+-8
+-7
+-6
+-5
+-4
+Base LR (log2 )
+3.34
+3.35
+3.36
+Linear-to-zero learning-rate sweeps
+Uniform-WD coefficient
+2
+4
+8
+16
+32
+64
+128
+Figure 30: Base learning rate sweeps at each uniform WD coefficient on the 51M parameter
+model with linear decay to zero. Each colored curve holds the WD coefficient fixed while varying
+the base learning rate; stars mark the minimum final validation loss within each sweep. Momentum
+hyperparameters are AdamW (β1 = 0.9, β2 = 0.95), ADANA (g3 = 8, κ = 0.85), Muon (β =
+0.95), and SOAP (β1 = 0.95, β2 = 0.99, βSh = 0.95). All 48 displayed sweeps satisfy the one-
+millipoint interiority criterion.
+55
+
+
+-9
+-8
+-7
+-6
+-5
+3.775
+3.800
+3.825
+3.850
+1× OT
+Val loss
+AdamW
+-14
+-13
+-12
+-11
+3.775
+3.800
+3.825
+3.850
+3.875
+ADANA
+-7
+-6
+-5
+-4
+3.64
+3.66
+3.68
+Muon
+-8
+-7
+-6
+-5
+3.66
+3.67
+3.68
+3.69
+SOAP
+-9
+-8
+-7
+-6
+-5
+3.44
+3.45
+3.46
+8× OT
+Val loss
+-14
+-13
+-12
+-11
+3.43
+3.44
+3.45
+-7
+-6
+-5
+-4
+3.400
+3.405
+3.410
+3.415
+3.420
+-8
+-7
+-6
+-5
+3.41
+3.42
+3.43
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.350
+3.355
+3.360
+3.365
+32× OT
+Val loss
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.335
+3.340
+3.345
+3.350
+3.355
+-7
+-6
+-5
+-4
+Base LR (log2 )
+3.33
+3.34
+3.35
+3.36
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.330
+3.335
+3.340
+3.345
+3.350
+Cosine-to-zero learning-rate sweeps
+Uniform-WD coefficient
+2
+4
+8
+16
+32
+64
+128
+Figure 31: Base learning rate sweeps at each uniform WD coefficient on the 51M parameter
+model with cosine decay to zero. Each colored curve holds the WD coefficient fixed while varying
+the base learning rate; stars mark the minimum final validation loss within each sweep. Solid lines
+with filled markers denote sweeps that satisfy the one-millipoint interiority criterion. Momentum
+hyperparameters are AdamW (β1 = 0.9, β2 = 0.95), ADANA (g3 = 8, κ = 0.85), Muon (β =
+0.95), and SOAP (β1 = 0.95, β2 = 0.99, βSh = 0.95). These sweeps provide the uniform WD grid
+used in the learning rate schedule comparison. All 48 displayed sweeps satisfy the one-millipoint
+interiority criterion.
+56
+
+
+L.2
+WEIGHT DECAY SWEEPS
+The WD schedule comparison and coefficient scaling analysis in Appendix E use nested sweeps.
+At every WD coefficient, we first select the minimum of an independently extended base learning
+rate sweep; only after each contributing learning rate sweep satisfies the interiority criterion in Sec-
+tion B.5 do we compare coefficients. The summary figures in Appendix E collapse this pointwise
+evidence by minimizing over the learning rate. Here we report the complete underlying grids.
+Table 13 gives the fixed momentum treatment and tested coefficients for every optimizer, WD sched-
+ule, and OT factor.
+WD coefficient c
+Optimizer Fixed momentum treatment
+1× OT
+8× OT
+32× OT
+64× OT
+Uniform WD
+AdamW
+β1 = 0.9, β2 = 0.98
+4, 8, 16
+8, 16, 32
+16, 32, 64, 128
+16, 32, 64, 128
+ADANA
+g3 = 8, κ = 0.85
+4, 8, 16
+8, 16, 32, 64
+16, 32, 64, 128
+16, 64, 128, 256
+Muon
+β = 0.98
+4, 8, 16
+8, 16, 32, 64
+16, 32, 64, 128
+16, 32, 64, 128, 256
+SOAP
+β1 = 0.95, β2 = 0.98, βSh = 0.95
+4, 8, 16
+8, 16, 16
+√
+2, 32 16, 32, 32
+√
+2, 64
+8, 32, 64, 128
+Log-time WD
+AdamW
+β1 = 0.9, β2 = 0.98
+1, 2, 4, 8
+1, 2, 4, 4
+√
+2, 8
+1, 2, 4, 8, 16
+2, 8, 16, 32, 64
+ADANA
+g3 = 8, κ = 0.85
+1, 2, 4, 8
+1, 2, 4, 8, 16
+1, 2, 4, 8, 16, 32
+2, 8, 16, 32, 64
+Muon
+β = 0.98
+1, 2, 4, 8
+1, 2, 4, 8
+1, 2, 4, 8, 16
+2, 4, 8, 16, 32
+SOAP
+β1 = 0.95, β2 = 0.98, βSh = 0.95 1, 2, 4, 8
+2, 4, 4
+√
+2, 8
+1, 2, 4, 8, 16, 32
+1, 2, 4, 8, 16, 32
+Table 13: WD coefficient grids for the uniform and log-time WD sweep figures. Each OT cell lists
+the coefficients c included in the corresponding base learning rate sweeps.
+Log-time WD coefficient sweeps.
+Figure 33 reports the corresponding 1×-anchored log-time WD
+coefficient sweeps.
+57
+
+
+-9
+-8
+-7
+-6
+-5
+-4
+3.80
+3.85
+1× OT
+Val loss
+AdamW
+-14 -13 -12 -11 -10
+3.775
+3.800
+3.825
+3.850
+ADANA
+-8
+-7
+-6
+-5
+-4
+3.66
+3.68
+Muon
+-7
+-6
+-5
+3.66
+3.68
+SOAP
+-9
+-8
+-7
+-6
+-5
+-4
+3.430
+3.435
+3.440
+3.445
+8× OT
+Val loss
+-14 -13 -12 -11 -10
+3.43
+3.44
+3.45
+-8
+-7
+-6
+-5
+-4
+3.40
+3.41
+3.42
+-7
+-6
+-5
+3.405
+3.410
+3.415
+-9
+-8
+-7
+-6
+-5
+-4
+3.35
+3.36
+32× OT
+Val loss
+-14 -13 -12 -11 -10
+3.34
+3.35
+-8
+-7
+-6
+-5
+-4
+3.33
+3.34
+3.35
+-7
+-6
+-5
+3.335
+3.340
+-9
+-8
+-7
+-6
+-5
+-4
+Base LR (log2 )
+3.33
+3.34
+64× OT
+Val loss
+-14 -13 -12 -11 -10
+Base LR (log2 )
+3.31
+3.32
+3.33
+-8
+-7
+-6
+-5
+-4
+Base LR (log2 )
+3.32
+3.34
+-7
+-6
+-5
+Base LR (log2 )
+3.31
+3.32
+3.33
+WD coefficient
+4
+8
+16
+16√2
+32
+32√2
+64
+128
+256
+Figure 32: Base learning rate sweeps at each uniform WD coefficient on the 51M parameter
+model with cosine decay to zero. Columns are optimizers and rows are OT factors. Each colored
+curve holds c fixed; circles are measured learning rates and black-edged stars mark the minimum
+within each sweep. All 60 sweeps satisfy the interiority criterion in Section B.5. Facets use indepen-
+dent vertical ranges to expose the local learning rate basin; upward triangles retain observed losses
+above a facet’s displayed range.
+58
+
+
+-10 -9
+-8
+-7
+-6
+-5
+3.80
+3.85
+3.90
+1× OT
+Val loss
+AdamW
+-15 -14 -13 -12 -11 -10
+3.800
+3.825
+3.850
+ADANA
+-10 -9 -8 -7 -6 -5 -4
+3.66
+3.68
+3.70
+Muon
+-9
+-8
+-7
+-6
+-5
+3.66
+3.68
+3.70
+SOAP
+-10 -9
+-8
+-7
+-6
+-5
+3.44
+3.45
+3.46
+3.47
+8× OT
+Val loss
+-15 -14 -13 -12 -11 -10
+3.42
+3.44
+3.46
+-10 -9 -8 -7 -6 -5 -4
+3.40
+3.41
+3.42
+-9
+-8
+-7
+-6
+-5
+3.400
+3.405
+3.410
+-10 -9
+-8
+-7
+-6
+-5
+3.35
+3.36
+3.37
+3.38
+32× OT
+Val loss
+-15 -14 -13 -12 -11 -10
+3.34
+3.36
+-10 -9 -8 -7 -6 -5 -4
+3.325
+3.350
+3.375
+3.400
+-9
+-8
+-7
+-6
+-5
+3.33
+3.34
+3.35
+-10 -9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.325
+3.350
+3.375
+3.400
+64× OT
+Val loss
+-15 -14 -13 -12 -11 -10
+Base LR (log2 )
+3.31
+3.32
+3.33
+-10 -9 -8 -7 -6 -5 -4
+Base LR (log2 )
+3.35
+3.40
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.31
+3.32
+3.33
+WD coefficient
+1
+2
+4
+4√2
+8
+16
+32
+64
+Figure 33: Base learning rate sweeps at each log-time WD coefficient on the 51M parameter
+model with cosine decay to zero. Columns are optimizers and rows are OT factors. Each colored
+curve holds c fixed; circles are measured learning rates and black-edged stars mark the minimum
+within each sweep. We use the 1×-anchored offset τ = 0.1S1×. All 77 sweeps satisfy the interi-
+ority criterion in Section B.5. Facets use independent vertical ranges, and upward triangles retain
+observed losses above a facet’s displayed range.
+59
+
+
+L.3
+UNIFORM-WD AND LOG-TIME-WD SCALING SWEEPS
+Figures 34 and 35 show every independently tuned learning rate sweep used in the uniform-WD and
+log-time-WD scaling comparisons.
+-10
+-9
+-8
+-7
+-6
+-5
+3.4
+3.6
+3.8
+h8
+Validation loss
+AdamW
+-14
+-13
+-12
+-11
+3.4
+3.6
+3.8
+ADANA
+-10 -9
+-8
+-7
+-6
+-5
+-4
+3.3
+3.4
+3.5
+3.6
+3.7
+Muon
+-8
+-7
+-6
+-5
+-4
+3.3
+3.4
+3.5
+3.6
+3.7
+SOAP
+-10
+-9
+-8
+-7
+-6
+3.1
+3.2
+3.3
+3.4
+h12
+Validation loss
+-15
+-14
+-13
+-12
+3.1
+3.2
+3.3
+3.4
+3.5
+-9
+-8
+-7
+-6
+-5
+3.1
+3.2
+3.3
+-10
+-9
+-8
+-7
+-6
+-5
+3.1
+3.2
+3.3
+-9
+-8
+-7
+-6
+Base LR (log2 )
+3.0
+3.1
+h16
+Validation loss
+-15
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.0
+3.1
+3.2
+-7
+-6
+-5
+Base LR (log2 )
+2.90
+2.95
+3.00
+3.05
+3.10
+-8
+-7
+-6
+-5
+-4
+Base LR (log2 )
+2.95
+3.00
+3.05
+3.10
+OT factor
+1
+2
+4
+8
+16
+32
+64
+128
+256
+Figure 34: Complete uniform-WD learning rate sweeps across model sizes and OT factors.
+Columns are optimizers and rows are model sizes; colors identify OT factor. The treatment uses
+cosine decay to zero and uniform WD with c(f) = 8√f. Circles are measured learning rates and
+black-edged stars mark the selected minimum within each sweep. All 76 displayed sweeps satisfy
+the one-millipoint interiority criterion.
+60
+
+
+-10
+-9
+-8
+-7
+-6
+3.4
+3.6
+3.8
+h8
+Validation loss
+AdamW
+-15 -14 -13 -12 -11 -10 -9
+3.4
+3.6
+3.8
+ADANA
+-8
+-7
+-6
+-5
+-4
+3.3
+3.4
+3.5
+3.6
+3.7
+Muon
+-9
+-8
+-7
+-6
+-5
+3.3
+3.4
+3.5
+3.6
+3.7
+SOAP
+-10
+-9
+-8
+-7
+-6
+3.1
+3.2
+3.3
+3.4
+h12
+Validation loss
+-16
+-15
+-14
+-13
+-12
+3.2
+3.4
+-8
+-7
+-6
+-5
+3.1
+3.2
+3.3
+-10 -9
+-8
+-7
+-6
+-5
+3.1
+3.2
+3.3
+-10
+-9
+-8
+-7
+Base LR (log2 )
+3.0
+3.1
+3.2
+h16
+Validation loss
+-16 -15 -14 -13 -12
+Base LR (log2 )
+2.9
+3.0
+3.1
+3.2
+-10
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+2.90
+2.95
+3.00
+3.05
+3.10
+-7
+-6
+-5
+Base LR (log2 )
+2.90
+2.95
+3.00
+3.05
+3.10
+OT factor
+1
+2
+4
+8
+16
+32
+64
+128
+Figure 35: Complete log-time-WD learning rate sweeps across model sizes and OT factors.
+Columns are optimizers and rows are model sizes; colors identify OT factor. The treatment uses
+cosine decay to zero and the 1×-anchored log-time WD coefficient a(f) = 2√f. Circles are
+measured learning rates and black-edged stars mark the selected minimum within each sweep. All
+72 displayed sweeps satisfy the one-millipoint interiority criterion.
+61
+
+
+L.4
+FIXED-MEMORY SWEEPS
+Figures 36 and 37 report the complete learning rate sweeps underlying the memory-tuning results in
+Appendix F and Figure 3.
+-12
+-11
+-10
+-9
+-8
+-7
+3.8
+4.0
+4.2
+1x OT
+Val loss
+AdamW
+-9
+-8
+-7
+-6
+-5
+-4
+3.7
+3.8
+3.9
+Muon
+-9
+-8
+-7
+-6
+-5
+3.66
+3.68
+3.70
+SOAP
+-10
+-9
+-8
+-7
+-6
+3.65
+3.70
+3.75
+2x OT
+Val loss
+-9
+-8
+-7
+-6
+-5
+-4
+3.55
+3.60
+3.65
+-8
+-7
+-6
+-5
+-4
+3.54
+3.56
+3.58
+-10
+-9
+-8
+-7
+-6
+3.55
+3.60
+4x OT
+Val loss
+-8
+-7
+-6
+-5
+-4
+3.45
+3.50
+-8
+-7
+-6
+-5
+-4
+3.46
+3.47
+3.48
+3.49
+-12 -11 -10
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.45
+3.50
+8x OT
+Val loss
+-9
+-8
+-7
+-6
+-5
+-4
+-3
+Base LR (log2 )
+3.40
+3.42
+3.44
+-9
+-8
+-7
+-6
+-5
+-4
+Base LR (log2 )
+3.41
+3.42
+3.43
+Effective momentum memory
+10
+20
+40
+80
+160
+320
+640
+1280
+2560
+Figure 36: Complete fixed-memory learning rate sweeps from 1× through 8× OT. Columns are
+optimizers, rows are OT factors, and colors identify effective memory. Black-edged stars mark the
+minimum of each learning rate sweep. Solid curves with filled markers denote sweeps satisfying
+the one-millipoint interiority criterion; dashed curves with hollow markers denote sweeps whose
+within-one-millipoint set reaches a tested boundary.
+62
+
+
+-10
+-9
+-8
+-7
+-6
+3.38
+3.40
+16x OT
+Val loss
+AdamW
+-8
+-7
+-6
+-5
+3.36
+3.37
+3.38
+Muon
+-7
+-6
+-5
+3.365
+3.370
+SOAP
+-11
+-10
+-9
+-8
+-7
+-6
+3.35
+3.36
+3.37
+32x OT
+Val loss
+-9
+-8
+-7
+-6
+-5
+3.33
+3.34
+-10
+-9
+-8
+-7
+-6
+-5
+-4
+3.33
+3.34
+3.35
+-11
+-10
+-9
+-8
+-7
+-6
+-5
+3.32
+3.33
+3.34
+64x OT
+Val loss
+-10
+-9
+-8
+-7
+-6
+-5
+3.31
+3.32
+3.33
+-10
+-9
+-8
+-7
+-6
+-5
+3.31
+3.32
+3.33
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.30
+3.32
+3.34
+128x OT
+Val loss
+-9
+-8
+-7
+-6
+Base LR (log2 )
+3.29
+3.30
+3.31
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.295
+3.300
+3.305
+Effective momentum memory
+10
+20
+40
+80
+160
+320
+640
+1280
+2560
+Figure 37: Complete fixed-memory learning rate sweeps from 16× through 128× OT. The lay-
+out and visual encoding match Figure 36. Open circles indicate points whose learning-rate sweeps
+were incomplete. The sweep for SOAP at 128× OT with M = 2560 is incomplete.
+63
+
+
+L.5
+PRECONDITIONER-ORDER SWEEPS
+Figures 38– 40 report the learning rate sweep evidence underlying the retained preconditioner-order
+comparisons in Appendix J. Momentum cooldown treatments are kept in the separate sweeps below.
+−8.5
+−8.0
+−7.5
+−7.0
+−6.5
+−6.0
+−5.5
+−5.0
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+β1 = 0.90
+Validation loss
+AdamW
+−8.5
+−8.0
+−7.5
+−7.0
+−6.5
+−6.0
+−5.5
+−5.0
+−4.5
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Validation loss
+LaProp
+−9.0
+−8.5
+−8.0
+−7.5
+−7.0
+−6.5
+−6.0
+−5.5
+−5.0
+Base LR exponent (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+β1 = 0.95
+Validation loss
+−9
+−8
+−7
+−6
+−5
+Base LR exponent (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Validation loss
+OT factor
+1×
+2×
+4×
+8×
+16×
+32×
+64×
+Figure 38: Complete learning rate sweeps for the fixed-memory preconditioner-order compar-
+ison. Panels compare AdamW and LaProp at β1 ∈{.90, .95}, fixed β2 = .98, and OT factors 1
+through 64. Each curve is an independent base learning rate sweep. All 28 displayed sweeps satisfy
+the one-millipoint interiority criterion.
+64
+
+
+-14
+-13
+-12
+-11
+3.4
+3.6
+3.8
+h8
+Validation loss
+ADANA
+-14
+-13
+-12
+-11
+-10
+-9
+3.4
+3.6
+3.8
+LADANA (log-v)
+-13
+-12
+-11
+-10
+-9
+3.30
+3.32
+3.34
+3.36
+3.38
+3.40
+LADANA (fixed-v)
+-15
+-14
+-13
+-12
+3.1
+3.2
+3.3
+3.4
+3.5
+h12
+Validation loss
+-15
+-14
+-13
+-12
+-11
+3.1
+3.2
+3.3
+3.4
+-15
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.0
+3.1
+3.2
+h16
+Validation loss
+-16
+-15
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.0
+3.1
+3.2
+OT factor
+1×
+2×
+4×
+8×
+16×
+32×
+64×
+128×
+strong LR interior
+open LR boundary
+Figure 39: Uniform-WD learning rate sweeps for preconditioner order across model sizes.
+Rows are the 51M, 124M, and 253M models; columns are ADANA, LADANA with log-time
+denominator memory, and the fixed-v LADANA ablation (available only for the 51M model).
+Thirty-seven of 39 displayed sweeps satisfy the one-millipoint interiority criterion. Open circles
+indicate points whose learning-rate sweeps were incomplete. The incomplete sweeps are log-v
+LADANA at 51M/128× and 124M/32×. ADANA is retained once as the visual reference for the
+two preconditioner-order treatments.
+65
+
+
+-15
+-14
+-13
+-12
+-11
+-10
+-9
+Base LR (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+3.9
+Validation loss
+ADANA
+-15
+-14
+-13
+-12
+-11
+-10
+-9
+-8
+-7
+Base LR (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+LADANA (log-v)
+OT factor
+1×
+2×
+4×
+8×
+16×
+32×
+64×
+128×
+strong LR interior
+open LR boundary
+Figure 40: Log-time-WD learning rate sweeps for h8 preconditioner order. Panels compare
+ADANA and LADANA with log-time denominator memory across OT factors 1 through 128. Open
+circles indicate points whose learning rate sweeps were incomplete.
+66
+
+
+L.6
+MOMENTUM COOLDOWN SWEEPS
+Figures 41– 42 report the learning rate sweep evidence underlying the retained momentum-
+cooldown comparison in Figure 6.
+-9
+-8
+-7
+-6
+-5
+Base LR (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Validation loss
+AdamW + cooldown
+-14
+-13
+-12
+-11
+-10
+Base LR (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+ADANA + cooldown
+OT factor
+1×
+2×
+4×
+8×
+16×
+32×
+64×
+128×
+strong LR interior
+open LR boundary
+Figure 41: Complete uniform-WD learning rate sweeps for the momentum cooldown inter-
+ventions. Panels show the momentum-cooldown variants of AdamW and ADANA across OT fac-
+tors 1 through 128. Corresponding standard-treatment sweeps appear in the primary-treatment and
+preconditioner-order sweeps and are not repeated here. All 16 displayed sweeps satisfy the one-
+millipoint interiority criterion.
+Momentum cooldown treatment-selection sweeps.
+Figure 44 exposes the component-wise
+learning rate sweeps underlying Table 11.
+67
+
+
+-15
+-14
+-13
+-12
+3.1
+3.2
+3.3
+3.4
+3.5
+h12
+Validation loss
+ADANA
+-15
+-14
+-13
+-12
+3.1
+3.2
+3.3
+3.4
+ADANA + cooldown
+-15
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.0
+3.1
+3.2
+h16
+Validation loss
+-16
+-15
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.0
+3.1
+3.2
+OT factor
+1
+2
+4
+8
+16
+32
+Figure 42: Large-model uniform-WD learning rate sweeps for ADANA with and without mo-
+mentum cooldown. Rows are the 124M and 253M parameter models, columns are the standard and
+momentum-cooldown treatments, and colors identify OT factor.
+-14
+-13
+-12
+-11
+-10
+-9
+Base LR (log2 )
+3.3
+3.4
+3.5
+3.6
+3.7
+3.8
+Validation loss
+ADANA + cooldown
+OT factor
+1x
+2x
+4x
+8x
+16x
+32x
+64x
+128x
+strong LR interior
+open LR boundary
+Figure 43: Complete log-time-WD learning rate sweeps for the momentum cooldown interven-
+tion. The panel shows ADANA with momentum cooldown across OT factors 1 through 128; the
+corresponding standard ADANA sweeps appear in the log-time-WD preconditioner sweep grid and
+are not repeated here. All eight displayed sweeps satisfy the one-millipoint interiority criterion.
+68
+
+
+-8
+-7
+-6
+Base LR (log2 )
+3.428
+3.429
+3.430
+3.431
+3.432
+3.433
+3.434
+3.435
+Validation loss
+AdamW
+Standard
+First moment
+Second moment
+Both moments
+-14
+-13
+-12
+-11
+Base LR (log2 )
+3.420
+3.425
+3.430
+3.435
+3.440
+Validation loss
+ADANA
+Standard
+Memory window
+Contribution taper
+Window + contribution
+Figure 44: Learning rate sweeps for cooldown-component selection at 8× OT. Each panel over-
+lays the independently swept component treatments for one optimizer. AdamW first-moment and
+both-moment cooldown are nearly coincident. The three second-moment-only AdamW observa-
+tions have losses from 15.2 to 42.9 and are shown as capped upward triangles; they are instability
+outcomes rather than ordinary open minima. All other displayed selected minima satisfy the one-
+millipoint learning rate interiority rule.
+69
