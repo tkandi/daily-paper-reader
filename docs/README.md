@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-08</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-09</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-08 19:27:08 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-09 19:35:19 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦大模型训练与推理系统：完成 13 篇论文筛选，精读分片 MoE 通信与推理 KV 缓存压缩。</p>
-<p>最值得关注 CIERA 的跨迭代指数复用以优化无损 Allgather，以及 BeaconKV 用 Beacon 查询引导 KV Cache 压缩、服务长推理。</p>
-<p>普通读者可优先读这两篇精读，随后关注边缘 DNN 能耗建模与混合 LLM 前缀缓存的工程落地。</p>
+<p>今日精选17篇论文，聚焦大模型训练并行策略、联邦微调与MoE资源调度。</p>
+<p>最值得关注的是异构集群上的DAG引导并行搜索（Poseidon）和并行策略链式优化，均获10分，直指更快、更高效的大模型预训练。</p>
+<p>建议优先精读两篇10分论文，再结合联邦学习与MoE速读内容，梳理“训练效率—通信成本—资源协同”的技术主线。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CIERA: Cross-Iteration Exponent Reuse for Lossless Allgather in Sharded MoE Training">CIERA: Cross-Iteration Exponent Reuse for Lossless Allgather in Sharded MoE Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="BeaconKV: Key-Value Cache Compression Guided by Beacon Queries for Efficient Large Reasoning Model Inference">BeaconKV: Key-Value Cache Compression Guided by Beacon Queries for Efficient Large Reasoning Model Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Beyond Scalar Flexibility: From Eligible AI Workloads to Dependable Load Relief">Beyond Scalar Flexibility: From Eligible AI Workloads to Dependable Load Relief</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Poseidon: DAG-Guided Parallelism Search for LLM Pre-Training on Heterogeneous Clusters">Poseidon: DAG-Guided Parallelism Search for LLM Pre-Training on Heterogeneous Clusters</span></li><li><span class="dpr-home-dashboard-paper-title" title="Parallelism Strategy Chaining for Fast Training Convergence">Parallelism Strategy Chaining for Fast Training Convergence</span></li><li><span class="dpr-home-dashboard-paper-title" title="AutoUVM: Automated Prefetching Framework for LLMs under UVM Oversubscription">AutoUVM: Automated Prefetching Framework for LLMs under UVM Oversubscription</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -93,12 +93,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">10 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="GreenPipe: Power Modeling for Containerized DNN Inference on Kubernetes Edge Nodes">GreenPipe: Power Modeling for Containerized DNN Inference on Kubernetes Edge Nodes</span></li><li><span class="dpr-home-dashboard-paper-title" title="Tail-Replay: Escaping the Curse of Linear Attention in Prefix Caching for Hybrid LLMs">Tail-Replay: Escaping the Curse of Linear Attention in Prefix Caching for Hybrid LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Space Generative AI with Solar Energy Harvesting">Space Generative AI with Solar Energy Harvesting</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FedSubMuon: Communication-Efficient Federated LLM Fine-Tuning via Structured Subspace Muon">FedSubMuon: Communication-Efficient Federated LLM Fine-Tuning via Structured Subspace Muon</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedRAW: Preserving Rare-Label Influence in Asynchronous Federated Learning">FedRAW: Preserving Rare-Label Influence in Asynchronous Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Analytical Resource Management for Fine-grained MoE Computation-Communication Overlap">Analytical Resource Management for Fine-grained MoE Computation-Communication Overlap</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>10</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 
