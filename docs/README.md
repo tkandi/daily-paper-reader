@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-09</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-10</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 17 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-09 19:35:19 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-10 19:47:45 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选17篇论文，聚焦大模型训练并行策略、联邦微调与MoE资源调度。</p>
-<p>最值得关注的是异构集群上的DAG引导并行搜索（Poseidon）和并行策略链式优化，均获10分，直指更快、更高效的大模型预训练。</p>
-<p>建议优先精读两篇10分论文，再结合联邦学习与MoE速读内容，梳理“训练效率—通信成本—资源协同”的技术主线。</p>
+<p>17 篇论文筛选完成，聚焦联邦学习、大模型基础设施与 RAG 系统评测。</p>
+<p>最值得关注的是隐私保护的联邦 LLM 微调，以及检验 LLM 能否自主构建支撑自身运行的基础设施能力。</p>
+<p>普通读者可先精读两篇 9 分论文，再按需速览 HybridFLow、RAGMark 与 ECOKV，把握工程落地脉络。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Poseidon: DAG-Guided Parallelism Search for LLM Pre-Training on Heterogeneous Clusters">Poseidon: DAG-Guided Parallelism Search for LLM Pre-Training on Heterogeneous Clusters</span></li><li><span class="dpr-home-dashboard-paper-title" title="Parallelism Strategy Chaining for Fast Training Convergence">Parallelism Strategy Chaining for Fast Training Convergence</span></li><li><span class="dpr-home-dashboard-paper-title" title="AutoUVM: Automated Prefetching Framework for LLMs under UVM Oversubscription">AutoUVM: Automated Prefetching Framework for LLMs under UVM Oversubscription</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Privacy-Preserving Split Learning for Federated LLM Fine-Tuning">Privacy-Preserving Split Learning for Federated LLM Fine-Tuning</span></li><li><span class="dpr-home-dashboard-paper-title" title="$Φ$-Bench: Can Large Language Models Engineer the Infrastructure That Powers Them?">$Φ$-Bench: Can Large Language Models Engineer the Infrastructure That Powers Them?</span></li><li><span class="dpr-home-dashboard-paper-title" title="Unified AI Gateway: A Framework for Joint Model Routing and KV Cache Management">Unified AI Gateway: A Framework for Joint Model Routing and KV Cache Management</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FedSubMuon: Communication-Efficient Federated LLM Fine-Tuning via Structured Subspace Muon">FedSubMuon: Communication-Efficient Federated LLM Fine-Tuning via Structured Subspace Muon</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedRAW: Preserving Rare-Label Influence in Asynchronous Federated Learning">FedRAW: Preserving Rare-Label Influence in Asynchronous Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Analytical Resource Management for Fine-grained MoE Computation-Communication Overlap">Analytical Resource Management for Fine-grained MoE Computation-Communication Overlap</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HybridFLow: SDN-Orchestrated Client Partitioning for Hybrid Federated Learning">HybridFLow: SDN-Orchestrated Client Partitioning for Hybrid Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="RAGMark: A Comprehensive Framework for Benchmarking Retrieval-Augmented Generation Systems">RAGMark: A Comprehensive Framework for Benchmarking Retrieval-Augmented Generation Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="ECOKV: Geometry-Aware KV Cache Eviction via Complementary Diversity Metrics">ECOKV: Geometry-Aware KV Cache Eviction via Complementary Diversity Metrics</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
