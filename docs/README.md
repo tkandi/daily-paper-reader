@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-10</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-11</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-10 19:47:45 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-11 19:19:38 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>17 篇论文筛选完成，聚焦联邦学习、大模型基础设施与 RAG 系统评测。</p>
-<p>最值得关注的是隐私保护的联邦 LLM 微调，以及检验 LLM 能否自主构建支撑自身运行的基础设施能力。</p>
-<p>普通读者可先精读两篇 9 分论文，再按需速览 HybridFLow、RAGMark 与 ECOKV，把握工程落地脉络。</p>
+<p>今日精选16篇AI系统论文，聚焦可验证机器学习栈、训练能耗弹性与推理并行。</p>
+<p>最值得关注的是 Numbat 对自包含 ML 栈的构建与验证，以及 AI 训练任务如何按电力供给灵活调度。</p>
+<p>普通读者可先精读这两篇，再速览上下文内并行解码与 AI 数据中心基础设施优化。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Privacy-Preserving Split Learning for Federated LLM Fine-Tuning">Privacy-Preserving Split Learning for Federated LLM Fine-Tuning</span></li><li><span class="dpr-home-dashboard-paper-title" title="$Φ$-Bench: Can Large Language Models Engineer the Infrastructure That Powers Them?">$Φ$-Bench: Can Large Language Models Engineer the Infrastructure That Powers Them?</span></li><li><span class="dpr-home-dashboard-paper-title" title="Unified AI Gateway: A Framework for Joint Model Routing and KV Cache Management">Unified AI Gateway: A Framework for Joint Model Routing and KV Cache Management</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Numbat: Building and Verifying a Self-Contained Machine-Learning Stack">Numbat: Building and Verifying a Self-Contained Machine-Learning Stack</span></li><li><span class="dpr-home-dashboard-paper-title" title="Characterizing Job Power Elasticity for Power-Flexible AI Training">Characterizing Job Power Elasticity for Power-Flexible AI Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Entwine: Coordinating Tiled Computation and Fine-Grained Communication across GPUs">Entwine: Coordinating Tiled Computation and Fine-Grained Communication across GPUs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HybridFLow: SDN-Orchestrated Client Partitioning for Hybrid Federated Learning">HybridFLow: SDN-Orchestrated Client Partitioning for Hybrid Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="RAGMark: A Comprehensive Framework for Benchmarking Retrieval-Augmented Generation Systems">RAGMark: A Comprehensive Framework for Benchmarking Retrieval-Augmented Generation Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="ECOKV: Geometry-Aware KV Cache Eviction via Complementary Diversity Metrics">ECOKV: Geometry-Aware KV Cache Eviction via Complementary Diversity Metrics</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Intra-Prompt Parallel Decoding for Common-Context Question Answering">Intra-Prompt Parallel Decoding for Common-Context Question Answering</span></li><li><span class="dpr-home-dashboard-paper-title" title="The OCUDU dApp Platform: An Open Runtime and E3 Interface for Real-Time AI-RAN">The OCUDU dApp Platform: An Open Runtime and E3 Interface for Real-Time AI-RAN</span></li><li><span class="dpr-home-dashboard-paper-title" title="AI for AI: Optimizing Additional Infrastructure Build-out to Power Artificial Intelligence Data Centers">AI for AI: Optimizing Additional Infrastructure Build-out to Power Artificial Intelligence Data Centers</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

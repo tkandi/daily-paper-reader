@@ -1,0 +1,759 @@
+Title: Intra-Prompt Parallel Decoding for Common-Context Question Answering
+
+URL Source: https://arxiv.org/pdf/2609.05707v1
+
+Published Time: Wed, 09 Sep 2026 00:14:36 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# Intra-Prompt Parallel Decoding for Common-Context Question Answering 
+
+Theodore Glavas *1,2,3,4 Nikhita Vedula 1 Dushyanta Dhyani 1
+
+Antonios Valkanas ∗1,2,3,4 Yilun Zhu †1 Shervin Malmasi 11 Amazon.com, Inc. 2 McGill University 3 Mila 4 Int. Lab. Learning Systems 
+
+> {theodore.glavas, antonios.valkanas}@mail.mcgill.ca, yz565@georgetown.edu, {veduln, dhyanidd, malmasi}@amazon.com
+
+Abstract 
+
+In common-context question answering (CCQA) tasks, multiple input questions share a common context to base their answers from. However, Large Language Models typically generate each answer using an independent prompt. While existing batching and caching techniques help improve parallelism and re-duce repeated computations, the separation of questions across prompts limits the achievable speedup, as modern GPUs are underutilized due to a memory bottleneck during attention. We present Intra-Prompt Parallel Decoding (IPPD), a novel inference method that answers multiple common-context questions in parallel within a single prompt. IPPD directly addresses the bottleneck by efficiently sharing both memory and computation during the attention process, as the next token for every question is decoded in a single inference step. IPPD uses virtual position IDs and attention mask manipulation to generate the same output as standard prompting without requiring fine-tuning or any changes to the LLM architecture. Since all parallelism occurs within a prompt, IPPD is fully compatible with batched inference, even when each prompt features a different context. Our experiments show that IPPD delivers up to 7X the effective throughput as standard decoding without quality degradation, and outperforms prefix caching with PagedAttention in most settings. 
+
+1 Introduction 
+
+Text generation has emerged as a core capability of LLMs, powering downstream NLP applications such as dialogue systems (Yi et al., 2025), sum-marization (Zhang et al., 2026), and question an-swering (QA) (Yue, 2025). Within the broad land-scape of text generation, contextual QA stands out as a representative benchmark task: given a doc-  
+
+> *This work was done as part of an internship at Amazon.
+> †Work done while at Amazon. Currently at Apple.
+
+ument and a question, a model must not only lo-cate relevant pieces of evidence within the context, but also integrate and reason across them to an-swer the question. A large subset of QA tasks referred to as reading comprehension follows this setting, where multiple questions are asked about the same passage (Lai et al., 2017; Yang et al., 2018; Rajpurkar et al., 2018; Koˇ ciský et al., 2018). We define common-context question answering (CCQA) as the task of producing multiple outputs by answering different questions about a shared context, such as a document. This setting is com-mon in industrial information extraction, where systems must extract numerous fields or facts from the same long, unstructured input, including finan-cial statements, medical records, legal documents, and web pages (Mandal et al., 2025; Brinkmann et al., 2024). Although LLMs excel at generating free-form answers for a wide range of applications, the com-putational cost of generative LLMs limits their adoption in large-scale real-world scenarios. This challenge is particularly critical in CCQA because, despite substantial context overlap across questions, autoregressive decoding repeatedly computes the same prompt and passage for each question, wast-ing GPU resources with redundant computations and amplifying inefficiencies. Motivated by cost savings, a significant body of literature has focused on improving the efficiency of LLM inference for text generation as well as CCQA. A major performance bottleneck arises from the challenge of fully utilizing highly-parallel GPU architectures, due to the high memory re-quirements and sequential nature of autoregressive decoding. State-of-the-art serving platforms, such as vLLM (Kwon et al., 2023), implement a variety of advanced methods to address this. Continuous batching dynamically groups incoming requests to maximize GPU utilization, PagedAttention (Kwon et al., 2023) shares the memory-intensive key-value arXiv:2609.05707v1 [cs.CL] 4 Sep 2026 (KV) cache across requests, and Cascade inference (Ye et al., 2024b; Juravsky et al., 2024) shares the compute-expensive attention score calculation of shared prefixes across requests. While these innova-tions have substantially accelerated inference, the computational cost of processing large, common contexts for millions of queries remains a key chal-lenge, particularly in offline scenarios requiring high throughput, and when not all batched requests share the same context. To address the above challenges, we introduce Intra-Prompt Parallel Decoding (IPPD), 1 a novel inference method for maximizing the batched throughput of CCQA with intra-prompt parallelism (Figure 1), where multiple questions are combined into a single prompt, and answers are decoded in parallel within it. By decoding tokens out of order and adjusting the attention mask, IPPD increases throughput while not affecting the final output. The increased efficiency of IPPD stems from dramati-cally reducing the number of required memory ac-cesses during attention, which is known to be heav-ily memory bottlenecked (Recasens et al., 2025). Importantly, IPPD can be easily applied to existing systems without changes to the core model imple-mentation, maintains compatibility with orthogo-nal inference acceleration methods, and is up to 7 times more computationally efficient than standard batched inference on realistic CCQA tasks. 
+
+2 Related Work 
+
+Token parallelism Recent efforts to accelerate LLM inference have explored decoding multiple tokens in parallel within a prompt. A common ap-proach is to decode consecutive tokens in parallel. Speculative decoding (Leviathan et al., 2023) em-ploys a smaller draft model to propose a sequence of tokens to be verified in parallel by a larger veri-fier LLM. The propose-then-verify paradigm is also utilized in Cai et al. (2024) and Fu et al. (2024). A key limitation of these approaches is that the length of the drafted token sequence is directly tied to the level of parallelism, and longer drafts are more prone to quality degradation and subsequent rejection by the verifier model. In contrast, our method parallelizes non-consecutive tokens known to be independent, which eliminates the need for a verification step. Other work has explored paral-lelizing non-sequential tokens. Ning et al. (2024)  
+
+> 1Code is available at https://github.com/networkslab/IPPD Corresponding author: theodore.glavas@mail.mcgill.ca
+
+and Liu et al. (2024) break down complex tasks into independent sub-tasks that can be processed in parallel. While this can reduce single-task latency, it requires creating and processing multiple new prompts. We show in Section 4.3 that intra-prompt parallelism results in denser computations during attention that more effectively utilize modern GPU hardware compared to batching separate prompts, resulting in higher throughput in offline settings. 
+
+Batch parallelism Another relevant research di-rection is accelerating LLM inference by sharing memory and computation across batched prompts. Prefix caching (Kwon et al., 2023; Ye et al., 2024a; Pan et al., 2025a) and PagedAttention (Kwon et al., 2023) are common methods that create a shared Key-Value (KV) cache to reduce memory usage and avoid recomputing KV matrices for common prefixes in batched prompts. While these tech-niques reduce the required floating point opera-tions (FLOPs) during attention, they are limited by the large number of memory accesses required to independently compute attention scores for each prompt, resulting in GPU underutilization. We elaborate on this phenomenon in Section 4.3. 
+
+Tree-based decoding Recent work has demon-strated the success of using tree data structures to share memory and computation of partially over-lapping queries. A KV cache tree stores shared contexts without duplication, and cross-attention is performed in chunks between the incoming queries and shared KV (Ye et al., 2024b; Juravsky et al., 2024; Yao et al., 2025; Wang et al., 2025). The final attention scores are then computed using a merge operator on the partial attention scores. Al-though strong performance can be obtained by de-signing optimized low-level attention kernels, this approach suffers from the overhead of the merge operation. Since a custom kernel and KV cache manager are required, existing methods are often limited in their batching functionality, or incom-patible with newer models and inference platforms (Yao et al., 2025; Pan et al., 2025b; Ye et al., 2024b). These factors limit their applicability and longevity. Rather than breaking up the attention process into many parts, IPPD combines common-context ques-tions into a single KV cache and attention operation without any context duplication. By supplying the model with a custom attention mask, IPPD paral-lelizes CCQA tasks without modifying the model implementation or breaking compatibility with or-thogonal methods. Q1
+
+A1 A2 A3 A4
+
+A1 A2 A3 A4
+
+IPPD  (our method): Multi-question prompt 
+
+Batched Inference : Multiple separate prompts 
+
+Q2 Q3 Q4
+
+Q1 Why did ... ? 
+
+> Who was ... ?
+> Extract all ...
+> Shared computation
+> Reduced memory bottleneck
+> Identify the ...
+
+Q2
+
+Q3
+
+Q4
+
+Common-Context Question Answering  
+
+> Contexts Questions
+> Same answer as batched inference
+> 7X Faster
+
+Q1 Q2 Q3 Q4
+
+Key Features 
+
+> Prompt
+> LLM Generation
+> Legend
+> ...
+
+Figure 1: In QA tasks, multiple questions often reference the same context. Traditional batched inference separates each question into a separate prompt, and processes prompts independently to generate the answer. IPPD combines multiple questions and contexts within a single prompt and jointly decodes multiple answers in parallel. This eliminates repeated computations and reduces the memory bottleneck of GPUs during attention to generate the same answers in a fraction of the time. 
+
+3 Problem Formulation: CCQA 
+
+We begin by denoting the inputs to the LLM in a QA setting. All LLM inputs are comprised of the following components: a common instruction or prompt prefix p, a context c (for example a docu-ment or passage), and a question x. Usually, these three logical parts form a triplet (p, c, x ) which, af-ter tokenization, becomes a contiguous sequence presented to the model. In realistic workflows, we can have many such triplets, and several triplets may share the same context. To capture this, let 
+
+{cj }Jj=1 denote contexts and for each context cj let 
+
+{xj,k }Mj 
+
+> k=1
+
+denote the associated questions. The set of logical triplets is then T = {(p, c j , x j,k ) | j =1, . . . , J, k = 1 , . . . , M j }. We assume this set to be fully available offline at inference time. We further assume that each question can be answered independently: generating ˆyj,k may depend on p,
+
+cj , xj,k , and its own previously generated tokens, but not on the answers to other questions. A traditional LLM loop to process the triplets 
+
+T would be to issue |T | independent prompts, each requiring a separate LLM forward pass f (·).During autoregressive answer generation, each an-swer token is generated and fed back into the in-put sequence and passed through forward pass f .As a result, the t-th token of the answer is ob-tained using ˆyj,k,t = f (p, c j , x j,k , y j,k,<t ), where 
+
+yj,k,<t represents the first t − 1 answer tokens generated for question index k of context cj . At the end of the process, we obtain the answer set 
+
+A = {ˆyj,k | j = 1 , . . . , J, k = 1 , . . . , M j }.Traditional inference methods employ batch-ing to process multiple prompts concurrently. Al-though parts of the computation, such as the MLP layers, can be effectively parallelized across prompts, computations in the attention layers are performed independently for each prompt. This in-troduces a bottleneck for batched inference, particu-larly when batch elements share a common context 
+
+cj . We elaborate on this phenomenon in Section 4. To overcome this limitation, we wish to develop an inference method that can efficiently share com-putation in the attention layers, while maintaining batched inference compatibility and not requiring any training or fine-tuning. To achieve this, we aim to parallelize the generation of ˆyj,k across j, k 
+
+within a prompt. It is important to note that each token within an answer ˆyj,k,t will still be generated autoregressively, as we are parallelizing across the 
+
+question set . The core methodological challenges are ensuring that the introduced intra-prompt par-allelism is computationally efficient and does not affect the quality of the generated answers A.We evaluate candidate strategies by comparing against batched autoregressive generation along two complementary axes: throughput (efficiency) and answer quality (fidelity to the ground truth question answers). Throughput measures how many logical triplets are answered per unit time per GPU. Answer quality is measured at the task level using standard metrics (Accuracy, F1, ROUGE-L). Task-level metrics compare generated answers ˆyj,k 
+
+to ground truth answers yj,k . See Appendix B for definitions of throughput and metrics. p c         
+
+> 1x
+> 1,1 x
+> 1,2 x
+> 2,1 x
+> 2,2
+> c
+> 2
+> p
+> c
+> 1
+> x
+> 1,1
+> x
+> 1,2
+> c
+> 2
+> x
+> 2,1
+> x
+> 2,2
+> y
+> 1,1,1
+> y
+> 1,2,1
+> y
+> 2,1,1
+> y
+> 2,2,1
+> y
+> 1,1,1
+> y
+> 1,2,1
+> y
+> 2,1,2
+> y
+> 2,2,1
+> Queries
+> Keys
+> You are a...
+> [Book start]
+> ...
+> [Book end]
+> Who was ...
+> Extract all...
+> Identify the...
+> Here are...
+> I've found...
+> Because...
+> It was...
+> p
+> c
+> 1
+> x
+> 1,1 y
+> 1,1,1
+> pc
+> 1x
+> 1,1
+> Queries
+> Keys
+> You are a...
+> Why did...
+> [Book start]
+> ...
+> [Book end]
+> pc
+> 1y
+> 1,1,1
+> x
+> 1,1
+
+Standard  Batched Inference  IPPD (our method)           
+
+> y
+> 1,1,1 Because... y
+> 1,1,2
+> Why did...
+> [Doc. start]
+> ...
+> [Doc. end]
+> pc
+> 1x
+> 1,1 x
+> 1,2 x
+> 2,1 x
+> 2,2 y
+> 1,1,1 y
+> 1,2,1 y
+> 2,1,1 y
+> 2,2,1
+> c
+> 2
+> y
+> 1,1,2
+> y
+> 1,2,2
+> y
+> 2,1,2
+> y
+> 2,2,2
+
+Prefill: 
+
+Decode: 
+
+y  
+
+> j,k,t
+> Context cj
+> Question x j,k
+> Inf. step t
+> Attention permitted
+> Attention masked
+> Legend:
+> Multiple tokens generated per prompt.
+> Queries share the same keys in one matrix-matrix multiplication.
+> Each token query is computed separately.
+
+Figure 2: The attention process between the queries (rows) and keys (columns) is depicted with green cells representing unmasked query-key pairs. In standard batched inference, the sequence contains a common instruction 
+
+p, shared context c, question x and partial answer y (simplified as one or two tokens for illustrative purposes). The arrows indicate which token is generated using the output of that query row. IPPD concatenates multiple contexts and queries into a single stacked prompt. The attention mask ensures that each query can only attend to past tokens from the relevant context and question, identifiable by color and shade respectively. At inference step t,IPPD generates the t-th token of four answers through a single shared attention operation per layer in this example. Batched inference would require four independent attention calculations to achieve the same result. 
+
+4 Method: Intra-Prompt Parallel Decoding (IPPD) 
+
+We introduce Intra-Prompt Parallel Decoding (IPPD) , a strategy that enables multiple con-text–question triplets to be processed in parallel within a single prompt. Section 4.1 describes how we replace the |T | independent forward passes of the canonical autoregressive loop with a single, structured forward-pass strategy that: (i) stacks contexts and questions into one prompt, (ii) as-signs hierarchical position identifiers so positional relationships do not induce cross-question leak-age, (iii) builds an attention mask that enforces per-question causal inference, and (iv) decodes to-kens in parallel across the question set. Figure 2 provides an illustrative example of the process: the IPPD prompt combines two contexts c1 and c2 with two questions each, x1,1, x 1,2 and x2,1, x 2,2 respec-tively. During the prefill stage, the attention mask prevents the questions from (a) attending to each other, and (b) attending to the non-relevant con-text. After a full forward pass, we can extract four answer tokens, corresponding to the first token of each question. These tokens are passed in parallel during the decode stage with appropriate masking to maintain high parallelism throughout generation. Our goal is to ensure that each generated token’s conditional distribution under this multi-query, per-step parallel scheme matches the distribution pro-duced by independent autoregressive decoding on the corresponding triplet (p, c j , x j,k ), which we demonstrate in Section 4.2. Section 4.3 describes the computational efficiency of IPPD, arising from increasing GPU utilization during attention. 
+
+4.1 Input pre-processing 
+
+We construct a stacked token sequence s containing the global instruction p, ℓ ≤ J contexts, and the associated questions. We append the answers after 
+
+this header. The header region of the prompt is 
+
+ p, c 1, x 1,1, x 1,2, . . . , c 2, x 2,1, . . . , c ℓ, x ℓ, 1, . . . ],
+
+(1) 
+
+and the full token sequence s at any point in decod-ing equals the header followed by the concatenation of all answer tokens produced so far. We do not reserve fixed answer slots inside the header; instead answers are accumulated at the end of the sequence as they are generated. To track the role and origin of each token and make masking causal, we compute a small meta-data tuple for each token index i in s: a virtual position ID pos virt (i), a context identifier ctx (i) ∈{0, 1, . . . , J } (with ctx (i) = 0 indicating tokens in 
+
+p), and a question identifier qtn (i) ∈ { 0, 1, . . . M }
+
+(with qtn (i) = 0 for tokens in p and c). We distinguish between a virtual position that encodes the per-triplet autoregressive ordering and the absolute position that reflects the token’s index in the concatenated sequence s. The virtual posi-tion of the t-th token of the answer for question 
+
+(j, k ) is defined as the position that token would occupy if the triplet (p, c j , x j,k ) were decoded in isolation:             
+
+> pos virt  yj,k t
+> =|p|+|cj|+|xj,k |+ ( t−1) ,(2)
+
+where | · | denotes the token length of a sequence. For header tokens inside p, cj , or xj,k , their virtual positions pos virt (·) cover these ranges:                        
+
+> pos virt (p) = [0 ,|p|),(3)
+> pos virt (cj) = [ |p|,|p|+|cj|),(4)
+> pos virt (xj,k ) = [ |p|+|cj|,|p|+|cj|+|xj,k |).(5)
+
+For answer tokens, pos virt (·) gives the local offset inside their parent triplet. Appendix A.1 provides a derivation for the absolute position IDs. We define the masking logical expressions to use virtual positions for the causality constraint. Let 
+
+q, k be token indices in s and ctx (·), qtn (·) be the context and question identifiers as previously de-fined. The elementary logical expressions become             
+
+> Mcaus .(q, k ) =  pos virt (q)≥pos virt (k),(6)
+> Mctx (q, k ) =  ctx (q) = ctx (k)∨ ctx (k) = 0 ,
+> (7)
+> Mqtn (q, k ) =  qtn (q) = qtn (k)∨ qtn (k) = 0 .
+> (8)
+
+The final mask logic is the conjunction     
+
+> Mfin .(q, k ) = M caus .(q, k )∧Mctx (q, k )∧Mqtn (q, k )
+> (9)
+
+of the causal, context and question masks. The transformer’s attention matrix mask is then set by       
+
+> Mq,k =
+> (0,if Mfin .(q, k )is true ,
+> −∞ ,otherwise. (10)
+
+Negative infinity inputs result in zero activation post-softmax in the attention block. Because answers are appended at the end of the sequence and are labeled with their originat-ing question and context, this mask guarantees that any answer token yj,k t may attend only to the global instruction p (via ctx (k) = 0 ), to tokens in its par-ent context cj (via ctx (q) = ctx (k)), and to tokens in its own question/answer pair xj,k and previously generated answer tokens (via qtn (q) = qtn (k)). Tokens belonging to other questions or contexts fail at least one mask and are therefore blocked, preventing cross-question information leakage de-spite the single forward-pass execution. 
+
+4.2 Parallel Decoding 
+
+Building on the hierarchical position and mask-ing scheme described above, we now argue that the resulting forward pass is equivalent to inde-pendent autoregressive decoding over each triplet 
+
+(p, c j , x j,k ). The key point is that the attention mechanism for any output token yj,k t is restricted by construction to exactly the same set of tokens it would see in the autoregressive case: the shared in-struction p, the corresponding context cj , the ques-tion xj,k , and its own previously generated tokens 
+
+yj,k <t . Tokens from other questions or contexts are masked and therefore have no influence. Formally, let q be the query vector for token yj,k t
+
+and let K be the matrix of key vectors over all tokens. Let S denote the set of key indices that the autoregressive computation treats as valid, which the causal mask determines through S = { k |
+
+MCAUSAL [k] = 0 }. In the autoregressive setting, we have     
+
+> attn AR (yj,k t) = softmax
+> qK ⊤
+> √dk
+> +MCAUSAL
+> 
+> V. (11)
+
+The additive mask assigns −∞ to every key outside 
+
+S, which removes those keys from the softmax sup-port without any explicit restriction of the softmax. Under IPPD, the same attention score is computed over all keys but with a mask MIPPD applied:           
+
+> attn IPPD (yj,k t) = softmax
+> qK ⊤
+> √dk
+> +MIPPD
+> 
+> V, (12)
+> MIPPD [k] =
+> (
+> 0,k∈S,
+> −∞ ,k / ∈S. (13)
+
+Since adding −∞ to a logit removes it from the softmax support, the resulting distribution is identi-cal to that of the autoregressive case:     
+
+> attn IPPD (yj,k t) = attn AR (yj,k t).(14)
+
+Thus, each token in the stacked prompt follows exactly the same computational path as in the inde-pendent autoregressive runs, establishing the equiv-alence of the two procedures. Each forward pass at step t generates the t-th token of each answer, which is appended to the prompt with the correct virtual position ID for the next pass. We stop appending tokens for answers that generate the end-of-sequence token, continu-ing the others until all answers are complete. This process is demonstrated in Fig. 2. Standard LLM frameworks such as Hugging Face Transformers (Wolf et al., 2020) natively support the multi-token output and custom attention masks required by IPPD. Consequently, IPPD requires no modifica-tions to the model implementation, attention ker-nel and KV cache structure. This ensures broad compatibility and a significantly lower barrier to adoption compared to tree-based alternatives. 
+
+4.3 Computational Efficiency 
+
+IPPD allows for more efficient computation in the attention layers. We provide a high-level explana-tion in this section, with a more detailed analysis and comparison to Cascade inference available in Section A.2. At each attention layer, the attention computation involves multiplying q and KT , fol-lowed by a multiplication with V post-softmax. These large multiplications incur a time cost for each byte of memory accessed to load these matri-ces, as well as a time cost for each floating point operation (FLOP) required for calculating the out-put. In autoregressive decoding, attention is almost exclusively bottlenecked by memory accesses, even for small models and large batch sizes (Recasens et al., 2025). This means that modern GPUs are underutilized because the ratio of FLOPs to bytes accessed from memory, known as arithmetic inten-sity , is too low. IPPD alleviates this bottleneck by increasing arithmetic intensity. Let Kp, K cj , V p, V cj denote the keys and values belonging to the instruction tokens p and the com-mon context tokens cj respectively. These keys and values can be computed once and cached for all prompts in the batch, in a process known as pre-fix caching. Nevertheless, for each attention layer, batched autoregressive inference still requires each key and value to be accessed for every output token, as each prompt requires an independent attention calculation. Since IPPD combines all {xj,k }Mj
+
+> k=1
+
+questions into one stacked prompt, it exposes reuse of Kp, K cj , V p, V cj within a shared attention op-eration that generates Mj output tokens. As the instruction p and context cj usually contain the most tokens, this reuse can substantially reduce re-peated memory traffic per output token. Although IPPD processes more FLOPs per output token, this tradeoff improves decoding throughput when atten-tion is memory-bound. Section A.2 quantifies this tradeoff and contrasts it with tree-based decoding strategies. We summarize the analysis into three key observations: (i) For tasks requiring a single-token answer ,like multiple-choice QA (RACE in Table 1), IPPD is most effective with shorter contexts due to lower arithmetic intensity. (ii) For tasks requiring a multi-token answer 
+
+(NarrativeQA in Table 1), IPPD is effective for both short and long contexts, as arithmetic intensity is low regardless of context length. (iii) In CCQA scenarios characterized by long shared contexts and short unique suffixes , IPPD is better suited than tree-based decoding, as the overhead of combining partial attention scores in tree methods outweighs the few FLOPs IPPD con-sumes on masked attention entries. 
+
+4.4 Batch Inference Compatibility 
+
+IPPD is fully compatible with batched inference. We can batch b stacked prompts each with ℓ con-texts. This allows us to trade off having shorter stacked prompts but lower intra-prompt parallelism. When using batched inference with IPPD, special care must be taken to maintain a uniform input length across stacked prompts. During prefill, the initial prompt is left-padded, as is normally done with standard batching. During decoding, each prompt may produce a variable number of output tokens per inference step. This is because (a) the number of questions or contexts may vary across stacked prompts, and (b) some answers may com-plete at an earlier step than others, thus reducing the number of outputs in the next step non-uniformly. To address this, we append pad tokens at each de-coding step to match the input length of the prompt with the most answers currently being generated. We assign these pad tokens a virtual position ID of infinity (implemented as the maximum integer value), so that the causal mask in Equation (6) pre-vents any attention. The virtual position IDs of other tokens also ignore the existence of pad to-kens, so the batched output of IPPD is unchanged. We implement prefix caching within IPPD only for the dataset-wide instruction p. This affects Nar-Average token length Dataset Number of contexts Avg. Parallelism Instruction Context Question Answer NarrativeQA (5s) 355 29.73 2,754.00 737.45 11.97 5.81 SQuAD 2.0 1,365 8.70 47.00 177.94 12.58 3.94 RACE 1,407 3.51 40.00 344.30 39.81 1.00 LongHealth 20 20.00 73.00 11,719.75 72.50 1.00             
+
+> Table 1: Dataset statistics with the average token length of each prompt sub-section. (5s) means the instruction p
+> includes 5 few-shot examples. Average parallelism is the average number of questions sharing a common context, i.e., ¯M=1
+> J
+> PJj=1 Mjfor a dataset with Jcontexts and Mjquestions per context cj.
+
+rativeQA, where p contains five few-shot exam-ples, and allows its KV cache to be reused across batched stacked prompts. IPPD also covers work-loads in which only some questions share a context. Questions with distinct contexts can be stacked in the same prompt, each carrying its own context, which still lowers the number of inference steps even though the gain is smaller than for questions that share a context. Table 5 shows that stacking up to six contexts per prompt is throughput-optimal on multi-token answer tasks such as SQuAD 2.0. Because every IPPD modification acts at the level of a single prompt, the method could compose with strategies such as length-based grouping or con-tinuous batching. Supporting these strategies in a production serving system nevertheless requires backend-specific integration work. 
+
+5 Experimental Setup 
+
+Datasets We evaluate IPPD on four CCQA datasets (Table 1). First, we evaluate on Narra-tiveQA (Koˇ ciský et al., 2018), a challenging dataset where answers are not required to be spans of the input. We employ 5-shot prompting (Liang et al., 2023) to investigate performance on long prefixes. We select SQuAD 2.0 (Rajpurkar et al., 2018) as an extractive QA benchmark with shorter contexts. We also evaluate on the multiple-choice bench-marks RACE (Lai et al., 2017) and LongHealth (Adams et al., 2025) to cover a wide range of prefix and answer lengths combinations as well as do-mains. Although IPPD is best suited for large-scale industrial workloads, the scarcity of public datasets of such magnitude necessitates the use of these benchmarks as proxies. Table 1 provides the impor-tant dataset statistics, while Section B.2 contains additional details. 
+
+Models We evaluate open-source LLMs of vary-ing sizes, namely, Qwen-3 (32B, 8B, 4B-Instruct-2507, 1.7B) (Yang et al., 2025) using non-thinking mode for computational efficiency. We also eval-uate Phi-4 14B (Abdin et al., 2024) and OLMo-2-0325-32B-Instruct (OLMo et al., 2025). Models larger than 8B parameters are quantized to 4 bits to fit on a single GPU. 
+
+Baselines As the current version of IPPD is implemented using HuggingFace Transformers (Wolf et al., 2020), we use Transformers’ standard batched inference as our primary baseline. We also compare our method to inference using prefix caching and PagedAttention (Kwon et al., 2023) (PC+PA), using vLLM as a backend. Like IPPD, these methods prevent KV recomputation and effi-ciently shares KV cache memory across questions with a shared context. Since vLLM is a production-oriented backend, it provides a number of orthogo-nal optimizations not available with Transformers, such as advanced scheduling and custom efficient model code. As our goal is to directly compare IPPD against PC+PA specifically, we adjust the vLLM inference hyperparameters to most closely match our baseline system, with other confounding factors mitigated or removed. Section B.3 provides full experimental details, including hyperparameter selection for each method. 
+
+Profiling and controlled ablations In addition to end-to-end throughput, we profile the prefill and decode phases separately to identify where IPPD reduces inference time. We also vary the number of questions sharing each context from 1 to 32 and increase context length from 1× to 8× to charac-terize how the available shared-context parallelism and prefill cost affect speedup. These experiments use controlled variants of the real benchmark ex-amples rather than fully synthetic inputs. Their construction and complete results are described in Sections D.1 and D.2. Model NarrativeQA (5 shot) SQuAD 2.0 RACE LongHealth ROUGE-L EM% F1 EM% Acc.% EM% Acc.% EM% Qwen3-32B 0.771 +0 .000 96.5 0.649 −0.004 96.9 91 .1+0 .0 99.7 87 .0−0.5 99.5 OLMo-2-32B 0.752 +0 .000 97.6 0.714 +0 .000 98.1 90 .6+0 .0 99.8 – –Phi4-14B 0.702 −0.004 91.3 0.466 −0.005 95.8 88 .0+0 .0 99.9 86 .5+0 .5 99.3 Qwen3-8B 0.727 +0 .000 97.5 0.598 −0.001 97.5 88 .3−0.1 99.6 83 .3+0 .0 100 Qwen3-4B-Instr. 0.735 +0 .000 95.7 0.659 +0 .002 98.1 87 .4+0 .0 99.7 83 .0+0 .5 99.5 Qwen3-1.7B 0.679 +0 .000 95.7 0.590 +0 .002 95.5 76 .7−0.1 99.1 69 .0−0.3 99.3 
+
+Table 2: Quality metrics for standard batched inference, with the delta to IPPD outputs shown in subscript. EM (Exact Match)% measures the percentage of batched inference and IPPD answers matching each other exactly. IPPD provides the same computational path for each token but numerical instabilities result in a near 100% EM rate. 
+
+> Qwen3-1.7B Qwen3-4B-I Qwen3-8B Phi4-14B Qwen3-32B OLMo2-32B
+> 010 20 30
+> Speedup
+
+NarrativeQA (5s) 
+
+> Qwen3-1.7B Qwen3-4B-I Qwen3-8B Phi4-14B Qwen3-32B OLMo2-32B
+> 02468
+
+SQuAD 2.0 
+
+> Qwen3-1.7B Qwen3-4B-I Qwen3-8B Phi4-14B Qwen3-32B OLMo2-32B
+> 0123
+> Speedup
+
+RACE 
+
+> Qwen3-1.7B Qwen3-4B-I Qwen3-8B Phi4-14B Qwen3-32B
+> 0510 15
+
+LongHealth   
+
+> Batched Inference Prefix Caching + PagedAttention IPPD
+
+Figure 3: Throughput measured in questions answered per second. Normalized throughput is relative to the standard batched inference baseline. IPPD outperforms prefix caching + PagedAttention for both short answer QA tasks (top), and for one of the two multiple-choice tasks (bottom). Darker colored shades represent batched inference (baseline), medium shades represent prefix caching + PagedAttention, and lighter shades represent IPPD. 
+
+6 Results 
+
+Table 2 shows that IPPD maintains near-identical performance to batched inference, with task-metric differences within one percentage point across all models and benchmarks. Exact match rates range from 91.3% to 100%, with 22 of 23 model–dataset combinations exceeding 95%. Section C.1 explains the finite-precision arithmetic differences. Figure 3 showcases the throughput of IPPD and prefix caching + PagedAttention (PC+PA) relative to standard batched inference across datasets and models. Absolute throughput numbers are avail-able in Appendix C. For the short answer gen-eration datasets, IPPD consistently outperforms both batched inference and PC+PA. NarrativeQA throughput increases by up to 32X with Qwen3-8B. Because IPPD prefix-caches the dataset-wide instruction p for NarrativeQA, which contains five few-shot examples, part of this speedup is at-tributable to reusing that prefix. IPPD neverthe-less outperforms PC+PA by 2.2X despite PC+PA’s more advanced cache management through the vLLM backend. IPPD also performs strongly with SQuAD 2.0, which features a much shorter in-struction and average context length than Narra-tiveQA. IPPD’s relative throughput is consistent across models, ranging from 4.1-5.6X for all mod-els except Phi4-14B, where we measure a 7.2X relative throughput. Although IPPD performs well across the entire model range, it is strongest on larger models, as shown by throughput on SQuAD 2.0 being slightly lower than PC+PA with Qwen3-1.7B but convincingly higher for models with 8 billion parameters or more.This trend suggests that IPPD becomes increasingly valuable as attention computations scale. For our multiple-choice datasets, IPPD con-sistently outperforms standard batched inference. RACE contains the lowest average number of ques-tions per context, which results in a 2.1-2.7X relative throughput increase for IPPD. However, PC+PA fails to provide a substantial throughput increase, likely due to the short average context length limiting the effects of KV caching and limit-ing arithmetic intensity. By stacking six contexts per prompt, IPPD provides a 5.8X greater increase in throughput (+171% vs. +29%) with OLMo2-32B. This result validates our theoretical analysis in Section A.2, which states that attention can still be memory bottlenecked during prefill when con-texts are short. In contrast, LongHealth features extremely long contexts, which have higher arith-metic intensity during prefill. IPPD is not as effec-tive in this setting as PC+PA, as the advantages of efficient KV cache management for long prefixes outweigh the memory access reductions of IPPD when prefill is already arithmetically intense. The phase-level profiling in Section D.1 con-firms that IPPD reduces both prefill and decode time relative to batched autoregressive inference in every supported multi-token model–dataset set-ting. Decode-time reductions generally track the reduction in decoding steps, consistent with decode remaining memory-bandwidth bound despite the additional FLOPs in each IPPD step. The question-count ablation in Section D.2.1 identifies shared-context parallelism as the primary driver of IPPD’s benefit: its win rate against PC+PA rises from 0% at one question per context to 73% at 16 and 32 questions, with LongHealth account-ing for five of the six remaining losses. Although longer contexts reduce IPPD’s relative advantage, the context-length ablation in Section D.2.2 shows that it still wins 75% of supported comparisons at 
+
+8× context length. 
+
+7 When to Use IPPD 
+
+IPPD performs best in throughput-oriented work-loads where many independently answerable ques-tions are available together. The number of ques-tions per context is the clearest practical indicator of its benefit, as examined in Section D.2.1. For multi-token outputs, IPPD remains effective across context lengths because decoding is memory-bandwidth bound. Its advantage narrows when answers are long relative to the shared context and question-specific suffixes dominate the stacked        
+
+> Short context Long context Single-token answer IPPD PC+PA Multi-token answer IPPD IPPD
+> Long generation Standard inf. PC+PA
+> Table 3: Recommended inference method by answer length and context length, assuming several questions share each context.
+
+prompt, as analyzed in Sections A.2, D.1 and D.2.2. For single-token outputs, short contexts such as RACE favor IPPD, whereas long contexts have higher prefill arithmetic intensity and can favor PC+PA, as on LongHealth in Figure 3. Table 3 summarizes these regimes. With short contexts and long generations, neither method targets the domi-nant question-specific decoding work, so standard batched inference or a specialized method such as speculative decoding (Leviathan et al., 2023) may be preferable. A large class of practically important CCQA workloads fall into the regime preferred by IPPD, such as extracting many dis-tinct fields from unstructured documents, product and web data, or validating documents against a set of requirements for quality assurance. IPPD can also apply inside workloads that appear se-quential, since reasoning problems can often be decomposed into sub-questions answered before any cross-dependency arises. 
+
+8 Conclusion 
+
+We introduce IPPD, a novel approach that acceler-ates LLM inference for tasks with shared context such as CCQA. By manipulating position IDs and attention masks, IPPD can decode the next token for all questions in parallel without requiring any modifications to the LLM architecture. IPPD is fully compatible with batched inference, handling multiple prompts with different contexts simultane-ously. IPPD achieves up to 7X speedup without sac-rificing model performance. Experimental results demonstrate that IPPD outperforms batched au-toregressive decoding on every benchmark dataset and model size we test, and outperforms prefix caching with PagedAttention in most evaluated set-tings. While our experiments focus on CCQA, the core concept of IPPD can extend to broader shared-context generation tasks such as recommendation systems and multi-aspect information extraction. Future work could explore combining IPPD with orthogonal efficiency techniques in systems such as vLLM to further reduce inference costs. Limitations 
+
+Our evaluation targets offline workloads in which the full question set is available in advance, and IPPD requires that questions sharing a context be answerable independently, so tasks whose an-swers condition one another fall outside its scope. Section 7 discusses a way to apply IPPD in-side nominally sequential tasks, which we do not evaluate. IPPD’s advantage also narrows in two regimes. Very long contexts paired with single-token answers raise arithmetic intensity during pre-fill, where prefix caching with PagedAttention out-performs IPPD on LongHealth. Generations that are long relative to the shared context reduce the advantage as well, as noted in Section A.2, though we do not measure this regime. IPPD is implemented on top of HuggingFace Transformers for ease of experimentation and low-level control during inference. Unlike vLLM, this implementation is not optimized for high-throughput serving applications. As such, the re-ported inference speed likely understates IPPD’s attainable efficiency. We leave the integration of IPPD with vLLM as a promising opportunity for future work. Since IPPD modifies the attention mask, it is not directly compatible with FlashAtten-tion (Dao, 2024). However, it is compatible with the new implementation of FlexAttention (Dong et al., 2025), which provides similar benefits to FlashAttention with the flexibility of custom atten-tion masks. IPPD is implemented with both Flex-Attention and standard scaled dot-product attention (SDPA), since the latter performs better in most of our experiments. This may change in the future as support for FlexAttention matures and becomes better optimized. We do not evaluate every model size on all hardware platforms, so throughput may vary for untested model–hardware combinations. We compare against standard batched inference and prefix caching with PagedAttention. Special-ized shared-prefix and tree-based systems such as Cascade inference, Hydragen, DeFT and FastTree lack implementations compatible with the model families and inference platforms used here, so we do not compare against them. We have not imple-mented or evaluated IPPD with production batch-ing policies, which remains future work. 
+
+References 
+
+Marah I Abdin, Jyoti Aneja, Harkirat Behl, Sébastien Bubeck, Ronen Eldan, Suriya Gunasekar, Michael Harrison, Russell J. Hewett, Mojan Javaheripi, Piero Kauffmann, James R. Lee, Yin Tat Lee, Yuanzhi Li, Weishung Liu, Caio CT Mendes, Anh Nguyen, Eric Price, Gustavo de Rosa, Olli Saarikivi, and 8 others. 2024. Phi-4 technical report. ArXiv preprint: arXiv 2412.08905. Lisa Adams, Felix Busch, Tianyu Han, Jean-Baptiste Excoffier, Matthieu Ortala, Alexander Löser, Hugo JWL Aerts, Jakob Nikolas Kather, Daniel Truhn, and Keno Bressem. 2025. Longhealth: A question answering benchmark with long clinical doc-uments. Journal of Healthcare Informatics Research ,9:280–296. Alexander Brinkmann, Roee Shraga, and Christian Bizer. 2024. Extractgpt: Exploring the potential of large language models for product attribute value extraction. In Information Integration and Web Intel-ligence: 26th International Conference, IiWAS 2024, Proceedings, Part I , pages 38–52. Springer-Verlag. Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple llm inference acceleration frame-work with multiple decoding heads. In Proceed-ings of the 41st International Conference on Machine Learning , volume 235, pages 5209–5235. Tri Dao. 2024. Flashattention-2: Faster attention with better parallelism and work partitioning. In The Twelfth International Conference on Learning Repre-sentations .Juechu Dong, BOYUAN FENG, Driss Guessous, Yanbo Liang, and Horace He. 2025. Flexattention: A pro-gramming model for generating fused attention vari-ants. In Proceedings of Machine Learning and Sys-tems , volume 7. Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. 2024. Break the sequential dependency of llm infer-ence using lookahead decoding. In Proceedings of the 41st International Conference on Machine Learn-ing , volume 235, pages 14060–14079. Jordan Juravsky, Bradley Brown, Ryan Saul Ehrlich, Daniel Y Fu, Christopher Re, and Azalia Mirhoseini. 2024. Hydragen: High-throughput LLM inference with shared prefixes. In Workshop on Efficient Sys-tems for Foundation Models II @ ICML .Tomáš Koˇ ciský, Jonathan Schwarz, Phil Blunsom, Chris Dyer, Karl Moritz Hermann, Gábor Melis, and Ed-ward Grefenstette. 2018. The NarrativeQA reading comprehension challenge. Transactions of the Asso-ciation for Computational Linguistics , 6:317–328. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Effi-cient memory management for large language model serving with pagedattention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles , pages 611–626. Guokun Lai, Qizhe Xie, Hanxiao Liu, Yiming Yang, and Eduard Hovy. 2017. RACE: Large-scale ReAd-ing comprehension dataset from examinations. In 
+
+Proceedings of the 2017 Conference on Empirical Methods in Natural Language Processing , pages 785– 794. Association for Computational Linguistics. Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via spec-ulative decoding. In Proceedings of the 40th Inter-national Conference on Machine Learning , volume 202, pages 19274–19286. Percy Liang, Rishi Bommasani, Tony Lee, Dimitris Tsipras, Dilara Soylu, Michihiro Yasunaga, Yian Zhang, Deepak Narayanan, Yuhuai Wu, Ananya Ku-mar, Benjamin Newman, Binhang Yuan, Bobby Yan, Ce Zhang, Christian Alexander Cosgrove, Christo-pher D Manning, Christopher Re, Diana Acosta-Navas, Drew Arad Hudson, and 31 others. 2023. Holistic evaluation of language models. Transac-tions on Machine Learning Research .Mingdao Liu, Aohan Zeng, Bowen Wang, Peng Zhang, Jie Tang, and Yuxiao Dong. 2024. Apar: Llms can do auto-parallel auto-regressive decoding. ArXiv preprint: arXiv 2401.06761. Souvik Mandal, Nayancy Gupta, Ashish Talewar, Paras Ahuja, Prathamesh Juvatkar, and Gourinath Banda. 2025. Idpleaderboard: A unified leaderboard for intelligent document processing tasks. https://idp-leaderboard.org. Xuefei Ning, Zinan Lin, Zixuan Zhou, Zifu Wang, Huazhong Yang, and Yu Wang. 2024. Skeleton-of-thought: Prompting LLMs for efficient parallel generation. In The Twelfth International Conference on Learning Representations .Team OLMo, Pete Walsh, Luca Soldaini, Dirk Groen-eveld, Kyle Lo, Shane Arora, Akshita Bhagia, Yuling Gu, Shengyi Huang, Matt Jordan, Nathan Lambert, Dustin Schwenk, Oyvind Tafjord, Taira Anderson, David Atkinson, Faeze Brahman, Christopher Clark, Pradeep Dasigi, Nouha Dziri, and 24 others. 2025. 2 olmo 2 furious. ArXiv preprint: arXiv 2501.00656. Rui Pan, Zhuang Wang, Zhen Jia, Can Karakus, Luca Zancato, Tri Dao, Yida Wang, and Ravi Netravali. 2025a. Marconi: Prefix caching for the era of hy-brid llms. In Proceedings of Machine Learning and Systems , volume 7. Zaifeng Pan, Yitong Ding, Yue Guan, Zheng Wang, Zhongkai Yu, Xulong Tang, Yida Wang, and Yufei Ding. 2025b. Fasttree: Optimizing attention kernel and runtime for tree-structured llm inference. In 
+
+Proceedings of Machine Learning and Systems , vol-ume 7. Pranav Rajpurkar, Robin Jia, and Percy Liang. 2018. Know what you don’t know: Unanswerable ques-tions for SQuAD. In Proceedings of the 56th Annual Meeting of the Association for Computational Lin-guistics (Volume 2: Short Papers) , pages 784–789. Association for Computational Linguistics. Pol G. Recasens, Ferran Agulló, Yue Zhu, Chen Wang, Eun Kyung Lee, Olivier Tardieu, Jordi Torres, and Josep Ll. Berral. 2025. Mind the memory gap: Unveiling gpu bottlenecks in large-batch llm infer-ence. In 2025 IEEE 18th International Conference on Cloud Computing (CLOUD) , pages 277–287. Zhibin Wang, Rui Ning, Chao Fang, Zhonghui Zhang, Xi Lin, Shaobo Ma, Mo Zhou, Xue Li, Zhongfeng Wang, Chengying Huan, Rong Gu, Kun Yang, Guihai Chen, Sheng Zhong, and Chen Tian. 2025. Flash-forge: Ultra-efficient prefix-aware attention for llm decoding. ArXiv preprint: arXiv 2505.17694. Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond, Clement Delangue, Anthony Moi, Pier-ric Cistac, Tim Rault, Rémi Louf, Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen, Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, and 3 others. 2020. Hugging-face’s transformers: State-of-the-art natural language processing. ArXiv preprint: arXiv 1910.03771. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayi-heng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, and 41 oth-ers. 2025. Qwen3 technical report. ArXiv preprint: arXiv 2505.09388. Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William Cohen, Ruslan Salakhutdinov, and Christo-pher D. Manning. 2018. HotpotQA: A dataset for diverse, explainable multi-hop question answering. In Proceedings of the 2018 Conference on Empiri-cal Methods in Natural Language Processing , pages 2369–2380. Association for Computational Linguis-tics. Jinwei Yao, Kaiqi Chen, Kexun Zhang, Jiaxuan You, Binhang Yuan, Zeke Wang, and Tao Lin. 2025. DeFT: Decoding with flash tree-attention for efficient tree-structured LLM inference. In The Thirteenth In-ternational Conference on Learning Representations .Lu Ye, Ze Tao, Yong Huang, and Yang Li. 2024a. ChunkAttention: Efficient self-attention with prefix-aware KV cache and two-phase partition. In Proceed-ings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Pa-pers) , pages 11608–11620. Association for Compu-tational Linguistics. Zihao Ye, Ruihang Lai, Bo-Ru Lu, Chien-Yu Lin, Size Zheng, Lequn Chen, Tianqi Chen, and Luis Ceze. 2024b. Cascade inference: Memory bandwidth effi-cient shared prefix batch decoding. Zihao Yi, Jiarui Ouyang, Zhe Xu, Yuwen Liu, Tianhao Liao, Haohao Luo, and Ying Shen. 2025. A survey on recent advances in llm-based multi-turn dialogue systems. ACM Computing Surveys , 58. Murong Yue. 2025. A survey of large language model agents for question answering. ArXiv preprint: arXiv 2503.19213. Yang Zhang, Hanlei Jin, Dan Meng, Jun Wang, and Jinghua Tan. 2026. A comprehensive survey on process-oriented automatic text summarization with exploration of llm-based methods. Neurocomputing ,663:131928. Appendix A Method Details 
+
+A.1 Position IDs and Attention Mask 
+
+In the stacked sequence s, each token has an abso-lute position determined by its literal index in the concatenated prompt. As answers are appended sequentially, absolute positions grow continuously across all contexts and questions. Formally, the ab-solute position of the t-th token of the k-th question under context j is 
+
+pos  yj,k t
+
+ = Lhdr + X
+
+> (j′,k ′)∈Q
+> rank( j′,k ′)<rank( j,k )
+
+Tj′,k ′
+
++ ( t − 1) + 1 , (15) where Lhdr is the length of the instruction plus all context and question headers, Q = (1 , 1) , (1 , 2) , . . . , (J, M J ) is the fixed ordering of question pairs in the prompt, and Tj′,k ′ is the token length of the generated answer for question 
+
+(j′, k ′). This absolute index reflects the physical layout of the stacked sequence. In contrast, our method introduces a virtual po-sition pos virt (·), which maps tokens back to posi-tions that are local to their own instruction, context, and question triplet. For a generated token yj,k t , the virtual position is 
+
+pos virt  yj,k t
+
+ = |p| + len( cj )+ |xj,k | + ( t − 1) . (16) Header tokens are similarly assigned virtual posi-tions aligned with their logical block boundaries. By mapping absolute indices into logically lo-cal virtual positions, we ensure that attention re-mains causal within each sequence, even if two sequences are physically distant in s. In other words, pos virt (·) preserves the illusion that each triplet (p, c j , x j,k ) is decoded autoregressively in isolation, while still allowing parallel execution within a single stacked prompt. 
+
+A.2 Computational Efficiency 
+
+We provide a deeper analysis of the FLOP and memory access trade-off of IPPD against prefix caching and PagedAttention (PC+PA). For this section, we assume that IPPD uses one context 
+
+cj , with Mj questions {xj,k ′ }Mj 
+
+> k′=1
+
+stacked in one prompt. We calculate how FLOPs and memory accesses scale with the length of p, c j , and xj,k ,which we write as | · | . We consider only one at-tention head of one attention layer, as the com-putation pattern for each head is the same. The FLOPs and bytes of memory accessed depend on the sequence length of the input and the hidden dimension of the query, key and value associated to each token. Since the hidden dimension is static, we focus on the sequence-length dependent dimen-sion of q, K and V , which we denote as dim (·).Table 4 contains dim (q) and dim (K, V ) for both methods during different stages of inference. The memory accesses required for each attention com-putation are linearly proportional to the dimensions of q, K and V , so we write that the bytes of mem-ory accessed are O(dim (q) + dim (K, V )) , ignor-ing scaling constants for simplicity. Similarly, the FLOPs required for multiplication during attention are O(dim (q) × dim (K, V )) . The arithmetic in-tensity is defined as the ratio of FLOPs to memory accesses, which scales as 
+
+O
+
+ dim (q) × dim (K, V )
+
+dim (q) + dim (K, V )
+
+
+
+.
+
+Low arithmetic intensity signifies that memory ac-cesses are causing a performance bottleneck, which Recasens et al. show is often the case with LLM inference. The following two sections compare the approximated FLOPs and memory accesses of PC+PA and IPPD for both prefill and decode. For a context cj and an inference step t, we consider the total FLOPs and memory accesses for computing attention for one output token of every question, 
+
+{yj,k ′ 
+
+> t
+
+}Mj
+
+> k′=1
+
+.
+
+A.2.1 Prefill 
+
+The first prefill with PC+PA for the prompt an-swering xj,k requires dim (q) = dim (K, V ) = 
+
+|p| + |cj | + |xj,k |, as the prefix cache has not yet been computed. In subsequent prefills, we only require dim (q) = |xj,k | since the instruction and context are in the prefix cache. The most signif-icant FLOP cost is during the first prefill, which scales as O(( |p| + |cj | + |xj,k |)2). Mj attention operations are required to prefill all questions, each requiring the full K and V . Therefore, the mem-ory accesses scale as O(Mj × (|p| + |cj | + |xj,k |)) .
+
+For IPPD , the FLOP cost scales as O(( |p| + |cj | +
+
+PMj 
+
+> k′=1
+
+|xj,k ′ |)2), since the prompt contains all questions. Under our operation-level model, mem-ory traffic scales as O(|p|+|cj |+PMj 
+
+> k′=1
+
+|xj,k ′ |) be-cause the questions are processed through a shared attention operation. Writing Xj = PMj 
+
+> k′=1
+
+|xj,k ′ |,the tradeoff obtained by IPPD is a reduction in memory accesses by a factor of Mj , in exchange for an increase in FLOPs by a factor of 
+
+ |p| + |cj | + Xj
+
+|p| + |cj | + |xj,k |
+
+2
+
+.
+
+There are two scenarios where this is advantageous: 1. When |p| + |cj | ≫ PMj 
+
+> k′=1
+
+|xj,k ′ |, and Mj ≫
+
+1, the relative increase in FLOPs is minor com-pared to the reduction in memory accesses. 2. Since arithmetic intensity (FLOPs / mem. ac-cess ratio) scales as O(|p| + |cj | + |xj,k |),shorter p, cj , and xk,j result in lower arith-metic intensity. This scenario is more mem-ory bottlenecked, so it benefits more from the reduction in memory accesses. We observe in Table 1 that the RACE dataset matches both of these scenarios: the contexts are short, but the questions are even shorter. Figure 3 shows IPPD significantly outperforming PC+PA in this task. For the LongHealth dataset, the con-texts are extremely large ( > 10 , 000 tokens on aver-age), which increases arithmetic intensity linearly. This dataset is therefore more likely to be FLOP bottlenecked, and not benefit as much from IPPD. We observe in our results that PC+PA outperforms IPPD on this dataset. Both RACE and LongHealth require only one token per answer, so their perfor-mance characteristics are solely determined by the prefill stage. 
+
+A.2.2 Decode 
+
+During decode, PC+PA contains a single query, as tokens are generated autoregressively. However, that query must attend to all prior tokens, which re-quires a separate memory access to the keys and val-ues of p and cj , xj,k and partial output yj,k <t . Arith-metic intensity is very low as both the FLOPs and memory accesses scale linearly with the sequence length. With IPPD, the first decode step has Mj
+
+queries. Writing Zj,t = PMj
+
+> k′=1
+
+(|xj,k ′ | + |yj,k ′ 
+
+> <t
+
+|),FLOPs per token are increased by a factor of 
+
+|p| + |cj | + Zj,t 
+
+|p| + |cj | + |xj,k | + |yj,k <t | .
+
+By exposing reuse of p and cj within a shared at-tention operation that generates Mj tokens, IPPD reduces repeated memory traffic to the shared con-text. In subsequent decoding steps, some of the 
+
+Mj answers may complete generation, reducing the parallelism in future steps. We write M ∗ 
+
+> j
+
+in Table 4 to denote this effect. To conclude, the decode stage is characterized by a much lower arithmetic intensity than the pre-fill stage, resulting in a severe memory access bot-tleneck. Unlike prefill, the decode stage benefits from IPPD’s memory access reduction even for extremely large p and cj . We see in Figure 3 that IPPD performs better than PC+PA for both datasets involving multi-token answers, which range from very short p and cj in SQuAD 2.0 to very large p
+
+and cj with 5-shot NarrativeQA. 
+
+A.2.3 Comparison to Cascade Inference 
+
+Cascade inference (Ye et al., 2024b) fulfills a sim-ilar objective as IPPD: to reduce the number of memory accesses to the common contexts, thereby increasing arithmetic intensity. The way this is achieved is very different from IPPD: Cascade in-ference computes separate attention scores for keys that are part of the common prefix and those unique to a prompt. This allows queries from different prompts to attend to the common prefix keys in a shared operation, exposing reuse and reducing re-peated memory traffic to those keys. Cascade infer-ence also introduces more FLOPs, because a merge operator is required to combine the prefix attention scores with the unique suffixes for each prompt. For settings where the common prefix p + cj is much larger than the questions, IPPD’s FLOPs in-crease is minimal, as shown in Section A.2.1. In settings with long questions or generations rela-tive to the context, the segmentation of attention by Cascade inference would be preferable. The real-world CCQA datasets used in this work more closely match the composition preferred by IPPD as evidenced in Table 1, while general few-shot prompting is likely to contain longer suffixes and generations. Direct comparison with Cascade infer-ence and other tree-based decoding methods men-tioned in Section 2 is infeasible due to the lack of a general implementation compatible with the model families and inference platforms studied in this work, which are representative of real-world applications. 
+
+B Additional Experimental Details 
+
+B.1 Evaluation Metric 
+
+We evaluate candidate decoding strategies by benchmarking them against standard batched in-Method Prefill Decode First Subsequent PC+PA                                                                       
+
+> dim (q)|p|+|cj|+|xj,k ||xj,k |1
+> dim (K, V )|p|+|cj|+|xj,k ||p|+|cj|+|xj,k |
+> +|yj,k <t |
+> Frequency Once per xj,k Once per yj,k t
+> IPPD
+> dim (q)|p|+|cj|+PMj
+> k′=1 |xj,k ′||cj|+PMj
+> k′=1 |xj,k ′|M∗
+> j
+> dim (K, V )|p|+|cj|+PMj
+> k′=1 |xj,k ′||p|+|cj|
+> +PMj
+> k′=1 (|xj,k ′|+|yj,k ′
+> <t |)
+> Frequency Once per cjOnce per set {yj,k ′
+> <t }M∗
+> j
+> k′=1
+
+Table 4: Summary of the matrix dimensions for queries q and keys/values K and V for a single attention head, using prefix caching + PagedAttention (PC+PA) and IPPD with one context per prompt. dim (·) denotes the dimension that varies with sequence length, ignoring the hidden dimension. Prefill denotes the first forward pass of each prompt, with the First column representing the calculation of the prefix cache. Subsequent prefills leverage this cache to avoid recomputations. The decode column represents the autoregressive decoding stage. The Frequency row indicates how often attention must be performed using these matrix dimensions. Mj denotes the number of questions in context cj . The ∗ indicates that the value may decrease after multiple inference steps, as some answers complete generation before others. The table shows that IPPD’s stacked prompts require larger dimensions but fewer attention calculations. 
+
+ference along two complementary dimensions: 
+
+throughput (efficiency) and answer quality (fidelity to ground truth answers). Throughput captures how many logical triplets can be processed per unit time per GPU, directly reflecting efficiency improvements. Concretely, let 
+
+|T | denote the number of answered triplets, Twall 
+
+the measured wall-clock latency to produce all an-swers, and G the number of GPUs used. We define 
+
+Throughput = |T | 
+
+Twall · G . (17) Answer quality is measured at the task level us-ing standard NLP evaluation metrics, including Ac-curacy, F1, and ROUGE-L. These metrics compare generated answers ˆyj,k to ground truth answers yj,k 
+
+across all triplets. We use standard definitions for these metrics from the literature. 
+
+B.2 Dataset Details NarrativeQA (Koˇ ciský et al., 2018) Narra-tiveQA is a reading comprehension benchmark containing books and movie scripts. We use the human-written summaries as document contexts. About 30 human-generated questions/answer pairs per document are provided. We report results on the test set using 5-shot prompting following the HELM benchmark (Liang et al., 2023). 
+
+SQuAD 2.0 (Rajpurkar et al., 2018) is an ex-tractive reading comprehension task based on the original Stanford Question Answering Dataset. It contains human generated questions about Wikipedia articles, where the answer is a span of the input text. SQuAD 2.0 adds an additional set of unanswerable questions to increase the difficulty of the task. We report results on the publicly avail-able development set, prompting the LLM to write "null" for unanswerable questions. 
+
+RACE (Lai et al., 2017) RACE is an English reading comprehension dataset derived from Chi-nese middle and high school exams. Multiple-choice questions are provided for each text passage by human English instructors covering a variety of topics. We report results on the test set, prompting the LLM to respond with the answer letter. 
+
+LongHealth (Adams et al., 2025) LongHealth is a collection of detailed patient cases each con-taining multiple discharge notes. Although realistic in form, structure and content, the documents are 
+
+entirely fictional , so the dataset contains no real patient information. It was written by experienced physicians. We report results on the entire dataset, using the Task 1 setting from Adams et al. (2025). We do not truncate documents, and modify their provided prompt to instruct the LLM to only re-spond with the answer letter. B.3 Inference Details General Details We run all primary experiments on the Amazon EC2 g6e.8xlarge server using one Nvidia L40S 48GB GPU. The profiling and con-trolled ablations were run on a Nvidia A100 40GB GPU, which slightly varies the exact throughput metrics but retains the same overall results. We use greedy decoding for all generations, and non-thinking mode for all hybrid models. We also set a maximum output token length for each dataset: 40 for NarrativeQA, 30 for SQuAD 2.0 and 1 for RACE and LongHealth. Phi4-14B, Qwen3-32B and OLMo-2-32B are quantized to NF4 using Bit-sAndBytes. Tokenization time is excluded from time measurements. The time required to calculate the attention mask for IPPD is included. 
+
+Standard batched inference We use the Hug-ging Face Transformers backend with the 
+
+generate () method and FlashAttention. Prefix caching is not enabled as it is not supported for batched inference. We increase the batch size for each model-dataset pair until throughput saturates or VRAM limits are exceeded. 
+
+Prefix caching + PagedAttention We use the vLLM backend for optimized support of prefix caching and PagedAttention. Some vLLM features, such as the asynchronous V1 Engine, provide an inherent advantage over Transformers, irrespective of the inference acceleration methods used. To make a direct comparison between IPPD and prefix caching + PagedAttention, we adjust vLLM set-tings to exclude advantages that IPPD could also benefit from, were it also implemented on the same backend. We use the synchronous V0 Engine, en-forcing eager mode as well as the use of the Trans-formers model implementation to match the one used by IPPD. We tune vLLM performance by pro-viding access to all available VRAM, and setting the maximum model length to the longest prompt + output length for each dataset, so as to maximize the automatically managed batch size. FlashAtten-tion is enabled. 
+
+IPPD Our method is implemented with Hugging Face Transformers and Accelerate. The model code for each LLM is unchanged, as all IPPD func-tionality is achieved through a custom inference loop. We implement prefix caching only for p, the dataset-wide instruction. This affects NarrativeQA, where p contains five few-shot examples. Prefix caching and IPPD are complementary in this set-ting: prefix caching avoids recomputing p, while IPPD reduces repeated processing of the contexts and questions within each stacked prompt. For each model-dataset pair, we select the optimal number of shared contexts per prompt and batch size. In prac-tice, we find that these hyperparameters are largely independent of model size. The optimal number of contexts per prompt is largely determined by the context length, number of questions, and hardware architecture. Table 5 shows the hyperparameters used for each method. We largely keep the same IPPD hyperparameters across model size as far as VRAM limits allow. 
+
+C Additional Experimental Results 
+
+C.1 Numerical Stability 
+
+IPPD follows the same idealized computational path as standard batched inference, so the re-maining output variation is attributable to finite-precision arithmetic. Floating-point addition is not associative, and IPPD’s stacked prompts differ in shape and size from a standard batch, which leads the GPU to select different tiling and reduction strategies when parallelizing the underlying matrix multiplications. Bitwise reproducibility is guaran-teed only across runs with identically shaped in-puts, a condition that batched inference and IPPD cannot satisfy simultaneously. These differences occasionally flip a greedy argmax and then propa-gate through the remainder of an answer, so longer generations accumulate more divergence. They in-troduce no systematic change in task-level quality. 
+
+C.2 Throughput Measurements 
+
+Table 6 presents absolute throughput scores, i.e., questions answered per second (QPS), for all benchmarks. 
+
+D Profiling and Controlled Ablations 
+
+D.1 Prefill and Decode Speedup Purpose and methodology. We separately pro-file the prefill and decode phases to determine whether IPPD’s end-to-end throughput gains arise in both phases of inference. For standard batched autoregressive inference and IPPD, we record the total number of prefill and decode steps and their cumulative wall-clock time. We exclude PC+PA from this phase-level comparison because its vLLM scheduler uses a different execution pat-tern, scheduling consecutive prefills and large de-code batches backed by paged KV-cache entries. Model NarrativeQA (5s) SQuAD 2.0 RACE LongHealth B C/P B C/P B C/P B C/P Batched Inf. Qwen3-32B 8 1 30 1 5 1 1 1OLMo-2-32B 8 1 30 1 5 1 1 1Phi-4-14B 8 1 30 1 5 1 1 1Qwen3-8B 20 1 30 1 5 1 1 1Qwen3-4B-Instr. 20 1 30 1 5 1 1 1Qwen3-1.7B 20 1 30 1 5 1 1 1IPPD Qwen3-32B 2 3 5 6 2 2 1 1OLMo-2-32B 2 3 5 6 2 2 1 1Phi-4-14B 3 4 6 6 2 2 1 1Qwen3-8B 3 4 6 6 2 2 1 1Qwen3-4B-Instr. 3 4 6 6 2 2 1 1Qwen3-1.7B 3 4 6 6 2 2 1 1
+
+Table 5: Hyperparameter selection for batch size B and contexts stacked per prompt C/P for IPPD and standard batched inference. Hyperparameters are mostly constant across model sizes, except when VRAM limits require a lower batch size.                                                                                
+
+> Model NarrativeQA (5s) LongHealth SQuAD 2.0 RACE QPS QPS QPS QPS Qwen3-32B Batched Inference 0.48 0.18 2.86 4.52 PC + PA 7.06 2.82 11.90 5.84 IPPD 10.74 1.93 15.74 11.78
+> OLMo-2-32B Batched Inference 0.54 -3.47 4.75 PC + PA 7.15 -12.54 6.15 IPPD 14.53 -19.43 12.91
+> Phi4-14B Batched Inference 0.91 0.44 5.36 10.84 PC + PA 14.42 7.02 27.11 13.90 IPPD 26.13 5.05 38.55 28.55
+> Qwen3-8B Batched Inference 1.75 0.71 14.25 21.18 PC + PA 26.39 11.43 50.10 25.17 IPPD 57.77 6.95 62.04 52.12
+> Qwen3-4B-Instr. Batched Inference 1.90 1.02 18.01 34.72 PC + PA 37.84 16.00 79.68 40.11 IPPD 54.48 8.92 82.88 82.98
+> Qwen3-1.7B Batched Inference 4.54 2.40 35.36 77.74 PC + PA 78.20 33.33 172.07 94.88 IPPD 105.91 20.34 145.02 169.79
+
+Table 6: Throughput comparison of all models on four selected CCQA datasets. We compare batched inference, prefix caching + PagedAttention (PC + PA), and our proposed IPPD. We use queries per second (QPS) as the measurement. The highest score for each setting is in bold .
+
+This makes their separate timings difficult to com-pare directly with the Transformers backend. Ta-ble 7 reports the ratio between the autoregressive and IPPD measurements, such that values above 
+
+1× indicate a reduction from IPPD. We use the original, unmodified datasets and otherwise follow the general setup in Section B.3, maximizing the batch size for each setting subject to the available VRAM. 
+
+Results. IPPD accelerates both prefill and de-code relative to standard batched autoregressive inference. During prefill, IPPD reduces the num-ber of forward passes by jointly processing ques-tions that share a context and by stacking multiple contexts in a prompt. Although each IPPD prefill step processes a larger sequence and therefore re-quires more FLOPs than a corresponding batched-inference step, the reduction in step count yields a substantial reduction in total prefill time. In most settings, the time reduction is smaller than the step reduction because prefill already has relatively high arithmetic intensity, making its additional FLOPs more consequential. The decode-step reduction is smaller because the number of steps is determined by the longest active answer in each batch. Nev-ertheless, decode-time reductions mostly track the corresponding step reductions. Thus, the additional FLOPs per IPPD decode step do not substantially increase its latency, consistent with decode being Model Dataset Prefill steps Prefill time Decode steps Decode time Qwen3-32B NarrativeQA (5s) 20.95 × 37.59 × 10.25 × 8.66 ×                                                                                            
+
+> SQuAD 2.0 7.07 ×5.00 ×5.79 ×5.08 ×
+> RACE 2.80 ×2.58 ×––LongHealth 20.00 ×9.33 ×––OLMo-2-32B NarrativeQA (5s) 20.95 ×43.68 ×10.45 ×11.81 ×
+> SQuAD 2.0 6.19 ×5.86 ×4.02 ×4.18 ×
+> RACE 2.80 ×2.67 ×––LongHealth ––––Phi-4-14B NarrativeQA (5s) 41.25 ×37.92 ×23.16 ×17.86 ×
+> SQuAD 2.0 9.90 ×5.42 ×9.64 ×8.49 ×
+> RACE 2.80 ×2.71 ×––LongHealth 20.00 ×9.99 ×––Qwen3-8B NarrativeQA (5s) 22.00 ×29.60 ×11.77 ×10.72 ×
+> SQuAD 2.0 9.90 ×4.40 ×7.73 ×6.35 ×
+> RACE 2.80 ×2.48 ×––LongHealth 20.00 ×8.26 ×––Qwen3-4B-Instr. NarrativeQA (5s) 16.50 ×26.72 ×9.48 ×10.88 ×
+> SQuAD 2.0 9.90 ×4.35 ×8.26 ×7.61 ×
+> RACE 2.80 ×2.44 ×––LongHealth 20.00 ×6.97 ×––Qwen3-1.7B NarrativeQA (5s) 16.50 ×23.72 ×8.76 ×12.15 ×
+> SQuAD 2.0 9.90 ×3.88 ×6.65 ×7.52 ×
+> RACE 2.80 ×2.45 ×––LongHealth 20.00 ×6.67 ×––
+
+Table 7: Prefill and decode step and time reductions from IPPD relative to batched autoregressive inference. Values are multiplicative speedups (higher is better). Dashes denote datasets with single-token outputs or configurations that exceed the model’s maximum sequence length. 
+
+primarily memory-bandwidth bound as analyzed in Section A.2. 
+
+D.2 Controlled Ablations Controlled-ablation design. For the following two ablations, we perturb real benchmark exam-ples rather than construct fully synthetic prompts. In practice, throughput depends on the joint dis-tribution of instruction, context, question, and an-swer lengths, which varies across examples and datasets. A synthetic sweep that varies one length while holding the others fixed would not capture these interactions and may not represent realistic workloads. Our controlled variants therefore mod-ify one axis of the original datasets while retaining their remaining content and natural length varia-tion. 
+
+D.2.1 Question Count Ablation Purpose and methodology. This ablation mea-sures how IPPD scales with the amount of par-allelism available among questions that share a context. For each dataset, we construct variants containing exactly 1, 2, 4, 8, 16, or 32 questions per context. For a target count M , we retain the first M question–answer pairs when a context con-tains at least M pairs. When it contains fewer than 
+
+M , we cycle through its existing pairs until the tar-get count is reached, duplicating the corresponding answers and options and numbering repeated query strings so that they remain distinct inputs. The con-text and other prompt components remain fixed. We evaluate IPPD and PC+PA on each variant and report throughput relative to standard batched au-toregressive inference in Table 8. All other settings follow Section B.3. 
+
+Results. The speedup from IPPD depends strongly on the number of questions sharing a con-text. With one question per context, shared-context parallelism is absent, and IPPD provides little or no benefit beyond that obtained by stacking distinct contexts in one prompt. Its speedup then grows rapidly with the question count and is generally largest at 32 questions per context. PC+PA pro-vides a substantial initial gain at one question per context, but scales more slowly as additional ques-tions are added. Consequently, IPPD overtakes PC+PA in an increasing number of model–dataset settings. LongHealth is the main exception. Its contexts are extremely long and its answers con-tain only one token, leaving no iterative decode phase. PC+PA is therefore consistently faster than IPPD by a broadly similar factor as the question count increases. We attribute much of this differ-ence to the efficient FlashAttention kernels used by Model Questions / context 1 2 4 8 16 32 PC+PA IPPD PC+PA IPPD PC+PA IPPD PC+PA IPPD PC+PA IPPD PC+PA IPPD 
+
+NarrativeQA (5s) 
+
+Qwen3-32B 5.09 × 1.52 × 5.72 × 2.63 × 6.73 × 4.34 × 7.93 × 7.20 × 10.81 × 12.28 × 15.76 × 18.91 ×
+
+OLMo-2-32B – – – – – – – – – – – –Phi-4-14B 6.50 × 1.57 × 7.07 × 2.74 × 8.38 × 5.02 × 9.77 × 8.84 × 12.33 × 15.60 × 16.60 × 23.98 ×
+
+Qwen3-8B 5.08 × 1.55 × 5.17 × 2.77 × 5.67 × 5.11 × 6.71 × 8.83 × 7.95 × 14.01 × 11.51 × 20.59 ×
+
+Qwen3-4B-Instr. 5.70 × 1.26 × 6.01 × 2.21 × 6.43 × 3.90 × 7.57 × 6.51 × 9.19 × 10.64 × 12.53 × 15.86 ×
+
+Qwen3-1.7B 5.90 × 1.19 × 5.99 × 2.12 × 6.43 × 3.56 × 7.46 × 6.10 × 8.56 × 9.44 × 11.51 × 13.97 ×
+
+SQuAD 2.0 
+
+Qwen3-32B 4.11 × 1.10 × 4.27 × 1.83 × 4.41 × 3.15 × 4.56 × 4.94 × 4.62 × 5.61 × 4.77 × 6.04 ×
+
+OLMo-2-32B 4.09 × 1.23 × 4.08 × 1.86 × 4.00 × 3.16 × 3.96 × 4.03 × 3.83 × 5.84 × 3.77 × 6.17 ×
+
+Phi-4-14B 5.24 × 1.18 × 5.32 × 2.10 × 5.31 × 3.60 × 5.48 × 5.95 × 5.69 × 8.49 × 6.20 × 9.70 ×
+
+Qwen3-8B 4.18 × 1.17 × 4.22 × 1.85 × 4.18 × 2.97 × 4.06 × 4.29 × 4.16 × 5.46 × 4.28 × 5.50 ×
+
+Qwen3-4B-Instr. 5.80 × 1.11 × 6.11 × 1.96 × 5.76 × 3.13 × 5.99 × 4.88 × 5.84 × 6.21 × 6.10 × 6.59 ×
+
+Qwen3-1.7B 6.91 × 1.07 × 6.67 × 1.73 × 6.61 × 2.73 × 6.69 × 4.30 × 6.37 × 5.54 × 6.57 × 6.07 ×
+
+RACE 
+
+Qwen3-32B 1.56 × 1.05 × 1.50 × 1.80 × 1.49 × 2.77 × 1.52 × 3.90 × 1.79 × 4.63 × 1.97 × 4.84 ×
+
+OLMo-2-32B 1.55 × 1.08 × 1.50 × 1.83 × 1.51 × 2.94 × 1.55 × 4.16 × 1.78 × 5.19 × 1.93 × 5.28 ×
+
+Phi-4-14B 1.58 × 1.05 × 1.53 × 1.76 × 1.51 × 2.82 × 1.53 × 3.97 × 1.83 × 5.07 × 1.96 × 5.35 ×
+
+Qwen3-8B 1.59 × 1.03 × 1.51 × 1.69 × 1.49 × 2.58 × 1.48 × 3.35 × 1.75 × 3.97 × 1.93 × 4.04 ×
+
+Qwen3-4B-Instr. 1.71 × 1.00 × 1.61 × 1.65 × 1.53 × 2.42 × 1.55 × 3.25 × 1.84 × 3.81 × 1.93 × 3.70 ×
+
+Qwen3-1.7B 1.95 × 0.94 × 1.79 × 1.54 × 1.72 × 2.29 × 1.72 × 3.08 × 2.03 × 3.71 × 2.19 × 3.70 ×
+
+LongHealth 
+
+Qwen3-32B 0.97 × 0.58 × 1.92 × 1.16 × 3.71 × 2.23 × 7.16 × 4.30 × 12.80 × 7.81 × 21.81 × 13.13 ×
+
+OLMo-2-32B – – – – – – – – – – – –Phi-4-14B 1.06 × 0.65 × 1.95 × 1.20 × 3.74 × 2.34 × 7.15 × 4.41 × 12.91 × 7.98 × 21.53 × 13.68 ×
+
+Qwen3-8B 1.13 × 0.58 × 2.03 × 1.06 × 3.92 × 2.00 × 6.92 × 3.75 × 12.47 × 6.83 × 20.02 × 11.44 ×
+
+Qwen3-4B-Instr. 1.21 × 0.51 × 2.06 × 0.89 × 3.72 × 1.68 × 6.83 × 3.16 × 11.86 × 5.64 × 18.48 × 9.31 ×
+
+Qwen3-1.7B 1.48 × 0.58 × 2.33 × 0.90 × 4.05 × 1.65 × 6.76 × 2.95 × 10.56 × 5.12 × 15.80 × 8.63 ×
+
+Total wins 22 0 17 5 16 6 11 11 6 16 6 16 
+
+Table 8: Questions-per-context ablation across datasets and models. Values are throughput speedups relative to batched autoregressive inference (higher is better). The better method for each model and column is in bold , and dashes denote configurations that exceed the model’s maximum sequence length. 
+
+the PC+PA backend, whereas IPPD uses standard scaled dot-product attention (SDPA) to support its custom attention mask. 
+
+D.2.2 Context Length Ablation Purpose and methodology. This ablation eval-uates how increasing the shared-context length af-fects the relative throughput of IPPD and PC+PA. We exclude LongHealth due to its existing long context. For the remaining three datasets, we re-tain each example’s questions and construct nested context variants by concatenating contexts sampled from other randomly drawn examples, producing context-length factors of 1×, 2×, 4×, and 8× on average. We rerun all three inference methods for each variant and report speedup relative to standard batched autoregressive inference in Table 9. The remaining setup follows Section B.3. 
+
+Results. Increasing context length generally re-duces IPPD’s speedup relative to autoregressive inference, although the trend is not monotonic for every model. As the context grows, a larger fraction of inference time is spent in the FLOP-intensive prefill phase, reducing the relative benefit of IPPD’s memory-access savings. Even at 8× context length, however, IPPD retains substantial speedups on Nar-rativeQA, SQuAD 2.0, and RACE. It outperforms PC+PA in 12 of the 16 supported model–dataset comparisons at this context length, demonstrating that its benefit persists well beyond the original context-length distribution. Model Context length 1× 2× 4× 8×
+
+PC+PA IPPD PC+PA IPPD PC+PA IPPD PC+PA IPPD 
+
+NarrativeQA (5s) 
+
+Qwen3-32B 15.97 × 18.25 × 20.50 × 17.73 × 20.74 × 13.44 × 18.74 × 12.91 ×
+
+OLMo-2-32B 14.39 × 22.07 × – – – – – –Phi-4-14B 16.05 × 23.16 × 21.46 × 18.85 × – – – –Qwen3-8B 10.91 × 19.72 × 13.54 × 16.66 × 12.02 × 14.39 × 12.10 × 13.55 ×
+
+Qwen3-4B-Instr. 12.13 × 15.02 × 15.07 × 13.08 × 13.83 × 10.76 × 12.73 × 9.14 ×
+
+Qwen3-1.7B 11.02 × 13.35 × 12.56 × 11.78 × 11.58 × 10.21 × 10.43 × 8.34 ×
+
+SQuAD 2.0 
+
+Qwen3-32B 4.64 × 4.86 × 3.52 × 4.77 × 3.56 × 4.76 × 3.99 × 3.54 ×
+
+OLMo-2-32B 3.87 × 4.51 × 3.02 × 5.07 × 2.81 × 5.17 × 3.11 × 4.13 ×
+
+Phi-4-14B 5.52 × 6.69 × 4.03 × 6.55 × 4.03 × 7.33 × 5.05 × 8.06 ×
+
+Qwen3-8B 4.12 × 4.66 × 3.14 × 4.55 × 2.86 × 4.38 × 2.98 × 4.31 ×
+
+Qwen3-4B-Instr. 5.83 × 5.18 × 4.34 × 5.17 × 3.57 × 4.57 × 3.44 × 4.02 ×
+
+Qwen3-1.7B 6.64 × 4.61 × 4.70 × 4.48 × 3.77 × 4.25 × 3.24 × 3.78 ×
+
+RACE 
+
+Qwen3-32B 1.50 × 2.54 × 1.37 × 2.68 × 1.32 × 2.55 × 1.36 × 2.28 ×
+
+OLMo-2-32B 1.50 × 2.63 × 1.34 × 2.80 × 1.29 × 2.71 × 1.35 × 2.78 ×
+
+Phi-4-14B 1.54 × 2.62 × 1.36 × 2.70 × 1.33 × 2.64 × 1.36 × 2.40 ×
+
+Qwen3-8B 1.49 × 2.34 × 1.40 × 2.46 × 1.38 × 2.41 × 1.42 × 2.12 ×
+
+Qwen3-4B-Instr. 1.57 × 2.25 × 1.44 × 2.30 × 1.41 × 2.17 × 1.40 × 1.81 ×
+
+Qwen3-1.7B 1.72 × 2.10 × 1.51 × 2.18 × 1.41 × 2.10 × 1.36 × 1.78 ×
+
+Total wins 2 16 5 12 3 13 4 12 
+
+Table 9: Context-length ablation across datasets and models. Values are throughput speedups relative to batched autoregressive inference (higher is better). The better method for each model and column is in bold , and dashes denote configurations that exceed the model’s maximum sequence length.
