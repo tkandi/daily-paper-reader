@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-11</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-12</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 15 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-11 19:19:38 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-12 19:21:13 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选16篇AI系统论文，聚焦可验证机器学习栈、训练能耗弹性与推理并行。</p>
-<p>最值得关注的是 Numbat 对自包含 ML 栈的构建与验证，以及 AI 训练任务如何按电力供给灵活调度。</p>
-<p>普通读者可先精读这两篇，再速览上下文内并行解码与 AI 数据中心基础设施优化。</p>
+<p>今日完成15篇论文筛选与分层阅读：精读4篇、速读11篇，聚焦大模型服务、联邦学习与边缘系统。</p>
+<p>最值得关注的方向是《Composable CXL Memory》带来的Kubernetes原生共享内存，以及非相干空中联邦学习的协议与设备调度。</p>
+<p>建议普通读者先精读这两篇，再按兴趣速读个性化查询理解、稀疏注意力和边缘数据集蒸馏方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Numbat: Building and Verifying a Self-Contained Machine-Learning Stack">Numbat: Building and Verifying a Self-Contained Machine-Learning Stack</span></li><li><span class="dpr-home-dashboard-paper-title" title="Characterizing Job Power Elasticity for Power-Flexible AI Training">Characterizing Job Power Elasticity for Power-Flexible AI Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Entwine: Coordinating Tiled Computation and Fine-Grained Communication across GPUs">Entwine: Coordinating Tiled Computation and Fine-Grained Communication across GPUs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Composable CXL Memory as a Kubernetes-Native Shared Memory for LLM Serving">Composable CXL Memory as a Kubernetes-Native Shared Memory for LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Non-Coherent Over-the-Air Federated Learning: Protocol, Convergence, and Device Scheduling">Non-Coherent Over-the-Air Federated Learning: Protocol, Convergence, and Device Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="PASCAL: A Phase-Aware Shared-Cache Model for Parallel Scans">PASCAL: A Phase-Aware Shared-Cache Model for Parallel Scans</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Intra-Prompt Parallel Decoding for Common-Context Question Answering">Intra-Prompt Parallel Decoding for Common-Context Question Answering</span></li><li><span class="dpr-home-dashboard-paper-title" title="The OCUDU dApp Platform: An Open Runtime and E3 Interface for Real-Time AI-RAN">The OCUDU dApp Platform: An Open Runtime and E3 Interface for Real-Time AI-RAN</span></li><li><span class="dpr-home-dashboard-paper-title" title="AI for AI: Optimizing Additional Infrastructure Build-out to Power Artificial Intelligence Data Centers">AI for AI: Optimizing Additional Infrastructure Build-out to Power Artificial Intelligence Data Centers</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RegionFed: Federated Learning for Personalized Query Understanding in Heterogeneous Retail Environments">RegionFed: Federated Learning for Personalized Query Understanding in Heterogeneous Retail Environments</span></li><li><span class="dpr-home-dashboard-paper-title" title="RouteRelay: Event-Triggered Cross-Layer Route Reuse for Efficient Dynamic Sparse Attention">RouteRelay: Event-Triggered Cross-Layer Route Reuse for Efficient Dynamic Sparse Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="CEDD-optimizer: Enabling Cost-Efficient Dataset Distillation on Geographically Distributed Edge Systems">CEDD-optimizer: Enabling Cost-Efficient Dataset Distillation on Geographically Distributed Edge Systems</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
