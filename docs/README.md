@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-13</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-14</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-13 21:28:29 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-14 19:23:03 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成 8 篇论文速读，涵盖个性化联邦学习、GPU 内核安全与分布式鲁棒优化。</p>
-<p>最值得关注的是地理正则化驱动的个性化联邦学习，以及 Tensor Core 位级行为的重构、编译器约束与静态验证。</p>
-<p>建议普通读者先从联邦学习方向入手，了解数据不出本地时如何提升个性化效果，再按兴趣延伸至 GPU 安全。</p>
+<p>今日完成13篇论文速览，精选2篇精读，聚焦大模型推理系统与硬件优化。</p>
+<p>最值得关注的是：用NVMe SSD做vLLM外部KV缓存，以及用消费级PIM支持生产级大模型服务。</p>
+<p>建议普通读者先读这两篇，重点了解存储与内存优化如何影响大模型服务效率和成本。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Building py-kvcache: A Performance Characterization of External KV Caching for vLLM with NVMe SSDs">Building py-kvcache: A Performance Characterization of External KV Caching for vLLM with NVMe SSDs</span></li><li><span class="dpr-home-dashboard-paper-title" title="PATTON: Enabling Commodity PIM for Production LLM Serving">PATTON: Enabling Commodity PIM for Production LLM Serving</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -93,12 +93,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Geographically Regularized AUC-Maximizing Personalized Federated Learning">Geographically Regularized AUC-Maximizing Personalized Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Taming Bitwise Behavior in GPU Kernels with Tensor Core: Black-Box Reconstruction, Compiler Enforcement, and Static Verification">Taming Bitwise Behavior in GPU Kernels with Tensor Core: Black-Box Reconstruction, Compiler Enforcement, and Static Verification</span></li><li><span class="dpr-home-dashboard-paper-title" title="Generalization Analysis of Distributed Kernel-based Robust Gradient Descent Algorithms">Generalization Analysis of Distributed Kernel-based Robust Gradient Descent Algorithms</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Hyperparameter Scaling Laws Across MoE Sparsity">Hyperparameter Scaling Laws Across MoE Sparsity</span></li><li><span class="dpr-home-dashboard-paper-title" title="Communication-efficient ADMM over Hierarchical Networks">Communication-efficient ADMM over Hierarchical Networks</span></li><li><span class="dpr-home-dashboard-paper-title" title="Cascading Gradient Inversion via LT-Code Inspired Peeling in Federated Learning">Cascading Gradient Inversion via LT-Code Inspired Peeling in Federated Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>8</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 
