@@ -1,0 +1,276 @@
+Title: Zero-I/O Fault Recovery for Sharded Deep Learning via Dynamic Framework Dependency Rebinding
+
+URL Source: https://arxiv.org/pdf/2609.18178v1
+
+Published Time: Thu, 17 Sep 2026 00:39:54 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# Zero-I/O Fault Recovery for Sharded Deep Learning via Dynamic Framework Dependency Rebinding 
+
+Genlang Chen *
+
+NingboTech University cgl@zju.edu.cn 
+
+Junyi Zhu 
+
+Dalian Ocean University junyizhu.cs@gmail.com 
+
+Abstract —Distributed model training at scale is frequently interrupted by transient network and communicator failures, which conventionally force cluster managers to abort all pro-cesses and roll back to the latest durable checkpoint. While periodic checkpointing provides durability, frequent snapshotting introduces severe storage backpressure: our measurements on a 1.216B-parameter decoder reveal that per-update asynchronous checkpointing degrades training throughput by up to +656.7%, consumes 32.5 GiB of host memory, and generates 3.39 TB/hour of storage traffic. To eliminate this overhead, we present AccelPact, a parallel runtime system that enables zero-I/O in-memory fault recovery for sharded distributed training. We observe that when communication fails at a committed optimizer step, computational progress in device memory remains quiescent and uncorrupted; nevertheless, standard continuation crashes because frameworks like PyTorch Fully Sharded Data Parallel (FSDP) aggressively cache internal communication handles across module wrappers and parameter hierarchies. AccelPact resolves this dependency invalidation by introducing a non-invasive reference-rebinding mechanism coordinated by an out-of-band Gloo cohort consensus protocol. On 16 NVIDIA RTX 5880 GPUs training full-parameter Mistral-7B, AccelPact eliminates checkpoint replay entirely, yield-ing a 1.197 × whole-run goodput improvement over cold restart and 1.194 × over NVRx checkpoint restoration at checkpoint age 5, rising to 1.698 × at age 18. Over ten successive fault injections, all 16 ranks maintain bit-identical parameter and optimizer state with zero numerical drift. Across 4-to-16 GPU cluster topologies, reference rebinding executes in constant time (0.493–0.518 ms). By operating directly on native C++ communicator instances rather than wrapper abstractions, AccelPact requires zero application-code modifications and guarantees zero graph breaks under 
+
+torch.compile , offering an efficient foundation for resilient large-scale deep learning. 
+
+Index Terms —Distributed Deep Learning, Fault Tolerance, Parallel Runtime Systems, FSDP, Communicator Recovery, State Preservation. 
+
+I. I NTRODUCTION 
+
+Large language models (LLMs) require weeks to months of continuous distributed execution across thousands of acceler-ators [1], [2]. At this scale, communication hangs, transport timeouts, and physical link degradation are inevitable. Meta’s 54-day operational study of 16,384 H100 GPUs during Llama 3 pre-training recorded 419 unexpected interruptions, with network switches, cables, NICs, and NCCL watchdog timeouts accounting for dozens of service disruptions [2]. When a collective communication failure occurs, production orchestrators typically default to an all-or-nothing rollback :
+
+> *
+
+Corresponding author: Genlang Chen (cgl@zju.edu.cn). 
+
+the cluster supervisor terminates all worker processes and relaunches training from the latest durable checkpoint stored on persistent media [3], [4]. While durable checkpoints are essential for unrecoverable hardware crashes, applying coarse-grained restart to transient communication faults discards multi-gigabytes of valid, uncorrupted device state—model parameters, AdamW optimizer moments, RNG states, and dataset token cursors. Workers are then forced to repeat up to dozens of minutes of redundant computation to replay already-completed updates. This practice is driven by a subtle dependency dilemma in modern deep learning frameworks. In PyTorch Fully Sharded Data Parallel (FSDP1) [5], model weights and optimizer states are partitioned across ranks, with communication multiplexed across intra-node sharding groups and inter-node replication groups (Hybrid Sharded Data Parallel, or HSDP). When an inter-node collective times out, destroying the faulty communi-cator and initializing a replacement group succeeds; however, subsequent backward propagation crashes immediately with backend abort exceptions. The failure occurs because FSDP internal components—including layer module wrappers, flat-parameter handles, and execution records—aggressively cache references to the original process group. Simply creating a new communicator leaves these internal framework pointers attached to the retired backend. In this work, we present AccelPact, a parallel runtime system that qualifies execution contexts for in-memory state preservation and dynamically repairs framework dependencies without checkpoint replay. AccelPact targets communication failures occurring at quiescent optimizer boundaries, where parameter and moment updates have committed, flat-parameter gradients are zeroed, and device streams are synchronized. At this boundary, AccelPact coordinates a six-phase distributed state machine over an out-of-band Gloo control plane, re-places the failed communicator, and dynamically rebinds all 
+
+L + 1 cached references across FSDP submodules, resuming execution from the committed frontier with zero replay. Any observation falling outside the qualified envelope—such as in-flight operator failures during forward compute or gradient reduction—strictly triggers a fail-stop safe-rejection contract, cleanly delegating to supervisor checkpoint restart to guarantee numerical correctness. This paper makes four main contributions: 1) Framework Dependency Diagnosis & Non-Invasive Re-arXiv:2609.18178v1 [cs.DC] 16 Sep 2026 binding : We uncover the dependency caching problem in PyTorch FSDP hybrid sharding, where L + 1 in-ternal process-group references prevent communicator replacement. We design a dynamic rebinding adapter that updates these references in-situ without modifying user training scripts or breaking compiler symbolic graph capture ( torch.compile ). 2) Distributed Agreement Protocol & Admission Control :We design a six-phase distributed recovery state machine with out-of-band Gloo coordination, monotonic genera-tion fencing, and fail-stop safe-rejection semantics that guarantees cohort-wide agreement before release, backed by an analytical break-even model. 3) Empirical Characterization of Checkpoint Storage Back-pressure : In a dedicated microbenchmark on a 1.216B model, we demonstrate that per-update asynchronous checkpointing incurs up to a +656.7% latency overhead, 32.5 GiB host memory pressure, and 3.39 TB/hour of write traffic, refuting the assumption that high-frequency checkpointing can replace in-memory state preservation. 4) Cluster Evaluation on Mistral-7B : Across 16 NVIDIA RTX 5880 GPUs training full-parameter Mistral-7B, Ac-celPact improves goodput by 1.197 × over cold restart and 1.194 × over NVRx checkpoint restoration at checkpoint age 5, rising to 1.698 × at age 18. All ranks maintain bit-identical parameter state across ten successive repairs with zero numerical drift. II. B ACKGROUND AND MOTIVATION 
+
+A. Distributed Sharded Training and FSDP 
+
+To train models exceeding single-GPU memory capacity, ZeRO [6] and FSDP [5] shard model parameters, gradients, and optimizer states across worker devices. Under Hybrid Sharded Data Parallel (HSDP), GPUs within a physical node form an intra-node sharding group, while corresponding local ranks across different nodes form an inter-node replication group. During forward execution, FSDP all-gathers parameter shards within the node. In backward execution, gradients are reduced and scattered locally, followed by an inter-node all-reduce across replication groups to synchronize parameter updates. When an inter-node replication collective fails, repairing the communication layer requires replacing the failed communi-cator while keeping model parameters and optimizer states intact in device memory. However, FSDP module wrappers cache the replication group in internal attributes (such as 
+
+_inter_node_pg ). For a model with L transformer layers and a root wrapper, exactly L + 1 cached references must be redirected on each affected rank. Omitting this rebinding causes subsequent backward passes to dispatch collectives to the retired communicator handle, crashing with DistBackendError: NCCL communicator was aborted .
+
+B. The Storage Backpressure of Frequent Checkpointing 
+
+A common alternative proposal is to checkpoint frequently (e.g., every update) using asynchronous Distributed Check-pointing (DCP) to minimize replay distance. To evaluate the TABLE I: DCP checkpointing overhead on 1.216B decoder across four GPUs (per-update checkpointing, local NVMe).                                          
+
+> Configuration s/step Overhead Fwd/Bwd PSS TB/h
+> Training only 1.024 ——9.07 0.00 Synchronous 9.960 +870.8 +5.46 17.99 2.64 Async thread 11.734 +1043.5 +240.75 31.48 2.30 Async process 12.212 +1090.2 +240.48 29.60 2.17 Async process, cached 7.747 +656.7 +17.96 32.52 3.39 Start at committed F: parameters, AdamW state, RNG, cursor
+> (a) Communicator-only repair
+> gg0
+> Replace Retired Probe passes
+> No rebind
+> FSDP wrappers cached group = g
+> 33 stale refs
+> Update F+ 1
+> aborts
+> Synchronized backward
+> (b) RePact reference repair
+> gg0
+> Replace Retired Probe passes
+> Rebind
+> FSDP wrappers cached group = g0
+> 33 redirected refs
+> Update F+ 1
+> commits
+> No replay
+
+Fig. 1: Contrast between communicator-only replacement and AccelPact reference rebinding. Replacing the communicator alone passes isolated group probes, but crashes in synchronized backward on 33 stale FSDP references. AccelPact dynamically redirects these references to resume training from frontier F
+
+with zero replay. feasibility of this strategy, we conducted a microbenchmark training a 1,216,448,512-parameter causal decoder across four NVIDIA RTX 5880 GPUs using PyTorch 2.11.0 and native DCP with local NVMe storage (Table I). As shown in Table I, baseline training alone requires 1.024 s per update. Synchronous checkpointing increases step latency to 9.960 s (+870.8%). Standard asynchronous staging via background threads or processes exacerbates the stall (+1043.5% and +1090.2%) due to thread scheduling contention and host memory copying overhead (+240% forward/backward increase). Even native cached-process staging incurs a +656.7% latency overhead (7.747 s/step), increases forward/backward compute by 17.96%, elevates host Proportional Set Size (PSS) from 9.07 to 32.52 GiB, and generates 3.39 TB/hour of write traffic. Furthermore, completed snapshots consistently lag execution by two full updates, meaning failures still require replaying two updates. Extrapolating this to our 16-GPU Mistral-7B workload, sav-ing per-rank state (10.9 GB, or 43.6 GB/node) over local NVMe (1.70 GB/s write bandwidth) requires ≈ 25 .6 s per update, imposing an +11 .6% continuous I/O penalty. These empirical results prove that frequent checkpointing cannot replace in-memory state preservation on high-throughput workloads. 
+
+C. Cross-Stack Driver Watchdog Divergence 
+
+State recoverability also depends on accelerator driver behavior. We evaluated in-process communicator destruction and recreation across two hardware stacks: NVIDIA A100 TABLE II: Cross-stack recovery policy matrix across accelera-tor platforms (4 DDP trials per cell; L1: in-memory preserve, 
+
+L2: checkpoint restart).                                         
+
+> Stack Policy Action Valid Replayed Updates
+> A100 No recovery —0/4 —A100 Always L1L14/4 0A100 Always L2L24/4 32 A100 Qualified L14/4 0910B No recovery —0/4 —910B Always L1L10/4 —910B Always L2L24/4 32 910B Qualified L24/4 32
+
+(CUDA 12.1 / NCCL 2.21.5) and Huawei Ascend 910B (CANN 9.1.0 / HCCL 9.1.0) under identical two-rank DDP setups. After an incomplete collective timeout, calling 
+
+destroy_process_group() followed by 
+
+init_process_group() succeeds cleanly on NVIDIA A100 across five fresh pairs, allowing workers to execute 128 subsequent collective epochs without replay. In contrast, on Ascend 910B, driver task queues retain pending work items from the aborted collective, triggering a hardware watchdog timeout that kills the process before recreation finishes. However, on recurrent computational graph workloads, this relationship inverts: Ascend’s driver admits graph re-execution while A100 requires a clean process restart. This proves that recovery qualification is not a static hardware attribute, but an empirical contract between the execution context and the recovery action. III. A CCEL PACT ARCHITECTURE 
+
+A. State Model and Qualification Contract 
+
+AccelPact models distributed training state as a composition of computational state Sapp and runtime resources Sruntime :
+
+S = ⟨S app , Sruntime ⟩, (1) 
+
+Sapp = {W, M, V, SRNG , κ, F, τ opt }, (2) 
+
+Sruntime = {G comm , Σstream , Rref }. (3) Here, W denotes sharded model weights, M and V are AdamW first and second moments, SRNG is device and CPU random state, κ is the dataset token cursor, F is the committed optimizer frontier index, and τopt is the optimizer step counter. Runtime resources include the active communicator Gcomm , CUDA streams Σstream , and framework references Rref .Recovery decisions are mediated by an observation key 
+
+K = ⟨p, r, ϕ, o ⟩, where p is the platform stack, r is the resource profile, ϕ is the failure phase, and o is the continuation objective. An envelope entry associates K with qualified recovery actions:  
+
+> •
+
+Preserve (L1): Applicable when failure occurs at a committed optimizer boundary ( ϕ = committed). Workers retain Sapp in device memory, destroy and rebuild Gcomm ,rebind Rref , and resume from frontier F with zero replay.  
+
+> •
+
+Restart ( L2): Triggered when failure occurs during un-committed compute ( ϕ ∈ { forward , backward }). Workers strictly issue a fail-stop rejection, delegating to the cluster supervisor to reload checkpoint C and replay A = F − C
+
+updates. 
+
+B. Break-Even Sensitivity Analysis 
+
+To quantify the operational value of in-memory recovery, we formulate the net cluster time saved ∆T over a training campaign of baseline duration T0:
+
+∆T = Neligible · S − Nother · C − h · T0, (4) where Neligible is the number of communication failures occurring at committed boundaries; S = A · tupdate − Trepair 
+
+is the time saved per eligible recovery event; Nother is the number of uncommitted failures; C = Tdetect + Treject is the safe rejection overhead ( C < 0.1 s); and h is the fractional runtime overhead of boundary guards. For a 24-hour training run ( T0 = 86 , 400 s), setting h =0.002 (0.2% , matching our measured 16-GPU guard overhead of +0 .200% and −0.412% ) incurs a daily monitoring cost of h · T0 ≈ 172 .8 s. With checkpoint age A = 5 and update duration tupdate = 220 s, each in-memory recovery saves S =5×220 −0.77 ≈ 1, 099 .2 s. Thus, just one eligible failure every 6.3 days (1, 099 .2/172 .8) offsets continuous guard monitoring across the cluster. Grounded in Meta’s Llama 3 405B training logs [2] (7.76 interruptions/day, with network and NCCL watchdog issues ac-counting for 0.916 events/day): if 2% of interruptions coincide with committed boundaries ( 0.155 events/day, or one incident every 6.45 days), daily replay savings ( 0.155 × 1, 099 .2 = 170 .4 s/day) approximately offsets ( 98 .6% ) continuous mon-itoring cost ( 172 .8 s/day). If 10% of failures coincide with boundary collectives ( 0.776 events/day), AccelPact achieves a gross saving of 852 .9 s/day and a net saving of 680 .2 s/day (≈ 3.9× daily monitoring cost). 
+
+C. Distributed Recovery Protocol 
+
+Recovery is governed by a six-phase distributed state machine across the full cluster W (|W | = 16 ) and the affected replication subgroup R ⊂ W (|R| = 4 ): 1) Observe : Workers detect an incomplete collective timeout at a committed boundary. Under 
+
+TORCH_NCCL_BLOCKING_WAIT=1 , PyTorch invokes 
+
+ncclCommAbort() and raises an exception in the main thread. 2) Guard Check & Stream Sync : Workers exe-cute torch.cuda.synchronize() to flush device queues, verifying all FSDP modules are IDLE with zero outstanding gradients. 3) Control Barrier & Frontier Agreement : All ranks in W
+
+synchronize over an out-of-band Gloo TCP channel. Rank 0 broadcasts committed frontier index F and generation counter g. Ranks assert exact agreement on F ; any mismatch aborts immediately. 4) Communicator Replacement : Ranks in R destroy the retired communicator and initialize a replacement with identical rank membership over the control plane. 5) Reference Rebinding : Ranks in R traverse the local FSDP module hierarchy, updating all L + 1 cached process-group references to point to the replacement communicator. 6) Validation Barrier & Release : Ranks in R execute an integer all-reduce on the new communicator to verify hardware readiness. Upon success, all ranks in 
+
+W synchronize on a Gloo release barrier and resume training. 
+
+a) Safety Invariant: If any worker encounters an exception or timeout during phases 2–6, it terminates immediately. The Gloo control channel detects worker loss, causing all surviving peers to exit within bounded deadlines, cleanly delegating to supervisor checkpoint restart without split-brain execution. 
+
+D. The FSDP Reference Rebinding Invariant 
+
+Let OFSDP be the set of FSDP module wrappers, parameter handles, and execution metadata. Rebinding enforces the invariant: 
+
+∀r ∈ O FSDP , (r = gold =⇒ r ← gnew )
+
+∧ (r̸ = gold =⇒ r unchanged ). (5) On return, every inspected reference formerly naming gold 
+
+must name gnew , and no reference to gold may remain. In our 32-layer Mistral-7B setup, exactly 33 internal references (one per layer wrapper plus root) are dynamically redirected. IV. E VALUATION 
+
+We evaluate AccelPact on real hardware across eight core dimensions: (1) 16-GPU full-parameter Mistral-7B training goodput; (2) checkpoint-age sensitivity; (3) recovery breakdown scaling across topologies; (4) causal necessity of reference rebinding; (5) safe rejection of in-flight faults; (6) repeated lifecycle stability and numerical drift; (7) fault-free guard overhead; and (8) architectural trade-offs versus wrapper indirection ( torchft ). 
+
+A. Experimental Setup a) Testbeds: The primary 16-GPU testbed comprises four nodes, each equipped with four NVIDIA RTX 5880 Ada GPUs (48 GiB VRAM, driver 570.169), interconnected via 1 Gbps Ethernet (PyTorch 2.5.1, CUDA 12.1, NCCL 2.21.5). FSDP hybrid sharding uses 4-way intra-node sharding and 4-way inter-node replication. Cross-stack evaluations use a four-GPU NVIDIA A100 server and an eight-NPU Huawei Ascend 910B server. 
+
+b) Workloads: The macro workload trains all 7,248,023,552 parameters of Mistral-7B-v0.3 [7], [8] on WikiText-103 [9] using sequence length 512, microbatch 1, and 8 accumulation steps (65,536 tokens/update). Model parameters and AdamW moments use BF16 with activation checkpointing. An optimizer update takes ≈ 220 s. TABLE III: Whole-run training goodput on 16 GPUs (Mistral-7B, 25 updates, checkpoint at update 10, fault after update 15, 
+
+A = 5 ).                              
+
+> Whole Run (s) Fault-to-Frontier (s) Block AccelPact Cold NVRx AccelPact Cold NVRx
+> 15734.8 6925.7 6847.1 2367.5 3502.6 3466.1 25789.5 6855.5 6872.1 2394.4 3487.7 3458.9 35733.8 6861.7 6863.5 2356.7 3495.6 3474.6 0100 200 300 Useful tokens / s RePact NVRx + restore
+> 295.2 245.9
+> Whole-job goodput Paired median: 1.200 ×
+
+Fig. 2: Full-model goodput on 16 GPUs training Mistral-7B. (a) Whole-run token throughput; (b) Paired whole-run speedup ratios over cold restart and NVRx. 
+
+B. Full-Model Training on 16 GPUs 
+
+Table III and Figure 2 present whole-run results over 25 optimizer updates (1,638,400 tokens), with a checkpoint written at update 10 and an inter-node collective fault injected after update 15 ( A = 5 ). AccelPact achieves a paired median whole-run goodput speedup of 1.197 × over cold restart (range 1.184–1.208 ×,saving 18.8 minutes) and 1.194 × over NVRx (range 1.187– 1.197 ×, saving 18.5 minutes). Looking at the fault-to-frontier duration, AccelPact completes the window in ≈ 2, 367 s, compared to ≈ 3, 500 s for cold restart and ≈ 3, 466 s for NVRx (1.47 × faster). While cold restart and NVRx must reload check-point 10 and replay five 220-second updates, AccelPact’s sub-second repair (0.672–0.930 s across blocks) eliminates 1,100 seconds of redundant computation, immediately advancing to update 16. 
+
+C. Checkpoint-Age Sensitivity 
+
+To evaluate scaling with checkpoint age, we conducted a 12-job sweep across ages A ∈ { 3, 6, 12 , 18 } (Table IV and Figure 3). Because AccelPact eliminates replay, its fault-to-frontier duration remains constant at 20.99–21.11 minutes across all ages. In contrast, cold restart scales linearly from 32.65 minutes at A = 3 to 87.81 minutes at A = 18 . At A = 18 , AccelPact completes the recovery window 4.183 × faster than cold restart (saving 66.82 minutes per failure), delivering a whole-run speedup of 1.698 ×.
+
+D. Recovery Topology Scaling 
+
+To evaluate how AccelPact scales with cluster topology, we measured breakdown timings on a 32-layer causal decoder across 4 GPUs (2 nodes × 2 GPUs), 8 GPUs (4 nodes × 23 6 12 18 Checkpoint age (updates) 030 60 90 Fault-to-frontier (min) 
+
+RePact 
+
+Cold NVRx 
+
+(a) Core-adapter recovery 
+
+8 32 128 Checkpoint age (updates) 1.1 1.3 1.5 Paired goodput ratio 
+
+(b) Single-node goodput 
+
+vs. cold vs. NVRx  
+
+> One job per policy and age Six pairs; observed ranges
+
+Fig. 3: Checkpoint-age sensitivity on 16 GPUs. AccelPact’s fault-to-frontier duration remains flat ( ≈21 minutes), while restart paths scale linearly with checkpoint age A.TABLE IV: Checkpoint-age sensitivity on 16 GPUs (Mistral-7B, fault after update 20, target frontier at update 25).                                 
+
+> Whole Run (s) Fault-to-Frontier (s) Age AAccelPact Cold NVRx AccelPact Cold NVRx
+> 35772.6 6459.5 6441.5 1266.9 1958.8 1926.4 65758.2 7102.6 7076.9 1260.0 2620.4 2584.2 12 5737.6 8401.3 8398.3 1261.3 3931.0 3904.2 18 5742.0 9749.0 9708.6 1259.4 5268.5 5221.3
+
+TABLE V: Recovery-stage breakdown on small decoder across GPU topologies (slowest rank values in milliseconds, mean over 5 trials).                           
+
+> Scale Admit Retire NCCL Rebind Total
+> 4 ( 2×2)9.36 531.72 78.98 0.493 624.55 8 ( 4×2)15.34 542.45 124.18 0.517 686.72 16 ( 4×4)26.82 542.60 118.57 0.518 693.91
+
+GPUs), and 16 GPUs (4 nodes × 4 GPUs), conducting five trials per layout (Table V and Figure 4). Gloo admission scales from 9.36 ms (4 GPUs) to 26.82 ms (16 GPUs). Communicator retirement takes 531.72–542.60 ms to cleanly release driver resources. NCCL rebuild requires 78.98 ms (2-member) to 118.57–124.18 ms (4-member). Cru-cially, 33-reference rebinding remains strictly constant at 0.493– 0.518 ms across all scales ( 493 –518 μs), reflecting constant CPU-local pointer inspection at fixed 33-reference depth. Total repair remains sub-second (0.625–0.694 s). 
+
+E. Why FSDP References Must Be Rebound 
+
+To isolate the necessity of reference rebinding, we executed an ablation where group replacement succeeded and passed its integer collective check, but rebind_fsdp_states() 
+
+was skipped. During update 9, the first seven micro-batches completed under no_sync . At microbatch 8, syn-4 GPUs 2 × 2 8 GPUs 4 × 2 16 GPUs 4 × 4 0.0 0.2 0.4 0.6 0.8 Time (s) 
+
+> (a) Complete repair
+> 4 GPUs 2 × 2 8 GPUs 4 × 2 16 GPUs 4 × 4 0200 400 600 Time (μs)
+> (b) 33 reference updates
+
+Fig. 4: Recovery-stage scaling across topologies (4, 8, and 16 GPUs). Reference rebinding remains invariant at ≈0.5 ms, with sub-second total repair. chronized backward propagation invoked inter-node gra-dient reduction. Because the 33 internal references still named the retired communicator, execution crashed immedi-ately with DistBackendError: NCCL communicator was aborted . This causal ablation confirms that communi-cator reconstruction alone is insufficient; dynamic framework rebinding is mandatory for continuation. 
+
+F. Operator-Level Faults and Safe Rejection 
+
+We evaluated AccelPact under uncommitted in-flight operator failures on a 4-layer causal decoder across four GPUs: 
+
+In-Flight Collective Rejection: We injected communica-tion timeouts during forward all-gather and backward 
+
+reduce-scatter . Boundary guards detected active module state ( FORWARD / BACKWARD ) with non-zero unreduced gra-dients, strictly issuing reject_uncommitted_boundary .Workers terminated with non-zero exit codes, cleanly delegating to supervisor checkpoint reload from step 1 to 5, with all 8/8 rank state checks passing bitwise. 
+
+Post-Commit Metric Reduction: When a collective timeout was injected during post-commit loss logging across replication shards (with modules IDLE and gradients cleared), AccelPact TABLE VI: Quiescent resources across ten repairs (Mistral-7B, 16 GPUs).                   
+
+> Resource Before Faults After 10 Repairs
+> Torch allocated (GiB) 10.188 10.188 Torch reserved (GiB) 30.887 30.887 Driver GPU (GiB) 31.471 31.471 Host RSS (GiB) 1.533–1.577 1.536–1.647 Threads 23 23 File descriptors 112–117 112–117 Registered groups 33Owned groups 22
+
+TABLE VII: Single-node fast-guard overhead across hardware stacks.                
+
+> Cell Pairs Median 95% Interval
+> A100 / graph 20 1.895 [-3.48, 5.13] A100 / DDP 12 -1.339 [-2.96, 0.36] 910B / graph 20 0.507 [-0.62, 0.85] 910B / DDP 12 -0.612 [-5.56, 2.18]
+
+admitted L1 repair, rebuilt the communicator, rebound refer-ences, and resumed to step 5 without replay, passing all 4/4 state checks. 
+
+G. Repeated Lifecycle and Drift Verification 
+
+On 16 GPUs training Mistral-7B, we injected ten successive collective faults across 25 updates. All ten in-process repairs completed successfully (0.664–0.870 s per repair). GPU allo-cated memory remained rock-solid at 10.188 GiB, reserved memory remained at 30.887 GiB (Table VI), and all 16 ranks matched the uninterrupted reference at the final frontier with zero numerical difference. In an automatic-precision drift study on a 4-GPU 32-layer decoder (36 jobs, 12 matched triplets across 3 seeds), all 96 final rank tensor comparisons matched the uninterrupted reference bitwise ( L2 = 0 ). 
+
+H. Fault-Free Guard Overhead 
+
+As reported in Table VII, observed guard overhead medians range from −1.339% to 1.895% on single-node cells. On the 16-GPU workload, two native/guarded pairs of 60 updates showed measured paired effects of +0 .200% and −0.412% ,confirming that boundary checks impose negligible overhead on production steps. 
+
+I. Architectural Comparison with torchft 
+
+We contextualize AccelPact against upstream torchft [10] (Meta PyTorch), which targets in-process recovery via com-munication wrapper indirection rather than dynamic attribute rebinding (Table VIII). In an evaluation on 4 GPUs under PyTorch 2.11.0 + NCCL 2.28.9 with a 32-layer causal decoder, torchft ’s 
+
+ProcessGroupWrapper demonstrated successful reconfig-uration in 3/3 trials ( Trepair ≈ 0.71 s; resumed in 12.9 s; 
+
+L2 = 0). In contrast, AccelPact’s native hook prototype TABLE VIII: Architectural and engineering trade-offs between AccelPact and upstream torchft .            
+
+> Dimension / Feature AccelPact torchft
+> Validated faulted jobs 0/3 3/3 Reached repair dispatch 0/3 3/3 Mean repair (s) —0.682 Mean fault to next update (s) —12.896 Passed final rank checks —12/12
+
+encountered pre-repair Gloo timeouts under PyTorch 2.11’s exception handling, failing to enter repair dispatch (0/3). This highlights a fundamental systems trade-off: (1) Decoupling vs. Zero-Code Integration : torchft ’s wrapper indirection isolates application control flow from transport aborts on newer stacks, but requires intrusive changes ( ∼15–25 lines wrapping init_process_group and FSDP handles). Conversely, AccelPact attaches to stock FSDP via hooks with 
+
+zero code changes , though its exception capture couples to runtime semantics (validated across our 16-GPU PyTorch 2.5.1 campaigns). (2) Compiler Tracing : Under 
+
+torch.compile(mode="reduce-overhead") ,custom wrappers require functional collective registration to avoid TorchDynamo graph breaks. In contrast, AccelPact preserves native ProcessGroupNCCL C++ instances, enabling Dynamo to capture whole-graph collectives with 
+
+zero wrapper-induced graph breaks .V. R ELATED WORK 
+
+HPC Resilience & Communicator Recovery: User-Level Fault Mitigation (ULFM) [11] extended MPI with communi-cator revocation and shrink primitives to enable continuation without restart. Reinit++ [12] evaluated in-memory restart to eliminate redeployment. AccelPact builds on this transport/state separation, resolving the deep learning challenge where frame-works cache communication handles within sharded model states. 
+
+High-Performance Checkpointing: Scalable checkpointing systems like SCR [13] and VeloC [14] leverage hierarchical storage to mitigate I/O overhead. In deep learning, Check-Freq [3] pipelines snapshotting with compute, and Gemini [15] caches checkpoints in host memory. As shown in Section II-B, even asynchronous snapshots incur compute stalls and multi-terabyte traffic at high frequencies. AccelPact complements checkpointing with a zero-I/O fast path for boundary faults. 
+
+Distributed Deep Learning Fault Tolerance: Bamboo [16] uses redundant compute; Oobleck [17] reconfigures pipeline templates; Chameleon [18] searches execution plans; Re-CoVer [19] explores trajectory preservation under HSDP; 
+
+torchft [10] wraps process groups in indirection layers; NVRx [4] coordinates restart with checkpoint reload. AccelPact uniquely formalizes context qualification and resolves FSDP references without wrapper encapsulation. VI. L IMITATIONS AND DISCUSSION 
+
+While AccelPact delivers substantial goodput gains, we explicitly identify its boundary limitations: (1) Envelope Scope :AccelPact targets collective failures at committed boundaries; in-flight failures during uncommitted compute safely reject to supervisor checkpoint restart. Mid-step discard is left to future work. (2) Framework Specificity : Direct reference rebind-ing inspects internal FSDP1 attributes ( _inter_node_pg ,
+
+FlatParamHandle ). While verified across PyTorch 2.1– 2.11, future architectures (e.g., FSDP2/DTensor) require cor-responding adapter updates. (3) Failure Scope : AccelPact ad-dresses transient timeouts, hangs, and partitions; unrecoverable node crashes and GPU hardware ECC faults require process relaunch and checkpoint restoration. (4) Interconnect Context :While evaluated over 1 Gbps Ethernet, AccelPact’s advantage stems from eliminating A replayed steps, providing proportional savings on multi-gigabit fabrics. VII. C ONCLUSION 
+
+Transient communication failures do not corrupt committed training progress in device memory. AccelPact operationalizes this insight for sharded training by coupling context qualifi-cation with dynamic reference rebinding. By repairing L + 1 
+
+cached FSDP references in surviving processes, AccelPact eliminates checkpoint replay, delivering up to 1.698 × goodput improvement on 16 GPUs with zero numerical drift and sub-second recovery across cluster topologies. In microbenchmarks, AccelPact demonstrates that frequent checkpointing incurs severe backpressure on short-step workloads, establishing in-memory state preservation as an essential complement to periodic checkpointing. These results validate framework-aware state preservation as a practical foundation for resilient distributed deep learning. ACKNOWLEDGMENT 
+
+The authors disclose the use of AI-assisted language pol-ishing and automated validation scripting during manuscript preparation. All technical formulations, systems designs, experi-mental measurements, and final claims were authored, reviewed, and verified by the authors. REFERENCES [1] Z. Jiang, H. Lin, Y. Zhong, Q. Huang, Y. Chen, Z. Zhang, Y. Peng, X. Li, C. Xie, S. Nong, Y. Jia, S. He, H. Chen, Z. Bai, Q. Hou, S. Yan, D. Zhou, Y. Sheng, Z. Jiang, H. Xu, H. Wei, Z. Zhang, P. Nie, L. Zou, S. Zhao, L. Xiang, Z. Liu, Z. Li, X. Jia, J. Ye, X. Jin, and X. Liu, “MegaScale: Scaling large language model training to more than 10,000 GPUs,” in 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) , 2024, pp. 745–760. [Online]. Available: https://www.usenix.org/conference/nsdi24/presentation/jiang-ziheng [2] A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Vaughan, A. Yang, A. Fan, A. Goyal, A. Hartshorn, A. Yang, A. Mitra, A. Sravankumar, A. Korenev, A. Hinsvark, A. Rao, A. Zhang, A. Rodriguez, A. Gregerson, A. Spataru, B. Roziere, B. Biron, B. Tang, B. Chern, C. Caucheteux, C. Nayak, C. Bi, C. Marra, C. McConnell, C. Keller, C. Touret, C. Wu, C. Wong, C. C. Ferrer, C. Nikolaidis, D. Allonsius, D. Song, D. Pintz, D. Livshits, D. Wyatt, D. Esiobu, D. Choudhary, D. Mahajan, D. Garcia-Olano, D. Perino, D. Hupkes, E. Lakomkin, E. AlBadawy, E. Lobanova, E. Dinan, E. M. Smith, F. Radenovic, F. Guzm´ an, F. Zhang, G. Synnaeve, G. Lee, G. L. Anderson, G. Thattai, G. Nail, G. Mialon, G. Pang, G. Cucurell, H. Nguyen, H. Korevaar, H. Xu, H. Touvron, I. Zarov, I. A. Ibarra, I. Kloumann, I. Misra, I. Evtimov, J. Zhang, J. Copet, J. Lee, J. Geffert, J. Vranes, J. Park, J. Mahadeokar, J. Shah, J. van der Linde, J. Billock, J. Hong, J. Lee, J. Fu, J. Chi, J. Huang, J. Liu, J. Wang, J. Yu, J. Bitton, J. Spisak, J. Park, J. Rocca, J. Johnstun, J. Saxe, J. Jia, K. V. Alwala, K. Prasad, K. Upasani, K. Plawiak, K. Li, K. Heafield, K. Stone, K. El-Arini, K. Iyer, K. Malik, K. Chiu, K. Bhalla, K. Lakhotia, L. Rantala-Yeary, L. van der Maaten, L. Chen, L. Tan, L. Jenkins, L. Martin, L. Madaan, L. Malo, L. Blecher, L. Landzaat, L. de Oliveira, M. Muzzi, M. Pasupuleti, M. Singh, M. Paluri, M. Kardas, M. Tsimpoukelli, M. Oldham, M. Rita, M. Pavlova, M. Kambadur, M. Lewis, M. Si, M. K. Singh, M. Hassan, N. Goyal, N. Torabi, N. Bashlykov, N. Bogoychev, N. Chatterji, N. Zhang, O. Duchenne, O. C ¸ elebi, P. Alrassy, P. Zhang, P. Li, P. Vasic, P. Weng, P. Bhargava, P. Dubal, P. Krishnan, P. S. Koura, P. Xu, Q. He, Q. Dong, R. Srinivasan, R. Ganapathy, R. Calderer, R. S. Cabral, R. Stojnic, R. Raileanu, R. Maheswari, R. Girdhar, R. Patel, R. Sauvestre, R. Polidoro, R. Sumbaly, R. Taylor, R. Silva, R. Hou, R. Wang, S. Hosseini, S. Chennabasappa, S. Singh, S. Bell, S. S. Kim, S. Edunov, S. Nie, S. Narang, S. Raparthy, S. Shen, S. Wan, S. Bhosale, S. Zhang, S. Vandenhende, S. Batra, S. Whitman, S. Sootla, S. Collot, S. Gururangan, S. Borodinsky, T. Herman, T. Fowler, T. Sheasha, T. Georgiou, T. Scialom, T. Speckbacher, T. Mihaylov, T. Xiao, U. Karn, V. Goswami, V. Gupta, V. Ramanathan, V. Kerkez, V. Gonguet, V. Do, V. Vogeti, V. Albiero, V. Petrovic, W. Chu, W. Xiong, W. Fu, W. Meers, X. Martinet, X. Wang, X. Wang, X. E. Tan, X. Xia, X. Xie, X. Jia, X. Wang, Y. Goldschlag, Y. Gaur, Y. Babaei, Y. Wen, Y. Song, Y. Zhang, Y. Li, Y. Mao, Z. D. Coudert, Z. Yan, Z. Chen, Z. Papakipos, A. Singh, A. Srivastava, A. Jain, A. Kelsey, A. Shajnfeld, A. Gangidi, A. Victoria, A. Goldstand, A. Menon, A. Sharma, A. Boesenberg, A. Baevski, A. Feinstein, A. Kallet, A. Sangani, A. Teo, A. Yunus, A. Lupu, A. Alvarado, A. Caples, A. Gu, A. Ho, A. Poulton, A. Ryan, A. Ramchandani, A. Dong, A. Franco, A. Goyal, A. Saraf, A. Chowdhury, A. Gabriel, A. Bharambe, A. Eisenman, A. Yazdan, B. James, B. Maurer, B. Leonhardi, B. Huang, B. Loyd, B. D. Paola, B. Paranjape, B. Liu, B. Wu, B. Ni, B. Hancock, B. Wasti, B. Spence, B. Stojkovic, B. Gamido, B. Montalvo, C. Parker, C. Burton, C. Mejia, C. Liu, C. Wang, C. Kim, C. Zhou, C. Hu, C.-H. Chu, C. Cai, C. Tindal, C. Feichtenhofer, C. Gao, D. Civin, D. Beaty, D. Kreymer, D. Li, D. Adkins, D. Xu, D. Testuggine, D. David, D. Parikh, D. Liskovich, D. Foss, D. Wang, D. Le, D. Holland, E. Dowling, E. Jamil, E. Montgomery, E. Presani, E. Hahn, E. Wood, E.-T. Le, E. Brinkman, E. Arcaute, E. Dunbar, E. Smothers, F. Sun, F. Kreuk, F. Tian, F. Kokkinos, F. Ozgenel, F. Caggioni, F. Kanayet, F. Seide, G. M. Florez, G. Schwarz, G. Badeer, G. Swee, G. Halpern, G. Herman, G. Sizov, G. J. Zhang, G. Lakshminarayanan, H. Inan, H. Shojanazeri, H. Zou, H. Wang, H. Zha, H. Habeeb, H. Rudolph, H. Suk, H. Aspegren, H. Goldman, H. Zhan, I. Damlaj, I. Molybog, I. Tufanov, I. Leontiadis, I.-E. Veliche, I. Gat, J. Weissman, J. Geboski, J. Kohli, J. Lam, J. Asher, J.-B. Gaya, J. Marcus, J. Tang, J. Chan, J. Zhen, J. Reizenstein, J. Teboul, J. Zhong, J. Jin, J. Yang, J. Cummings, J. Carvill, J. Shepard, J. McPhie, J. Torres, J. Ginsburg, J. Wang, K. Wu, K. H. U, K. Saxena, K. Khandelwal, K. Zand, K. Matosich, K. Veeraraghavan, K. Michelena, K. Li, K. Jagadeesh, K. Huang, K. Chawla, K. Huang, L. Chen, L. Garg, L. A, L. Silva, L. Bell, L. Zhang, L. Guo, L. Yu, L. Moshkovich, L. Wehrstedt, M. Khabsa, M. Avalani, M. Bhatt, M. Mankus, M. Hasson, M. Lennie, M. Reso, M. Groshev, M. Naumov, M. Lathi, M. Keneally, M. Liu, M. L. Seltzer, M. Valko, M. Restrepo, M. Patel, M. Vyatskov, M. Samvelyan, M. Clark, M. Macey, M. Wang, M. J. Hermoso, M. Metanat, M. Rastegari, M. Bansal, N. Santhanam, N. Parks, N. White, N. Bawa, N. Singhal, N. Egebo, N. Usunier, N. Mehta, N. P. Laptev, N. Dong, N. Cheng, O. Chernoguz, O. Hart, O. Salpekar, O. Kalinli, P. Kent, P. Parekh, P. Saab, P. Balaji, P. Rittner, P. Bontrager, P. Roux, P. Dollar, P. Zvyagina, P. Ratanchandani, P. Yuvraj, Q. Liang, R. Alao, R. Rodriguez, R. Ayub, R. Murthy, R. Nayani, R. Mitra, R. Parthasarathy, R. Li, R. Hogan, R. Battey, R. Wang, R. Howes, R. Rinott, S. Mehta, S. Siby, S. J. Bondu, S. Datta, S. Chugh, S. Hunt, S. Dhillon, S. Sidorov, S. Pan, S. Mahajan, S. Verma, S. Yamamoto, S. Ramaswamy, S. Lindsay, S. Lindsay, S. Feng, S. Lin, S. C. Zha, S. Patil, S. Shankar, S. Zhang, S. Zhang, S. Wang, S. Agarwal, S. Sajuyigbe, S. Chintala, S. Max, S. Chen, S. Kehoe, S. Satterfield, S. Govindaprasad, S. Gupta, S. Deng, S. Cho, S. Virk, S. Subramanian, S. Choudhury, S. Goldman, T. Remez, T. Glaser, T. Best, T. Koehler, T. Robinson, T. Li, T. Zhang, T. Matthews, T. Chou, T. Shaked, V. Vontimitta, V. Ajayi, V. Montanez, V. Mohan, V. S. Kumar, V. Mangla, V. Ionescu, V. Poenaru, V. T. Mihailescu, V. Ivanov, W. Li, W. Wang, W. Jiang, W. Bouaziz, W. Constable, X. Tang, X. Wu, X. Wang, X. Wu, X. Gao, Y. Kleinman, Y. Chen, Y. Hu, Y. Jia, Y. Qi, Y. Li, Y. Zhang, Y. Zhang, Y. Adi, Y. Nam, Y. S. Wang, Y. Zhao, Y. Hao, Y. Qian, Y. Li, Y. He, Z. Rait, Z. DeVito, Z. Rosnbrick, Z. Wen, Z. Yang, Z. Zhao, and Z. Ma, “The Llama 3 herd of models,” 2024. [Online]. Available: https://arxiv.org/abs/2407.21783 [3] J. Mohan, A. Phanishayee, and V. Chidambaram, “CheckFreq: Frequent, fine-grained DNN checkpointing,” in 19th USENIX Conference on File and Storage Technologies (FAST 21) , 2021, pp. 203–216. [Online]. Available: https://www.usenix.org/conference/fast21/presentation/mohan [4] NVIDIA Resiliency Extension: In-process Restart Usage Guide ,NVIDIA, n.d., version 0.6.0; accessed 2026-09-12. [Online]. Available: https://github.com/NVIDIA/nvidia-resiliency-ext/blob/v0.6. 0/docs/source/inprocess/usage guide.rst [5] Y. Zhao, A. Gu, R. Varma, L. Luo, C.-C. Huang, M. Xu, L. Wright, H. Shojanazeri, M. Ott, S. Shleifer, A. Desmaison, C. Balioglu, P. Damania, B. Nguyen, G. Chauhan, Y. Hao, A. Mathews, and S. Li, “PyTorch FSDP: Experiences on scaling fully sharded data parallel,” 
+
+Proceedings of the VLDB Endowment , vol. 16, no. 12, pp. 3848–3860, 2023. [Online]. Available: https://doi.org/10.14778/3611540.3611569 [6] S. Rajbhandari, J. Rasley, O. Ruwase, and Y. He, “ZeRO: Memory optimizations toward training trillion parameter models,” in 
+
+SC20: International Conference for High Performance Computing, Networking, Storage and Analysis , 2020, pp. 1–16. [Online]. Available: https://doi.org/10.1109/SC41405.2020.00024 [7] A. Q. Jiang, A. Sablayrolles, A. Mensch, C. Bamford, D. S. Chaplot, D. de las Casas, F. Bressand, G. Lengyel, G. Lample, L. Saulnier, L. R. Lavaud, M.-A. Lachaux, P. Stock, T. L. Scao, T. Lavril, T. Wang, T. Lacroix, and W. E. Sayed, “Mistral 7B,” arXiv preprint arXiv:2310.06825 , 2023. [Online]. Available: https://arxiv.org/abs/2310.06825 [8] Mistral AI, “Mistral-7B-v0.3 model card,” 2024. [Online]. Available: https://huggingface.co/mistralai/Mistral-7B-v0.3 [9] Salesforce, “WikiText dataset,” n.d., dataset artifact, wikitext-103-raw-v1 training split; accessed 2026-09-09. [Online]. Available: https://huggingface.co/datasets/Salesforce/wikitext [10] Meta PyTorch, “torchft: PyTorch fault tolerance,” 2026, nightly 2026.9.10. API: https://meta-pytorch.org/torchft/process group.html; accessed 2026-09-12. [Online]. Available: https://pypi.org/project/ torchft-nightly/2026.9.10/ [11] W. Bland, A. Bouteiller, T. Herault, G. Bosilca, and J. Dongarra, “Post-failure recovery of MPI communication capability: Design and rationale,” International Journal of High Performance Computing Applications , vol. 27, no. 3, pp. 244–254, 2013. [Online]. Available: https://doi.org/10.1177/1094342013488238 [12] G. Georgakoudis, L. Guo, and I. Laguna, “Reinit++: Evaluating the performance of global-restart recovery methods for MPI fault tolerance,” in High Performance Computing – ISC High Performance 2020 , ser. Lecture Notes in Computer Science, vol. 12151. Springer, 2020, pp. 536– 554. [Online]. Available: https://doi.org/10.1007/978-3-030-50743-5 27 [13] A. Moody, G. Bronevetsky, K. Mohror, and B. R. de Supinski, “Design, modeling, and evaluation of a scalable multi-level checkpointing system,” in 2010 ACM/IEEE International Conference for High Performance Computing, Networking, Storage and Analysis , 2010, pp. 1–11. [Online]. Available: https://doi.org/10.1109/SC.2010.18 [14] B. Nicolae, A. Moody, E. Gonsiorowski, K. Mohror, and F. Cappello, “VeloC: Towards high performance adaptive asynchronous checkpointing at large scale,” in 2019 IEEE International Parallel and Distributed Processing Symposium (IPDPS) , 2019, pp. 911–920. [Online]. Available: https://doi.org/10.1109/IPDPS.2019.00099 [15] Z. Wang, Z. Jia, S. Zheng, Z. Zhang, X. Fu, T. S. E. Ng, and Y. Wang, “GEMINI: Fast failure recovery in distributed training with in-memory checkpoints,” in Proceedings of the 29th Symposium on Operating Systems Principles , 2023, pp. 364–381. [Online]. Available: https://doi.org/10.1145/3600006.3613145 [16] J. Thorpe, P. Zhao, J. Eyolfson, Y. Qiao, Z. Jia, M. Zhang, R. Netravali, and G. H. Xu, “Bamboo: Making preemptible instances resilient for affordable training of large DNNs,” in 
+
+20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) , 2023, pp. 497–513. [Online]. Available: https://www.usenix.org/conference/nsdi23/presentation/thorpe [17] I. Jang, Z. Yang, Z. Zhang, X. Jin, and M. Chowdhury, “Oobleck: Resilient distributed training of large models using pipeline templates,” in Proceedings of the 29th Symposium on Operating Systems Principles ,2023, pp. 382–395. [Online]. Available: https://doi.org/10.1145/3600006. 3613152 [18] Y. Zhou, Z. Wang, P. Jiang, H. Xia, J. Lu, Q. Jiang, R. Gu, H. Xu, X. Huang, G. Fang, Z. Hu, J. Zhang, Y. Cai, J. He, and C. Tian, “Chameleon: Adaptive fault tolerance for distributed training via real-time policy selection,” arXiv preprint arXiv:2508.21613v4 , 2026. [Online]. Available: https://arxiv.org/abs/2508.21613v4 [19] Z. Liu, Z. Wang, R. Zhang, A. Maurya, H. Zhou, P. Hovland, S. Di, F. Cappello, B. Nicolae, and Z. Zhang, “ReCoVer: Resilient LLM pre-training system via fault-tolerant collective and versatile workload,” arXiv preprint arXiv:2605.11215v2 , 2026. [Online]. Available: https://arxiv.org/abs/2605.11215v2

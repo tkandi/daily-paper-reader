@@ -1,0 +1,1409 @@
+Title: Block Parallelism For Efficient Distributed Long-Context Diffusion Language Model Training
+
+URL Source: https://arxiv.org/pdf/2609.19242v1
+
+Published Time: Fri, 18 Sep 2026 00:05:18 GMT
+
+Number of Pages: 25
+
+Markdown Content:
+Preprint. Under review. 
+
+# BLOCK PARALLELISM FOR EFFICIENT DISTRIBUTED 
+
+# LONG -C ONTEXT DIFFUSION LANGUAGE MODEL TRAINING 
+
+Tarun Suresh ∗
+
+, Pranshu Chaturvedi ∗
+
+, Hangoo Kang ∗
+
+, Parth Shroff, Ishan S. Khare, Hermann Kumbong, Azalia Mirhoseini 
+
+Stanford University 
+
+ABSTRACT 
+
+Block diffusion language models (BDLMs) combine autoregressive dependen-cies across blocks with parallel denoising within blocks, but long-context training is constrained by distributed attention communication and activation memory. Conventional context parallelism (CP) shards the combined clean-plus-corrupted sequence by position, communicating shared clean K/V together with block-specific corrupted K/V and their gradients. We observe that the BDLM objec-tive separates over target blocks. We introduce block parallelism (BP), a new distributed parallelism dimension that assigns each corrupted-block computation to one rank. To scale BP to long contexts, we introduce context-sharded block parallelism (CSBP), which also shards the shared clean sequence across those ranks. CSBP keeps corrupted K/V and gradients local, avoids replicated clean prefixes, and preserves BDLM training semantics. On 16 H200 GPUs at 256K context, CSBP improves throughput over the best baseline by 1.18–1.45 × for supervised fine-tuning and 1.27–1.33 × for conversion of autoregressive models to BDLMs, while matching or reducing peak HBM. Full-model speedup reaches 1.61 × at 512K. On eight H100 GPUs, CSBP accelerates DFlash2 speculative-decoder train-ing by 2.48 × at 512K and 7.59 × at 1M. In matched 12-hour DiffusionGemma 26B-A4B SFT runs, CSBP achieves higher pass rates at every trained check-point on SWE-bench Verified and Terminal-Bench Lite. The code is available at 
+
+https://github.com/ScalingIntelligence/Turbo-dLLM .
+
+1 INTRODUCTION Training time per 1B tokens Context length Context-Sharded Block Parallelism (CSBP) Best existing parallelism strategies 1.26× 1.30× 1.33× faster   
+
+> 40h 60h 80h 100h 64K 128K 256K Qwen3.8-27B · 16× H200
+
+Autoregressive → block diffusion training 1.25× 1.44× 1.45× 1.61× faster    
+
+> 10h 20h 30h 40h 64K 128K 256K 512K DiffusionGemma 26B-A4B · 16× H200
+
+Block diffusion fine-tuning 2.48× 7.59× faster  
+
+> 0h 5h 10h 15h 512K 1M DFlash2 for Qwen3.8-27B · 8× H100
+
+Speculative decoding drafter training 
+
+Figure 1: CSBP accelerates the frontier of long-context block diffusion training. 
+
+> ∗
+
+Equal contribution. Correspondence to {tsuresh@stanford.edu, pranshu@cs.stanford.edu, hangook@stanford.edu} .
+
+1arXiv:2609.19242v1 [cs.LG] 16 Sep 2026 Preprint. Under review.            
+
+> (a) CP: token-wise sharding (b) BP: block ownership (c) CSBP: sharded context + block ownership
+> Rank 1
+> Clean K/V Corrupted K/V 112233
+> Rank 2
+> Clean K/V Corrupted K/V 445566
+> Rank 3
+> Clean K/V Corrupted K/V 778899
+> Small cells denote token positions Clean and corrupted K/V cross ranks during attention Rank 1 Rank 2 Rank 3 Block 1
+> Clean 1 Block 2
+> Clean 1 Clean 2 Block 3 Each target block has one owner
+> Overlapping clean prefixes are replicated
+> Corrupted K/V stay local; clean prefixes are replicated Rank 1
+> Clean K/V 123
+> Complete block 1 Rank 2
+> Clean K/V 456
+> Complete block 2 Rank 3
+> Clean K/V 789
+> Complete block 3 Shared clean sequence is token-sharded Only shared clean K/V cross ranks during attention
+
+Figure 2: (a) Conventional CP shards by token position and exchanges both clean and corrupted K/V across ranks, despite corrupted K/V having no reuse across blocks. (b) BP keeps corrupted K/V local to each block’s owner, but replicates overlapping clean prefixes. (c) CSBP also shards the shared clean context, so only clean K/V and their gradients cross ranks during attention. Figure 3 details the resulting tensor communication. Block diffusion language models, or BDLMs, offer a promising approach to combining strong language-model quality with efficient inference. They retain autoregressive dependencies across consecutive token blocks while generating the tokens within each block through parallel denoising. This combines the causal structure of autoregressive models with the parallelism of diffusion-based generation (Arriola et al., 2025; O’Donoghue & Flennerhag, 2026; Fu et al., 2026). Coding agents and other long-running assistants accumulate interaction histories (Yang et al., 2024; Yao et al., 2023), motivating long-context BDLM training. For these workloads, activation memory and long-context attention are major bottlenecks. Existing long-context training systems commonly use context parallelism, which partitions sequence activations across devices so that each device stores and processes only part of the context. During attention, devices exchange information across these partitions, allowing local queries to incorporate relevant information from the full sequence (Liu et al., 2023; Jacobs et al., 2023). Conventional context parallelism (CP) is poorly matched to BDLM training because it partitions the combined clean-plus-corrupted representation by token position and performs distributed attention across those position shards. Clean K/V from earlier blocks can condition multiple later blocks, whereas corrupted K/V for block b are used only by queries from that block. At every layer, CP therefore exchanges both clean and corrupted K/V during forward and their corresponding gradients during backward. The corrupted K/V consume cross-rank bandwidth despite having no reuse across blocks (Figure 2(a)). Our first insight is that we can eliminate this block-specific communication by exploiting the BDLM objective’s separability across corrupted blocks. We introduce block parallelism (BP), which makes target-block computation a new distributed parallelism dimension. BP assigns each complete corrupted-block computation to one rank. Different ranks execute different block com-putations concurrently while each block’s corrupted Q/K/V, activations, and gradients remain local (Figure 2(b)). BP alone replicates increasingly long and overlapping clean prefixes across ranks. To scale BP to long contexts, we introduce context-sharded block parallelism (CSBP): CP shards the shared clean sequence across the same ranks that own complete corrupted-block computations. Each clean K/V shard serves all local blocks whose prefixes include it, and its gradients accumulate on its owner. CSBP thus distributes clean computation and storage while keeping corrupted K/V and their gradients local (Figure 2(c)). We make four contributions. • Block parallelism. We introduce target-block computation as a new distributed parallelism dimension for BDLM training. BP uses per-block loss separability to assign each complete corrupted-block computation, including its forward pass, loss, and backward pass, to one 2Preprint. Under review. rank. Different blocks execute concurrently while their corrupted K/V and gradients remain local, eliminating block-specific cross-rank communication. • Context-sharded block parallelism. We introduce CSBP to scale block parallelism to long contexts without replicating the clean sequence. Over the same ranks, BP assigns complete corrupted-block computations while CP shards the shared clean-sequence computation. Each clean K/V shard serves every block whose prefix contains it, and its owner accumulates the backward contributions from all such blocks. CSBP removes corrupted K/V from cross-rank attention communication and avoids replicating overlapping clean prefixes. • Efficient long-context training. Across six models, CSBP delivers 256 K-context speedups of 1.18–1.45 × for SFT and 1.27–1.33 × for AR-to-BDLM conversion over the best base-lines, while matching or reducing peak HBM (Table 1). The advantage grows with CP/BP degree and context length (Figures 4–5): at 512K, it reaches 1.19 × on NemotronDiffusion 14B and 1.61 × on DiffusionGemma 26B-A4B. • Faster speculative decoding training and stronger agent performance. CSBP accelerates DFlash2 drafter training by 2.48 × at 512K and 7.59 × at 1M. Under matched 12-hour DiffusionGemma SFT budgets, CSBP achieves higher pass rates at every trained checkpoint on SWE-bench Verified and Terminal-Bench Lite. 
+
+2 RELATED WORK 
+
+Long-context training parallelism. Megatron sequence parallelism reduces activation replication alongside tensor parallelism (Korthikanti et al., 2022). DeepSpeed-Ulysses redistributes sequence shards across attention heads (Jacobs et al., 2023), while Ring Attention overlaps K/V communication with attention computation (Liu et al., 2023). Striped Attention balances causal attention workloads, and LoongTrain combines head and context parallelism (Brandon et al., 2023; Gu et al., 2024). 
+
+Block diffusion and AR-to-BDLM adaptation. Block Diffusion combines autoregressive depen-dencies between blocks with parallel denoising within blocks, supporting variable-length generation and clean-prefix K/V caching (Arriola et al., 2025). Fast-dLLM v2 converts AR checkpoints us-ing block-structured attention, complementary masking, and shifted prediction (Wu et al., 2025). DiffusionGemma adapts an AR model through denoising SFT followed by sampler distillation and reinforcement learning (DiffusionGemma Team, 2026). 
+
+Diffusion-based speculative decoding. Speculative decoding verifies draft tokens in parallel while preserving the AR target distribution (Leviathan et al., 2023). DFlash uses target-model features to draft an entire block in one pass (Chen et al., 2026). DFlash2 adds block-local dynamic convolutions and candidate-path selection to improve draft quality (Inco AI, 2026). CSBP instead accelerates block-separable training by separating shared context from block-local computation, preserving training objectives and inference protocols. 
+
+3 BACKGROUND 
+
+3.1 NOTATION 
+
+Let a sequence x = ( x1, . . . , x L) be divided into B contiguous blocks of M = L/B tokens. 
+
+x =
+
+
+
+x(1) , . . . , x (B)
+
+, x(<b ) =
+
+
+
+x(1) , . . . , x (b−1) 
+
+. (1) We use b to index blocks and r to index the P ranks in a parallel group. At each transformer layer (Vaswani et al., 2017), Q, K, and V denote the query, key, and value projections; semicolons inside brackets denote sequence concatenation. 3Preprint. Under review. 3.2 BLOCK DIFFUSION LANGUAGE MODELS 
+
+A block diffusion language model (BDLM) generates blocks from left to right while denoising the tokens within each block in parallel (Arriola et al., 2025). 
+
+pθ (x) = 
+
+> B
+
+Y
+
+> b=1
+
+pθ
+
+
+
+x(b) | x(<b )
+
+, (2) where each conditional distribution is modeled by a diffusion process. Training samples continuous times tb, not discrete timestep indices: standard BDLM uses uniform stratification over [10 −3, 1) across batch/block pairs; Fast-dLLM v2 uses unstratified U[0 , 1) draws. Each target block forms a corrupted copy x(b) 
+
+> tb
+
+conditioned on its clean prefix x(<b ). The training objective is 
+
+LBDLM =
+
+> B
+
+X
+
+> b=1
+
+Etb, x (b)
+
+> tb
+
+h
+
+−w(tb) log pθ
+
+
+
+x(b) | x(b) 
+
+> tb
+
+, x (<b )i 
+
+. (3) The expectation is over tb and x(b) 
+
+> tb
+
+∼ qtb (· | x(b)), where qtb is the corruption process and w(tb)
+
+is a noise-dependent loss weight. We denote the bth summand, including token normalization, by 
+
+Lb. Training observes the complete sequence and uses the clean ground-truth prefix for every target block. The standard BDLM training computation evaluates all B block losses together by placing a length-L
+
+corrupted copy alongside a length-L clean copy, forming a length-2L representation. It contains a block-specific corrupted copy and a reusable clean copy of every token. A block-causal attention mask gives the clean tokens in block b access to the preceding clean blocks and causal access within block b. The corrupted tokens in target block b attend bidirectionally within their own corrupted block and attend to the clean prefix x(<b ), but do not use corrupted K/V from other blocks. Their visible keys and values are therefore [Kb; Kclean  
+
+> <b
+
+] and [Vb; V clean  
+
+> <b
+
+].The corrupted activations of block b affect only Lb, while its clean representation can be reused by multiple later block losses. Corrupted computation is therefore block-specific, while clean computation is shared across block losses. All block losses share the model parameters. 3.3 CONTEXT PARALLELISM 
+
+Context parallelism (CP) uses token position as its ownership dimension, partitioning the attention input across P ranks so each rank stores approximately a 1/P fraction of its token activations while the group jointly evaluates attention (Liu et al., 2023; Jacobs et al., 2023). BDLM training supplies the length-2L clean-plus-corrupted representation as this attention input, so conventional CP partitions both copies by token position. Let Qr , Kr , and Vr denote the query, key, and value projections initially owned by rank r, and let dh
+
+be the attention-head dimension. Writing K = [ K1; . . . ; KP ] and V = [ V1; . . . ; VP ], the attention output for the queries on rank r is 
+
+Or = softmax 
+
+ Qr K⊤
+
+√dh
+
++ Mr
+
+
+
+V, (4) where Mr contains the attention-mask rows for the queries on rank r.Causal attention produces uneven work across sequence shards because later queries see longer prefixes. Zigzag partitioning pairs early and late chunks on each rank to balance their attention work (Dubey et al., 2024), while retaining the sequence shard as the unit of CP ownership. 
+
+4 BLOCK PARALLELISM 
+
+4.1 LIMITATIONS OF CONVENTIONAL CONTEXT PARALLELISM 
+
+Conventional CP is poorly matched to BDLM training because it partitions the entire length-2L
+
+clean-plus-corrupted representation by token position and performs distributed attention across 4Preprint. Under review. those position shards. Both clean and corrupted K/V therefore participate in cross-rank attention communication. The corrupted K/V for block b are used only by queries from that block. CP exchanges these block-specific K/V during forward and returns their gradients to the position-shard owners during backward, adding communication at every layer for data used by only one block. Clean K/V are shared across later block losses. When Lb uses a clean K/V shard, attention backward produces a gradient contribution for that shard. This contribution is accumulated on the owning rank, where backward continues through the clean projections and earlier layers. Conventional CP therefore combines the required clean-prefix communication with block-specific corrupted K/V and gradient communication at every layer. 4.2 BLOCK -PARALLEL EXECUTION 
+
+Our first insight is that we can eliminate this block-specific communication by exploiting the BDLM objective’s per-block loss separability to expose target-block computation as a new distributed parallelism dimension. The corrupted activations of block b contribute only to Lb, while the clean representations of its observed prefix can contribute to multiple block losses. BP assigns each complete corrupted-block computation to one rank. The assigned rank executes the corrupted forward pass, loss, and backward pass for block b while keeping the block’s corrupted Q/K/V, activations, and gradients local. Different ranks execute different block computations concurrently (Figure 2(b)). Let Br denote the blocks assigned to rank r. Rank r computes 
+
+Lr = X
+
+> b∈B r
+
+Lb. (5) Linearity of differentiation gives the global gradient identity 
+
+> P
+
+X
+
+> r=1
+
+∇θ Lr =
+
+> B
+
+X
+
+> b=1
+
+∇θ Lb = ∇θ LBDLM . (6) 4.3 CONTEXT -SHARDED BLOCK PARALLELISM 
+
+BP keeps corrupted-block computations local, but BP alone replicates clean prefixes across ranks. A rank can reuse the longest prefix required by its assigned blocks, but these prefixes overlap across ranks, and ranks assigned later blocks may compute and store nearly the full clean sequence. Clean computation and activations can therefore be replicated across up to min( B, P ) active ranks. Our second insight is that we can scale BP without this replication because BP and CP operate on complementary parts of the computation over the same P ranks. BP assigns complete corrupted-block computations while CP shards the clean-sequence computation shared by those blocks. We call this context-sharded block parallelism (CSBP). Each rank executes a subset of complete corrupted-block computations and stores one clean-sequence shard (Figure 3). Context parallelism supplies the distributed clean K/V and accumulates their backward contributions, while BP keeps each corrupted-block computation on its owner. 
+
+Forward pass. The rank assigned target block b computes 
+
+Ob = Attn  Qb, [Kb; Kclean  
+
+> <b
+
+], [Vb; V clean  
+
+> <b
+
+] , (7) where Attn denotes scaled dot-product attention. The rank holds Qb, Kb, and Vb locally, while CP supplies the sharded clean-prefix K/V. Online softmax combines the local within-block contribution with the distributed clean-prefix contributions (Milakov & Gimelshein, 2018; Dao et al., 2022). The target-block computations reuse overlapping prefixes of the clean sequence. During one context-parallel attention pass, rank r applies each clean K/V shard supplied by CP to its clean queries and to every b ∈ B r whose prefix contains tokens from that shard. The length-L distributed clean K/V stream therefore serves every local block whose clean prefix includes that shard. Algorithm 1 gives the complete per-layer computation in the same notation. 5Preprint. Under review.                                                  
+
+> Clean tokens Corrupted tokens
+> (a) CP Rank 1
+> Clean
+> Q/K/V
+> Corrupted
+> Q/K/V
+> 112233
+> Q,dQ , and O
+> stay local
+> Rank 2
+> Clean
+> Q/K/V
+> Corrupted
+> Q/K/V
+> 445566
+> Q,dQ , and O
+> stay local
+> Rank 3
+> Clean
+> Q/K/V
+> Corrupted
+> Q/K/V
+> 778899
+> Q,dQ , and O
+> stay local Forward: K/V
+> Backward: dK/dV Q,dQ ,Ostay local
+> Cross-rank: Clean + Corrupted
+> K/V and dK/dV
+> (b) CSBP Rank 1
+> Clean Q/K/V
+> 123
+> Rank 2
+> Clean Q/K/V
+> 456
+> Rank 3
+> Clean Q/K/V
+> 789Block 1: Corrupted
+> Q/K/V +
+> dQ/dK/dV local Block 2: Corrupted
+> Q/K/V +
+> dQ/dK/dV local
+> Block 3: Corrupted
+> Q/K/V +
+> dQ/dK/dV local Forward: K/V
+> Backward: dK/dV Q,dQ ,Ostay local
+> Cross-rank: Clean K/V
+> and Clean dK/dV only
+
+Figure 3: Conventional CP shards the combined clean-plus-corrupted sequence by token position. Clean and corrupted K/V cross ranks during forward, and clean and corrupted dK/dV cross ranks during backward; Q, dQ , and attention outputs remain with their query owners. CSBP shards only the shared clean sequence, so only clean K/V and dK/dV cross ranks. Each block owner retains its corrupted Q/K/V and dQ/dK/dV locally. 
+
+Backward pass. The rank assigned block b backpropagates Lb, computing the gradients of Qb, Kb,and Vb locally together with contributions to the clean-prefix K/V gradients. Exact CP backward accumulates the clean K/V gradient contributions from all clean and assigned corrupted-block queries on each clean-shard owner, which continues backward through the clean projections and earlier layers. Corrupted Q/K/V gradients therefore remain on block owners, while gradients through clean activations are accumulated on clean-shard owners. Together, these contributions give the global parameter gradient in Equation 6. Algorithm 2 gives the corresponding backward pass. Implementations 1 and 2 give the production forward and backward fast paths. Later target blocks and clean-sequence chunks have longer prefixes and require more attention work. We devise a dual-end strategy that assigns target blocks b and B + 1 − b to the same rank. We use the same early–late pairing for target blocks and zigzag clean-sequence sharding over the same ranks (Dubey et al., 2024). Appendix B shows that this common pairing exactly balances target-block and clean causal attention for equal partitions and handles non-divisible block counts. 4.4 COMPLEXITY AND SOURCES OF IMPROVEMENT 
+
+CSBP preserves the exact BDLM computation and gradients (Proposition 1) while eliminating cross-rank communication for corrupted K/V and avoiding replicated clean prefixes. 
+
+Computation. Conventional CP and CSBP evaluate the same valid attention pairs, so both require 
+
+Θ( L2) total attention work and Θ( L2/P ) work per rank under balanced assignment. CSBP changes where this work is executed. Each corrupted block is evaluated on one rank, while CP supplies the shared clean K/V. The gain comes from keeping block-specific computation local and eliminating its cross-rank communication while preserving the same asymptotic attention work. 
+
+Communication. Conventional CP applies distributed attention to the combined length-2L clean-plus-corrupted representation. CSBP distributes only the length-L clean K/V, while corrupted K/V remain on their block owners. Each communicated clean K/V shard serves every local block query whose prefix includes that shard. In backward, corrupted K/V gradients remain on block owners and clean K/V gradients return to their shard owners. Cross-rank attention communication therefore contains only shared clean K/V and their gradients. CSBP removes the length-L corrupted component from this communication in both forward and backward. 6Preprint. Under review. 
+
+Memory. Each CSBP rank stores one length-L/P clean shard and the activations for its assigned corrupted blocks. With balanced block assignments, each rank stores approximately L/P clean tokens and L/P corrupted tokens, giving approximately 2L/P token activations and matching conventional CP to first order. Pure BP can store a clean prefix approaching length L on ranks assigned later blocks. CSBP reduces this clean-prefix component to L/P , providing up to a P × reduction for a rank whose longest required prefix approaches L. CSBP therefore retains CP’s activation scaling without pure BP’s overlapping-prefix replication. 
+
+5 EXPERIMENTS 
+
+5.1 EXPERIMENTAL SETUP 
+
+Models and workloads. We evaluate three workloads. For supervised fine-tuning (SFT), we use NemotronDiffusion 3B, 8B, and 14B (Fu et al., 2026) and DiffusionGemma 26B-A4B (O’Donoghue & Flennerhag, 2026). For AR-to-BDLM conversion, we use the text backbones of Qwen3.5-27B (Qwen Team, 2026a) and Qwen3.8-27B (Qwen Team, 2026b) with the Fast-dLLM v2 objective (Wu et al., 2025). Conversion provides a route to parallel generation without training a diffusion model from scratch and tests CSBP beyond fine-tuning existing BDLMs. We also train long-context DFlash2 drafters (Inco AI, 2026) for Qwen3.8-27B and Muse-Glimmer-30B following the SpecForge frame-work (Li et al., 2026) and open-source implementation (Li et al., 2025) (Appendix E). Across all workloads, the best baseline and CSBP evaluate the same objective on the same target blocks. The SFT and AR-to-BDLM workloads include every eligible target block, while DFlash2 uses the draft blocks sampled by its training objective. 
+
+Hardware. Full-model training uses two nodes, each with eight NVIDIA H200 GPUs and 141 GB of HBM3e per GPU. DFlash2 training uses one node with eight NVIDIA H100 GPUs and 80 GB of HBM3 per GPU. 
+
+Baselines and configurations. We compare against highly optimized conventional training without BP, using the token-position sharding found in distributed-training libraries (NVIDIA, n.d.; Liang et al., 2025) when CP is required. We profile-optimize baseline execution and share applicable kernel and layout optimizations with CSBP. For each setting, the best baseline is the highest-throughput tested feasible combination of data, tensor (Shoeybi et al., 2019), expert (Lepikhin et al., 2020), context (Liu et al., 2023; Jacobs et al., 2023), and sequence parallelism (Korthikanti et al., 2022) and global batch size. With CSBP, each complete corrupted-block computation stays on one rank while the reusable clean context remains sharded across ranks, eliminating cross-rank transport of corrupted K/V and their gradients. We optimize topology and batch size independently with CSBP enabled. 
+
+Implementation and metrics. We use PyTorch (Paszke et al., 2019), FlashAttention-4 (Zadouri et al., 2026), FlexAttention (Dong et al., 2025), and NCCL; all runs use BF16. We implement a token-chunked linear cross-entropy loss with cuBLAS projections and fused CUDA softmax/CE kernels, avoiding full-sequence logits materialization. Full-model runs use activation checkpointing (Chen et al., 2016) and DeepSpeed ZeRO Stage 2 (Rajbhandari et al., 2019); the throughput-maximizing DFlash2 recipe uses fused AdamW without activation checkpointing. We report useful model FLOPs utilization (MFU) (Chowdhery et al., 2022). For DFlash2, throughput and useful MFU count supervised draft-target tokens; computation replicated across context ranks consumes runtime without increasing either metric. Peak HBM is the maximum peak allocated memory across GPUs. For throughput and memory profiles, every training sequence has exactly the reported context length. The equal-wall-clock experiments use the variable sequence lengths of their respective datasets. 5.2 EFFECTIVENESS OF CSBP CSBP improves throughput across every evaluated model and both training objectives at 256K context (Table 1). It delivers 1.18 –1.45 × speedup for SFT and 1.27 –1.33 × for AR-to-BDLM conversion, while matching or reducing peak HBM. The gains extend from NemotronDiffusion to DiffusionGemma 26B-A4B and both Qwen backbones, demonstrating consistent benefits across the evaluated model families. 7Preprint. Under review. Table 1: CSBP accelerates training at 256K context.                                                               
+
+> Training workload Model Best baseline topology Ours topology Tok/s Speedup MFU (%) Peak HBM (GiB) BDLM fine-tuning NemotronDiffusion 3B DP4/TP1/CP4 DP4/TP1/CP4/BP4 13,434 / 16,027 1.19 ×31.7 / 37.8 57.1 / 57.0
+> BDLM fine-tuning NemotronDiffusion 8B DP4/TP1/CP4 DP4/TP1/CP4/BP4 9,668 / 11,379 1.18 ×32.3 / 38.0 97.5 / 97.5 BDLM fine-tuning NemotronDiffusion 14B DP2/TP1/CP8 DP2/TP1/CP8/BP8 7,884 / 9,301 1.18 ×33.1 / 39.0 91.1 / 90.6
+> BDLM fine-tuning DiffusionGemma 26B-A4B DP1/TP1/EP2/CP8 DP1/TP1/EP2/CP8/BP8 10,557 / 15,359 1.45 ×12.7 / 18.4 118.1 / 113.6
+> AR-to-BDLM conversion Qwen3.8-27B DP1/TP2/CP8 DP1/TP2/CP8/BP8 2,623 / 3,490 1.33 ×20.1 / 26.8 120.7 / 111.1
+> AR-to-BDLM conversion Qwen3.5-27B DP1/TP2/CP8 DP1/TP2/CP8/BP8 2,641 / 3,351 1.27 ×20.3 / 25.7 120.7 / 111.1
+
+Pairs: best baseline / ours. Bold marks the better value. 
+
+5.3 SCALING WITH CP/BP DEGREE 
+
+CSBP’s advantage grows as training uses more ranks to accommodate longer contexts (Figure 4). From degree two to eight, speedup rises from 1.10 × to 1.18 × for NemotronDiffusion 14B and from 1.25 × to 1.45 × for DiffusionGemma 26B-A4B. Keeping corrupted-block computation local becomes increasingly beneficial in this long-context regime. 1.10× 1.15× 1.18× 1.25× 1.44× 1.45× 
+
+(a) NemotronDiffusion 14B (b) DiffusionGemma 26B −A4B 
+
+2 4 8 2 4 81.25× 1.30× 1.35× 1.40× 1.45× 1.10× 1.12× 1.14× 1.16× 1.18× CP/BP degree Throughput speedup over best baseline 
+
+Figure 4: CSBP’s throughput gains grow with CP/BP degree. 5.4 SCALING WITH CONTEXT LENGTH 
+
+Longer contexts strengthen the throughput advantage of CSBP (Figure 5). Extending context from 64K to 512K increases speedup from 1.10 × to 1.19 × for NemotronDiffusion 14B and from 1.25 ×
+
+to 1.61 × for DiffusionGemma 26B-A4B. The gains persist through 512K, consistent with avoiding corrupted K/V communication becoming more valuable as sequences grow. Context sharding is what makes these long-context gains practical. Without it, BP replicates over-lapping clean prefixes: NemotronDiffusion 14B pure BP is slower and uses more memory at 64K, then runs out of memory at 128K; DiffusionGemma 26B-A4B pure BP runs out of memory at both 64K and 128K under the matched native objective. CSBP fits and accelerates training in these cases (Appendix H). 5.5 ACCELERATING BLOCK DIFFUSION SPECULATIVE DECODING DRAFTER TRAINING 
+
+On eight H100 GPUs (Table 2), CSBP produces larger DFlash2 speedups than full-model workloads because conventional CP replicates the block-local decoder, vocabulary loss, and selector across context ranks, whereas CSBP assigns each draft block to one rank. At 512K, removing this two-way duplication yields 2.48 × higher throughput; at 1M, four CP2/BP2 replicas versus one CP8 baseline yield 7.59 ×. Executed-GEMM utilization (executed GEMM FLOP/s relative to BF16 peak) is 28.7%/37.0% at 512K and 35.8%/36.5% at 1M for baseline/CSBP. At 512K, CSBP cuts exposed attention communication from 105.4 to 7.5 ms per GPU because each block stays on one rank, 8Preprint. Under review. 1.10× 1.15× 1.18× 1.19× 1.25× 1.44× 1.45× 1.61×         
+
+> (a) NemotronDiffusion 14B (b) DiffusionGemma 26B −A4B
+> 64K 128K 256K 512K 64K 128K 256K 512K 1.25× 1.30× 1.35× 1.40× 1.45× 1.50× 1.55× 1.60× 1.65× 1.10× 1.12× 1.14× 1.16× 1.18× 1.20× Context length Throughput speedup over best baseline
+
+Figure 5: Longer contexts amplify CSBP’s throughput advantage. avoiding corrupted K/V and gradient transport and explaining its higher utilization; the near-equal 1M values show the gains reflect genuine reductions in executed work and increased data parallelism. At 256K, where full replicas fit, DP8 remains 19.2% faster because it avoids sequence-parallel overhead. Muse-Glimmer-30B shows complementary gains. Against the fastest feasible non-BP topology, CSBP is 1.56 ×, 3.35 ×, and 4.81 × faster at 256K, 512K, and 1M, respectively. At 512K, CP2 runs out of memory, while CP2/BP2 fits and supports four data-parallel replicas; at 1M, CP4/BP4 both saves 12.0% peak HBM relative to CP8 and raises throughput by 4.81 ×.Table 2: CSBP accelerates long-context DFlash2 drafter training. 
+
+Model Context length Best baseline topology Ours topology Tok/s Speedup MFU (%) Peak HBM (GiB) Qwen3.8-27B 256K DP8 DP4/CP2/BP2 167,228 / 140,350 0.84 × 38.4 / 32.2 63.5 / 48.3 
+
+Qwen3.8-27B 512K DP4/CP2 DP4/CP2/BP2 57,027 / 141,222 2.48 × 13.1 / 32.4 63.3 / 54.6 
+
+Qwen3.8-27B 1M DP1/CP8 DP4/CP2/BP2 18,389 / 139,541 7.59 × 4.2 / 32.0 53.7 / 67.1 Muse-Glimmer-30B 256K DP4/CP2 DP4/CP2/BP2 62,698 / 98,046 1.56 × 18.5 / 28.9 63.8 / 57.5 
+
+Muse-Glimmer-30B 512K DP2/CP4 DP4/CP2/BP2 29,493 / 98,785 3.35 × 8.7 / 29.1 63.8 / 65.6 Muse-Glimmer-30B 1M DP1/CP8 DP2/CP4/BP4 12,842 / 61,742 4.81 × 3.8 / 18.2 63.3 / 55.7 
+
+Pairs: best baseline / ours. Tok/s and MFU count supervised draft-target tokens. Bold marks the better value. 
+
+5.6 EQUAL -WALL -CLOCK DOWNSTREAM PERFORMANCE 
+
+We finally test whether CSBP’s higher training throughput translates into faster downstream progress under a fixed wall-clock budget. We fine-tune DiffusionGemma 26B-A4B with the best baseline and CSBP for 12 hours and evaluate checkpoints every three hours on SWE-bench Verified and Terminal-Bench Lite (Figure 6). We train with LoRA adapters on eight H100 GPUs, comparing CP8 with CSBP at CP8/BP8. Appendix F provides full data and training details. CSBP achieves a higher pass rate at every trained checkpoint on both benchmarks. Its lead peaks at 1.8 percentage points on SWE-bench Verified and 2 points on Terminal-Bench Lite; after 12 hours, it remains 1 point ahead on both benchmarks. 
+
+6 LIMITATIONS 
+
+CSBP requires known training targets and accelerates training, not generation of unknown future tokens. It targets long contexts, where attention communication and clean-prefix replication are most costly. 9Preprint. Under review. 30.0 32.2 33.6 34.6 35.4 30.0 33.8 35.4 36.0 36.4             
+
+> 30 32 34 36 036912
+> Training Time (Hours) Pass Rate (%) Best baseline CSBP (a) SWE −bench Verified 26 26 27 28 29 26 27 29 30 30
+> 26 27 28 29 30 036912
+> Training Time (Hours) Pass Rate (%) Best baseline CSBP (b) Terminal −Bench Lite
+
+Figure 6: Equal-wall-clock downstream performance. Checkpoints from the best baseline and CSBP are evaluated every three hours on (a) SWE-bench Verified and (b) Terminal-Bench Lite. 
+
+7 CONCLUSION 
+
+In this work, we propose block parallelism (BP), a distributed parallelism dimension that assigns complete corrupted-block computations to ranks. We further propose context-sharded block paral-lelism (CSBP), which shards the shared clean context across those ranks to scale training to long contexts. By matching the parallel decomposition to the BDLM objective, we keep corrupted K/V and gradients local, avoid clean-prefix replication, and preserve the reference computation and gradients. On 16 H200 GPUs at 256K context, we obtain 1.18–1.45 × higher throughput for SFT and 1.27– 1.33 × for AR-to-BDLM conversion over the best baseline, while matching or reducing peak HBM; full-model speedup reaches 1.61 × at 512K. On eight H100 GPUs, we accelerate DFlash2 drafter training by 2.48 × at 512K and 7.59 × at 1M. In matched 12-hour DiffusionGemma 26B-A4B SFT runs, we achieve higher pass rates at every trained checkpoint on SWE-bench Verified and Terminal-Bench Lite, finishing one percentage point ahead on both benchmarks. We show that block-aware parallelism improves long-context BDLM training efficiency and post-training outcomes within fixed budgets without changing the objective. BP and CSBP complement data, tensor, and expert parallelism for scaling BDLM adaptation, AR-to-BDLM conversion, and speculative-drafter training. 10 Preprint. Under review. REPRODUCIBILITY STATEMENT 
+
+Section 4 describes BP and CSBP, and Appendix A states the assumptions and establishes equivalence to the reference computation. Appendix C gives forward and backward schedules. Section 5.1 and Appendix F describe training and evaluation; Appendices D and E detail the conversion and drafter objectives. ACKNOWLEDGMENTS 
+
+We thank the Scaling Intelligence Lab and others for their constructive feedback during the composi-tion of the paper, including Shayan Talaei, Jon Saad-Falcon, Seil Kang, Ravenor Davion, and Amir Zeinali. We gratefully acknowledge support from federal sources: NSF under No. 24-554 (AIMing) and DARPA under No. HR00112520038 (Fallingwater). We also gratefully acknowledge support from Stanford HAI, IBM (Code Generation), Lightspeed, Google, and Google DeepMind. This work was also partially supported by IBM and Felicis as an affiliate member of Stanford Institute for Human-centered Artificial Intelligence (HAI)’s industry program. We also gratefully acknowledge computing resources provided by Stanford’s Marlowe Computing Instrument (Kapfer et al., 2025). 
+
+REFERENCES 
+
+Alpay Ariyak, Junda Zhang, Junxiong Wang, Shang Zhu, Federico Bianchi, Sanjana Srivastava, Ashwinee Panda, Siddhant Bharti, Chenfeng Xu, John Heo, Xiaoxia Shirley Wu, James Zou, Percy Liang, Leon Song, Ce Zhang, Ben Athiwaratkun, Zhongzhu Zhou, and Qingyang Wu. CoderForge-Preview: SOTA open dataset for training efficient agents, February 2026. URL 
+
+https://www.together.ai/blog/coderforge-preview . Project core leads: Alpay Ariyak; Zhongzhu Zhou; Qingyang Wu. Marianne Arriola, Aaron Kerem Gokaslan, Justin T. Chiu, Zhihan Yang, Zhixuan Qi, Jiaqi Han, Subham Sekhar Sahoo, and Volodymyr Kuleshov. Block diffusion: Interpolating between autore-gressive and diffusion language models. In International Conference on Learning Representations ,2025. URL https://arxiv.org/abs/2503.09573 .William Brandon, Aniruddha Nrusimha, Kevin Qian, Zachary Ankner, Tian Jin, Zhiye Song, and Jonathan Ragan-Kelley. Striped attention: Faster ring attention for causal transformers. arXiv preprint arXiv:2311.09431 , 2023. URL https://arxiv.org/abs/2311.09431 .Jian Chen, Yesheng Liang, and Zhijian Liu. DFlash: Block Diffusion for Flash Speculative Decoding. In Proceedings of the International Conference on Machine Learning (ICML) , 2026. URL 
+
+https://arxiv.org/abs/2602.06036 .Tianqi Chen, Bing Xu, Chiyuan Zhang, and Carlos Guestrin. Training deep nets with sublinear memory cost. arXiv preprint arXiv:1604.06174 , 2016. URL https://arxiv.org/abs/ 1604.06174 .Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, et al. PaLM: Scaling language modeling with pathways. arXiv preprint arXiv:2204.02311 , 2022. URL https://arxiv.org/abs/2204. 02311 .Neil Chowdhury, James Aung, Chan Jun Shern, Oliver Jaffe, Dane Sherburn, Giulio Starace, Evan Mays, Rachel Dias, Marwan Aljubeh, Mia Glaese, Carlos E. Jimenez, John Yang, Leyton Ho, Tejal Patwardhan, Kevin Liu, and Aleksander Madry. Introducing SWE-bench verified, 2024. URL 
+
+https://openai.com/index/introducing-swe-bench-verified/ .Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Processing Systems , 2022. URL https://arxiv.org/abs/2205.14135 .DiffusionGemma Team. DiffusionGemma technical report. arXiv preprint arXiv:2608.00146 , 2026. URL https://arxiv.org/abs/2608.00146 .11 Preprint. Under review. Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. Flex-Attention: A programming model for generating fused attention variants. In 
+
+Proceedings of Machine Learning and Systems , volume 7, 2025. URL 
+
+https://proceedings.mlsys.org/paper_files/paper/2025/hash/ 61a9278dfef5f871b5e472389f8d6fa1-Abstract-Conference.html .Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, et al. The Llama 3 herd of models. 
+
+arXiv preprint arXiv:2407.21783 , 2024. URL https://arxiv.org/abs/2407.21783v1 .Yonggan Fu, Lexington Whalen, Abhinav Garg, et al. Nemotron-Labs-Diffusion: A tri-mode language model unifying autoregressive, diffusion, and self-speculation decoding. arXiv preprint arXiv:2607.05722 , 2026. URL https://arxiv.org/abs/2607.05722 .Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, Yonggang Wen, Tianwei Zhang, Xin Jin, and Xuanzhe Liu. LoongTrain: Efficient training of long-sequence LLMs with head-context parallelism. 
+
+arXiv preprint arXiv:2406.18485 , 2024. URL https://arxiv.org/abs/2406.18485 .Harbor Framework Team. Harbor: A framework for evaluating and optimizing agents and models in container environments, August 2026. URL https://harborframework.com/ .Inco AI. DFlash 2: Keep Drafting Parallel, August 2026. URL https://inco.ai/blog/ dflash2/ .Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. DeepSpeed-Ulysses: System optimizations for enabling training of extreme long sequence transformer models. arXiv preprint arXiv:2309.14509 , 2023. URL 
+
+https://arxiv.org/abs/2309.14509 .Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik R. Narasimhan. SWE-bench: Can language models resolve real-world GitHub issues? In The Twelfth International Conference on Learning Representations , 2024. URL https://openreview. net/forum?id=VTF8yNQM66 .Craig Kapfer, Kurt Stine, Balasubramanian Narasimhan, Christopher Mentzel, and Emmanuel Candès. Marlowe: Stanford’s GPU-based computational instrument, 2025. URL https://doi.org/ 10.5281/zenodo.14751899 .Vijay Korthikanti, Jared Casper, Sangkug Lym, Lawrence McAfee, Michael Andersch, Mohammad Shoeybi, and Bryan Catanzaro. Reducing activation recomputation in large transformer models. 
+
+arXiv preprint arXiv:2205.05198 , 2022. URL https://arxiv.org/abs/2205.05198 .Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. GShard: Scaling giant models with conditional computation and automatic sharding. arXiv preprint arXiv:2006.16668 , 2020. URL https: //arxiv.org/abs/2006.16668 .Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In Proceedings of the 40th International Conference on Machine Learning , volume 202 of Proceedings of Machine Learning Research , pp. 19274–19286, 2023. URL https: //proceedings.mlr.press/v202/leviathan23a.html .Shenggui Li, Yikai Zhu, Chao Wang, Fan Yin, Shuai Shi, Yubo Wang, Yi Zhang, Yingyi Huang, Haoshuai Zheng, and Yineng Zhang. SpecForge: Train speculative decoding models effortlessly. 
+
+https://github.com/sgl-project/specforge , 2025. Shenggui Li, Chao Wang, Yikai Zhu, Yubo Wang, Fan Yin, Shuai Shi, Yefei Chen, Xiaomin Dong, Qiaoling Chen, Jin Pan, et al. SpecForge: A flexible and efficient open-source training framework for speculative decoding. arXiv preprint arXiv:2603.18567 , 2026. 12 Preprint. Under review. Wanchao Liang, Tianyu Liu, Less Wright, Will Constable, Andrew Gu, Chien-Chin Huang, Iris Zhang, Wei Feng, Howard Huang, Junjie Wang, Sanket Purandare, Gokul Nadathur, and Stratos Idreos. TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training. In The Thirteenth International Conference on Learning Representations , 2025. URL https: //openreview.net/forum?id=SFN6Wm7YBI .Hao Liu, Matei Zaharia, and Pieter Abbeel. Ring attention with blockwise transformers for near-infinite context. arXiv preprint arXiv:2310.01889 , 2023. URL https://arxiv.org/abs/ 2310.01889 .Maxim Milakov and Natalia Gimelshein. Online normalizer calculation for softmax. arXiv preprint arXiv:1805.02867 , 2018. URL https://arxiv.org/abs/1805.02867 .NVIDIA. Context Parallel Package — Megatron Core. Software documentation, n.d. URL https://docs.nvidia.com/megatron-core/developer-guide/latest/ user-guide/features/context_parallel.html . Accessed September 5, 2026. Brendan O’Donoghue and Sebastian Flennerhag. DiffusionGemma: 4x faster text generation. Google Blog, June 2026. URL https://blog.google/innovation-and-ai/technology/ developers-tools/diffusion-gemma-faster-text-generation/ .OpenThoughts-Agent team, Snorkel AI, Bespoke Labs. OpenThoughts-TBLite: A high-signal benchmark for iterating on terminal agents. https://www.openthoughts.ai/blog/ openthoughts-tblite , February 2026. Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Kopf, Edward Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. PyTorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems ,volume 32, 2019. URL https://papers.neurips.cc/paper_files/paper/2019/ hash/bdbca288fee7f92f2bfa9f7012727740-Abstract.html .Xiaoxuan Peng, Kaiqi Zhang, Xinyu Lu, Boxi Cao, Yaojie Lu, Hongyu Lin, Xianpei Han, and Le Sun. LiteCoder-Terminal: Scaling long-horizon terminal environments for learning language agents. 
+
+arXiv preprint arXiv:2605.29559 , 2026. URL https://arxiv.org/abs/2605.29559 .Qwen Team. Qwen3.5: Towards native multimodal agents, February 2026a. URL https://qwen. ai/blog?id=qwen3.5 .Qwen Team. Qwen3.8-Max: A new bar for coding and cowork, August 2026b. URL https: //qwen.ai/blog?id=qwen3.8 .Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. ZeRO: Memory optimizations toward training trillion parameter models. arXiv preprint arXiv:1910.02054 , 2019. URL https: //arxiv.org/abs/1910.02054 .Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catan-zaro. Megatron-LM: Training multi-billion parameter language models using model parallelism. 
+
+arXiv preprint arXiv:1909.08053 , 2019. URL https://arxiv.org/abs/1909.08053 .Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. arXiv preprint arXiv:1706.03762 , 2017. URL https://arxiv.org/abs/1706.03762 .Xingyao Wang, Boxuan Li, Yufan Song, Frank F. Xu, Xiangru Tang, Mingchen Zhuge, Jiayi Pan, Yueqi Song, Bowen Li, Jaskirat Singh, Hoang H. Tran, Fuqiang Li, Ren Ma, Mingzhang Zheng, Bill Qian, Yanjun Shao, Niklas Muennighoff, Yizhe Zhang, Binyuan Hui, Junyang Lin, Robert Brennan, Hao Peng, Heng Ji, and Graham Neubig. OpenHands: An open platform for AI software developers as generalist agents. In The Thirteenth International Conference on Learning Representations ,2025. URL https://openreview.net/forum?id=OJd3ayDDoF .13 Preprint. Under review. Chengyue Wu, Hao Zhang, Shuchen Xue, Shizhe Diao, Yonggan Fu, Zhijian Liu, Pavlo Molchanov, Ping Luo, Song Han, and Enze Xie. Fast-dLLM v2: Efficient block-diffusion LLM. arXiv preprint arXiv:2509.26328 , 2025. URL https://arxiv.org/abs/2509.26328 .John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press. SWE-agent: Agent-computer interfaces enable automated software engineering. 
+
+arXiv preprint arXiv:2405.15793 , 2024. URL https://arxiv.org/abs/2405.15793 .Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. ReAct: Synergizing reasoning and acting in language models. In International Conference on Learning Representations , 2023. URL https://arxiv.org/abs/2210.03629 .Ted Zadouri, Markus Hoehnerbach, Jay Shah, Timmy Liu, Vijay Thakkar, and Tri Dao. FlashAttention-4: Algorithm and kernel pipelining co-design for asymmetric hardware scaling. 
+
+arXiv preprint arXiv:2603.05451 , 2026. URL https://arxiv.org/abs/2603.05451 .14 Preprint. Under review. 
+
+A CORRECTNESS OF CONTEXT -S HARDED BLOCK PARALLELISM 
+
+Proposition 1 (Exactness of CSBP) . Let {B r }Pr=1 partition the B target blocks, and let the clean token rows be partitioned arbitrarily across the same P ranks. Given any fixed input sequence, sampled diffusion times and corruptions, per-token model randomness, and loss normalization, CSBP computes, for every parameter value θ, the same global sampled loss and parameter gradient as the reference length-2L BDLM computation, up to floating-point reduction order. Proof. Fix the input sequence, sampled diffusion times and corruptions, model randomness, and loss normalization. Let Lref  
+
+> b
+
+(θ) and LCSBP  
+
+> b
+
+(θ) be the resulting sampled losses for block b. For rank r,define 
+
+LCSBP  
+
+> r
+
+= X
+
+> b∈B r
+
+LCSBP  
+
+> b
+
+, LCSBP =
+
+> P
+
+X
+
+> r=1
+
+LCSBP  
+
+> r
+
+, Lref =
+
+> B
+
+X
+
+> b=1
+
+Lref  
+
+> b
+
+. (8) Let Hclean  
+
+> d
+
+and Hcorr  
+
+> b,d
+
+denote the clean representations and the corrupted representations of block b
+
+after d of the model’s D transformer layers. Thus H0 is the embedding output and HD enters the output projection. We use Hd to denote all clean and corrupted representations at depth d, and θd to denote the parameters of layer d for 1 ≤ d ≤ D.1. Reference dependencies. The length-2L construction and block-causal mask described in Section 3 determine the visible K/V rows. At layer d, a clean query at position q attends to clean positions 1, . . . , q . The corrupted queries in block b attend to their own corrupted block and the clean positions in preceding blocks. We write Kclean  
+
+> ≤q,d
+
+and V clean  
+
+> ≤q,d
+
+for the clean K/V rows at positions 1, . . . , q . The reference attention is 
+
+Oclean ,ref  
+
+> q,d
+
+= Attn  Qclean  
+
+> q,d
+
+, K clean  
+
+> ≤q,d
+
+, V clean 
+
+> ≤q,d
+
+ , (9) 
+
+Ocorr ,ref  
+
+> b,d
+
+= Attn  Qcorr  
+
+> b,d
+
+, [Kcorr  
+
+> b,d
+
+; Kclean  
+
+> <b,d
+
+], [V corr  
+
+> b,d
+
+; V clean  
+
+> <b,d
+
+] . (10) Equation 10 implies, for every Z ∈ { Q, K, V },
+
+∂O corr ,ref 
+
+> b,d
+
+∂Z corr 
+
+> b′,d
+
+= 0 (b′̸ = b). (11) 2. Exact sharded attention. Let Cr be the set of clean token positions stored on rank r. The clean shards satisfy 
+
+> P
+
+[
+
+> r=1
+
+Cr = {1, . . . , L }, Cr ∩ Cr′ = ∅ (r̸ = r′). (12) Consider one query vector q. Let S be its visible key positions, partitioned into disjoint nonempty sets S1, . . . , S J . For the key and value rows ki and vi, let ai = qk ⊤ 
+
+> i
+
+/√dh and 
+
+amax = max i∈S ai. Since the sets Sj partition S,
+
+Attn( q, K S , V S ) = 
+
+> J
+
+X
+
+> j=1
+
+X
+
+> i∈Sj
+
+eai−amax viJX
+
+> j=1
+
+X
+
+> i∈Sj
+
+eai−amax 
+
+. (13) Online softmax evaluates these partitioned sums exactly (Milakov & Gimelshein, 2018; Dao et al., 2022). For a clean query at position q, the nonempty sets Cr ∩ { 1, . . . , q } partition its visible K/V rows. For a corrupted query in block b, its local corrupted block together with the nonempty clean sets Cr ∩ { 1, . . . , (b − 1) M } partition its visible K/V rows. These clean sets are empty for b = 1 . CSBP therefore supplies exactly the rows in Equations 9 and 10. 15 Preprint. Under review. 3. Forward induction. The common inputs and embedding computation give HCSBP 0 = Href 0 .Assume HCSBP  
+
+> d−1
+
+= Href  
+
+> d−1
+
+for some 1 ≤ d ≤ D. Their Q/K/V projections agree, and Equation 13 gives 
+
+Oclean ,CSBP  
+
+> q,d
+
+= Oclean ,ref  
+
+> q,d
+
+∀q, Ocorr ,CSBP  
+
+> b,d
+
+= Ocorr ,ref  
+
+> b,d
+
+∀b. (14) The remaining operations in layer d are unchanged, so HCSBP  
+
+> d
+
+= Href  
+
+> d
+
+. Induction over 
+
+d = 1 , . . . , D gives HCSBP  
+
+> D
+
+= Href  
+
+> D
+
+.4. Loss. The output projection and block losses are unchanged. The forward induction therefore gives LCSBP  
+
+> b
+
+= Lref  
+
+> b
+
+for every block. Since {B r }Pr=1 partitions the target blocks, 
+
+LCSBP =
+
+> P
+
+X
+
+> r=1
+
+X
+
+> b∈B r
+
+LCSBP  
+
+> b
+
+=
+
+> B
+
+X
+
+> b=1
+
+Lref  
+
+> b
+
+= Lref . (15) 5. Backward pass. The equal final representations and common loss functions give the same derivatives at the output of the model. Let L denote the global sampled loss of either execution. For Z ∈ { Q, K, V }, Equation 11 and the chain rule give 
+
+∂L
+
+∂Z corr 
+
+> b,d
+
+=
+
+> B
+
+X
+
+> b′=1
+
+∂O corr 
+
+> b′,d
+
+∂Z corr 
+
+> b,d
+
+!⊤
+
+∂L
+
+∂O corr 
+
+> b′,d
+
+= ∂O corr 
+
+> b,d
+
+∂Z corr 
+
+> b,d
+
+!⊤
+
+∂L
+
+∂O corr 
+
+> b,d
+
+. (16) Thus corrupted Q/K/V derivatives depend only on the queries from the same block and are computed on its owner. Let Zclean  
+
+> r,d
+
+denote the clean K/V rows at positions Cr , and let Oq,d 
+
+denote the attention output for query row q. The chain rule gives 
+
+∂L
+
+∂Z clean 
+
+> r,d
+
+= X
+
+> q
+
+∂O q,d 
+
+∂Z clean 
+
+> r,d
+
+!⊤
+
+∂L
+
+∂O q,d 
+
+, Z ∈ { K, V }, (17) where the sum is over all clean and corrupted query rows. A term is zero when the query cannot attend to a position in Cr . Exact CP backward accumulates this sum on rank r. For every clean query row q,
+
+∂L
+
+∂Q clean 
+
+> q,d
+
+= ∂O clean 
+
+> q,d
+
+∂Q clean 
+
+> q,d
+
+!⊤
+
+∂L
+
+∂O clean 
+
+> q,d
+
+, (18) which is computed on the query owner. Because the two executions have the same for-ward values and output derivatives, Equations 16–18 give the same Q/K/V derivatives. Backpropagation through the unchanged remainder of layer d therefore satisfies 
+
+∂LCSBP 
+
+∂H CSBP 
+
+> d−1
+
+= ∂H CSBP 
+
+> d
+
+∂H CSBP 
+
+> d−1
+
+!⊤
+
+∂LCSBP 
+
+∂H CSBP 
+
+> d
+
+= ∂H ref 
+
+> d
+
+∂H ref 
+
+> d−1
+
+!⊤
+
+∂Lref 
+
+∂H ref 
+
+> d
+
+= ∂Lref 
+
+∂H ref 
+
+> d−1
+
+,
+
+∇θd LCSBP =
+
+ ∂H CSBP 
+
+> d
+
+∂θ d
+
+⊤ ∂LCSBP 
+
+∂H CSBP 
+
+> d
+
+=
+
+ ∂H ref 
+
+> d
+
+∂θ d
+
+⊤ ∂Lref 
+
+∂H ref 
+
+> d
+
+= ∇θd Lref .
+
+(19) Because the output projection is identical, its parameter gradient and derivative with respect to HD agree, providing the base case. Reverse induction through d = D, . . . , 1 gives equal transformer-layer gradients and equal derivatives with respect to H0. The common embed-ding computation then gives equal embedding gradients. Finally, linearity of differentiation and Equation 8 give PX
+
+> r=1
+
+∇θ LCSBP  
+
+> r
+
+= ∇θ LCSBP = ∇θ Lref . (20) 16 Preprint. Under review. Equations 15 and 20 hold for every sampled realization. Taking expectations also gives the same BDLM objective and objective gradient. 
+
+Communication consequence. Under CSBP, only clean K/V and their gradients cross ranks during attention, while corrupted Q/K/V and their gradients remain on the rank assigned their block. 
+
+B LOAD BALANCING 
+
+Both attention workloads in CSBP increase with block position. Later target blocks attend to longer clean prefixes, and later clean query blocks attend to longer causal prefixes. Because both costs grow with the same block index, the same early–late pairing balances them simultaneously. Assume B equal-sized blocks of M = L/B tokens. Let W target  
+
+> b
+
+and W clean  
+
+> b
+
+denote the valid query–key pairs for target-block and clean causal attention at block b. The M target queries in block 
+
+b attend to (b − 1) M clean-prefix keys and M keys from their own corrupted block, for bM visible keys. The M clean queries attend to the b − 1 preceding clean blocks and causally within their own block. Their work is therefore 
+
+W target  
+
+> b
+
+= bM 2, W clean  
+
+> b
+
+= ( b − 1) M 2 + M (M + 1) 2 . (21) Dual-end BP pairs target block b with block B + 1 − b. Clean-sequence zigzag sharding uses the same early–late pairing (Dubey et al., 2024). The work of each pair is 
+
+W target  
+
+> b
+
++ W target  
+
+> B+1 −b
+
+= ( B + 1) M 2, W clean  
+
+> b
+
++ W clean  
+
+> B+1 −b
+
+= BM 2 + M. (22) Both sums are independent of b, so every early–late pair carries the same amount of target-block work and the same amount of clean causal work. When B is divisible by 2P , assigning B/ (2 P )
+
+pairs to each rank gives 
+
+W target  
+
+> r
+
+= B(B + 1) M 2
+
+2P , W clean  
+
+> r
+
+= L(L + 1) 2P , 1 ≤ r ≤ P. (23) Using the same pairs for target-block placement and clean zigzag sharding gives every rank equal target-block and clean causal attention work. Attention backward uses the same valid query–key pairs, so these pair counts remain balanced. When exact divisibility does not hold, we distribute the complete pairs as evenly as possible and assign any unpaired middle block to the currently least-loaded rank. 17 Preprint. Under review. 
+
+C CSBP A LGORITHM AND EXECUTION SCHEDULE 
+
+Algorithm 1 summarizes one CSBP layer. Each rank stores one clean-sequence shard and the complete corrupted blocks in Br . All ranks execute concurrently: CP supplies clean K/V, while each block’s corrupted Q/K/V remain local. 
+
+Algorithm 1 CSBP forward pass on rank r
+
+1: Input: Clean shard (Qr , K r , V r ) and {(Qb, K b, V b) : b ∈ B r }
+
+2: Output: Or and {Ob : b ∈ B r }
+
+3: All-gather the clean K/V shards to form (Kclean , V clean ) on each rank 4: Clean-sequence attention (CP) 
+
+5: Compute clean-query attention under the block-causal mask 6: Or ← softmax  Qr (Kclean )⊤/√dh + Mr
+
+ V clean 
+
+7: Assigned corrupted blocks (BP) 
+
+8: for all b ∈ B r do 
+
+9: Compute within-block attention from the local Qb, K b, V b
+
+10: Compute clean-prefix attention from the gathered Kclean  
+
+> <b
+
+, V clean 
+
+> <b
+
+11: Merge the two outputs and LSEs by online softmax to obtain 12: Ob ← Attn  Qb, [Kb; Kclean  
+
+> <b
+
+], [Vb; V clean  
+
+> <b
+
+] (Equation 7) 
+
+13: end for 
+
+14: return Or and {Ob : b ∈ B r }
+
+Algorithm 2 gives the exact backward pass. Rank r keeps the corrupted Q/K/V gradients for its assigned blocks, while CP sums the clean K/V gradients contributed by all clean and corrupted queries. 
+
+Algorithm 2 CSBP attention backward on rank r
+
+1: Input: Saved forward tensors and {L b : b ∈ B r }
+
+2: Output: (dQ r , dK r , dV r ) and {(dQ b, dK b, dV b) : b ∈ B r }
+
+3: Clean-query backward (CP) 
+
+4: Backpropagate Or ; retain dQ r and the clean K/V contributions 5: Assigned corrupted blocks (local backward) 
+
+6: for all b ∈ B r do 
+
+7: Backpropagate Lb through Ob
+
+8: (dQ b, dK b, dV b) ← ∇ (Qb,K b,V b)Lb (kept on rank r)
+
+9: Add this block’s clean-prefix K/V gradients to the CP reduction 10: end for 
+
+11: Clean-gradient reduction (CP backward) 
+
+12: Reduce-scatter the clean K/V contributions across ranks 13: for Z ∈ { K, V } do 
+
+14: dZ r ← X
+
+> q
+
+ ∂O q
+
+∂Z r
+
+⊤ ∂L
+
+∂O q
+
+(Equation 17) 
+
+15: end for 
+
+16: return (dQ r , dK r , dV r ) and {(dQ b, dK b, dV b) : b ∈ B r }
+
+18 Preprint. Under review. 
+
+Efficient fused operator. Implementation 1 shows the production forward path. It starts an asynchronous all-gather of clean K/V, then computes all local corrupted blocks with one block-diagonal attention launch while communication runs. After the all-gather, one masked fused-attention launch computes the clean-K/V contribution for every query. The mask uses each gathered key’s original clean token position, so the kernel consumes the gathered K/V directly without a reordering copy. Each attention launch returns a normalized output Oj and row-wise log-sum-exp (LSE) zj . For two disjoint key sets, the CUDA kernel sets m = max( z1, z 2), wj = ezj −m, and computes 
+
+O = w1O1 + w2O2
+
+w1 + w2
+
+, z = m + log( w1 + w2). (24) This is Equation 13 applied to the two attention launches. The implementation stores the numerator, 
+
+m, and the normalizer w1 + w2 in FP32 until the final division.  
+
+> 1
+
+@cuda_kernel  
+
+> 2
+
+def merge_lse_kernel(numerator, m, normalizer,  
+
+> 3
+
+O_block, z_block):  
+
+> 4
+
+# One thread handles one (corrupted-query row, head-dimension) element.  
+
+> 5
+
+q, d = cuda_grid_2d()  
+
+> 6
+
+if q >= len (z_block):  
+
+> 7
+
+return  
+
+> 8
+
+m_new = max (m[q], z_block[q])  
+
+> 9
+
+w_acc = exp(m[q] - m_new) if isfinite(m[q]) else 0.0  
+
+> 10
+
+w_block = exp(z_block[q] - m_new) if isfinite(z_block[q]) else 0.0  
+
+> 11
+
+numerator[q, d] = (w_acc * numerator[q, d]  
+
+> 12
+
++ w_block * O_block[q, d])  
+
+> 13
+
+if d == 0:  
+
+> 14
+
+normalizer[q] = w_acc * normalizer[q] + w_block  
+
+> 15
+
+m[q] = m_new  
+
+> 16 17 18
+
+def csbp_collective_forward(Q, K_block, V_block,  
+
+> 19
+
+K_clean_r, V_clean_r, masks, scale):  
+
+> 20
+
+# 1. Start the clean K/V all-gather.  
+
+> 21
+
+work, gathered = async_all_gather(K_clean_r, V_clean_r)  
+
+> 22 23
+
+# 2. One block-diagonal launch covers every block owned by this rank.  
+
+> 24
+
+O_block, LSE_block = block_diagonal_attention(  
+
+> 25
+
+Q[:masks.corrupted_rows], K_block, V_block, scale)  
+
+> 26 27
+
+# 3. Use the gathered clean K/V directly in one masked launch.  
+
+> 28
+
+work.wait()  
+
+> 29
+
+K_clean, V_clean = view_all_gathered_clean_kv(gathered)  
+
+> 30
+
+clean_mask = block_causal_mask(masks)  
+
+> 31
+
+O_clean, LSE_clean = masked_clean_attention(  
+
+> 32
+
+Q, K_clean, V_clean, clean_mask, scale)  
+
+> 33 34
+
+# 4. Custom CUDA kernels apply the LSE rule above in FP32.  
+
+> 35
+
+numerator = O_clean. float ()  
+
+> 36
+
+m = LSE_clean. float ()  
+
+> 37
+
+normalizer = isfinite(m). float ()  
+
+> 38
+
+launch(merge_lse_kernel, numerator, m, normalizer,  
+
+> 39
+
+O_block, LSE_block)  
+
+> 40
+
+O, LSE = empty_outputs(Q)  
+
+> 41
+
+launch(normalize_output_kernel,  
+
+> 42
+
+numerator, m, normalizer, O, LSE)  
+
+> 43
+
+save_for_backward(Q, K_block, V_block, K_clean, V_clean, O, LSE)  
+
+> 44
+
+return O
+
+Implementation 1: CSBP forward schedule and CUDA LSE merge. 19 Preprint. Under review. Implementation 2 shows the fused packed backward. One masked kernel reuses the saved output and LSE to compute gradients for the local corrupted K/V and gathered clean K/V together. The corrupted gradients remain local, while only the clean K/V gradients are reduce-scattered to their CP ranks.                                                                                                      
+
+> 1def csbp_fused_backward(dO, saved, masks, scale):
+> 2Q, K_block, V_block, K_clean, V_clean, O, LSE =saved
+> 34#1. Pack local corrupted K/V before the gathered clean K/V.
+> 5K_packed, V_packed =pack_local_clean_kv(
+> 6K_block, V_block, K_clean, V_clean)
+> 78#2. One masked backward reuses the exact forward output and LSE.
+> 9dQ, dK_packed, dV_packed =masked_attention_backward(
+> 10 Q, K_packed, V_packed, O, LSE, dO,
+> 11 masks.packed, scale)
+> 12 13 #3. Split local gradients from the clean gradients that communicate.
+> 14 dK_block, dK_clean =split_local_clean_gradients(
+> 15 dK_packed, masks.corrupted_rows)
+> 16 dV_block, dV_clean =split_local_clean_gradients(
+> 17 dV_packed, masks.corrupted_rows)
+> 18 19 #4. Return each rank’s clean K/V-gradient shard.
+> 20 dK_clean_r, dV_clean_r =reduce_scatter_clean_gradients(
+> 21 dK_clean, dV_clean)
+> 22 return dQ, dK_block, dV_block, dK_clean_r, dV_clean_r
+
+Implementation 2: Fused CSBP backward. One masked kernel computes the local corrupted-block and clean-context gradients. 
+
+D AR-TO -BDLM C ONVERSION METHODOLOGY 
+
+Fast-dLLM v2 adapts a pretrained causal LM to block diffusion while retaining next-token predic-tion (Wu et al., 2025). It samples a blockwise binary mask m(0) and constructs a second noisy view with the complementary mask m(1) = 1 − m(0) on every supervised token. If h(v) 
+
+> i
+
+is the hidden representation at position i in view v ∈ { 0, 1}, let m(v) 
+
+> i
+
+= 1 when xi is masked and let S contain the supervised positions other than the first token. The sampled objective is 
+
+bLAR -to -BDLM = −
+
+> 1
+
+X
+
+> v=0
+
+X
+
+> i∈S
+
+m(v) 
+
+> i
+
+log pθ
+
+
+
+xi | h(v)
+
+> i−1
+
+
+
+, m(0)  
+
+> i
+
++ m(1)  
+
+> i
+
+= 1 . (25) The complementary views supervise every eligible next token exactly once. The one-token shift uses the preceding query row to predict xi, matching a causal LM head. The objective preserves the two properties used by block parallelism. Each view uses the length-2L
+
+clean-plus-corrupted computation, and queries in block b use corrupted K/V only from block b of that view and clean K/V from preceding clean blocks, 
+
+Ob,v = Attn  Qb,v , [Kb,v ; Kclean  
+
+> <b,v
+
+], [Vb,v ; V clean  
+
+> <b,v
+
+] . (26) The two views are separate batch elements and introduce no cross-view attention. The label shift also leaves these attention dependencies unchanged. We assign each shifted loss term to the block containing its prediction row, and group the terms from both views into the corresponding block loss. The objective therefore retains the decomposition bLAR -to -BDLM = PBb=1 Lb.CSBP therefore applies directly. BP assigns each complete corrupted computation and loss for block 
+
+b in both views to one rank, while CP shards the clean sequence of both views across the same ranks. Corrupted Q/K/V and their gradients remain on the block owner, while clean K/V gradients are accumulated on their CP shard owners. Proposition 1 applies to each view, and summing the complementary-view losses preserves its loss and gradient equalities. 20 Preprint. Under review. 
+
+E DF LASH 2 D RAFTER TRAINING METHODOLOGY 
+
+DFlash trains a lightweight block-diffusion drafter for speculative decoding (Chen et al., 2026). Given a clean sequence x, hidden features Htar are extracted from a frozen autoregressive target model. For each sampled block b, the token at position ab is visible and the next M − 1 tokens are masked and predicted in one pass. Queries attend bidirectionally within the block and to target-feature K/V preceding ab; different draft blocks do not attend to one another. Let ex(b) = ( xab , [MASK ], . . . , [MASK ]) denote the input for block b. One draft-attention layer computes 
+
+Ob = Attn  Qb, [Kb; Ktar  
+
+> <a b
+
+], [Vb; V tar  
+
+> <a b
+
+] . (27) Following DFlash2 (Inco AI, 2026), our drafter uses the architecture in the open-source SpecForge implementation (Li et al., 2025). It retains this one-pass backbone and uses block-local two-tap dynamic convolutions and a candidate-path selector. Its sampled objective is the sum of a draft-token loss and a selector loss for each block: 
+
+bLDFlash2 = 1
+
+Z
+
+X
+
+> b
+
+Lb, Lb = Ldraft  
+
+> b
+
++ αsel Lsel  
+
+> b
+
+, (28) where Z is the sum of valid token weights and αsel weights the selector term. This blockwise objective makes CSBP directly applicable. Let Br be the blocks assigned to rank r;these sets are disjoint and together contain every sampled block. Since Lb depends only on block b
+
+and its target-feature prefix, each rank evaluates its assigned terms, and 
+
+> P
+
+X
+
+> r=1
+
+∇θ
+
+1
+
+Z
+
+X
+
+> b∈B r
+
+Lb
+
+!
+
+= ∇θ bLDFlash2 . (29) Thus, assigning complete blocks to ranks preserves the loss and gradient up to floating-point reduction order. It also gives DFlash2 an additional source of savings beyond full-model SFT and AR-to-BDLM conversion. With P context ranks, conventional CP repeats each block-local drafter path P times, while CSBP evaluates it once. Full-model training has no separate drafter path and therefore no corresponding P -to-one reduction. The repeated DFlash2 work includes the decoder, vocabulary objective, output-head recomputation, and selector; target-feature processing remains context sharded. At 512K, removing two-way replication reduces measured GEMM work by 1.92 ×, and higher execution efficiency raises the throughput gain to 2.48 ×. At 1M, removing eight-way replication permits four data-parallel replicas, producing the 7.59 × aggregate throughput gain. 
+
+F DIFFUSION GEMMA SFT T RAINING DATA AND EVALUATION DETAILS 
+
+SWE-bench Verified. For the software-engineering comparison in Figure 6, the best baseline and CSBP train on identical ordered streams of successful CoderForge-Preview trajectories (Ariyak et al., 2026), formatted for the OpenHands agent interface (Wang et al., 2025). Trajectories in the training stream have a mean sequence length of 65,536.5 tokens and a maximum length of 131,072 tokens. We evaluate the base model at 0 hours and checkpoints at 3, 6, 9, and 12 hours, with one attempt on each of the 500 SWE-bench Verified tasks (Jimenez et al., 2024; Chowdhury et al., 2024). The harness supplies the issue and repository state; success requires both the designated FAIL_TO_PASS and 
+
+PASS_TO_PASS tests to pass. 
+
+Terminal-Bench Lite. The best baseline and CSBP train on identical ordered streams of quality-filtered Terminus-2 trajectories from LiteCoder-Terminal-SFT (Peng et al., 2026). Trajectories in the training stream have a mean sequence length of 65,551 tokens and a maximum length of 131,072 tokens. We evaluate the same checkpoint schedule with Harbor’s Terminus-2 agent (Harbor Framework Team, 2026) on all 100 OpenThoughts-TBLite tasks (OpenThoughts-Agent team, Snorkel AI, Bespoke Labs, 2026), with one attempt per task. A task passes only when its benchmark verifier returns success. 
+
+Matched wall-clock protocol. Within each workload, the best baseline and CSBP use the same model, training corpus, optimizer settings, checkpoint schedule, and evaluation configuration; only 21 Preprint. Under review. the distributed training method changes. We report pass rate as the percentage of tasks solved by the single attempt. Evaluation tasks and verifier outputs do not contribute training gradients. Both sources apply benchmark decontamination: CoderForge excludes matching SWE-bench Verified repository/commit pairs and problem statements, while LiteCoder-Terminal-SFT filters 13-gram overlaps with Terminal-Bench queries (Ariyak et al., 2026; Peng et al., 2026). 
+
+SFT optimization. The CoderForge-Preview and LiteCoder-Terminal-SFT runs use a global batch size of one example and one gradient-accumulation step per update. We train rank-16 LoRA adapters with α = 32 on eight H100 GPUs. The baseline uses CP8, while CSBP uses CP8/BP8. We optimize with DeepSpeed ZeRO-2 and FusedAdam using a peak learning rate of 10 −5, Adam coefficients 
+
+(β1, β 2) = (0 .95 , 0.99) , ϵ = 10 −8, weight decay 10 −4, gradient clipping at 1.0, and a cosine schedule that decays the learning rate to 10 −6.
+
+G END -TO -E ND NUMERICAL AGREEMENT 
+
+Table 3 compares the strongest non-BP baseline with CSBP using full-depth BF16 runs at 256K context on sixteen H200 GPUs. The NemotronDiffusion and DiffusionGemma rows evaluate BDLM fine-tuning, while the Qwen rows evaluate Fast-dLLM v2 AR-to-BDLM conversion. Each pair uses the same model, random seed, generated inputs, objective, and optimizer configuration. The resulting loss differences are small and consistent with floating-point reduction order. Table 3: End-to-end loss agreement between the strongest non-BP baseline and CSBP at 256K context.                                                        
+
+> Model Context Best baseline topology Ours topology Absolute loss difference Relative loss difference NemotronDiffusion 3B 256K DP4/TP1/CP4 DP4/TP1/CP4/BP4 2.83 ×10 −32.11 ×10 −4
+> NemotronDiffusion 8B 256K DP4/TP1/CP4 DP4/TP1/CP4/BP4 2.59 ×10 −31.97 ×10 −4
+> NemotronDiffusion 14B 256K DP2/TP1/CP8 DP2/TP1/CP8/BP8 9.54 ×10 −77.18 ×10 −8
+> DiffusionGemma 26B-A4B 256K DP1/TP1/EP2/CP8 DP1/TP1/EP2/CP8/BP8 6.51 ×10 −32.11 ×10 −4
+> Qwen3.8-27B 256K DP1/TP2/CP8 DP1/TP2/CP8/BP8 7.21 ×10 −65.11 ×10 −7
+> Qwen3.5-27B 256K DP1/TP2/CP8 DP1/TP2/CP8/BP8 9.50 ×10 −56.69 ×10 −6
+
+H PURE BLOCK PARALLELISM ABLATION 
+
+Sharding the clean context makes BP practical at long sequence lengths (Table 4). For NemotronDif-fusion 14B at 64K, CSBP is 1.46 × faster than pure BP and uses 89.8 rather than 110.7 GiB of HBM. At 128K, CSBP still fits while pure BP runs out of memory. DiffusionGemma 26B-A4B shows the same need for context sharding even earlier: pure BP runs out of memory at both 64K and 128K, where CSBP fits and outperforms pure CP. Block ownership removes corrupted K/V communication; context sharding prevents replicated clean prefixes from erasing that benefit. 22 Preprint. Under review. Table 4: Context sharding enables block parallelism at long contexts. 
+
+Model Context Method Topology Global batch Tok/s Peak HBM (GiB) NemotronDiffusion 14B 64K Best baseline DP8/TP1/CP2 8 20,092 89.5 Pure BP DP8/TP1/BP2 8 15,223 110.7 Ours DP8/TP1/CP2/BP2 8 22,152 89.8 NemotronDiffusion 14B 128K Best baseline DP4/TP1/CP4 4 13,114 90.0 Pure BP DP4/TP1/BP4 4 OOM OOM Ours DP4/TP1/CP4/BP4 4 15,136 90.1 DiffusionGemma 26B-A4B 64K Best baseline DP4/TP1/EP2/CP2 8 22,154 109.4 Pure BP DP4/TP1/EP2/BP2 8 OOM OOM Ours DP4/TP1/EP2/CP2/BP2 8 27,653 113.5 DiffusionGemma 26B-A4B 128K Best baseline DP2/TP1/EP2/CP4 4 14,584 112.0 Pure BP DP2/TP1/EP2/BP4 4 OOM OOM Ours DP2/TP1/EP2/CP4/BP4 4 21,049 113.6 
+
+I LOAD BALANCING ANALYSIS 
+
+Load balancing delivers substantial gains without increasing memory use (Table 5). Replacing contiguous block assignment with early–late pairing improves throughput by 1.34 × for Nemotron-Diffusion 3B and 1.28 × for DiffusionGemma 26B-A4B at 256K. Peak HBM is unchanged for NemotronDiffusion and falls by 6.5 GiB for DiffusionGemma. Only the block assignment changes; the objective and remaining training settings are fixed. These gains show that equal block counts are not enough: balancing attention work across ranks is important to realizing CSBP’s throughput benefit. Table 5: Load balancing accelerates CSBP at 256K context.                          
+
+> Model Topology Global batch ms/step Tok/s MFU (%) Peak HBM (GiB) Speedup NemotronDiffusion 3B DP4/TP1/CP4/BP4 488,950.4 / 66,500.3 11,788 / 15,768 27.8 / 37.2 57.0 / 57.0 1.34 ×
+> DiffusionGemma 26B-A4B DP1/TP1/EP2/CP8/BP8 243,722.0 / 34,134.6 11,991 / 15,359 14.4 / 18.4 120.1 / 113.6 1.28 ×
+
+Pairs: contiguous / dual-end. Speedup: dual-end / contiguous. Bold marks the better value. 
+
+J AR-TO -BDLM C ONVERSION RESULTS 
+
+CSBP’s benefits extend to converting autoregressive models into BDLMs (Table 6). Under the Fast-dLLM v2 objective, both Qwen backbones train faster and use less peak HBM at every evaluated context length. Speedup grows from 1.26 –1.27 × at 64K to 1.27 –1.33 × at 256K, where CSBP also saves 9.6 GiB of HBM. Table 6: CSBP accelerates AR-to-BDLM conversion from 64K to 256K context. 
+
+Model Context Best baseline topology Ours topology Tok/s Speedup MFU (%) Peak HBM (GiB) Qwen3.8-27B 64K DP1/TP2/CP8 DP1/TP2/CP8/BP8 4,697 / 5,905 1.26 × 22.3 / 28.0 64.2 / 62.5 
+
+Qwen3.8-27B 128K DP1/TP2/CP8 DP1/TP2/CP8/BP8 3,742 / 4,853 1.30 × 21.4 / 27.8 83.0 / 78.3 
+
+Qwen3.8-27B 256K DP1/TP2/CP8 DP1/TP2/CP8/BP8 2,623 / 3,490 1.33 × 20.1 / 26.8 120.7 / 111.1 
+
+Qwen3.5-27B 64K DP1/TP2/CP8 DP1/TP2/CP8/BP8 4,709 / 5,967 1.27 × 22.3 / 28.3 64.2 / 62.5 
+
+Qwen3.5-27B 128K DP1/TP2/CP8 DP1/TP2/CP8/BP8 3,722 / 4,850 1.30 × 21.3 / 27.8 83.0 / 78.3 
+
+Qwen3.5-27B 256K DP1/TP2/CP8 DP1/TP2/CP8/BP8 2,641 / 3,351 1.27 × 20.3 / 25.7 120.7 / 111.1 
+
+Pairs: best baseline / ours. Bold marks the better value. 
+
+23 Preprint. Under review. 
+
+K EFFECTIVENESS ACROSS DIFFERENT BLOCK SIZES 
+
+CSBP maintains its advantage across an eightfold range of block sizes (Table 7). From 128 to 1,024 tokens per block, speedup stays within 1.14 –1.15 × for NemotronDiffusion 14B and 1.33 –1.44 × for DiffusionGemma 26B-A4B. Table 7: CSBP sustains speedups across block sizes at 128K context.                                                                                                            
+
+> Model Block size Best baseline topology Ours topology Global batch ms/step Tok/s MFU (%) Peak HBM (GiB) Speedup NemotronDiffusion 14B 128 DP4/TP1/CP4 DP4/TP1/CP4/BP4 439,187.3 / 34,279.4 13,379 / 15,295 34.3 / 39.2 90.0 / 90.1 1.14 ×
+> NemotronDiffusion 14B 256 DP4/TP1/CP4 DP4/TP1/CP4/BP4 439,979.2 / 34,637.4 13,114 / 15,136 33.7 / 38.9 90.0 / 90.1 1.15 ×
+> NemotronDiffusion 14B 512 DP4/TP1/CP4 DP4/TP1/CP4/BP4 438,852.1 / 34,197.3 13,494 / 15,331 34.7 / 39.4 90.0 / 90.1 1.14 ×
+> NemotronDiffusion 14B 1,024 DP4/TP1/CP4 DP4/TP1/CP4/BP4 439,201.0 / 34,392.4 13,374 / 15,244 34.5 / 39.3 90.0 / 90.1 1.14 ×
+> DiffusionGemma 26B-A4B 128 DP2/TP1/EP2/CP4 DP2/TP1/EP2/CP4/BP4 433,271.3 / 24,844.4 15,758 / 21,103 12.6 / 16.9 111.8 / 113.6 1.34 ×
+> DiffusionGemma 26B-A4B 256 DP2/TP1/EP2/CP4 DP2/TP1/EP2/CP4/BP4 435,949.5 / 24,907.5 14,584 / 21,049 11.7 / 16.9 112.0 / 113.6 1.44 ×
+> DiffusionGemma 26B-A4B 512 DP2/TP1/EP2/CP4 DP2/TP1/EP2/CP4/BP4 433,319.8 / 24,829.4 15,735 / 21,116 12.7 / 17.0 112.1 / 113.7 1.34 ×
+> DiffusionGemma 26B-A4B 1,024 DP2/TP1/EP2/CP4 DP2/TP1/EP2/CP4/BP4 433,033.5 / 24,850.7 15,871 / 21,097 12.9 / 17.1 112.3 / 113.7 1.33 ×
+
+Pairs: best baseline / ours. Bold marks the better value. 
+
+L SAVINGS BREAKDOWNS 
+
+Table 8 separates attention communication from end-to-end step time. NemotronDiffusion 14B uses full attention, so keeping corrupted K/V local halves its logical attention traffic; overlap limits the reduction in exposed attention communication to 20.4%. DiffusionGemma 26B-A4B has a second, architecture-specific source of savings: 25 of its 30 attention layers use a 1,024-token sliding window. The tested CP8 baseline uses full-shard K/V exchange in all 30 layers. CSBP keeps corrupted K/V local and, in the 25 sliding-window layers, its window-aware exchange sends only the clean rows needed by local queries; only the five global-attention layers exchange complete clean K/V shards. This reduces logical attention traffic by 93.5% and exposed attention communication by 93.4%. Table 8: Attention and step-time breakdown at 256K: CP8 baseline vs. CSBP. 
+
+Measure NemotronDiffusion 14B CP8 → CP8/BP8 DiffusionGemma 26B-A4B CP8 → CP8/BP8 Step time (s) 66.50 → 56.37 (1.18 ×) 49.66 → 34.13 (1.45 ×)
+
+Forward GPU span (s) 17.57 → 13.00 (−26 .0% ) 10.99 → 5.83 (−47 .0% )
+
+Backward GPU span (s) 49.46 → 45.02 (−9.0% ) 36.50 → 26.62 (−27 .1% )
+
+Attention traffic (GiB/GPU) 210.00 → 105.00 (−50 .0% ) 433.13 → 28.30 (−93 .5% )
+
+Exposed attention comm. (s/GPU) 3.034 → 2.414 (−20 .4% ) 10.939 → 0.723 (−93 .4% )
+
+The 93% reductions apply to attention communication, not the complete training step. Diffu-sionGemma’s step time falls by 31.3%, while dense and expert GEMM durations remain nearly unchanged. Both forward and backward become faster, yielding 1.18 × and 1.45 × end-to-end speedup for NemotronDiffusion 14B and DiffusionGemma 26B-A4B, respectively. 
+
+M COMPLETE H200 P ROFILES 
+
+CSBP improves the throughput–memory trade-off across the tested models and context lengths (Table 9). The independently selected configurations deliver speedups up to 1.61 ×. Even when throughput is nearly tied, context sharding can substantially reduce memory: for NemotronDiffusion 3B at 128K, CSBP stays within 1% of the DP16 baseline’s throughput while saving 41 GiB of peak HBM. This case highlights another practical benefit of CSBP: retaining throughput while freeing memory. 24 Preprint. Under review. Table 9: Throughput and memory gains across long-context training configurations. 
+
+Model Context Ours topology Best baseline topology Global batch Tok/s MFU (%) Peak HBM (GiB) HBM saved (GiB) Speedup NemotronDiffusion 3B 128K DP8/TP1/CP2/BP2 DP16/TP1 8 / 16 28,891 / 29,086 37.5 / 37.7 56.5 / 97.5 41.0 0.99 ×
+
+NemotronDiffusion 3B 256K DP4/TP1/CP4/BP4 DP4/TP1/CP4 4 16,027 / 13,434 37.8 / 31.7 57.0 / 57.1 0.1 1.19 ×
+
+NemotronDiffusion 3B 512K DP2/TP1/CP8/BP8 DP2/TP1/CP8 2 8,352 / 6,895 37.4 / 30.8 58.1 / 61.7 3.6 1.21 ×
+
+NemotronDiffusion 8B 64K DP8/TP1/CP2/BP2 DP8/TP1/CP2 16 29,829 / 26,669 37.8 / 33.8 96.9 / 96.4 −0.5 1.12 ×
+
+NemotronDiffusion 8B 128K DP8/TP1/CP2/BP2 DP8/TP1/CP2 8 19,653 / 16,580 38.5 / 32.5 96.9 / 96.4 −0.5 1.19 ×
+
+NemotronDiffusion 8B 256K DP4/TP1/CP4/BP4 DP4/TP1/CP4 4 11,379 / 9,668 38.0 / 32.3 97.5 / 97.5 0.0 1.18 ×
+
+NemotronDiffusion 8B 512K DP2/TP1/CP8/BP8 DP2/TP1/CP8 2 6,254 / 5,202 38.2 / 31.8 98.5 / 99.5 1.0 1.20 ×
+
+NemotronDiffusion 14B 64K DP8/TP1/CP2/BP2 DP8/TP1/CP2 8 22,152 / 20,092 38.8 / 35.2 89.8 / 89.5 −0.3 1.10 ×
+
+NemotronDiffusion 14B 128K DP4/TP1/CP4/BP4 DP4/TP1/CP4 4 15,136 / 13,114 38.9 / 33.7 90.1 / 90.0 −0.1 1.15 ×
+
+NemotronDiffusion 14B 256K DP2/TP1/CP8/BP8 DP2/TP1/CP8 2 9,301 / 7,884 39.0 / 33.1 90.6 / 91.1 0.5 1.18 ×
+
+NemotronDiffusion 14B 512K DP1/TP2/CP8/BP8 DP1/TP2/CP8 1 5,052 / 4,242 37.7 / 31.6 71.9 / 72.7 0.8 1.19 ×
+
+DiffusionGemma 26B-A4B 64K DP4/TP1/EP2/CP2/BP2 DP4/TP1/EP2/CP2 8 27,653 / 22,154 16.0 / 12.8 113.5 / 109.4 −4.1 1.25 ×
+
+DiffusionGemma 26B-A4B 128K DP2/TP1/EP2/CP4/BP4 DP2/TP1/EP2/CP4 4 21,049 / 14,584 16.9 / 11.7 113.6 / 112.0 −1.6 1.44 ×
+
+DiffusionGemma 26B-A4B 256K DP1/TP1/EP2/CP8/BP8 DP1/TP1/EP2/CP8 2 15,359 / 10,557 18.4 / 12.7 113.6 / 118.1 4.6 1.45 ×
+
+DiffusionGemma 26B-A4B 512K DP1/TP2/CP8/BP8/SP DP1/TP2/CP8/SP 1 9,815 / 6,079 20.3 / 12.6 106.5 / 127.4 20.9 1.61 ×
+
+Pairs: ours / best baseline. HBM saved: best baseline minus ours. 
+
+25

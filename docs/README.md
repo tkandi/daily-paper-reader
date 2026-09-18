@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-14</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-18</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 24 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>13</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-14 19:23:03 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-18 21:37:32 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成13篇论文速览，精选2篇精读，聚焦大模型推理系统与硬件优化。</p>
-<p>最值得关注的是：用NVMe SSD做vLLM外部KV缓存，以及用消费级PIM支持生产级大模型服务。</p>
-<p>建议普通读者先读这两篇，重点了解存储与内存优化如何影响大模型服务效率和成本。</p>
+<p>今日完成24篇论文推荐：精读13篇、速读11篇，聚焦大模型训练与分布式GPU协作。</p>
+<p>最值得关注的是长上下文混合专家训练的显存峰值优化，以及去中心化GPU网格中的高效大模型适配。</p>
+<p>建议下一步优先精读这两篇10分论文，再结合分布式群体学习、GPU性能测量与数据并行微调方向拓展了解。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">13 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Building py-kvcache: A Performance Characterization of External KV Caching for vLLM with NVMe SSDs">Building py-kvcache: A Performance Characterization of External KV Caching for vLLM with NVMe SSDs</span></li><li><span class="dpr-home-dashboard-paper-title" title="PATTON: Enabling Commodity PIM for Production LLM Serving">PATTON: Enabling Commodity PIM for Production LLM Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Flattening Every Memory Peak in Long-Context Mixture-of-Experts Training">Flattening Every Memory Peak in Long-Context Mixture-of-Experts Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Communication-Efficient LLM Adaptation over Decentralized GPU Meshes">Communication-Efficient LLM Adaptation over Decentralized GPU Meshes</span></li><li><span class="dpr-home-dashboard-paper-title" title="DeepShare: Assurance-Driven Deep Learning Job Scheduling for Multi-Tenant Clusters">DeepShare: Assurance-Driven Deep Learning Job Scheduling for Multi-Tenant Clusters</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>13</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Hyperparameter Scaling Laws Across MoE Sparsity">Hyperparameter Scaling Laws Across MoE Sparsity</span></li><li><span class="dpr-home-dashboard-paper-title" title="Communication-efficient ADMM over Hierarchical Networks">Communication-efficient ADMM over Hierarchical Networks</span></li><li><span class="dpr-home-dashboard-paper-title" title="Cascading Gradient Inversion via LT-Code Inspired Peeling in Federated Learning">Cascading Gradient Inversion via LT-Code Inspired Peeling in Federated Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Consensus-based Decentralized Distributed Swarm Learning with Heterogeneous Big Data">Consensus-based Decentralized Distributed Swarm Learning with Heterogeneous Big Data</span></li><li><span class="dpr-home-dashboard-paper-title" title="Argus: Orchestrating Cross-Layer GPU Performance Measurements around Semantic Regions">Argus: Orchestrating Cross-Layer GPU Performance Measurements around Semantic Regions</span></li><li><span class="dpr-home-dashboard-paper-title" title="Clustering-Based Balanced Sampling and Allocation with Data Parallelism for High-Performance Fine-Tuning">Clustering-Based Balanced Sampling and Allocation with Data Parallelism for High-Performance Fine-Tuning</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
