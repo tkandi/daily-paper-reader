@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-18</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-19</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 24 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>13</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-18 21:37:32 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-19 19:51:08 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成24篇论文推荐：精读13篇、速读11篇，聚焦大模型训练与分布式GPU协作。</p>
-<p>最值得关注的是长上下文混合专家训练的显存峰值优化，以及去中心化GPU网格中的高效大模型适配。</p>
-<p>建议下一步优先精读这两篇10分论文，再结合分布式群体学习、GPU性能测量与数据并行微调方向拓展了解。</p>
+<p>今日精读与速读共覆盖17篇论文，重点聚焦联邦学习、分布式DiT服务与边缘大模型推理。</p>
+<p>最值得关注的是联邦学习框架的可扩展性评测，以及PixelFlow在分布式DiT服务中的Token级负载管理。</p>
+<p>下一步可优先精读这两个方向，先了解系统如何提升模型推理效率，再关注隐私保护与请求调度等实际落地问题。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">13 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Flattening Every Memory Peak in Long-Context Mixture-of-Experts Training">Flattening Every Memory Peak in Long-Context Mixture-of-Experts Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Communication-Efficient LLM Adaptation over Decentralized GPU Meshes">Communication-Efficient LLM Adaptation over Decentralized GPU Meshes</span></li><li><span class="dpr-home-dashboard-paper-title" title="DeepShare: Assurance-Driven Deep Learning Job Scheduling for Multi-Tenant Clusters">DeepShare: Assurance-Driven Deep Learning Job Scheduling for Multi-Tenant Clusters</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Scalability and Performance Evaluation of Federated Learning Frameworks: A Comparative Analysis">Scalability and Performance Evaluation of Federated Learning Frameworks: A Comparative Analysis</span></li><li><span class="dpr-home-dashboard-paper-title" title="PixelFlow: Token-Level Workload Management for Efficient Distributed DiT Serving">PixelFlow: Token-Level Workload Management for Efficient Distributed DiT Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Agentic Autoscaling through Worker-Pool Orchestration for LLM-driven Text Classification in Cloud Computing Environments">Agentic Autoscaling through Worker-Pool Orchestration for LLM-driven Text Classification in Cloud Computing Environments</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>13</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Consensus-based Decentralized Distributed Swarm Learning with Heterogeneous Big Data">Consensus-based Decentralized Distributed Swarm Learning with Heterogeneous Big Data</span></li><li><span class="dpr-home-dashboard-paper-title" title="Argus: Orchestrating Cross-Layer GPU Performance Measurements around Semantic Regions">Argus: Orchestrating Cross-Layer GPU Performance Measurements around Semantic Regions</span></li><li><span class="dpr-home-dashboard-paper-title" title="Clustering-Based Balanced Sampling and Allocation with Data Parallelism for High-Performance Fine-Tuning">Clustering-Based Balanced Sampling and Allocation with Data Parallelism for High-Performance Fine-Tuning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Privacy-Aligned Personalized Federated Learning with Compact Adaptation and Variable-Length Gaussian Communication">Privacy-Aligned Personalized Federated Learning with Compact Adaptation and Variable-Length Gaussian Communication</span></li><li><span class="dpr-home-dashboard-paper-title" title="End-to-End Latency-Minimizing and Load-Balanced Request Scheduling for Edge LLM Inference in Agentic AI Services">End-to-End Latency-Minimizing and Load-Balanced Request Scheduling for Edge LLM Inference in Agentic AI Services</span></li><li><span class="dpr-home-dashboard-paper-title" title="Bridging the Gap Between Homogeneous and Heterogeneous Asynchronous Optimization Is Surprisingly Difficult">Bridging the Gap Between Homogeneous and Heterogeneous Asynchronous Optimization Is Surprisingly Difficult</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
