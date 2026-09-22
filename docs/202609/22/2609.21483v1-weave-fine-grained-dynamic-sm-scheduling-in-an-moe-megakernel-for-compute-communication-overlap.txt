@@ -1,0 +1,673 @@
+Title: Weave: Fine-Grained Dynamic SM Scheduling in an MoE Megakernel for Compute-Communication Overlap
+
+URL Source: https://arxiv.org/pdf/2609.21483v1
+
+Published Time: Mon, 21 Sep 2026 00:46:05 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Weave: Fine-Grained Dynamic SM Scheduling in an MoE Megakernel for Compute-Communication Overlap 
+
+Ziyu Huang ∗1 , Yangjie Zhou ∗2 , Chenhao Zhu 1, Zihan Liu 1, Jinyu Liu 1, Shulai Zhang 1, Xingxun Tang 1, Hongzhe Yan 1, Xinhao Luo 1, Minyi Guo 1, Xiu Lin 3, Yinghao Yu 3, Guodong Yang 3, Liping Zhang 3, Shixuan Sun 1, Jingwen Leng 11Shanghai Jiao Tong University Shanghai, China 
+
+> 2
+
+National University of Singapore Singapore 
+
+> 3
+
+Alibaba Group China 
+
+huang_ziyu@sjtu.edu.cn 
+
+Abstract 
+
+Mixture-of-Experts (MoE) inference under expert par-allelism (EP) turns each MoE layer into a distributed computation with costly dispatch and combine communi-cation. State-of-the-art systems reduce this cost through communication-computation overlap, splitting the GPU’s SMs for communication and computation respectively. However, this approach still leaves GPU resources wasted along two dimensions. Spatially, the best SM split is determined by each layer’s routing result and varies across layers and GPUs, so fixed policies mismatch the workload and waste either NVLink bandwidth or compute throughput. Temporally, complex MoE data dependencies introduce bubbles that leave SMs idle. We present Weave , to our knowledge the first MoE overlap system that performs fine-grained dynamic SM scheduling—deciding per layer and per GPU by routing results at runtime. Once routing completes, each layer’s communication and computation volumes become known; Weave exploits this predictability through a lightweight cost model running inside the persistent megakernel: a spatial scheduler partitions SMs into communication workers and computation workers to match the commu-nication/computation throughput ratio, and a temporal scheduler coordinates the two worker groups to minimize SM idleness. On 4 ×H100 SXM GPUs across six mainstream MoE models, Weave achieves a 2.89× geometric-mean MoE-layer speedup and a 1.33× geometric-mean end-to-end speedup over five state-of-the-art baselines. 
+
+CCS Concepts: • Software and its engineering → Soft-ware performance .
+
+Keywords: MoE, Expert Parallelism, communication-com-putation overlap, GPU SM scheduling 
+
+1 Introduction 
+
+Mixture-of-Experts (MoE) scales large language models by replacing dense feed-forward networks with sparsely acti-vated expert networks [22]. Each token is routed to only a small subset of experts, increasing model capacity while keeping per-token computation nearly constant. As modern MoE models grow to tens or hundreds of experts [3, 6, 12, 15, 18, 20, 21], distributed inference commonly relies on expert parallelism (EP), where experts are partitioned across GPUs. Under EP, tokens are routed to experts placed on different GPUs, turning each MoE layer into a distributed computa-tion with cross-GPU token movement. This distributed execution makes dispatch and combine a central cost of MoE inference. In each MoE layer, dispatch sends token activations to the GPUs that host their selected experts; after expert computation, combine returns and re-duces the expert outputs into final token representations. Prior work reports that dispatch and combine can consume up to 40% of MoE layer latency [28]. This pressure is ampli-fied by hardware scaling: as shown in Figure 1, BF16 ten-sor throughput has grown faster than NVLink bandwidth across recent GPU generations, and this widening compute-interconnect gap makes communication an increasingly im-portant component of MoE layer latency. To reduce this exposed communication cost, software-level communication-computation overlap has become critical for efficient MoE inference. Based on their aware-ness of the dynamic routing results, existing systems fall into three categories. Figure 2 compares the execution timelines of these approaches. 
+
+(i) No explicit SM partitioning Triton-Distributed (TD) [32] runs communication and computation serially across all SMs, relying on global preemption for overlap at operator boundaries. All SMs execute dispatch, GEMM, and 
+
+> ∗Both authors contributed equally to this work. 1arXiv:2609.21483v1 [cs.DC] 18 Sep 2026
+
+Ziyu Huang et al. A100 H100 B200 01000 2000  
+
+> BF16 TFLOPS
+> 312 989 2250
+> 3.2 ×
+> 2.3 ×
+> BF16 TFLOPS NVLink (GB/s)
+> 0250 500 750 1000
+> NVLink (GB/s, unidir.)
+> 300 450 900
+> 1.5 ×
+> 2.0 ×
+
+Figure 1. GPU compute vs. NVLink bandwidth scaling across A100/H100/B200. Left blue axis: BF16 dense TFLOPS. Right red axis: NVLink unidirectional GB/s. combine in sequence, yielding minimal communication-computation overlap. 
+
+(ii) Static SM partition DeepEP [30] and ParallelKittens (PK) [26] fix the number of communication SMs at compile time, applying the same partition to all layers. Dedicating separate SM groups to communication and computation en-ables overlap, but data dependencies in the communication-computation pipeline (up gemm cannot begin until dispatch delivers tokens; combine must wait for down gemm to fin-ish) create pipeline bubbles that leave SMs idle. 
+
+(iii) Coarse-grained dynamic Comet [28] selects the communication/computation SM ratio from a pre-profiled kernel library based on the input sequence length, switch-ing once per iteration. This adapts to workload intensity across iterations, but the partition still does not respond to per-layer routing variation. However, none of these approaches adapts the SM parti-tion to the actual routing result of each layer, leaving sub-stantial GPU resource waste along both spatial and tempo-ral dimensions. The waste manifests in two dimensions. Spatially, the optimal communication/computation SM ratio depends on each layer’s routing result, which determines the commu-nication and computation volumes on each GPU. When the SM partition does not match these volumes, one group of SMs finishes early and idles while the other remains the bottleneck, wasting either communication bandwidth or computation throughput. Since routing skew varies across inputs, layers, and GPUs, a fixed or per-iteration partition inevitably mismatches some layers. Temporally, even with a well-chosen SM split, the pipeline bubbles shown in Figure 2(b) persist: communi-cation SMs remain idle during the middle computation phase, forming a large mid bubble that further degrades SM utilization. Building on these observations, we propose Weave , a runtime SM scheduling system for MoE communication-computation overlap (Figure 2(d)). Weave exploits the fact that each layer’s communication and computation volumes become known after routing, and schedules SMs per layer and per GPU rather than relying on an offline fixed policy. SM1               
+
+> SM2
+> SM3
+> SM4
+> SM1
+> SM2
+> SM3
+> SM4
+> Comm
+> Comp
+> Dispatch
+> (Communication)
+> GEMM(UP&GATE)
+> (Computation)
+> Time
+> Time
+> D
+> SM1
+> SM2
+> SM3
+> SM4
+> Comm
+> Comp Time
+> GEMM
+> (Comp)
+> Dispatch
+> (Comm)
+> Routing
+> result
+> iter-wise
+> dynamic
+> Static
+> SM1
+> SM2
+> SM3
+> SM4
+> Comm
+> Comp
+> Stealing
+> GEMM work
+> GEMM(DOWN)
+> (Computation)
+> Combine
+> (Communication)
+> G0 G1 C
+> DC
+> G0 G1
+> DC
+> G0 G1
+> D0 D1 SC0 C1
+> G0-0 G1-0 G0-1 G1-1
+> saved
+> saved
+> saved
+> (a) No overlap
+> Triton-dist
+> (b) static SM
+> partition
+> DeepEP
+> (d) fine-grained
+> dynamic
+> Ours
+> (Weave)
+> (c) coarsed-
+> grained dynamic
+> Comet
+> Dependency
+> Static
+> layer -wise
+> dynamic
+> Time
+
+Figure 2. Four MoE execution patterns. (a) No overlap (TD): all SMs execute dispatch, GEMM, and combine serially. (b) Static SM partition (DeepEP): communication and com-putation SMs are fixed at compile time, leaving idle bubbles. (c) Coarse-grained dynamic (Comet): SM count adjusts per iteration. (d) Fine-grained dynamic (Weave): SM partition adjusts per layer and per GPU. It combines a spatial scheduler that partitions SMs into communication workers and computation workers with a temporal scheduler that coordinates the two worker groups to minimize SM idleness, unified by a lightweight cost model running inside a persistent megakernel. We implement Weave on PK [26] and evaluate it on 4×H100 SXM GPUs across six mainstream MoE architectures. Compared with five state-of-the-art base-lines [26, 28, 30–32], Weave achieves the lowest per-layer MoE latency in all configurations, with a 2.89× geometric-mean MoE-layer speedup and a 1.33× geometric-mean end-to-end speedup. This paper makes the following contributions. 
+
+• We identify routing-determined SM scheduling as a key inefficiency in distributed MoE inference, showing that the communication/computation SM split must be selected per layer and per GPU after routing completes. 
+
+• We design Weave’s runtime spatial scheduler, which uses routing-derived workload volumes and cali-brated hardware throughput curves to choose the communication SM count for each layer and GPU. 
+
+• We design Weave’s temporal scheduler, which uses chunk pipelining and bubble stealing to reduce SM idleness caused by MoE data dependencies within each layer. 
+
+• We implement Weave based on Parallel Kittens [26] and show that it consistently improves MoE-layer and end-to-end inference latency over state-of-the-art baselines. Our implementation will be open-sourced upon acceptance. 
+
+2Weave 
+
+2 Background and Motivation 
+
+This section first introduces the basics of Mixture-of-Experts (MoE) and the corresponding computation/com-munication overlap techniques. Then we analyze the limitations of existing communication-related optimiza-tions to derive our insights. 
+
+2.1 Mixture-of-Experts and Expert Parallelism 
+
+MoE replaces the monolithic FFN layer with tens to hun-dreds of smaller expert sub-networks, each activated only for a subset of tokens selected by a learned gating mecha-nism, thereby scaling model parameters while keeping per-token computation nearly constant. The presence of multiple discrete experts gives rise to a new parallelism paradigm: expert parallelism (EP), under which experts are partitioned across GPUs. Host-ing experts across multiple GPUs introduces cross-GPU communication overhead. As illustrated in Figure 3, each MoE layer under EP con-sists of five stages: (1) dispatch , which sends each token to the GPU hosting its target experts; (2) GEMM0 , the up-projection and gated FFN; (3) activation , typically a SiLU followed by element-wise multiplication; (4) GEMM1 , the down-projection FFN; and (5) combine , which aggregates the per-expert results via weighted summation and returns them to the originating GPU. Among these, dispatch and combine are cross-GPU communication operations, while GEMM0, activation, and GEMM1 are local expert computa-tion. GPU0       
+
+> Inputs
+> Token A
+> GPU1
+> Dispatch Dispatch
+> to Expert 0
+> to Expert 1
+> to Expert 2
+> to Expert 3
+> Expert 0
+> UP
+> GATE
+> MUL
+> Combine  Outputs
+> Combine
+> Outputs
+> token routing (from GPU0)
+> t0'
+> SiLU
+> GEMM 0 SILU_MUL
+> DOWN
+> GEMM 1
+> Expert 1
+> t2
+> t1
+> t1'
+> t2'
+> t3 '
+> t4'
+> t5'
+> t0
+> from Expert 0
+> from Expert 1
+> from Expert 2
+> from Expert 3
+> t0'
+> t1'
+> t2'
+> t3 '
+> t4'
+> t5'
+> UP
+> GATE
+> MUL
+> SiLU
+> GEMM 0 SILU_MUL
+> DOWN
+> GEMM 1
+> Inputs
+> Token B
+> t5
+> t4
+> t3
+> Expert 2
+> UP
+> GATE
+> MUL
+> SiLU
+> GEMM 0 SILU_MUL
+> DOWN
+> GEMM 1
+> Expert 1
+> UP
+> GATE
+> MUL
+> SiLU
+> GEMM 0 SILU_MUL
+> DOWN
+> GEMM 1
+> t2
+> t1
+> t0
+> t5
+> t4
+> t3
+> token routing (from GPU1)
+
+Figure 3. MoE forward pass under expert parallelism (2 GPUs, 4 experts, top-𝑘 = 3 routing). Dispatch sends each token to the GPU hosting its expert; the expert sub-network sequentially executes gemm0 (UP+GATE), silu_mul, and gemm1 (DOWN); combine performs weighted summation and returns the results. 
+
+2.2 Compute-Communication Overlap 
+
+To hide dispatch and combine latency, modern systems over-lap communication with computation by partitioning GPU SMs between the two tasks; for example, DeepEP [30] dedi-cates 20 of the 132 SMs on an H100 to communication and uses the remaining 112 for computation. However, even SM-level partitioning is a non-trivial design problem. We conduct an experiment that evaluates different compute-communication SM partitions across six MoE models (DeepSeek-V3 (DSv3), Phi-3.5-MoE, Qwen3-30B, Qwen3.5-35B, DeepSeek-V2-Lite (DSv2-Lite), DeepSeek-V2 (DSv2); seq = 8192 prefill, 4×H100 SXM, EP = 4, BF16). As shown in Figure 4(c), on the one hand, the optimal partition point that minimizes overall execution time varies across models, indicating that the SM partition must be adapted per layer. On the other hand, the trend itself also differs across models, suggesting that the strategy should adapt to different models, configurations, and other factors. 
+
+2.3 Limitations of SOTA Approaches 
+
+Existing distributed MoE systems either fix the number of communication SMs at compile time [26, 30], select from a pre-profiled configuration per iteration [28], or avoid explicit SM partitioning altogether and run communication and computation serially [32]. However, MoE workloads are inherently dynamic : the routing result of each layer changes, causing the communication and computation volumes to shift, and consequently the optimal communi-cation SM count varies from layer to layer. Resolving this mismatch poses two key challenges: how to determine the optimal SM partition at runtime, and, once the partition is made, how to coordinate the two groups of SMs (comm workers and comp workers) to maximize overlap while minimizing idle time. 
+
+2.3.1 Challenge A: Runtime Partition Decision. 
+
+As discussed in §1, existing approaches fall into three suboptimal modes: static fixed, coarse-grained dynamic, and no overlap. We now quantify the performance gap on DSv2 (4 ×H100 SXM) with CodeSearchNet dataset. As the hatched bars of Figure 5 show, within a single MoE layer the per-GPU optimal 𝑐 ∗ ranges from 12 to 36. Neither DeepEP’s fixed 𝑐=20 nor Comet’s per-iteration 𝑐=18 
+
+matches any GPU’s optimum. Since all GPUs synchronize after each MoE layer, the layer latency is determined by the slowest GPU. The hollow markers report the resulting per-GPU latency: on the bottleneck GPU (GPU 3), DeepEP is 1.33× slower than the per-GPU optimal, Comet 1.18× ,and TD 1.44× .Determining the optimal SM partition at runtime is there-fore a key challenge. 
+
+2.3.2 Challenge B: Dynamic Coordination of Two Worker Groups. 
+
+Even after performing the SM partition described in Chal-lenge A, complex dependencies between communication 
+
+3Ziyu Huang et al. 23 25 27
+
+> Dispatch SMs
+> 26
+> 27
+> 28
+> Bandwidth per rank (GB/s)
+> 450 GB/s peak
+
+(a) Dispatch bandwidth     
+
+> 2324252627
+> GEMM SMs
+> 26
+> 27
+> 28
+> 29
+> 210
+> Throughput per rank (TFLOPS)
+> 989 TFLOPS peak
+
+(b) GEMM throughput       
+
+> 2223242526
+> Dispatch SMs
+> 22
+> 21
+> 20
+> 21
+> 22
+> 23
+> Measured time (ms)
+
+(c) Dispatch + GEMM      
+
+> DSv3 Phi-3.5-MoE Qwen3-30B Qwen3.5-35B DSv2 DSv2-Lite
+
+Figure 4. Impact of SM partitioning on compute-communication overlap (4 ×H100 SXM, 6 MoE models, seq = 8192 prefill, EP = 4, BF16). (a) Dispatch bandwidth vs. dispatch SM count 𝑐 : near-linear then saturates. (b) GEMM throughput vs. compute SM count 𝑁 −𝑐 : sub-linear under power and L2 cache constraints. (c) Dispatch-gemm total time with tile-level overlap as a function of 𝑐 ; markers indicate each model’s optimal split. GPU 0 GPU 1 GPU 2 GPU 3 010 20 30 40                
+
+> Comm. SM count ( c)
+> Comm. SM count ( c, bars) Optimal c*Comet ( c= 18 )DeepEP ( c= 20 )Comm. SM count ( c, bars) Optimal c*Comet ( c= 18 )DeepEP ( c= 20 )
+> 020 40 60
+> Latency (ms)
+> Latency (ms, markers) Optimal Comet DeepEP TD
+
+Figure 5. SM partition mismatch under existing policies (DSv2, CodeSearchNet dataset, Layer 1, 4 ×H100 SXM). Left y-axis (hatched bars): per-GPU optimal comm SM count 𝑐 ∗
+
+vs. Comet ( 𝑐=18 , per-iteration) and DeepEP ( 𝑐=20 , static); the optimal 𝑐 ∗ ranges from 12 to 36 across GPUs. Right y-axis (hollow markers): per-GPU latency under each policy plus TD (serial); layer latency is limited by the slowest GPU. and computation tasks make it difficult to coordinate the two worker groups so that they run in parallel (high comm/comp overlaping) without waiting for each other (high SM Active rate). The MoE forward pass has inherent data dependencies: up gemm cannot begin until dispatch delivers the required tokens, and combine cannot start until down gemm finishes. Under SM partitioning, these dependencies cause communi-cation workers to idle during the middle computation phase, forming pipeline bubbles that existing systems [26, 28, 30] 0 20 40 
+
+Comm/Comp Overlap (%) 
+
+025 50 75 100 
+
+> SM Active (%)
+
+Weave (Ours) 
+
+> DSv2-Lite, seq=2048, 4 ×H100 SXM, EP=4 PK TD Comet DeepEP Weave
+
+Figure 6. Performance of MoE overlap systems along two utilization dimensions: comm-comp overlap (x-axis) and SM Active (y-axis). Each marker is one system, measured on DSv2-Lite (seqlen = 2048, 4 ×H100 SXM, EP = 4, BF16). do not fill. As shown in Figure 6, no existing system simul-taneously achieves high SM Active and high comm-comp overlap; only Weave maintains high levels on both dimen-sions (91% SM Active, 47% overlap). 
+
+3 Design 
+
+In this section, we present the core design of Weave, a runtime SM scheduling system for efficient MoE execution under expert parallelism. Existing systems cannot perceive per-layer routing results and adapt the SM partition accord-ingly, which leads to missed optimization opportunities in two dimensions: spatially, a mismatched SM split wastes either communication bandwidth or compute through-put; temporally, the complex dependencies introduced           
+
+> 4Weave Software: routing
+> GPU0
+> GPU1
+> layer 1 layer 7
+> ...
+> Hardware: throughput
+> SMs
+> BW
+> TFLOPS
+> Fused MegaKernel
+> Cost Model
+> comm
+> SMs
+> comp
+> SMs
+> dispatch Scombine 0combine 1
+> gemm0 0act 0gemm1 0gemm0 1act 1gemm1 1
+> SMs
+> time
+> §3.1 Spatial Scheduler
+> §3.1 Temporal Scheduler
+> local remote
+> Optimized Execution Plan
+> GPU 0
+> GPU 1
+
+Figure 7. System overview of Weave. The system takes rout-ing results (software input) and communication bandwidth / compute throughput curves (hardware input), and makes runtime decisions inside the megakernel along two dimen-sions: spatial scheduler (how to split SMs between com-munication and computation, §3.1), and temporal scheduler (how the two types of workers coordinate their execution, §3.2). The output is an optimized execution plan applied to the current layer. by communication-computation overlap leave SMs idle. Weave addresses both dimensions with runtime scheduling. Figure 7 gives an overview of Weave’s architecture. Weave takes two categories of input: software input, consisting of per-layer routing results that determine the communication volume and computation workload on each GPU; and hardware input, consisting of calibrated com-munication bandwidth and compute throughput curves as functions of SM count. These inputs are fed into a persistent megakernel that fuses all five forward operations of an MoE layer (dispatch, gemm0, silu_mul, gemm1, combine). Within this megakernel, each SM is assigned either a comm 
+
+role (Dispatch and Combine) or a comp role (GEMM0, SiLU-Mul, and GEMM1). A lightweight cost model in the megakernel prologue jointly determines the spatial SM partition and the temporal execution order, producing a per-layer, per-GPU scheduling plan that coordinates the two types of workers throughout the layer. The key observation behind Weave’s runtime scheduling is that the workload of an MoE layer becomes fully deter-mined once routing completes. At that point, Weave knows the number of tokens to send and receive, the token dis-tribution across experts, and the resulting computation vol-ume on each GPU. Weave therefore invokes its scheduler im-mediately after routing. The scheduler combines these run-time workload descriptors with hardware throughput pro-files and uses a lightweight cost model inside the megak-ernel prologue to generate a layer-specific scheduling plan within microseconds. The megakernel then transitions to its main execution phase. Weave jointly optimizes scheduling along two dimen-sions. The spatial scheduler (§3.1) selects the number of SMs assigned to communication so that communication bandwidth and computation throughput are balanced for the current layer. The temporal scheduler (§3.2) chunks routed tokens into pipelined microbatches and allows idle communication SMs to steal GEMM tiles when commu-nication work is temporarily unavailable. Since the best temporal schedule depends on the throughput induced by the spatial SM split, Weave solves the two dimensions jointly using a unified cost model (§3.3). Concretely, the scheduling decision is governed by two variables: the number of communication SMs 𝑐 (how to par-tition SMs between the two worker groups) and the pipeline chunk count 𝐾 (how to split tokens into pipelined micro-batches for temporal coordination). The cost model (§3.3) jointly searches over the (𝑐, 𝐾 ) space and, for each candi-date pair, derives the number of GEMM tiles 𝑛 steal that com-munication workers can steal during their idle periods. The optimal (𝑐 ∗, 𝐾 ∗) and the corresponding steal count fully de-termine the execution plan for each layer and GPU. 
+
+3.1 Spatial Scheduler 
+
+The spatial scheduler determines how the available SMs are divided between communication and computation. As shown in Figure 4(c), the overall latency as a function of the SM split has a clear optimum that depends on the routed workload of the current layer. As shown in Figure 4(a)(b), both communication band-width and GEMM throughput saturate well before all 𝑁 SMs are assigned; a small number of communication SMs is suffi-cient to approach peak bandwidth, leaving the majority for computation. We now formalize the optimization. Let 𝑁 denote the number of SMs available to the megakernel, and let 𝑐 denote the number of SMs assigned to communication; the remain-ing 𝑁 −𝑐 SMs are assigned to computation. Let 𝐻 denote the hidden dimension, 𝐼 the per-expert FFN intermediate di-mension, and 𝐵 = 2𝐻 bytes the per-token communication size (each token is an 𝐻 -element BF16 vector, 2 bytes per element). After routing, let 𝑋 local denote the number of lo-cal tokens routed to local experts, 𝑋 in the number of remote tokens routed to local experts, and 𝑋 uniq in the deduplicated                  
+
+> 5Ziyu Huang et al. D
+> G0 G1
+> Cmid bubble
+> Ttail Ta
+> comm SMs comp SMs
+> time
+> c
+> (a) Baseline ( ccomm SMs)
+> D
+> G0 G1
+> Cbubble
+> Tb
+> saved
+> comm SMs comp SMs
+> time
+> c*
+> (b) + Spatial: reduce cto c*
+> D
+> G0 0G1 0
+> C0
+> G0 1G1 1
+> C1
+> Tc
+> saved
+> comm SMs comp SMs
+> time
+> c*
+> (c) + Temporal: chunk pipeline ( K=2)
+> DSC0C1
+> gemm Td
+> saved
+> comm SMs comp SMs
+> time
+> c*
+> (d) + Temporal: bubble stealing (Weave)
+> dispatch (D) gemm0 (G0) act (silu_mul) gemm1 (G1) combine (C) steal (S) spatial scheduler temporal scheduler
+
+Figure 8. Operational details of the spatial and temporal schedulers. (a) Baseline with communication-computation overlap enabled; a large mid bubble persists. (b) The spatial scheduler applies a near-optimal communication/computa-tion SM ratio, reducing the mid bubble. (c) The temporal scheduler partitions tokens into microbatches, exposing ad-ditional overlap opportunities and further reducing the mid bubble. (d) The temporal scheduler fills the residual mid bub-ble by assigning idle communication SMs to execute GEMM tiles. count of 𝑋 in (under top-𝑘 routing with 𝑘>1 , the same re-mote token may be selected by multiple local experts, so 
+
+𝑋 uniq in ≤ 𝑋 in ; each unique remote token is transferred across the network only once and then reused for all selecting ex-perts [30, 33]). The per-layer workloads are: 
+
+𝑊 comp = (𝑋 local + 𝑋 in ) ⋅ 6𝐻 𝐼 FLOPs , (1) 
+
+𝑊 dispatch = 𝑋 uniq in ⋅ 𝐵 bytes , (2) 
+
+𝑊 combine = 𝑋 in ⋅ 𝐵 bytes . (3) 
+
+𝑊 comp counts the GEMM work executed jointly on 𝑋 local +𝑋 in token-expert pairs (both local and remote). For commu-nication, the dispatch volume is 𝑋 uniq in ⋅ 𝐵 (each unique re-mote token is pulled once and reused) and the combine vol-ume is 𝑋 in ⋅𝐵 (one per-expert output returned for each token-expert pair). We let 𝛼 ∈ [0, 1) denote the tile-level overlap ratio be-tween communication and computation, calibrated empiri-cally. The remaining fraction (1 − 𝛼) of communication is exposed as a tail outside the overlap window. The three time components are 
+
+𝑇 comp = 𝑊 comp 
+
+TFLOPS (𝑁 −𝑐) , (4) 
+
+𝑇 comm = 𝑊 dispatch + 𝑊 combine 
+
+BW (𝑐) , (5) 
+
+𝑇 tail = (1 − 𝛼) ⋅ 𝑊 combine 
+
+BW (𝑐) . (6) The layer is bounded by whichever of the two paths is slower, plus the unhidden tail. The spatial scheduler therefore selects 
+
+𝑇 total = max (𝑇 comp + 𝑇 tail , 𝑇 comm ), (7) 
+
+𝑐 ∗ = arg min 𝑇 total . (8) If 𝑇 comp + 𝑇 tail > 𝑇 comm , the layer time is determined by the GEMM together with the unhidden combine tail; otherwise the GEMM fits entirely within the communication window and the layer time is determined by serialized dispatch and combine. 
+
+3.2 Temporal Scheduler 
+
+Given the SM partition 𝑐 from the spatial scheduler, the tem-poral scheduler addresses how the two groups of SMs coor-dinate over time. As Figure 8(a) shows, under a fixed SM partition with no temporal scheduling, Dispatch and Com-bine cluster at the two ends of the timeline, leaving a large stretch of idle comm SMs in the middle of the MoE layer and forming a large mid bubble , i.e., an idle interval during the GEMM phase. To eliminate this bubble, Weave uses two mechanisms: the chunk pipeline (§3.2.1) spreads Combine into the middle of the GEMM phase for fine-grained overlap; 
+
+bubble stealing (§3.2.2) lets comm SMs steal GEMM tiles in the residual mid bubble that the chunk pipeline still cannot cover. 
+
+3.2.1 Chunk Pipeline. 
+
+The mid bubble in Figure 8(a) comes from the DAG depen-dency: a Combine operation cannot start until the corre-sponding GEMM1 tile has been produced. To relax this con-straint, we split the tokens into smaller chunks; chunks are independent of each other, which opens up more overlap 
+
+> 6Weave
+
+opportunities. As Figure 8(c) shows, we split GEMM0, SiLU-Mul, GEMM1, and Combine into 𝐾 chunks, while Dispatch is not chunked, so that communication can overlap with computation as much as possible. Unlike a naive approach where comm SMs switch to comp after dispatch finishes, the chunk pipeline keeps comm SMs continuously doing com-munication throughout the middle phase. Figure 8(c) illus-trates 𝐾 =2 : chunk 0’s Combine ( 𝐶 0) runs during chunk 1’s GEMM, so communication and computation execute con-currently in time. The choice of 𝐾 involves a trade-off: a larger 𝐾 gives finer chunks and a smaller mid bubble, but each chunk holds fewer tokens, degrading per-chunk GEMM throughput. As Figure 9a shows, we benchmark the group GEMM perfor-mance under the chunk pipeline on H100 using DSv3 with input seq = 8k. As 𝐾 increases, the performance degradation accelerates; at 𝐾 =8 , throughput drops by ∼27% compared to 
+
+𝐾 =1 . We capture this degradation with a correction factor eff chunk (𝐾 ) ∈ (0, 1] , defined as the ratio of chunked GEMM throughput to unchunked throughput ( 𝐾 =1 ). The computa-tion time under chunking becomes: 
+
+𝑇 comp (𝑐, 𝐾 ) = 𝑊 comp 
+
+TFLOPS (𝑁 −𝑐) ⋅ eff chunk (𝐾 ) , (9) where eff chunk (𝐾 ) ∈ (0, 1] is the ratio of chunked GEMM throughput to the unchunked case. Chunking also modi-fies the tail term: the final chunk’s combine, the only seg-ment not absorbed by a subsequent GEMM, is now of size 
+
+𝑊 combine /𝐾 , so the tail is reduced by a factor of 𝐾 relative to the unchunked case: 
+
+𝑇 tail = (1 − 𝛼) ⋅ 𝑊 combine 
+
+BW (𝑐) ⋅ 𝐾 . (10) A larger 𝐾 reduces the unhidden tail but increases the GEMM time through the degradation of eff chunk (𝐾 ) ; a smaller 𝐾 does the opposite. The optimum balances these two effects. 
+
+3.2.2 Bubble Stealing. 
+
+After the joint search of §3.3 chooses (𝑐 ∗, 𝐾 ∗), communica-tion SMs may still have idle capacity between the end of dis-patch and the start of the chunked combine. We fill this gap by letting them steal GEMM tiles, shown as the S block in Figure 8(d). Once Dispatch finishes, comm SMs join the 𝑁 −𝑐 
+
+comp SMs on GEMM work, converting idle capacity into ef-fective GEMM throughput. We place the steal window right after Dispatch so that stolen GEMM tiles execute consecu-tively and subsequent Combine operations also run with-out interruption. If stealing were instead scattered into the idle gaps between each chunk’s Combine, both GEMM and Combine would be repeatedly interrupted by role switches, degrading performance. This consolidated placement yields the pattern shown in Figure 8(d). Below we derive the number of tiles to steal. Given 𝑐 , com-munication takes 
+
+𝑡 comm (𝑐) = 𝑊 comm 
+
+BW (𝑐) . (11) During this interval, the 𝑁 −𝑐 comp SMs complete 
+
+𝑊 partial (𝑐) = 𝑡 comm (𝑐) ⋅ TFLOPS (𝑁 −𝑐) (12) of GEMM work, leaving 
+
+𝑊 steal (𝑐) = max (0, 𝑊 comp − 𝑊 partial (𝑐)) (13) GEMM FLOPs to be stolen. Once Dispatch finishes, all 𝑁 
+
+SMs are available for GEMM, so 𝑊 steal (𝑐) is shared equally across 𝑁 SMs. Letting 𝑊 tile denote the FLOPs of a single GEMM tile, each SM steals 
+
+𝑛 steal (𝑐) = 𝑊 steal (𝑐) 𝑁 ⋅ 𝑊 tile 
+
+(14) GEMM tiles. 
+
+3.3 Joint Search for (𝑐 ∗, 𝐾 ∗)
+
+Substituting the 𝐾 -aware definitions of 𝑇 comp and 𝑇 tail from §3.2 into the total layer time expression of §3.1 yields 
+
+𝑇 total (𝑐, 𝐾 ) = max (𝑇 comp (𝑐, 𝐾 ) + 𝑇 tail (𝑐, 𝐾 ), 𝑇 comm (𝑐)). 
+
+(15) The scheduler then jointly searches for 
+
+(𝑐 ∗, 𝐾 ∗) = arg min  
+
+> 𝑐,𝐾
+
+𝑇 total (𝑐, 𝐾 ). (16) In the comp-dominated regime(if 𝑇 comp + 𝑇 tail > 𝑇 comm ), increasing 𝐾 raises 𝑇 comp through the degradation of eff chunk (𝐾 ) but lowers 𝑇 tail via the 1/𝐾 scaling. The two opposing effects produce the real measured (𝑐, 𝐾 ) grid result(Fig. 9b). The number of GEMM tiles to steal is then computed from (𝑐 ∗, 𝐾 ∗).Figure 9b shows the measured latency under different 
+
+(𝑐, 𝐾 ) configurations. We use DSv2-Lite with input sequence length 8192 for this experiment. The grid exhibits a single clear optimum at 𝑐 ∗=40, 𝐾 ∗=4 (1.365 ms), confirming that 𝑐 
+
+and 𝐾 must be searched jointly. Once (𝑐 ∗, 𝐾 ∗) is determined, the scheduler further com-putes the per-SM steal-tile count 𝑛 steal (𝑐 ∗) via equations (13) and (14) from §3.2.2. At this point the megakernel’s com-plete execution plan (SM role assignment, chunk count, and the per-SM steal-tile count) is fully determined, and the ker-nel enters its main execution phase. 
+
+4 Implementation 
+
+Weave is built on PK [26] and implemented as a single per-sistent megakernel, launched with a grid size equal to the SM count ( 𝑁 =132 on H100). After each layer’s routing com-pletes, the routing result is passed as a kernel parameter; the megakernel then runs the cost model of §3.3 on-GPU to obtain the current layer’s (𝑐 ∗, 𝐾 ∗). Both 𝑐 ∗ and 𝐾 ∗ can therefore switch dynamically per layer.       
+
+> 7Ziyu Huang et al. 1248
+> chunk count K
+> 0246
+> Layer latency (ms)
+> 4.39 4.46 4.86 5.57
+> 75 80 85 90 95 100
+> eff chunk  (%)
+
+(a) Impact of chunk splitting on GEMM (DSv3, seq=8192, H100). 24 40 56          
+
+> c(comm SMs)
+> 1248
+> K (num chunks)
+> 2.539 1.724 1.880 2.205 1.701 1.651 1.810 1.365 1.519 2.267 1.535 1.544
+> 1.50 1.75 2.00 2.25 2.50
+> latency (ms)
+
+(b) (𝑐, 𝐾 ) latency grid for DSv2-Lite (seq=8192). Star: optimum 
+
+𝑐 ∗ = 40, 𝐾 ∗ = 4 .
+
+Figure 9. (a) Chunk splitting degrades GEMM throughput; at 𝐾 =8 , performance drops by ∼27% . (b) Measured latency over the (𝑐, 𝐾 ) grid shows a clear unimodal optimum, con-firming joint search is necessary. Each block derives its role from 𝑐 ∗ and blockIdx.x :blocks with index < 𝑐 ∗ are comm SMs (executing dispatch and combine), while the remaining blocks are omp SMs (executing gemm0, activation, and gemm1). All tile assign-ments use dynamic scheduling: each SM claims its next tile via atomicAdd on a global counter following the chunk pipeline DAG order, naturally tolerating variation in SM execution speeds [27]. After dispatch finishes, comm SMs steal 𝑛 steal GEMM tiles before transitioning to combine. For the final combine, all 𝑁 SMs participate regardless of role, eliminating tail idleness. Weave also fuses dispatch-side token deduplication [30] into the megakernel. DeepEP [30] and TD [32] perform deduplication as a separate operation before GEMM0, whereas Weave overlaps dispatch with GEMM0 and achieves deduplication naturally during dispatch. After routing completes, duplicate tokens are identified and each comm tile knows in advance whether its token is a dupli-cate. If so, the tile reads directly from a local HBM buffer populated by the first transfer, avoiding both redundant cross-GPU transfers and HBM polling. 
+
+5 Evaluation 
+
+5.1 Evaluation Setup Hardware. All experiments are conducted on a node with 
+
+4× NVIDIA H100 80 GB SXM5 GPUs. Each GPU has 132 SMs, 80 GB HBM3, and a peak BF16 throughput of 989 TFLOPS. The GPUs are fully connected through NVLink and NVSwitch, with 450 GB/s unidirectional bandwidth per GPU. The host has two Intel Xeon Platinum 8468 CPUs, each with 48 physical cores and 96 hardware threads, for a total of 96 cores and 192 hardware threads across 2 NUMA nodes. The system has 2.0 TiB of CPU memory. 
+
+Software. We use CUDA Toolkit 12.9.86, NVIDIA driver 575.57.08, NCCL 2.21.5, NVSHMEM 3.6.5, Python 3.10.12, 
+
+Table 1. MoE model configurations used in evaluation. 
+
+Model 𝐸 top-𝑘 𝐻 𝐼 
+
+DSv3 256 8 7168 2048 Phi-3.5-MoE 16 2 4096 6400 Qwen3-30B 128 8 2048 768 Qwen3.5-35B 256 8 2048 512 DSv2-Lite 64 6 2048 1408 DSv2 160 6 5120 1536 
+
+and PyTorch 2.6.0+cu124. The evaluated baseline implemen-tations are SGLang v0.5.9, Triton-Distributed(TD) v3.4.0, DeepEP v1.2.1, Comet with Flux v1.1.2, and ParallelKittens at commit a8f63a9 .
+
+Models. We evaluate six mainstream BF16 MoE architec-tures under expert parallelism with EP =4 , as summarized in Table 1. Here, 𝐸 denotes the total number of routed experts, top-𝑘 denotes the number of experts selected per token, 𝐻 
+
+denotes the hidden dimension, and 𝐼 denotes the per-expert intermediate dimension. 
+
+Workloads. We sample routing inputs from the ShareGPT dataset and control the input sequence length in 
+
+{2048, 4096, 8192} with batch size 1. 
+
+Baselines. We compare Weave with five representative MoE serving and communication-computation overlap systems. SGLang [31] is a production-grade serving system that uses NCCL All-to-All and cuBLAS grouped GEMM. TD [32] fuses dispatch with GEMM0 and GEMM1 with combine, and uses global task preemption within fused op-erators to reduce inter-operator bubbles. DeepEP [30] is an expert-parallel communication library that chunks tokens into pipeline stages to overlap dispatch and combine with expert GEMM; we use DeepGEMM [29] as its GEMM back-end and keep its default communication partition of 20 SMs. Comet [28] fuses dispatch with GEMM0 and GEMM1 with combine, enabling tile-level communication-computation overlap. ParallelKittens (PK) [26] fuses dispatch with expert up-projection under a compile-time fixed SM partition. 
+
+5.2 Per-Layer MoE Latency 
+
+We compare Weave against five baselines (SGLang [31], PK [26], TD [32], DeepEP [30], Comet [28]) across 6 MoE architectures and 3 sequence lengths (2k, 4k, 8k tokens). As shown in Figure 10 (Row 1), Weave achieves the lowest per-layer latency in all 18 configurations. Weave achieves 1.95× –4.76× geometric mean speedup over all baselines: vs. DeepEP 1.95× , vs. Comet 2.01× , vs. TD 2.95× , vs. SGLang 3.63× , vs. PK 4.76× . DeepEP uses DeepGEMM [29] as its GEMM backend and chunks tokens into pipeline stages to overlap dispatch/combine with expert GEMM. Comet performs tile-level overlap within two fused kernels (dispatch+gemm0 and gemm1+combine) and can select the communication SM count per iteration                               
+
+> 8Weave 2k 4k 8k 1.00
+> MoE latency (ms)
+> Phi-3.5-MoE
+> 2k 4k 8k 10.0
+> DSv3
+> 2k 4k 8k 1.00
+> Qwen3-30B
+> 2k 4k 8k 1.00
+> Qwen3.5-35B
+> 2k 4k 8k 1.00
+> DSv2-Lite
+> 2k 4k 8k 1.00
+> DSv2
+> 2k 4k 8k 0.0 2.5 5.0 7.5 10.0 12.5
+> E2E latency (ms)
+> 2k 4k 8k 010 20 30 2k 4k 8k 0246810 2k 4k 8k 0.0 2.5 5.0 7.5 10.0 12.5 2k 4k 8k 024682k 4k 8k 0510 15 20
+> Sequence length Attention Comet SGLang PK TD DeepEP Weave
+
+Figure 10. Per-layer MoE latency and end-to-end latency on 4 ×H100 SXM, EP=4, BF16. Row 1 : per-layer MoE latency (log-scale y-axis) across six models and three sequence lengths (2k/4k/8k). Row 2 : end-to-end latency breakdown for the same six models at the same three sequence lengths; the gray band is attention layer time and the colored bars on top are MoE layer time for each system. based on sequence length. TD fuses the same two opera-tor pairs into two kernels, but within each fused kernel communication and computation run serially across all SMs, with only marginal overlap at operator boundaries via global preemption. PK fuses dispatch with the expert up-projection under a compile-time fixed SM partition. SGLang issues separate NCCL and cuBLAS calls without kernel-level overlap. None of these baselines adapts the SM partition to per-layer routing results. 
+
+5.3 End-to-End Performance 
+
+We evaluate end-to-end (E2E) latency by combining the pre-MoE/attention block time measured via SGLang with the MoE kernel time from Weave and each baseline. We test the same 6 MoE architectures at sequence lengths 2048, 4096, and 8192 (batch size 1, 4 ×H100 EP=4), yielding 18 configura-tions per baseline. Figure 10 (Row 2) shows the E2E latency breakdown for all 18 configurations. The gray band repre-sents the attention time and the colored bars show each sys-tem’s MoE time. Weave achieves the lowest E2E latency in all 18 configura-tions, with 1.12× –1.70× geometric mean E2E speedup across baselines: vs. DeepEP 1.12× , vs. Comet 1.13× , vs. TD 1.28× ,vs. SGLang 1.50× , vs. PK 1.70× . The E2E advantage is more pronounced at shorter sequence lengths: as sequence length grows, attention time scales quadratically while MoE time scales linearly, so the attention portion increasingly domi-nates E2E latency and dilutes Weave’s MoE-layer speedup. 
+
+5.4 Hardware Utilization Profiling 
+
+We profile Weave and other baselines (TD, Comet, DeepEP, PK) with Nsight Systems on DSv2-Lite (seq = 2048, 4 ×H100 SXM, EP=4). The profiling window covers the complete MoE forward pass from the end of routing to the end of combine. We report three GPU metrics (SM Active, NVLink Utiliza-tion, Tensor Core HMMA) and a derived overlap ratio, de-fined as the fraction of the profiling window during which both NVLink Utilization and Tensor Core HMMA are simul-taneously greater than zero. Figure 11 summarizes the mean (bar) and peak (hollow circle atop dashed line) of the three metrics over each system’s MoE forward window, together with the overlap ratio. Weave achieves the highest overlap ratio (47.1%). The remaining baselines fall well below: Comet (14.3%), DeepEP (9.2%), PK (5.8%), and TD (5.1%). Comet has the second-highest SM Active mean (47.4%) because its two-segment fusion keeps SMs busy, but its overlap is moderate. DeepEP’s low overlap stems from a mismatched communication SM count: NVLink activity appears as brief bursts that quickly saturate and stop, leaving the vast majority of the timeline with only Tensor Core active. Weave achieves leading performance across all four metrics. SM Active : fusing all five MoE operations into a single persistent megakernel eliminates inter-kernel launch gaps, and bubble stealing ensures communication SMs have GEMM tiles to execute after their primary work finishes,   
+
+> 9Ziyu Huang et al. DeepEP TD Comet PK Weave 020 40 60 80 100
+> 25.3 13.6 47.4 16.4 91.3
+
+(a) SM Active (%)       
+
+> DeepEP TD Comet PK Weave 020 40 60 80 100
+> 0.3 1.4 0.7 0.7 7.0
+
+(b) NVL Utilization (%)    
+
+> DeepEP TD Comet PK Weave 020 40 60 80 100
+> 5.8 3.2 11.5 3.3 23.5
+
+(c) Tensor Core (%)   
+
+> DeepEP TD Comet PK Weave 010 20 30 40 50 60
+> 9.2 5.1 14.3 5.8 47.1
+
+(d) Comm-Comp Overlap (%) 
+
+Figure 11. Aggregate GPU metrics over the MoE forward window (DSv2-Lite, seq = 2048, 4 ×H100, EP=4). Bars: mean; hollow circles atop dashed lines: peak. (a) SM Active (%). (b) NVLink Utilization (%). (c) Tensor Core HMMA (%). (d) Comm-comp overlap ratio (%). keeping all SMs occupied throughout the layer. NVLink Utilization and Tensor Core HMMA : the spatial scheduler maintains a well-matched communication/computation SM ratio throughout the kernel’s execution, so neither NVLink bandwidth nor compute throughput starves while the other is saturated. Overlap ratio : the chunk pipeline extends the communication window from the head and tail of the layer to cover the entire computation phase by interleaving combine with gemm over time, maximizing the duration where NVLink and Tensor Core are simultaneously active. 
+
+5.5 Cost Model Accuracy 
+
+We evaluate the cost model along two dimensions: selection accuracy and online cost. As shown in Figure 12, we sweep 4 models × 4 sequence lengths on 4 ×H100 SXM (EP=4), each with 54 (𝑐, 𝐾 ) configurations. (a) Selection accuracy. For each (model, seq_len) group, we compare the measured la-tency at the cost-model-selected (𝑐, 𝐾 ) against the measured latency at the exhaustive-search optimum. The average ac-curacy gap is 8.2%. (b) Online cost. Because the cost model is fused inside the megakernel, each block computes inde-pendently and only reads a small amount of routing results from global memory. On DSv3, the cost model overhead is a nearly constant 0.54 𝜇 s regardless of sequence length, less than 0.021% of the MoE layer time, indicating that the run-time search adds negligible overhead. 
+
+5.6 Design Ablation 
+
+We isolate the contributions of the spatial and the tempo-ral scheduler by comparing three configurations on Qwen3-30B and Qwen3.5-MoE at sequence lengths 2k, 4k, 8k, and 16k (4 ×H100, EP=4). 
+
+• Weave w/o S+T: both schedulers disabled; dispatch / gemm / combine run sequentially on all SMs (no compute-communication overlap). 2 4 6 8   
+
+> Measured optimal (ms)
+> 2468
+> Model-chosen (ms)
+> (a) Cost model accuracy
+> DSv3 Phi-3.5-MoE Qwen3-30B DSv2-Lite
+> 2k 4k 8k 16k
+> Sequence length
+> 02468
+> MoE layer latency (ms)
+> (b) Cost model overhead
+> MoE layer latency Cost model overhead
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Cost model overhead (  s)
+
+Figure 12. Cost model evaluation. (a) Configuration-selection quality: measured-optimal latency vs. measured latency at the cost-model-chosen (𝑐, 𝐾 ) ; dashed line is 𝑦=𝑥 .(b) Online overhead on DSv3: MoE layer latency (left blue axis, bars) vs. cost model overhead (right red axis, hollow markers). 
+
+• Weave w/o T: spatial scheduler (S) enabled, tempo-ral scheduler (T) disabled (no chunk pipeline or bub-ble stealing). Isolates the spatial scheduler’s contribu-tion. 
+
+• Weave: full design with both spatial and temporal schedulers. As shown in Figure 13, going from Weave w/o S+T to Weave w/o T quantifies the gain of explicit SM partition-ing; going from Weave w/o T to Weave further quantifies the additional gain of the temporal scheduler. Both design components yield significant positive gains at every (model, seqlen) point. On Qwen3-30B at seq=4096, enabling S re-duces latency by 14.4% , and further enabling T reduces it by 
+
+15.7% on top of that; the two stages compose into a 27.8% 
+
+latency reduction over the no-scheduler configuration. Av-eraged over the eight (model, seqlen) points, S contributes a 
+
+10.1% reduction and T an additional 14.1% , for a total 22.8%          
+
+> 10 Weave 2K 4K 8K 16K
+> Sequence length
+> 10 0
+> 4 × 10 1
+> 6 × 10 1
+> 2 × 10 0
+> Latency (ms)
+> Qwen3-30B
+> Weave w/o S+T Weave w/o T Weave Comet 2K 4K 8K 16K
+> Sequence length
+> 10 0
+> 6 × 10 1
+> 2 × 10 0
+> Latency (ms)
+> Qwen3.5-MoE
+
+Figure 13. Design ablation on Qwen3-30B and Qwen3.5-MoE (4 ×H100, EP=4). S = spatial scheduler, T = temporal scheduler. Three configurations: Weave w/o S+T (no over-lap), Weave w/o T (spatial only), Weave (full). reduction. This confirms that both schedulers are effective, and their gains stack. 
+
+6 Related Work 
+
+Compute-communication overlap. Existing MoE inference systems have extensively studied how to overlap inter-GPU communication with expert computa-tion [4, 7, 9, 13, 16, 23, 24, 34]. Existing systems improve overlap at progressively finer granularity. Host- and stream-level approaches pipeline all-to-all communication with expert computation through operator scheduling and pipeline partitioning [9, 11, 23, 24], but the overlap is still bounded by kernel-level stages. Finer-grained approaches such as FlashOverlap [10] and TokenWeave [8] exploit tile-or token-level opportunities, yet expert computation often remains encapsulated in opaque library kernels, limiting how communication can be interleaved with computa-tion. Kernel fusion addresses this limitation by moving communication into expert GEMM kernels, allowing dispatch or combine to overlap with GEMM at a finer in-kernel granularity rather than only across separate kernel launches. ParallelKittens [26] fuses dispatch with the expert up-projection under a compile-time fixed SM partition, while Comet [28] and TD [32] fuse dispatch/up-projection and down-projection/combine as separate stages. These fused pipelines enable finer-grained overlap by moving communication closer to GEMM execution, but remain limited by fixed SM partitioning, partial fusion, or residual launch boundaries between fused stages. 
+
+Persistent megakernel. Fusing all operators into asingle persistent megakernel has gained increasing at-tention [1, 2, 5, 14, 17, 19, 25, 33, 35]. MoE kernel fusion reduces launch overhead and exposes opportunities for cross-operator scheduling. Partial-fusion approaches still retain inter-operator boundaries, while whole-layer megakernels such as FlashDMoE [1] integrate dispatch, expert computation, and combine into a single kernel. Whole-layer fusion removes launch boundaries and creates a larger scheduling domain. For highly dynamic workloads such as MoE, effectively using this domain requires run-time control over task ordering and resource allocation. MPK [2] introduces scheduler SMs for device-side task scheduling and also analyzes MoE workloads, but its MoE support is limited to single-GPU execution without cross-GPU dispatch and combine communication. When MPK does consider multi-GPU communication, it targets only static tensor parallelism (TP), thereby missing the compute-communication overlap opportunities unique to expert parallelism where routing-dependent workloads vary per layer. TD’s piecewise megakernel enables limited scheduling within fused regions, but still only partially fuses MoE operators and does not jointly adapt SM par-titioning and intra-layer execution order after routing. Weave addresses this gap by using a persistent megakernel as a routing-aware scheduling domain that adapts both decisions at runtime. 
+
+7 Conclusion 
+
+We present Weave, to our knowledge the first MoE overlap system whose SM split is decided per layer and per GPU by routing results at runtime. Existing systems either fix the SM partition at compile time, adjust it only at coarse granularity, or avoid explicit SM partitioning and run communication and computation serially with minimal overlap; Weave instead exploits the fact that each layer’s communication and computation volumes become known after routing, running a lightweight cost model inside the persistent megakernel to jointly select the communication SM count and chunk pipeline configuration online. On 4×H100 SXM GPUs across six mainstream MoE mod-els, Weave achieves a 2.89× geometric-mean MoE-layer speedup and a 1.33× geometric-mean end-to-end speedup over five state-of-the-art baselines. 
+
+Limitations and future work. Due to hardware con-straints, Weave is currently validated on a single 4 ×H100 NVLink node with EP=4. Extending to larger GPU counts and multi-node configurations is left for future work. 
+
+References         
+
+> [1] Osayamen Jonathan Aimuyo, Byungsoo Oh, and Rachee Singh. 2025. FlashMoE: Fast Distributed MoE in a Single Kernel. In Advances in Neural Information Processing Systems (NeurIPS) . arXiv:2506.04667. [2] Xinhao Cheng, Zhihao Zhang, Yu Zhou, Jianan Ji, Jinchen Jiang, Zepeng Zhao, Ziruo Xiao, Zihao Ye, Yingyi Huang, Ruihang Lai, Hongyi Jin, Bohan Hou, Mengdi Wu, Yixin Dong, Anthony Yip, Songt-ing Wang, Wenqin Yang, Xupeng Miao, Tianqi Chen, and Zhihao Jia. 2025. Mirage Persistent Kernel: A Compiler and Runtime for Mega-Kernelizing Tensor Programs. arXiv preprint arXiv:2512.22219 (2025). [3] Damai Dai, Chengqi Deng, Chenggang Zhao, R.X. Xu, Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng, Xingkai Yu, Y. Wu, Zhenda Xie, Y.K. Li, Panpan Huang, Fuli Luo, Chong Ruan, Zhifang Sui, and Wen-feng Liang. 2024. DeepSeekMoE: Towards Ultimate Expert Special-ization in Mixture-of-Experts Language Models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (ACL) .11
+
+Ziyu Huang et al. 
+
+[4] DeepSeek-AI. 2024. DeepSeek-V3 Technical Report. arXiv preprint arXiv:2412.19437 (2024). [5] Greg Diamos, Shubho Sengupta, Bryan Catanzaro, Mike Chrzanowski, Adam Coates, Erich Elsen, Jesse Engel, Awni Hannun, and Sanjeev Satheesh. 2016. Persistent RNNs: Stashing Recurrent Weights On-Chip. ICML (2016). [6] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Trans-formers: Scaling to Trillion Parameter Models with Simple and Effi-cient Sparsity. Journal of Machine Learning Research (JMLR) 23, 120 (2022), 1–39. [7] Yunqi Gao, Bing Hu, Mahdi Boloursaz Mashhadi, A-Long Jin, Yan-feng Zhang, Pei Xiao, Rahim Tafazolli, and Mérouane Debbah. 2025. FlowMoE: A Scalable Pipeline Scheduling Framework for Distributed Mixture-of-Experts Training. In Advances in Neural Information Pro-cessing Systems (NeurIPS) . arXiv:2510.00207. [8] Raja Gond, Nipun Kwatra, and Ramachandran Ramjee. 2025. Token-Weave: Efficient Compute-Communication Overlap for Distributed LLM Inference. arXiv preprint arXiv:2505.11329 (2025). [9] Jiaao He, Jidong Zhai, Tiago Antunes, Haojun Wang, Fuwen Luo, Shangfeng Shi, and Qin Li. 2022. FasterMoE: Modeling and Optimiz-ing Training of Large-Scale Dynamic Pre-Trained Models. In Proceed-ings of the 27th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) .[10] Ke Hong, Xiuhong Li, Minxu Liu, Qiuli Mao, Tianqi Wu, Zixiao Huang, Lufang Chen, Zhong Wang, Yichong Zhang, Zhenhua Zhu, Guohao Dai, and Yu Wang. 2025. FlashOverlap: A Lightweight De-sign for Efficiently Overlapping Communication and Computation. 
+
+arXiv preprint arXiv:2504.19519 (2025). [11] Changho Hwang, Wei Cui, Yifan Xiong, Ziyue Yang, Ze Liu, Han Hu, Zilong Wang, Rafael Salas, Jithin Jose, Prabhat Ram, HoYuen Chau, Peng Cheng, Fan Yang, Mao Yang, and Yongqiang Xiong. 2023. Tu-tel: Adaptive Mixture-of-Experts at Scale. In Proceedings of Machine Learning and Systems (MLSys) . arXiv:2206.03382. [12] Albert Q. Jiang, Alexandre Sablayrolles, Antoine Roux, et al. 2024. Mixtral of Experts. arXiv preprint arXiv:2401.04088 (2024). [13] Chenyu Jiang, Ye Tian, Zhen Jia, Shuai Zheng, Chuan Wu, and Yida Wang. 2024. Lancet: Accelerating Mixture-of-Experts Training via Whole Graph Computation-Communication Overlapping. In Proceed-ings of Machine Learning and Systems (MLSys) . arXiv:2404.19429. [14] Hongyi Jin, Bohan Hou, Guanjie Wang, Ruihang Lai, Jinqi Chen, Zi-hao Ye, Yaxing Cai, Yixin Dong, Xinhao Cheng, Zhihao Zhang, Yi-long Zhao, Yingyi Huang, Lijie Yang, Jinchen Jiang, Gabriele Oliaro, Jianan Ji, Xupeng Miao, Vinod Grover, Todd C Mowry, Zhihao Jia, and Tianqi Chen. 2025. EventTensor: A Unified Abstraction for Com-piling Dynamic Megakernel. arXiv preprint arXiv:2604.13327 (2025). [15] Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2021. GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding. In International Conference on Learning Representations (ICLR) .[16] Jiamin Li, Yimin Jiang, Yibo Zhu, Cong Wang, and Hong Xu. 2023. Accelerating Distributed MoE Training and Inference with Lina. In 
+
+USENIX Annual Technical Conference (ATC) .[17] Lingxiao Ma, Zhiqiang Xie, Zhi Yang, Jilong Xue, Youshan Miao, Wei Cui, Wenxiang Hu, Fan Yang, Lintao Zhang, and Lidong Zhou. 2020. Rammer: Enabling Holistic Deep Learning Compiler Optimizations with rTasks. In OSDI .[18] Niklas Muennighoff, Luca Soldaini, Dirk Groeneveld, Kyle Lo, Ja-cob Morrison, Sewon Min, Weijia Shi, Pete Walsh, Oyvind Tafjord, Nathan Lambert, Yuling Gu, Shane Arora, Akshita Bhagia, Dustin Schwenk, David Wadden, Alexander Wettig, Binyuan Hui, Tim Dettmers, Douwe Kiela, Ali Farhadi, Noah A. Smith, Pang Wei Koh, Amanpreet Singh, and Hannaneh Hajishirzi. 2025. OLMoE: Open Mixture-of-Experts Language Models. In International Conference on Learning Representations (ICLR) .[19] Aniruddha Nrusimha, William Brandon, Mayank Mishra, Yikang Shen, Rameswar Panda, Jonathan Ragan-Kelley, and Yoon Kim. 2025. FlashFormer: Whole-Model Kernels for Efficient Low-Batch Infer-ence. arXiv preprint arXiv:2505.22758 (2025). [20] Qwen Team. 2025. Qwen3 Technical Report. arXiv preprint arXiv:2505.09388 (2025). [21] Qwen Team. 2026. Qwen3.5: Towards Native Multimodal Agents. 
+
+https://qwen.ai/blog?id=qwen3.5 . Flagship MoE: Qwen3.5-397B-A17B (397B total / 17B activated, 512 routed + 1 shared expert, top-10). [22] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc V. Le, Geoffrey E. Hinton, and Jeff Dean. 2017. Outra-geously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer. In International Conference on Learning Representations (ICLR) .[23] Shaohuai Shi, Xinglin Pan, Xiaowen Chu, and Bo Li. 2023. PipeMoE: Accelerating Mixture-of-Experts through Adaptive Pipelining. In 
+
+IEEE Conference on Computer Communications (INFOCOM) .[24] Shaohuai Shi, Xinglin Pan, Qiang Wang, Chengjian Liu, Xiaozhe Ren, Zhongzhe Hu, Yu Yang, Bo Li, and Xiaowen Chu. 2024. ScheMoE: An Extensible Mixture-of-Experts Distributed Training System with Tasks Scheduling. In Proceedings of the 19th European Conference on Computer Systems (EuroSys) . 236–249. doi: 10.1145/3627703.3650083 
+
+[25] Benjamin Spector, Jordan Juravsky, Stuart Sul, Owen Dugan, Dy-lan Lim, Dan Fu, Simran Arora, and Christopher Ré. 2025. Look Ma, No Bubbles! Designing a Low-Latency Megakernel for Llama-1B. https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles .Hazy Research blog post. [26] Stuart H. Sul, Simran Arora, Benjamin F. Spector, and Christopher Ré. 2025. ParallelKittens: Systematic and Practical Simplification of Multi-GPU AI Kernels. arXiv preprint arXiv:2511.13940 (2025). [27] Renji Thomas, Kristin Barber, Naser Sedaghati, Li Zhou, and Radu Teodorescu. 2016. Core Tunneling: Variation-Aware Voltage Noise Mitigation in GPUs. In 2016 IEEE International Symposium on High Performance Computer Architecture (HPCA) . 151–162. doi: 10.1109/ HPCA.2016.7446061 
+
+[28] Shulai Zhang, Ningxin Zheng, Haibin Lin, Ziheng Jiang, Wenlei Bao, Chengquan Jiang, Qi Hou, Weihao Cui, Size Zheng, Li-Wen Chang, Quan Chen, and Xin Liu. 2025. Comet: Fine-grained Computation-communication Overlapping for Mixture-of-Experts. In Proceedings of Machine Learning and Systems (MLSys) . arXiv:2502.19811. [29] Chenggang Zhao, Zhean Xu, Liang Zhao, Jiashi Li, Chenhao Xu, Anyi Xu, Shengyu Liu, Kexing Zhou, and Kuai Yu. 2025. DeepGEMM: clean and efficient BLAS kernel library on GPU. https://github.com/ deepseek-ai/DeepGEMM .[30] Chenggang Zhao, Shangyan Zhou, Liyue Zhang, Chengqi Deng, Zhean Xu, Yuxuan Liu, Kuai Yu, Jiashi Li, and Liang Zhao. 2025. DeepEP: An Efficient Expert-Parallel Communication Library. https: //github.com/deepseek-ai/DeepEP .[31] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Effi-cient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems (NeurIPS) . arXiv:2312.07104. [32] Size Zheng, Wenlei Bao, Qi Hou, Xuegui Zheng, Jin Fang, Chen-hui Huang, Tianqi Li, Haojie Duanmu, Renze Chen, Ruifan Xu, Yi-fan Guo, Ningxin Zheng, Ziheng Jiang, Xinyi Di, Dongyang Wang, Jianxi Ye, Haibin Lin, Li-Wen Chang, Liqiang Lu, Yun Liang, Jidong Zhai, and Xin Liu. 2025. Triton-distributed: Programming Overlap-ping Kernels on Distributed AI Systems with the Triton Compiler. arXiv:2504.19442 [cs.DC] https://arxiv.org/abs/2504.19442 
+
+[33] Size Zheng, Xuegui Zheng, Li-Wen Chang, and Jidong Zhai. 2025. UniEP: Unified Expert-Parallel MoE MegaKernel for LLM Training. 
+
+arXiv preprint arXiv:2604.19241 (2025). 12 Weave 
+
+[34] Guichao Zhu, Lintian Lei, Yuhao Qing, Yichao Fu, Fanxin Li, Dong Huang, Zekai Sun, and Heming Cui. 2025. FoldMoE: Efficient Long Se-quence MoE Training via Attention-MoE Pipelining. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguis-tics (Volume 1: Long Papers) . Association for Computational Linguis-tics, Vienna, Austria, 3705–3717. doi: 10.18653/v1/2025.acl-long.186 
+
+[35] Donglin Zhuang, Zhen Zheng, Haojun Xia, Xiafei Qiu, Junjie Bai, Wei Lin, and Shuaiwen Leon Song. 2024. MonoNN: Enabling a New Monolithic Optimization Space for Neural Network Inference Tasks on Modern GPU-Centric Architectures. In OSDI .13

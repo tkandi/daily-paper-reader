@@ -1,0 +1,2432 @@
+Title: DLB: Distributed Load Balancing at Scale for Generative AI Inference
+
+URL Source: https://arxiv.org/pdf/2609.21079v1
+
+Published Time: Mon, 21 Sep 2026 00:14:44 GMT
+
+Number of Pages: 33
+
+Markdown Content:
+# DLB: Distributed Load Balancing at Scale for Generative AI Inference 
+
+## Santiago R. Balseiro ∗
+
+## Google Research and Columbia University 
+
+## sbalseiro@google.com Bartek Wydrowski ∗
+
+## Google Research 
+
+## bwydrowski@google.com Sameer Agarwal †
+
+## Google Research 
+
+## sameeragarwal@google.com David Applegate †
+
+## Google Research 
+
+## dapplegate@google.com Aaron Archer †
+
+## Google Research 
+
+## aarcher@google.com Soheil Hassas Yeganeh † Alex Iriza †
+
+## Google Research 
+
+## iriza@google.com Bobby Kleinberg †
+
+## Google Research and Cornell University 
+
+## rkleinberg@google.com Balasubramanian Sivan †
+
+## Google Research 
+
+## balusivan@google.com Pranav Vaish †
+
+## Google Research 
+
+## pranavvaish@google.com Oscar Zegarra †
+
+## Google Research 
+
+## ozegarra@google.com Wenxin Zhang †
+
+## Google Research 
+
+## wenxinzhang@google.com Vahab Mirrokni 
+
+## Google Research 
+
+## mirrokni@google.com Amin Vahdat 
+
+## Google Research 
+
+## vahdat@google.com 
+
+## Abstract 
+
+The reliance on scarce and expensive accelerators such as GPUs and TPUs in modern datacenters places unprecedented demands on backend infrastructure. For workloads charac-terized by heterogeneous service times and complex multi-stage processing, such as Generative AI, conventional load balancing techniques are often inadequate, relying heavily on costly overprovisioning to maintain service level objectives. This paper introduces DLB, the Distributed Load Balancer, a novel system designed to minimize end-to-end user latency for large-scale, heterogeneous workloads. DLB employs a scalable, distributed design with peer-to-peer probing to maintain real-time visibility into server ca-pacity across large-scale, geographically distributed infras-tructure. The system continuously learns latency models to estimate the latency impact of routing decisions, allowing it to effectively manage heterogeneous hardware and diverse model architectures. We provide a novel theoretical analysis of our routing algorithms that establishes their stability and global performance guarantees over time. We also evaluate DLB through extensive simulations, which show substantial gains compared to state-of-the-art load balancing algorithms. Finally, following a 22-month deployment of DLB at Google, where it facilitates large-scale Generative AI inference for 
+
+> ∗Equal contribution.
+> †Alphabetical order.
+
+thousands of different machine learning models and millions of requests per second, we detail the design choices and prac-tical experiences gained from the system in production. Anal-ysis of production migrations demonstrates that DLB yields statistically significant latency reductions compared to the legacy baseline, including a 17% decrease in median latency and a 13% decrease at the p95 tail. 
+
+## 1 Introduction 
+
+To meet the surging demand in modern machine learning (ML), especially GenAI inference, hyperscalers often deploy model endpoints across globally distributed cells [31], where inference servers execute requests on machine-learning accel-erators ( MLAs ) like GPUs or TPUs. Given the substantial cost of MLAs, load imbalance is exceptionally wasteful: requests may queue in one cell while compute remains idle in another. Therefore, a global load balancer —which routes incoming requests across cells—acts as a critical lever to “flatten the latency-utilization curve”: at a fixed capacity, it reduces queue-ing latency; at a fixed latency target, it reduces the required headroom and hence overall capacity. 1arXiv:2609.21079v1 [cs.DC] 17 Sep 2026 Root Router Root Router Root Router Root Router Leaf Router Leaf Router Leaf Router Leaf Router Inference Server Inference Server Inference Server Inference Server       
+
+> Cell xx Cell yy
+> Endpoint requests Endpoint requests
+> (a) High-level two-tier topology.
+> Root Router Leaf Router
+> Global Routing Algorithm Probe Client Local Routing Algorithm Probe Server Latency Estimator
+> dispatched requests dispatched requests probes responses latency samples requests in flight and error rates latency model requests in flight, error rates, and latency model incoming requests
+> (b) Root and leaf router internals.
+
+Figure 1: DLB design. (a) Requests for an endpoint enter root routers, which select an eligible cell and forward each request to a leaf router there; the leaf then selects a local inference server. Each cell runs multiple root and leaf router replicas. Traffic-residency constraints can restrict eligible cells (here, traffic from cell 
+
+yy cannot be routed to cell xx ). (b) A root router runs the global routing algorithm and a probe client, while a leaf router runs the local routing algorithm, a probe server, and a latency estimator. At the leaf, the local routing algorithm exports latency samples and RIF/error state to the estimator and probe server; at the root, the probe client supplies the aggregated response to the global routing algorithm. Solid arrows show request routing; dotted arrows show telemetry and probing. 
+
+## 1.1 Global Load Balancing for GenAI: Moti-vation and Challenges 
+
+Conventional approaches—such as weighted round-robin [33], fewest-connections [6], or centralized global schemes [5]—often struggle to capture fine-grained system dynamics. These policies either rely on coarse proxies such as active connection counts that correlate poorly with actual serving latency or use long control loops. At Google, the primary global load balancer, which we will refer to as the minimum network latency balancer (MNLB), works as follows [11]. At intervals on the order of tens of seconds, a centralized optimizer computes routing weights that minimize network latency subject to serving-capacity constraints; traffic then follows those weights until the next update. Because MNLB accounts for serving latency only implicitly via capacity, operators must maintain conservative headroom to avoid the steep region of each cell’s utilization– latency curve. This architecture has proven exceptionally robust for traditional web services with ample headroom and short, homogeneous “grains of sand” requests. Modern ML serving challenges these premises. First, work-loads exhibit diverse attributes, with service times spanning orders of magnitude: from milliseconds for high-throughput recommendation systems (“sand”) to several minutes for com-plex reasoning tasks (“boulders”). For long-running queries, serving latency significantly exceeds network latency, making it beneficial to route requests remotely to alleviate any local compute backlog. Second, capacity headroom is scarce and costly: provisioning additional MLA capacity on demand is severely limited in the face of resource constraints and over-provisioning is often prohibitively expensive. Consequently, inference servers are forced to operate at high utilization (running “hot”), leaving minimal headroom to absorb traffic bursts. Therefore, the load balancer must jointly optimize network and serving latency and actively track how busy each cell is. However, doing this at a global scale introduces three challenges: • Heterogeneous cells and evolving serving stacks. Cells can vary widely in size and MLA hardware, with raw hard-ware performance differing by more than an order of magni-tude. Furthermore, serving stacks evolve through techniques such as continuous batching [40] and disaggregated prefill-decode [44]. Because these operations intertwine sequen-tial and highly parallelizable steps, identical in-flight request counts or utilization can yield drastically different serving latencies across endpoints and cells. • Tracking system state at scale. Cell load and available ca-pacity can change much faster than MNLB’s tens-of-seconds update cycle. Making intelligent routing decisions requires fresh system state collection and sharing, which can be costly at scale. The system must navigate through a complex design 2space: how and what state to collect, how to share it, and at 
+
+what frequency .• Routing under delayed feedback. Network latency delays both user queries and system feedback. Aggressively direct-ing incoming traffic toward a currently favorable cell can overload it before the effects of earlier decisions are observed, and repeated corrections can produce oscillations. This is particularly problematic for short, high-throughput requests where network latencies are significant relative to serving latencies. 
+
+## 1.2 DLB: System Design and Theoretical Foun-dations 
+
+We introduce DLB, a distributed global load-balancing sys-tem with a theoretical foundation for routing under delayed feedback. DLB combines learned cell performance models and scalable state collection with routing mechanisms that account for the delayed effects of sending load. • A distributed system for heterogeneous inference. DLB operates at Layer 7, the Application Layer, providing the request-level visibility essential for complex ML workloads. DLB separates global traffic control from local inference server selection through two tiers (Figure 1a). Root routers 
+
+operate globally to choose a target cell using aggregate cell-level state, while leaf routers operate locally to select a spe-cific inference server within a cell. Both tiers use multiple router replicas, distributing the routing load and providing redundancy. To accommodate diverse MLA generations and evolving serv-ing pipelines, DLB treats the cell’s internal architecture as a black box. Leaf routers aggregate the cell’s requests-in-flight (RIF, requests queued or executing across its servers) and latency observations to continuously learn a cell-specific 
+
+latency model , and root routers use these models to make routing decisions (Figure 1b). Peer-to-peer sharing and active probing keep routing state fresh, allowing DLB to respond on a network round-trip timescale to changes in the serving system, including load, cell capacity, and traffic intensity. • Routing algorithms with global performance guarantees. 
+
+DLB supports two routing mechanisms, configured per end-point. Discrete routing immediately directs each request to a most preferred cell; it is well suited to sparse, computation-ally heavy “boulders,” for which serving latency dominates network latency. On the other hand, for high-throughput “sand” workloads that are prone to oscillations, DLB applies 
+
+flow routing , which changes routing probabilities gradually, limiting how quickly traffic shifts while the effects of ear-lier decisions remain unobserved. Both mechanisms support several cost signals so that practitioners can choose based on their infrastructure capabilities and deployment stage: RIF-based costs provide a robust option without latency es-timation, while latency- or gradient-based costs incorporate network latency and estimates of serving latency for better routing performance. Recent cross-region load balancers such as SkyWalker [39] and GORGO [20] provide practical mechanisms for routing and state estimation, but they do not establish performance guarantees for their routing dynamics under delayed feed-back. Existing theoretical work either omits network latency [43] or establishes only local convergence to optimality [2], leaving global behavior unresolved. We give a novel unified theory for global convergence of our routing algorithms in the presence of network latencies using Lyapunov’s direct method (Section 4). Our theoretical results provide a new understanding of how network latencies impact the stability of routing decisions and workload dynamics, laying a theo-retical foundation for designing and tuning load balancing algorithms in the presence of stale state information. The key analytical innovation is the construction of a Lyapunov function [14, ch. 4] that jointly controls routing decisions and workload dynamics. • Deployment and evaluation. DLB has been deployed at Google since November 2024 and now serves thousands of endpoints, including state-of-the-art Gemini models, and mil-lions of requests per second across hundreds of cells and millions of MLAs. We evaluate DLB through production mi-grations and simulation (Section 5). Across 68 production endpoints, migration from MNLB to DLB is associated with 17% lower p50, 13% lower mean, 14% lower p90, and 13% lower p95 latency, conditional on request rate and endpoint fixed effects. In production, DLB allows us to run 20% hotter on average. Figure 2 shows one illustrative endpoint. In sim-ulations, DLB policies show lower mean and tail latency and fewer queue-overflow errors than MNLB and weighted ran-dom routing under heterogeneity, demand bursts, and capacity outages. DLB achieves these performance gains with low sys-tem overhead: aggregate router compute cost is about 0 .04% of the compute cost of the MLAs it balances; traversing the root and leaf routers adds less than a millisecond of delay to requests that take hundreds of milliseconds and typically seconds or longer to complete. 
+
+## 2 Related Work 
+
+Our work sits at the intersection of distributed systems, ma-chine learning infrastructure, and network theory. 
+
+Datacenter load balancing Load balancing is a founda-tional problem in datacenter networking, typically addressed at either the packet level (Layer 4) or the application level (Layer 7). 3Figure 2: Mean latency of one illustrative high-throughput endpoint while transitioning from the legacy system (MNLB) to DLB in March 2025. 
+
+Systems like Maglev [9] and Ananta [19] provide scalable, layer 4 load balancing using consistent hashing and equal-cost multi-path routing to distribute packets across backend servers. These systems operate on flow tuples (5-tuples) and lack visibility into application-level semantics. They assume request homogeneity, which fails for GenAI workloads where service times vary by orders of magnitude. More granular ap-proaches like Drill [10] perform micro-load balancing at the switch level to reduce tail latency in low-latency datacenter networks. However, Drill operates on microsecond timescales to manage queue buildup for short flows, whereas DLB man-ages seconds-long inference queries where processing latency dominates network latency. Layer 7 balancers use content-aware routing. The “Power of d-Choices” is a classic paradigm where a router probes 
+
+d servers and selects the least loaded. Prequal [38] extends this by probing to balance real-time RIF, while C3 [28] fo-cuses on cutting tail latency in storage systems by selecting replicas based on expected service time. DLB instead em-ploys a predictive model that accounts for the complex rela-tionship between request counts (prefill/decode) and latency. Furthermore, our gradient-based routing minimizes total sys-tem latency (social optimum) rather than just balancing queue lengths. 
+
+Serving systems for machine learning loads The explo-sion of Large Language Models (LLMs) has spurred the devel-opment of specialized serving systems. Most existing GenAI serving and request-routing systems balance traffic across inference servers within a single cell (e.g., vLLM Produc-tion Stack, Ray Serve, AIBrix, SGLang Router, Preble, and DualMap) [1, 24, 26, 30, 32, 41]. This corresponds to DLB’s leaf-to-server layer. The closest systems to DLB are recent multi-region LLM load balancers. SkyWalker’s cross-region routers, analogous to DLB roots, select cells based on replica availability and prefer the local cell while using longest-prefix match among eligible destinations [39]. DLB instead uses learned cell per-formance models to compare heterogeneous cells. GORGO directly scores candidate replicas using a tunable combination of network latency, queueing, and prefix-cache reuse to opti-mize time-to-first-token [20]. DLB instead uses cell-level RIF, latency, or gradient-based costs aimed at end-to-end latency, and we provide theoretical guarantees for the flow-routing policies in Section 4. 
+
+Theoretical analysis of load balancing algorithms There is a long stream of literature studying policies such as Join-the-Shortest-Queue [12, 34, 36], Join-Idle-Queue [16], and backpressure [29]. These policies achieve system stability and attain excellent performance when cells are homogeneous and in the absence of network latencies. Weng et al. [35] show that variations of these policies can achieve asymptotic optimality with heterogeneous servers when networks are well connected. These papers, however, do not consider network latencies, which can induce oscillations in distributed routing [18]. We frame the load balancing problem within the context of algorithmic game theory [22]. Latency-based routing in DLB converges to a Wardrop Equilibrium, typical of selfish routing games. Our gradient-based routing builds upon the Greatest Marginal Service Rate policy [43], which analyzes the case without network latency, and distributed gradient de-scent approaches [2], which provide a local stability analysis with network latencies. Our work ensures global convergence to the system-optimal solution even under delayed feedback. 
+
+## 3 System Architecture and Algorithms 
+
+We detail the transition from our previous centralized load balancing control plane (Section 1.1) to the distributed DLB architecture (Section 3.1), outlining the specific routing and probing mechanisms that enable millisecond-scale respon-siveness. We undertook this transition to address the latency and heterogeneity challenges posed by GenAI inference. 
+
+## 3.1 DLB System Architecture 
+
+DLB is a two-tier distributed system in which each cell has two types of logical routers. The root routers act as the entry point for traffic and are in charge of distributing the traffic across cells. The leaf routers are in charge of assigning re-quests internally to inference servers within the cell. They also gather information about the current state of the infer-ence servers, such as load, availability, and response times, to make informed routing decisions. Each router runs on a different machine and multiple replicas are maintained to increase reliability and scalability. Leaf (and root) routers utilize a peer-to-peer (P2P) communication protocol to ex-change information across replicas. Our routing infrastructure supports multi-tenancy where a single router handles multiple endpoints, but for clarity, this discussion focuses on a single endpoint. 4We next describe the main components in detail. Figures 1a and 1b show the fleet-wide architecture and router internals. 
+
+Root routers. Incoming traffic first arrives at the geographi-cally closest cell, where it is assigned in a round-robin fashion to one of the root routers, which execute two modules: a rout-ing algorithm and a probe client. • Global routing algorithm. Incoming requests to a root router are immediately dispatched to a cell using one of the load balancing algorithms described in Section 3.2. Within the selected cell, the request is handed to one of the cell’s leaf routers in a round-robin fashion. Because of traffic residency constraints, cells might not be able to route requests to every other cell (for example, European regulations require personal data to be processed within the European Union). Root routers do not queue requests. Routers implement an error aversion mechanism designed to maximize goodput (the number of requests served successfully) by dynamically shifting traffic away from cells that are producing high error rates. • Probe client. Root routers periodically probe the leaf routers of each cell. Each probe response reports the cell’s RIF as well as the locally derived latency model and the cell’s error rate. Roots probe at a pre-specified frequency (e.g., once every few milliseconds). To decrease network congestion, the root routers within a cell take turns probing leaves and sharing the results with local peer root routers. The probing rate can be adjusted to maintain a balance between acquiring up-to-date information and mitigating network congestion. 
+
+Leaf routers. These routers receive requests from root routers and assign them to an inference server within the same cell. Each leaf router executes three modules: a local routing algorithm, a probe server, and a latency estimator. • Local routing algorithm. The local routing algorithm selects an inference server within the same cell to process requests. Inference servers are selected using a distributed power-of-d-choices paradigm that seeks to balance the number of tokens waiting to be processed in each queue [38]. • Latency estimators. Leaf routers periodically collect latency samples from all the leaf routers within the cell and estimate a parametric latency model for the cell. To decrease compu-tational burden, the leaf routers within a cell take turns esti-mating the latency models and sharing the resulting latency model with peer leaf routers within the cell. More details about the estimation process are provided in Section 3.3. • Probe server. Upon receiving a probe from a root router, the probe server synchronously returns the cell’s aggregate state, including the RIF, latency model, and error rate. To derive the RIF, the leaf router asynchronously queries all peer leaf routers within the cell and caches the aggregated results, ensuring that internal data collection does not block the probe response path. Latency is measured directly at the leaf router by timestamping each request’s arrival and completion. 
+
+## 3.2 Load Balancing Algorithms 
+
+We implement two different routing mechanisms: flow routing 
+
+and discrete routing . In both mechanisms, root routers use the state of the system and the latency models to estimate the “cost” of routing an additional request to each cell. The algorithms, however, differ in the way costs are used to make routing decisions. Moreover, we provide three approaches for computing the cost of routing an additional request: RIF-based , latency-based , and gradient-based . In production, the mechanism is configured per endpoint based on workload attributes (Section 6). Discrete routing is a fast-reacting algorithm that routes each request to the cell with the lowest cost. This algorithm can lead to fast convergence, but can suffer from oscillatory behavior when network latencies between cells are large. Flow routing is a probabilistic routing algorithm in which each request router maintains a vector of routing probabilities that are adjusted using gradient descent [2]. Flow routing can guarantee convergence with arbitrary network latencies at the expense of slower convergence times compared to discrete routing. Both routing algorithms are distributed and do not require estimating arrival rates. In the RIF-based routing algorithm, the cost is set to be the ratio between the RIF and the number of inference servers in a cell. This algorithm can be understood as an instantiation of the weighted least connections policy, where the weights are set to be inversely proportional to the capacity of each cell [42], and seeks to equalize the utilization across cells under the assumption that inference servers have similar pro-cessing rates. In latency-based routing, the cost is set to the estimated latency of an average request based on the cell state. This routing algorithm is similar to the Shortest Expected De-lay policy in [3] or the C3 policy of [28], which route requests based on the queue length and processing rate of each cell. Finally, in gradient-based routing, the cost is set to a gradient that measures the marginal impact on the total system latency of routing an additional unit of flow (in requests per second) to a cell. This routing algorithm extends the Greatest Marginal Service Rate policy of [43] to incorporate network latencies. The choice of cost function dictates the equilibrium to which the system converges. This choice presents a funda-mental trade-off between latency optimality and robustness. In Section 4, we prove that gradient-based routing can achieve near-optimal system latency. However, this pursuit of opti-mality requires aggressive consumption of latency estimates, rendering the policy sensitive to estimation error. Conversely, RIF-based routing requires minimal information but may yield sub-optimal results by ignoring network and serving latencies. We observe, however, that RIF-based routing can 5lead to good performance when network latencies are small compared to serving latencies (the "boulder" case) and cells have homogeneous hardware. Latency-based routing strikes a balance between these two extremes: the system converges to the so-called Wardrop Equilibrium of the nonatomic routing game in which self-interested players route traffic through a network [22, Definition 18.1]. Because requests do not in-ternalize the delay they impose on future requests, the total system latency can be suboptimal. Combining the routing mechanism and the cost function yields six distinct algorithms. We next provide a formal defi-nition of the algorithms. 
+
+3.2.1 Formal Description of the Global Routing Algo-rithms 
+
+We model the network as a directed graph (C , A), where C =
+
+{1, . . . , n} represents the set of cells and A ⊆ C × C denotes the set of directed arcs. This topology captures the allowable source-destination cell pairings, rather than the physical links of the underlying communication infrastructure. Due to traffic residency constraints, the graph is not necessarily symmetric; that is, (i, j) ∈ A does not imply ( j, i) ∈ A. We denote by 
+
+C +(i) = { j ∈ C : (i, j) ∈ A} and C −( j) = {i ∈ C : (i, j) ∈ A}
+
+the out-neighbors and in-neighbors of a cell, respectively. We denote by Ni(t) the total number of RIF in the inference servers of cell i ∈ C at time t. For every arc (i, j) ∈ A, let 
+
+τi j ≥ 0 denote its fixed one-way network latency. We encode the routing decisions of the algorithm using 
+
+xi j (t), which denotes the probability that a request arriving at cell i ∈ C at time t is routed to cell j ∈ C . We let xi(t) = (xi j (t)) j∈C be a routing vector for cell i ∈ C and assume that 
+
+xi(t) ∈ ∆i = z ∈ Rn 
+
+> ≥0
+
+: ∑ j∈C z j = 1, z j = 0 for j̸ ∈ C +(i) ,that is, cells can only route requests to valid destinations. 
+
+3.2.2 Routing Mechanisms 
+
+For each admissible arc (i, j), let ci j : R≥0 → R≥0 be the route cost evaluated at the destination workload. We next describe the global routing algorithms. • Discrete routing. Each root router in cell i ∈ C sends requests to the cell with the least cost, i.e., 
+
+xi(t) ∈ arg min  
+
+> z∈∆i
+
+# ∑ 
+
+> j∈C+(i)
+
+ci j 
+
+ Nj(t − τi j ) · z j . (1) Ties can be broken arbitrarily. Note that costs are evaluated at the delayed system state Nj(t − τi j ) to account for network latencies between cells. We omit the delays introduced by discrete probing intervals in our description, as these intervals are negligible relative to network latency. • Flow routing. Each root router maintains a vector of routing probabilities xi(t) updated using gradient descent. Then 
+
+xi(t + δt) = Π∆i (xi(t) − ηi · δt · ci(t)) , (2) with δt > 0 denoting the time between updates and ηi > 0denoting the stepsize used by the cell. The cost vector ci(t) ∈
+
+Rn has jth component ci j (Nj(t −τi j )) for j ∈ C +(i). The time between updates is set to match the probing rate. In (2) Π∆i
+
+denotes the Euclidean projection to the set of feasible routing vectors, Π∆i (z) = arg min v∈∆i ∥v − z∥2. The projection can be done in O(n log n) time using standard algorithms [7]. 
+
+3.2.3 Cost Functions 
+
+We use these cost functions. • RIF-based routing. This cost is the RIF divided by the num-ber of replicas k j ∈ N in cell j ∈ C : ci j (Nj) = Nj/k j. The policy aims to equalize the ratio of RIF to replicas across cells. • Latency-based routing. The cost function is the expected end-to-end latency at workload Nj, ci j (Nj) = ℓ j(Nj) + 2τi j ,which is the sum of the serving and round-trip network la-tency. Here, we denote by ℓi(Ni) the expected latency across requests in cell i ∈ C as a function of its RIF. The algorithm seeks to route requests to the cell with least latency. • Gradient-based routing. The cost function captures the marginal impact on the system latency of routing an addi-tional unit of flow ci j (Nj) = 1/μ′j(Nj) + 2τi j , where the first term measures the marginal impact on the serving latency of all requests and the second on the network latency of this request. Here, μi(Ni) denotes the processing rate of cell i ∈ C ,which captures the number of queries processed per unit of time as a function of the RIF. The term 1 /μ′j(Nj) measures the sensitivity to server saturation. When the marginal service rate μ′j(Nj) is high, pushing more flow to the cell does not significantly impact processing times. However, when μ′j(Nj)
+
+is low, the cell is nearing saturation and pushing more flow causes a backlog because the server cannot speed up to match it. Under this choice, we prove that the system converges to the optimal latency-minimizing solution. 
+
+## 3.3 Latency Estimation 
+
+Effective routing requires accurate estimates of serving la-tency and processing rate. While both can be derived from observing request arrivals and departures, we focus on la-tency as it is more readily instrumented in production. We specifically target average latency because it serves as a proxy for the typical user’s experience and is mathematically more tractable to optimize, as discussed in Section 1.1. We define a latency model for cell i ∈ C as a function 
+
+ℓi : R≥0 → R≥0 that maps the number of RIF Ni to an ex-pected serving latency ℓi(Ni). Leaf routers periodically fit these models and communicate the parameters (introduced later) to root routers, which evaluate the local latencies or processing rate derivatives μ′
+
+> i
+
+(Ni) based on real-time probing. 6Figure 3: Latency estimation using parametric modeling. The blue dots repre-sent exponentially smoothed average latency measurements from production traffic. The red solid line shows the fitted parametric model. 
+
+To derive processing rates from latency models, we employ the approximation Ni ≈ ℓi(Ni) · μi(Ni). Intuitively, this cap-tures the cell’s drain time : given a backlog of Ni requests, the expected latency is roughly the time required to clear the pending work at the current rate. This relationship mirrors Little’s Law, with the caveat that we apply it here as a proxy for the instantaneous state rather than a long-term average. We opt to communicate latency models as opposed to in-stantaneous point estimates of latency for multiple reasons. First, latency models tend to be more stable and can be com-municated with lower frequency. Second, different routing algorithms use latency models in different ways, so it is ad-vantageous to separate the routing logic from the estimation process. We adopt a parametric model of the latency function 
+
+ℓi(Ni; θi) with θi ∈ Rd a d-dimensional vector representing the parameters for cell i ∈ C . Parametric models allow us to impose shape constraints and can be more data efficient than nonparametric models. Figure 3 plots our estimator together with the exponen-tially smoothed averages for a cell with multiple inference servers. For our parametric models, we used a softplus func-tional approximation, which provides a good fit in practice. Our latency models capture that latency is approximately con-stant when workload is low and then increases linearly when workload is high as requests start queueing. 
+
+## 3.4 Error Aversion 
+
+We implement an error aversion mechanism designed to max-imize goodput (the number of requests served successfully) by dynamically shifting traffic away from cells that are pro-ducing a high rate of errors. This is crucial for maintaining service reliability when some cells may be unhealthy, over-loaded, or experiencing other issues. Error aversion allows the system to react gracefully when cells are generating errors, without manual intervention. Each leaf router tracks the error rate of requests it handles using an exponential moving average. This error fraction is reported back to the root routers via the probing mechanism. Each root router maintains an “aversion rate” for each cell, which is a value between 0 and 1. This rate represents the probability that the root router will avoid sending a request to that particular destination due to its error history. The aversion rate is periodically updated using a control loop based on how each cell compares to the others. The core idea is to penalize cells performing worse than the best one while incorporating a recovery detection mechanism that allows the system to detect if the cell becomes healthy again. 
+
+## 3.5 Affinity Routing 
+
+DLB routes requests from the same session to the same infer-ence server to exploit prefix caching , which reuses the expen-sive prefill computation across requests that share context. We observe that 60% to 70% of requests can benefit from prefix caching, and reuse cuts prefill computation by 40% to 50%. However, exploiting affinity could work against load balance. Static assignment schemes like consistent hashing suffer from well-known pitfalls: hash collisions can concentrate sessions on a single server, and a few “hot sessions” can overload that server. DLB instead makes stickiness conditional . A new ses-sion is routed as usual; subsequent queries return to the same cell as long as the expected latency minus expected prefix-caching savings there is lower than that of the best alternative cell. Otherwise, the request is re-routed to the best alternative cell and the session re-affinitized. The two tiers hold affinity state differently: root routers keep a map from session scheduling hash to cell, while leaf routers are nearly stateless—the inference servers maintain the session-to-server mappings and return them in probe re-sponses, so every leaf router in a cell sees the same mapping without leaf-to-leaf synchronization. 
+
+## 3.6 Fault Tolerance 
+
+Root routers store only session affinity caches and cell-level load statistics. When a root router crashes, clients fail over to peer replicas; missing affinity mappings temporarily fall back to load-based routing and are relearned upon request completion. Leaf routers are nearly stateless, storing only transient router-local counters and local latency models. When a leaf router crashes, root routers detect probe timeouts and redirect queries to healthy peers. The lost local RIF quickly self-corrects as peer leaves probe servers and sync via P2P broadcasts. Upon restart, the leaf recovers peer models over P2P and re-enters the active routing pool as soon as root probes succeed. 74 Theoretical Analysis 
+
+We consider a fluid model in which requests arrive at cell i ∈ C
+
+at a rate λi > 0. In a fluid model, every request is infinitesi-mal and a continuous flow of queries moves deterministically through the system. For a cell i ∈ C , we refer to Ni(t) as the 
+
+workload at time t ≥ 0 to reflect that the number of requests is now a continuous rather than discrete quantity. Fluid mod-els are prevalent in the congestion control literature as they provide tractable approximations that are accurate for large-scale systems with high arrival rates and a large number of servers [8, 25]. We conduct our analysis under the following assumptions. 
+
+Assumption 1 (Processing rate functions) . For every j ∈ C ,the processing rate function μ j : [0, ∞) → [0, ∞) is strictly increasing, continuous, and bounded, with μ j(0) = 0. Define 
+
+¯μ j = sup N≥0 μ j(N) < ∞.
+
+Monotonicity is natural for work-conserving systems, while boundedness captures finite hardware throughput. Our para-metric models, which provide a good fit in practice, satisfy these assumptions. 
+
+Assumption 2. There exists a finite feasible pair (N′, x′) ∈
+
+Rn 
+
+> ≥0
+
+× ∏i∈C ∆i such that, for every j ∈ C ,
+
+# ∑  
+
+> i∈C−(j)
+
+λix′ 
+
+> i j
+
+= μ j(N′
+
+> j
+
+) < ¯μ j.
+
+We need Assumption 2 to ensure that the system is stable, i.e., the service capacity of the cells is enough to serve all arriving jobs without allowing the queue sizes to explode. 
+
+Assumption 3 (Separable costs with additively slowly vary-ing workload components) . For every arc (i, j) ∈ A,ci j (N) = f j(N) + gi j , N ≥ 0, (3) 
+
+where g i j ≥ 0 and f j : [0, ∞) → [0, ∞) is continuous, strictly increasing, and coercive. Moreover, for every fixed H ≥ 0,
+
+lim 
+
+> N→∞
+
+f j(N + H)
+
+f j(N) = 1. (4) In the implemented latency- and gradient-based policies, 
+
+gi j = 2τi j is the round-trip network latency; the analysis al-lows any fixed nonnegative per-arc term gi j .We say that f j is additively slowly varying when it satis-fies (4). Thus, at large workloads, any fixed additive workload increment changes f j by a vanishing fraction of its current value. RIF-based routing satisfies Assumption 3 automati-cally. For latency-based routing, measured latency increases as requests compete for finite serving resources. At high load, additional backlog mainly adds queueing delay, motivating approximately linear growth: latency becomes unbounded, while any fixed backlog increment has a vanishing relative impact. For gradient-based routing, 1 /μ′j reflects diminishing returns to concurrency: near saturation, increasingly more backlog is needed to obtain additional throughput. The addi-tive condition further assumes that a fixed backlog increment changes the already-small marginal throughput gain by only a vanishing fraction. We now define equilibrium points of our algorithms, which depend on the choice of cost functions c = ( ci j (·)) (i, j)∈A used to quantify the impact of routing a request. 
+
+Definition 1 (Equilibrium point) . A finite pair (N∗, x∗) ∈
+
+Rn 
+
+> ≥0
+
+× ∏i∈C ∆i is an equilibrium for cost functions c if it sat-isfies (1) flow balance, 
+
+# ∑  
+
+> i∈C−(j)
+
+λix∗ 
+
+> i j
+
+= μ j(N∗ 
+
+> j
+
+), j ∈ C , (5) 
+
+and (2) complementary slackness, i.e., for every origin i ∈ C ,
+
+# ∑ 
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+)( zi j − x∗
+
+> i j
+
+) ≥ 0, zi ∈ ∆i. (6) The complementary slackness condition states that, for each cell i ∈ C , every arc with positive flow has the same cost. Otherwise, we could improve the solution by pushing an extra unit of flow through the arc with the lowest cost. 
+
+Lemma 1. Suppose Assumptions 1– 3 hold. Then, there exists an equilibrium point. Moreover, the equilibrium workloads N∗ are unique. 
+
+Lemma 1 maps every set of cost functions satisfying our as-sumptions to unique workload levels, but, as we now discuss, different cost functions lead to distinct equilibrium points. For gradient-based routing, Lemma 1 implies that equilib-rium points are global minimizers of steady state average latency subject to flow balance constraints at each cell. See Appendix C.2 for discussion of this point and a proof of the lemma itself. [2] shows that this optimal steady-state solution constitutes a uniform lower bound on the performance of any load balancing policy. In latency-based routing, the comple-mentary slackness condition ensures a Nash equilibrium since no request has a unilateral incentive to deviate and select a cell with lower cost. It is well known from the congestion games literature that the Price of Anarchy of selfish routing can be unbounded, i.e., latency-based routing can lead to arbi-trarily poor system-wide latency compared to gradient-based routing [22, Example 18.3]. In addition, RIF-based routing can theoretically lead to arbitrarily poor latency in heteroge-neous networks as it ignores network and serving latencies. In practice, however, both policies perform remarkably well. (See Figure 6.) 
+
+## 4.1 Global Performance Guarantee 
+
+In this section we present our main result, a global perfor-mance guarantee that measures the cumulative distance be-tween the workloads of our flow routing algorithms and the 8equilibrium levels. The most convenient distance measure for stating our results is the following semi-metric: 
+
+D j(Nj, N∗ 
+
+> j
+
+) =   f j(Nj) − f j(N∗ 
+
+> j
+
+) ·  μ j(Nj) − μ j(N∗ 
+
+> j
+
+) , (7) where f j(Nj) is the workload-dependent component in the additive decomposition of the cost function ci j (Nj) given in Assumption 3. Because the cost and processing rate func-tions are strictly increasing, we have that D j(Nj, N∗ 
+
+> j
+
+) ≥ 0 and 
+
+D j(Nj, N∗ 
+
+> j
+
+) = 0 if and only if Nj = N∗ 
+
+> j
+
+. While D j is symmet-ric, it is only a semi-metric because it does not necessarily satisfy the triangle inequality. 
+
+Theorem 1 (Cumulative guarantee for flow routing) . Let ¯τ =
+
+max (i, j)∈A τi j . Suppose Assumptions 1–3 hold, together with a mild admissibility condition on the prescribed workload history over [−¯τ, 0] (Assumption 4 in Appendix C.1). Fix an equilibrium (N∗, x∗), network latencies τ = ( τi j )(i, j)∈A , and an admissible workload history N |[−¯τ,0]. Write η = min i∈C ηi
+
+and ¯η = max i∈C ηi. There exist constants 
+
+η0(τ) ∈ (0, ∞], G1(τ) < ∞, G2(τ, N|[−¯τ,0]) < ∞,
+
+independent of T and the stepsizes, such that the following holds. For ¯η ≤ η0(τ) and every T ≥ 2¯ τ,
+
+1
+
+T ∑ 
+
+> j∈C
+> ZT
+> 0
+
+D j(Nj(t), N∗ 
+
+> j
+
+) dt ≤ 2 ∑i∈C λi
+
+T η + G1(τ) ¯η
+
++ G2(τ, N|[−¯τ,0])
+
+T .
+
+Theorem 1 shows a finite-horizon trade-off: larger stepsizes reduce the adaptation term 1 /(T η) but increase the delay-dependent penalty G1(τ) ¯η. For fixed nonzero stepsizes, taking 
+
+T → ∞ leaves an O( ¯η) bound on the time-average distance. If all stepsizes are set to η = T −1/2, for horizons large enough that η ≤ η0(τ), the right-hand side is O(T −1/2) and the time-average distance converges to zero. 
+
+Main challenges and key proof ideas. The analysis of dis-tributed load balancing algorithms is difficult because routing decisions and workload dynamics interact, and because every router acts on a stale view of the system. Our proof relies on a Lyapunov function with two components. The first compo-nent, adapted from the classical analysis of gradient descent, measures the squared distance between the algorithm’s rout-ing decisions and their equilibrium values. The core novelty lies in the second component, built from the routing costs themselves, which explicitly controls the workload dynamics induced by request arrivals and departures. Delay leaves error terms that pair costs and routing decisions measured a round trip apart, where cost functions can be unbounded. We there-fore split each cost into a bounded part and a tail, and analyze them separately. Appendix C.3 contains the full proof. 
+
+> Figure 4: Cumulative distribution of latencies across our fleet of endpoints, weighted by their demand in requests per second.
+
+## 5 Deployment and Evaluation 
+
+We deployed DLB starting in November 2024 as the primary load balancer for Google’s GenAI serving stack, and it has since expanded to serve other types of models. While specific usage figures remain confidential, the system’s adoption has tracked the rapid expansion of GenAI and machine learning workloads at Google. Notably, the number of MLAs balanced by DLB has increased tenfold since launch. DLB now sup-ports thousands of distinct endpoints and balances millions of requests per second (RPS) across millions of MLAs in Google’s global data center infrastructure. Figure 4 illustrates the cumulative distribution of serv-ing latencies across our fleet, weighted by request volume. Workloads are extremely heterogeneous, with latencies span-ning multiple orders of magnitude: from milliseconds for lightweight CPU models, to seconds for some LLMs, to sev-eral minutes for complex reasoning requests. Although the latter are a small fraction of requests, they consume a much larger fraction of MLA chips. 
+
+## 5.1 System overhead 
+
+Each cell runs between 5 and 200 software router tasks de-pending on its query rate and MLA fleet size. The aggre-gate compute footprint of all DLB routers is roughly 2500 ×
+
+smaller than the cost of the MLAs they balance (i.e., about 0.04%). Probing (root →leaf, leaf →server) and P2P gather-scatter account for approximately 40% of that router CPU consumption. The routing delay added by traversing the root and leaf routers is on the order of a few hundred microsec-onds to one millisecond; for a representative deployment of a frontier LLM, this amounts to 0 .04% of end-to-end latency in the mean and 0 .14% at p99: orders of magnitude smaller than the migration-associated latency changes reported below. 9(a) Demand and RIF. (b) Utilization and inference servers. (c) Mean and p90 latency. 
+
+> Figure 5: Typical production data for a GenAI endpoint across one week. Axes in (a) are normalized to protect proprietary operational data.
+
+## 5.2 Migration Analysis 
+
+This subsection compares DLB’s production performance against MNLB. Note that MNLB is a strong baseline , hav-ing routed most of Google’s production traffic for 20+ years, while undergoing continuous improvement. Figure 2 illustrates the raw time-series dynamics of a single high-throughput endpoint before and after its live transition from MNLB to DLB. The week before the transition is red, and the week after is green. For this specific endpoint trace, raw observational latency dropped by 9% under comparable request arrival rates (Figure 8 in Appendix A). To quantify the impact associated with the MNLB to DLB migration more systematically across our entire infrastruc-ture, we conducted an interrupted time series analysis on 68 production endpoints that migrated in 2025. We employed a fixed-effects panel regression to isolate the treatment effect from confounding factors like demand elasticity and produc-tion model heterogeneity. We specified a log-log regression model to normalize differences in scale across endpoints, al-lowing us to interpret regression coefficients as percentage changes [37]. Our analysis is based on 56,663 observations, allowing us to estimate regression coefficients with high con-fidence. We defer a detailed description of the econometric analysis to Appendix A, and provide a summary here. Our analysis confirms that DLB yields statistically sig-nificant reductions in latency across all metrics ( p < 0.01). Specifically, after controlling for load fluctuations across the 68-endpoint fleet, the regression estimates a relative causal la-tency reduction of roughly 17% for p50, 13% for mean, 14% for p90, and 13% for p95 1 compared to the legacy baseline (MNLB), with results weighted by compute-seconds. This 17% p50 / 13% mean causal reduction across 68 endpoints demonstrates that while individual endpoints experience vary-ing raw drops depending on their specific compute-to-network bottleneck (e.g., 9% for the specific endpoint in Figure 2), DLB delivers substantial performance improvement, validat-                   
+
+> 1The 95% confidence intervals on these estimates are
+> [−17 .26% ,−16 .30% ]for p50, [−13 .81% ,−12 .97% ]for mean,
+> [−14 .37% ,−13 .32% ]for p90, and [−13 .23% ,−12 .03% ]for p95 latency.
+
+ing the efficacy of its distributed, state-aware routing in a production environment. The intra-cell load balancer (Pre-qual) was identical across the MNLB/DLB migration, so we attribute these gains to better inter-cell load balancing. 
+
+## 5.3 Performance of a Production Endpoint De-ployment 
+
+Figure 5 plots a one-week performance profile of a production GenAI workload under DLB, revealing the interplay between demand, capacity, and latency. • Demand and scaling. Demand exhibits a strong diurnal pat-tern with daily weekday peaks and lower peaks on the week-end (Fig 5a). The model management system dynamically adjusts the replica count (Fig 5b, dashed line), but it operates on a slower timescale than traffic bursts and is constrained by available capacity. Thus, utilization frequently spikes above 90% during the onset of demand surges before new capacity comes online. • Latency stability. Despite the utilization spikes, the mean serving latency remains remarkably stable at around 1 second (Fig 5c, solid line). Hence, RIF tracks RPS almost perfectly, as predicted by Little’s Law. • Tail effects. Unlike the mean, the p90 latency is highly sen-sitive to load, fluctuating between 1.5 and 3.0 seconds in cor-relation with daily peaks. Queue buildup during peak hours disproportionately impacts the tail. Our interrupted time se-ries analysis in Section 5.2 strongly suggests that the elevation of p90 latency during peak hours would be even more severe if we had not switched from MNLB to DLB. 
+
+## 5.4 Simulation-based Evaluation 
+
+We evaluated DLB using a high-fidelity simulator that inte-grates the C++ production codebase to ensure all modules behave exactly as they do in production. The simulations consider disaggregated prefill-decode architectures across ge-ographically distributed cells. Our simulations evaluate the 10 (a) Mean latency. (b) p90 latency. (c) Error rates.   
+
+> Figure 6: Mean latency, p90 latency, and error rates of different routing algorithms across target utilization levels. Mean and p90 latency are normalized by the corresponding latency of weighted random routing ( Rand ).
+> (a) Mean latency. (b) p90 latency. (c) Error rates.
+> Figure 7: Mean latency, p90 latency, and error rates of different routing algorithms subjected to varying amounts of latency estimation error. Mean and p90 latency are normalized by the corresponding latency of weighted random routing ( Rand ).
+
+routing algorithms in isolation and do not model affinity rout-ing: requests are independent and receive no prefix-cache benefits. We tested the system under various conditions, in-cluding hardware and processing time heterogeneity, adapt-ability to demand bursts and capacity outages, and robustness against latency function estimation errors. We compare DLB’s discrete ( Disc ) and flow-based ( Flow ) routing algorithms us-ing RIF ( RIF ), latency ( Lat ), and gradient ( Grad ) cost func-tions against weighted random routing ( Rand ), which routes requests proportionally to the number of replicas in each cell [13], and the legacy centralized load balancer ( MNLB )described in Section 1.1. We defer the full description of the experiments to Appendix B and summarize the results here. The simulations demonstrate that DLB’s policies substan-tially outperform the baselines in heterogeneous scenarios. While gradient-based flow routing provided the best over-all performance, particularly for short “sand” requests where network latency is significant, the simpler RIF-based routing proved highly competitive at high utilization levels. Addi-tionally, DLB exhibited superior robustness compared to the legacy MNLB system, significantly reducing tail latencies and error rates during demand bursts and capacity outages. Figure 6 shows how performance varies with the target utilization level. We report normalized latency (the ratio to the random routing baseline) to standardize comparisons across diverse scenarios. Naturally, the relative improvements of our stateful policies over Rand and MNLB are smaller when utilization is low, as queuing delays are less severe. This regime highlights a critical limitation of RIF-based routing. When the system is lightly loaded, the optimal strategy is to route exclusively to faster or closer cells (depending on query cost). RIF-based routing results in sub-optimal performance by spilling requests to slower cells despite the availability of faster alternatives. When utilization is high, our policies yield substantially lower latencies and error rates compared with MNLB (and Rand ), highlighting DLB’s ability to drive higher utilization and keep error rates and latencies in check. To evaluate robustness against latency estimation error, we inject multiplicative noise into the model parameters. Given a maximum perturbation magnitude ε > 0, we define the perturbed parameters for cell i as (1 + ε · ξi) · ˆθi, where ξi ∼
+
+Unif [−1, 1] and ˆ θi are the original parameters. We report mean latencies, p90 latencies, and error rates in Figure 7. These results highlight an advantage of RIF-based rout-ing: because routing decisions are estimation agnostic, it is immune to latency estimation errors. The latency-estimation-dependent policies Disc -Lat , Flow -Lat , Disc -Grad , and 
+
+Flow -Grad degrade gracefully; while their performance de-clines as ε increases, they maintain competitive performance even in the presence of substantial parameter noise. MNLB 
+
+11 and Rand do not use the latency estimator, so are also im-mune to errors in the estimates. Note, however, that MNLB 
+
+depends on other estimated inputs such as query arrival rates. 
+
+## 6 Lessons Learned 
+
+We highlight the specific benefits, unexpected behaviors, and hard-earned lessons from this deployment. 
+
+Hyperscaling to production. DLB scaled rapidly along-side the dramatic increase in demand for GenAI models at Google. We faced the challenge of supporting a vast assort-ment of endpoints with heterogeneous attributes—balancing both “boulders” and “sand” (Figure 4). RIF-based routing is used when an endpoint is onboarded because it requires no latency estimation and robustly handles demand and capacity ramp-ups. It excels at equalizing utilization at the expense of increased network latency and bandwidth. We gradually transition endpoints to latency-aware cost functions. Discrete routing suits “boulders,” whose serving time dominates feed-back delay, while flow routing suits “sand,” where delayed feedback would otherwise induce herding. Our aim was to make routing a system concern rather than a user configura-tion problem, and for most endpoints it is; high-value end-points still receive manual tuning of parameters. 
+
+Objectives and configuration. We found that “load bal-ancing” is often an ill-posed optimization problem: objec-tive functions vary drastically across tenants, ranging from throughput maximization to minimizing time-to-first-token. However, exposing complex configuration knobs to accom-modate every nuance creates unmanageable toil. Instead, we focused on minimizing end-to-end latency while maintaining high goodput. While this objective does not perfectly align with every stakeholder’s desires, it served as a robust proxy for system health that minimized user complaints. 
+
+Integration with other systems. DLB does not operate in isolation—it is part of a cohesive serving stack. For in-stance, it complements the horizontal scaling capabilities of the model management system, which dynamically adjusts replica counts based on utilization. However, we found that operating them as independent control systems creates distinct challenges. First, due to the significant latency required to load large model weights into memory, the scaling system op-erates at a much lower frequency (minutes or hours) compared to DLB. Since DLB operates on a millisecond timescale, it must be highly reactive and absorb demand spikes using only the currently available resources. Second, the systems rely on overlapping but inconsistent sources of truth: the model management system actuates based on infrastructure metrics like utilization, whereas DLB optimizes latency. Moving for-ward, we hope to couple these feedback loops more tightly, enabling a unified control plane where routing and scaling decisions inform one another in real time. 
+
+The gap between analytical models and practice. A recur-ring lesson was that production traffic and inference servers routinely violate standard theoretical assumptions. For exam-ple, we observed endpoints receiving “synchronized” traffic, such as thousands of simultaneous requests at the start of each minute, creating demand spikes that defy standard prob-abilistic modeling. This simultaneously creates a low average utilization with a high error rate during the burst window. High-resolution visualization played a key role in identify-ing root causes and providing solutions. DLB’s millisecond-timescale control loop helps absorb these bursts much better than the 10-second loop of MNLB. GenAI workloads exhibit complex behavior due to opti-mizations such as continuous batching and speculative de-coding [15]. This complexity is compounded by the rapid pace of model innovation and the heterogeneity of the serving fleet (varying in parameters, architecture, and context win-dow). Our system relies on a robust estimation framework that treats the inference server as a black box. This approach proved critical and allowed us to adapt to the heterogeneity of the fleet without requiring model-specific tuning or deep intro-spection into the inference servers. As complex, multi-stage inference models are adopted, a promising research direc-tion is to design load balancing algorithms that gain visibility into the inference process, utilizing stage-level telemetry to identify and avoid internal bottlenecks. 
+
+Estimation and routing form a closed loop. Coupling an online estimator to the policy that generates its data created two subtle control challenges: First, our latency models are fit over requests that have completed within a sliding window. This naturally censors in-flight requests and systematically biases the fitted curves toward short-lived queries; the skew is especially pronounced for “boulder” endpoints dominated by long prefill or generation sequences. Second, and more fundamentally, the router observes a cell’s latency only when routing traffic to it: a cell temporarily deemed slow stops re-ceiving traffic, its model grows stale, and the router cannot directly observe if it has recovered. Because the policy dic-tates its own training distribution, online tuning degrades into an exploration–exploitation dilemma. In practice, DLB miti-gates this starvation loop via out-of-band background probing, regularizing unconfident models toward a fleet-wide prior (via Bayesian shrinkage), and injecting controlled dithering noise into latency estimates. While effective, these solutions remain empirical heuristics. This operational friction underscores why RIF-based routing serves as such a resilient default: it observes raw physical queue occupancy rather than fitting empirical curves, avoiding the additional feedback loop intro-duced by latency estimation. 12 7 Conclusions 
+
+This paper introduces DLB, a distributed global load bal-ancing system designed to address the unique resource con-straints and service heterogeneity of modern workloads, with a focus on GenAI inference at scale. Our Lyapunov analysis establishes a cumulative guarantee for the continuous-time flow-routing model with finite stepsizes and fixed network latencies. In addition, we detail our experiences deploying DLB within Google’s infrastructure, demonstrating its ability to robustly serve millions of requests per second across thou-sands of distinct endpoints while validating the effectiveness of state-aware policies in complex production environments. Several interesting research directions stem from this work. Our algorithms and analysis focus on optimizing mean la-tency; an interesting research direction is to improve our algorithms to explicitly control tail latencies, which can de-fine user experience. Another interesting direction is to an-alyze nonmonotone processing rate functions that can arise from complex inference server behavior such as batching and caching. Finally, supporting genuinely heterogeneous tenant objectives, such as time-to-first-token alongside end-to-end latency, without reintroducing configuration toil would be highly practically relevant. 
+
+## Acknowledgments 
+
+Building and deploying DLB was a massive collaborative ef-fort, and we are deeply grateful to the many individuals who made it possible. We thank Amlan Chakraborty, Toby Davies and David Eisenstat for their engineering support. Integrating DLB into Google’s next-generation machine learning serving stack could not have happened without the engineering contri-butions of Yanghua Huang, Chung il Lee, Matt Miecnikowski, Ken Franko, Anirudh Nambiar, Zuguang Yang, Brian Zhao and Kuan Zhu alongside the leadership support of Abhijit Karmarkar, Li Lao, Abhishek Rajgarhia and Anitha Vijayaku-mar. We also thank Hawkwood Glazier, who helped build an earlier prototype that provided many valuable lessons. We are grateful to Google Research leadership—specifically John Anderson, Corinna Cortes, Manu Guere, Yossi Matias—for investing in the DLB team, and Jon Orwant for trusting our instincts and supporting this bottom-up project from its incep-tion. Finally, we thank Carla Bromberg and Tyler Russell for providing critical program management support throughout the project, with special thanks to Tyler for his assistance with data collection and the analysis of production migrations. 13 References 
+
+[1] AIBrix Team. AIBrix: A scalable control plane for large language model serving. https://github.com/ vllm-project/aibrix , 2024. [2] Santiago R Balseiro, Vahab S Mirrokni, and Bartek Wydrowski. Load balancing with network laten-cies via distributed gradient descent. arXiv preprint arXiv:2504.10693 , 2025. [3] Sayed Atef Banawan and John Zahorjan. Load sharing in heterogeneous queueing systems. In IEEE INFO-COM’89, Proceedings of the Eighth Annual Joint Con-ference of the IEEE Computer and Communications So-cieties , pages 731–732. IEEE Computer Society, 1989. [4] Dimitri P Bertsekas. Nonlinear programming. Journal of the Operational Research Society , 48(3):334–334, 1997. [5] Cooper Bethea, Gráinne Sheerin, Jennifer Mace, Ruth King, Gary Luo, and Gary O’Connor. Managing load. In Betsy Beyer, Niall Richard Murphy, David K. Rensin, Kent Kawahara, and Stephen Thorne, editors, The Site Reliability Workbook: Practical Ways to Implement SRE , chapter 11. O’Reilly Media, 2018. https://sre. google/workbook/managing-load/ .[6] DongJun Choi, Kwang Sik Chung, and JinGon Shon. An improvement on the weighted least-connection schedul-ing algorithm for load balancing in web cluster systems. In International Conference on Grid and Distributed Computing , pages 127–134. Springer, 2010. [7] Laurent Condat. Fast projection onto the simplex and the ℓ1 ball. Mathematical Programming , 158(1):575– 585, 2016. [8] Jim G Dai. On positive harris recurrence of multiclass queueing networks: a unified approach via fluid limit models. The Annals of Applied Probability , 5(1):49–77, 1995. [9] Danielle E Eisenbud, Cheng Yi, Carlo Contavalli, Cody Smith, Roman Kononov, Eric Mann-Hielscher, Ardas Cilingiroglu, Bin Cheyney, Wentao Shang, and Jin-nah Dylan Hosein. Maglev: A fast and reliable software network load balancer. In 13th USENIX Symposium on Networked Systems Design and Implementation (NSDI 16) , pages 523–535, 2016. [10] Soudeh Ghorbani, Zibin Yang, P Brighten Godfrey, Yashar Ganjali, and Amin Firoozshahian. Drill: Mi-cro load balancing for low-latency data center networks. In Proceedings of the Conference of the ACM Special Interest Group on Data Communication (SIGCOMM ’17) , pages 225–238, 2017. [11] Google Cloud. Advanced load balancing op-timizations. https://docs.cloud.google.com/ load-balancing/docs/service-lb-policy , 2026. Accessed: September 15, 2026. [12] Varun Gupta, Mor Harchol Balter, Karl Sigman, and Ward Whitt. Analysis of join-the-shortest-queue routing for web server farms. Performance Evaluation , 64(9-12):1062–1081, 2007. [13] Bruce Hajek. Extremal splittings of point processes. 
+
+Mathematics of operations research , 10(4):543–556, 1985. [14] Hassan K. Khalil. Nonlinear Systems . Prentice Hall, Upper Saddle River, NJ, 3rd edition, 2002. [15] Yaniv Leviathan, Matan Kalman, and Yossi Matias. Fast inference from transformers via speculative decoding. In 
+
+International Conference on Machine Learning , pages 19274–19286. PMLR, 2023. [16] Yi Lu, Qiaomin Xie, Gabriel Kliot, Alan Geller, James R Larus, and Albert Greenberg. Join-idle-queue: A novel load balancing algorithm for dynamically scalable web services. Performance Evaluation , 68(11):1056–1071, 2011. [17] David G Luenberger. Optimization by vector space methods . John Wiley & Sons, 1997. [18] Saied Mehdian, Zhengyuan Zhou, and Nicholas Bambos. Join-the-shortest-queue scheduling with delay. In 2017 American Control Conference (ACC) , pages 1747–1752. IEEE, 2017. [19] Parveen Patel, Deepak Bansal, Lihua Yuan, Ashwin Murthy, Albert Greenberg, David A Maltz, Randy Kern, Hemant Kumar, Marios Zikos, Hongyu Wu, et al. Ananta: Cloud scale load balancing. In Proceedings of the ACM SIGCOMM 2013 conference on SIGCOMM ,pages 207–218, 2013. [20] Alessio Ricci Toniolo, Rome Thorstenson, and Abi-naya Dinesh. GORGO: Online tuning for cross-region network-aware LLM serving. arXiv preprint arXiv:2602.11688 , 2026. [21] Thomas G. Robertazzi. Computer Networks and Sys-tems: Queueing Theory and Performance Evaluation .Springer, New York, NY, 3rd edition, 2000. [22] Tim Roughgarden. Algorithmic game theory. Commu-nications of the ACM , 53(7):78–86, 2010. [23] Johannes Schropp and I Singer. A dynamical sys-tems approach to constrained minimization. Numerical functional analysis and optimization , 21(3-4):537–551, 2000. 14 [24] SGLang Team. SGLang v0.4: Zero-overhead batch scheduler, cache-aware load balancer, and faster structured outputs. https://www.lmsys.org/blog/ 2024-12-04-sglang-v0-4/ , 2024. [25] Rayadurgam Srikant and Tamer Ba¸ sar. The mathematics of Internet congestion control . Springer, 2004. [26] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dong-ming Li, and Yiying Zhang. Preble: Efficient distributed prompt scheduling for LLM serving. In The Thirteenth International Conference on Learning Representations (ICLR) , 2025. [27] Weijie Su, Stephen Boyd, and Emmanuel J Candes. A differential equation for modeling nesterov’s acceler-ated gradient method: Theory and insights. Journal of Machine Learning Research , 17(153):1–43, 2016. [28] Lalith Suresh, Marco Canini, Stefan Schmid, and Anja Feldmann. C3: Cutting tail latency in cloud data stores via adaptive replica selection. In 12th USENIX Sympo-sium on Networked Systems Design and Implementation (NSDI 15) , pages 513–527, 2015. [29] Leandros Tassiulas and Anthony Ephremides. Stability properties of constrained queueing systems and schedul-ing policies for maximum throughput in multihop radio networks. In 29th IEEE Conference on Decision and Control , pages 2130–2132. IEEE, 1990. [30] The Ray Team. Ray Serve: Scalable and programmable serving. https://docs.ray.io/en/latest/serve/ ,2026. Accessed August 17, 2026. [31] Abhishek Verma, Luis Pedrosa, Madhukar Korupolu, David Oppenheimer, Eric Tune, and John Wilkes. Large-scale cluster management at Google with Borg. In Pro-ceedings of the Tenth European Conference on Com-puter Systems , pages 1–17, 2015. [32] vLLM Project. vLLM Production Stack. https: //github.com/vllm-project/production-stack ,2025. Accessed August 17, 2026. [33] Weikun Wang and Giuliano Casale. Evaluating weighted round robin load balancing for cloud web ser-vices. In 2014 16th international symposium on sym-bolic and numeric algorithms for scientific computing ,pages 393–400. IEEE, 2014. [34] Richard R Weber. On the optimal assignment of cus-tomers to parallel servers. Journal of Applied Probabil-ity , 15(2):406–413, 1978. [35] Wentao Weng, Xingyu Zhou, and Rayadurgam Srikant. Optimal load balancing with locality constraints. Pro-ceedings of the ACM on Measurement and Analysis of Computing Systems , 4(3):1–37, 2020. [36] Wayne Winston. Optimality of the shortest line disci-pline. Journal of applied probability , 14(1):181–189, 1977. [37] Jeffrey M. Wooldridge. Econometric Analysis of Cross Section and Panel Data . MIT Press, 2nd edition, 2010. [38] Bartek Wydrowski, Robert Kleinberg, Stephen M. Rum-ble, and Aaron Archer. Load is not what you should balance: Introducing prequal. In 21st USENIX Sympo-sium on Networked Systems Design and Implementation (NSDI 24) , pages 1285–1299, Santa Clara, CA, April 2024. USENIX Association. [39] Tian Xia, Ziming Mao, Jamison Kerney, Ethan J. Jack-son, Zhifei Li, Jiarong Xing, Scott Shenker, and Ion Stoica. SkyWalker: A locality-aware cross-region load balancer for LLM inference. arXiv preprint arXiv:2505.24095 , 2025. [40] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soo-jeong Kim, and Byung-Gon Chun. Orca: A distributed serving system for Transformer-Based generative mod-els. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) , pages 521–538, 2022. [41] Ying Yuan, Pengfei Zuo, Bo Wang, Zhangyu Chen, Zhipeng Tan, and Zhou Yu. DualMap: Enabling both cache affinity and load balancing for distributed LLM serving. arXiv preprint arXiv:2602.06502 , 2026. [42] Wensong Zhang. Linux virtual server for scalable net-work services. In Ottawa Linux Symposium , volume 2000, 2000. [43] Wenxin Zhang, Santiago R Balseiro, Robert Kleinberg, Vahab Mirrokni, Balasubramanian Sivan, and Bartek Wydrowski. Distributed load balancing with workload-dependent service rates. In Proceedings of the 26th ACM Conference on Economics and Computation , pages 917– 917, 2025. [44] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. Dist-serve: Disaggregating prefill and decoding for goodput-optimized large language model serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) , pages 193–210, 2024. 15 Mean p50 p90 p95 
+
+β0 : baseline level 6.405 ∗∗∗ 6.008 ∗∗∗ 6.949 ∗∗∗ 7.157 ∗∗∗ 
+
+β1 : treatment effect -0.144 ∗∗∗ -0.184 ∗∗∗ -0.149 ∗∗∗ -0.135 ∗∗∗ 
+
+β2 : rps effect 0.166 ∗∗∗ 0.134 ∗∗∗ 0.145 ∗∗∗ 0.174 ∗∗∗ 
+
+R2 0.980 0.970 0.970 0.964 Latency Impact (95% CI) [−13 .81% , −12 .97% ] [−17 .26% , −16 .30% ] [−14 .37% , −13 .32% ] [−13 .23% , −12 .03% ]       
+
+> Table 1: Fixed-effects panel regression results estimating the causal impact of DLB migration. We denote by ∗∗∗ p-values less than 0.01. The number of observations is 56,663. The latency impact represents the relative percentage change in latency attributable to DLB after controlling for unit heterogeneity. We adopt sum coding ( ∑iαi=0) so that β0captures the grand mean of all units. Latencies are measured in milliseconds.
+
+## A Migration Analysis: Data, Specification, and Results 
+
+Many production endpoints migrated from MNLB to DLB, and we wish to quantify the treatment effect on mean and tail latencies for these endpoints. Our methodology uses an interrupted time series analysis within a panel data framework, incorporating unit fixed effects and controlling for varying demand. The dataset comprises 68 distinct inference endpoints that migrated to DLB during 2025. This dataset excludes units with very low demand or missing more than half of the observations. We constructed a panel by tracking these units relative to their specific migration events. For each unit, we collected time-series data on mean, p50, p90, and p95 latencies, alongside the requests per second (RPS). Let mi denote the migration date for unit i. To capture steady-state behavior, we defined a pre-intervention observation window from mi − 10 days to mi − 3 days, and a post-intervention window from mi + 3 days to mi + 10 days. A six-day buffer period 
+
+[mi − 3, mi + 3] was excluded from the analysis to prevent contamination from transient effects during the system rollout. The seven-day duration for both observation windows ensures that our comparison accounts for weekly and diurnal traffic patterns inherent to both systems. Metrics were aggregated over 20-minute intervals, yielding a set of 7 × 24 × 3 × 2 = 1008 observations per unit. We define mean_latency it and rps it as the mean latency and request rate, respectively, for unit i at relative time step t ∈{1, . . . , 1008 }. The binary treatment variable Tit ∈ { 0, 1} indicates the active load balancing regime, taking a value of one if DLB is active at time t, and zero if the legacy load balancer is active. The time index t = 1 is normalized to the start of the pre-intervention window for each unit to align the asynchronous migration timelines. We adopt a fixed-effects panel regression model rather than modeling individual units separately. This approach enhances statistical power and improves external validity by pooling information across heterogeneous units. To account for time-invariant unobserved heterogeneity specific to each endpoint (e.g., underlying model architecture and computational complexity), we include unit-specific fixed effects. We specify a log-log regression model to estimate the elasticity of latency with respect to demand and the relative impact of the treatment: log (mean_latency it ) = β0 + β1Tit + β2 log (rps it ) + αi + εit ,
+
+where β0 represents the intercept or average baseline level, β1 captures the treatment effect (the causal impact of DLB), β2
+
+estimates the elasticity of latency with respect to load, αi is the unit-specific effect, and εit represents the idiosyncratic error term. Latencies enter the regression in milliseconds (unlike some figures in the main body, which report latencies in seconds), so the intercepts β0 in Table 1 are on a log-millisecond scale. The inclusion of log (rps it ) as a covariate controls for exogenous demand fluctuations, isolating the impact of load on latency. The log-log specification normalizes differences in scale across endpoints, allowing us to interpret coefficients as percentage changes [37]. We use a weighted least squares regression, weighting observations by their MLA usage in seconds, to minimize the influence of low-volume outliers and weight the regression toward observations representing more MLA use. The regression results are summarized in Table 1. All estimated coefficients are statistically significant ( p < 0.01), and the high 
+
+R2 values indicate that the model explains a substantial proportion of the variance in latency. Across all metrics, the treatment effect β1 is negative, confirming that DLB yields a statistically significant reduction in latency compared to the baseline. As anticipated, the coefficient for request rate β2 is positive, consistent with queuing theory predictions that increased load correlates with higher end-to-end latency. To quantify the magnitude of the improvement, we convert the log-linear coefficients back to a percentage lift. The 95% confidence interval for the relative latency impact is calculated as exp (β1 ± 1.96 · SE β1 ) − 1, where SE β1 is the standard error of the treatment coefficient. 16 Figure 8: Requests per second for the endpoint shown in Figure 2 during the migration from MNLB to DLB.  
+
+> Inference Server
+> incoming requests
+> Prefill Queue Prefill Engine Prefill Engine Decode Queue Decode Queue Decode Engine Decode Engine
+> Figure 9: Architecture of a disaggregated inference server. The server separates processing into prefill and decode stages. Incoming requests first enter a shared prefill queue servicing multiple parallel prefill engines. Once the prefill stage is complete, the request and its KV cache are transferred to a selected decode engine.
+
+## B Simulation-based Evaluation: Experimental Protocol and Results 
+
+We perform a comprehensive evaluation of DLB via high-fidelity simulations, focusing on three key dimensions: resilience to network and hardware heterogeneity, adaptability to demand bursts and capacity outages, and robustness against latency function estimation errors. 
+
+## B.1 Experimental Methodology 
+
+We describe the simulation environment, the scenarios used in our simulations, the policies we evaluate, and the simulation pipeline. 
+
+Production-integrated simulation. To ensure high fidelity, our simulator integrates the production C++ codebase of DLB. This approach ensures that all control plane logic—including probing, latency estimation, and routing updates—behaves exactly as it does in production. We simulate the request arrival process using a time-varying Poisson process, which approximates the volatility observed in production workloads [21]. We model cells as collections of inference servers employing the disaggregated prefill-decode architecture (Figure 9). We run our simulations on the Borg cluster management system. Crucially, because the request router’s control loops (probing, state estimation) operate on periodic cycles off the critical request path, we execute the simulation in real time (wall-clock time). 17 While this constrains the maximum scale of our experiments, it guarantees that the temporal dynamics between asynchronous control updates and request handling are captured with precision. 
+
+Scenario generation. We employ a hierarchical sampling strategy for the cells to ensure that the simulation reflects the co-located nature of cells in production environments. We group real-world Google cell locations by geographical region, select a random subset of regions, and then randomly sample cells within those regions to yield a total of 2 to 10 cells. Network latencies are based on historical inter-cell round-trip times. In each cell, the number of inference servers is drawn from a Poisson distribution with mean 10. Each inference server has a disaggregated architecture with one prefill engine and two decode engines with four parallel slots per decode engine. The time required to process a token in each stage is randomly drawn for each cell (but then fixed for the scenario) from a log-normal distribution to replicate the heterogeneity observed in production due to different hardware, with a 20% standard deviation across cells. Each request has a random number of prefill and decode tokens drawn from different shifted Gamma distributions, which approximate actual workloads well. We calculate the theoretical request processing rate for each cell based on its replica count (i.e., the number of inference servers), its token processing speed, and the mean prefill and decode token counts of a representative workload distribution. We sum these rates to obtain a total system processing rate, which we then multiply by a target utilization factor of 80% to determine the total demand. This total demand is allocated among the cells by sampling uniformly from the probability simplex. 
+
+Baselines and Policies. We evaluate RIF-based routing ( RIF ), latency-based routing ( Lat ), and gradient-based routing ( Grad )using discrete ( Disc ) or flow routing mechanisms ( Flow ). As suggested by our theoretical results in Section 4, we choose the stepsize for flow routing algorithms to be inversely proportional to the mean network latency. We compare our algorithms against two benchmarks: weighted random routing ( Rand ), which routes requests proportionally to the number of replicas in each cell [13], and the centralized legacy load balancing algorithm ( MNLB ) described in Section 1.1. Because Rand is integrated into the DLB stack, it naturally adapts to capacity outages by adjusting replica counts and utilizes our error aversion mechanism to avoid unhealthy cells. 
+
+Experimental protocol. For each experiment, we draw 10 scenarios at random using the generative process described above. Each scenario is simulated for a duration of 10 minutes. We run 5 trials per scenario to average out stochastic variations in arrival and service processes. For each scenario-policy tuple, we compute mean and p90 end-to-end latencies (network + serving latencies) of successful requests, and error rates from inference servers’ queues overflowing. To facilitate comparison across heterogeneous scenarios, we report the normalized latency , defined as the ratio of the algorithm’s latency to that of the random routing baseline. We present selected results in Figure 6; the remaining results are presented in Appendix B. 
+
+## B.2 Impact of Network and Hardware Heterogeneity 
+
+We use the scenarios described above as baselines and then explore different variations such as higher/lower utilization levels, longer/shorter requests, and different levels of heterogeneity across cells. Figures 10, 11, 12 (in the appendix) present mean latency, p90 latency results, and error rates, respectively, for different experiments. The baseline scenarios have an 80% utilization and serving latencies on the order of hundreds of milliseconds to seconds (see results in Figure 10a). Most DLB policies show improvements around 20% relative to random routing, with Flow-Grad 
+
+performing the best. These results confirm that our stateful algorithms substantially outperform the random routing ( Rand )baseline. While Flow-Grad yields the best performance, it is notable that RIF-based routing—which ignores hardware speed differences—achieves competitive results. At higher utilization, the system is forced to fully saturate all available capacity; thus, optimal routing involves distributing load across all cells regardless of their individual speeds. Finally, our policies outperform 
+
+Rand and MNLB by actively balancing requests to mitigate the local queue buildups that drive tail latency. Figure 10b shows how performance varies with the utilization level. Naturally, the relative improvements of our stateful policies over Rand and MNLB are smaller when utilization is low, as the queuing delays we avoid are less severe. This regime highlights a critical limitation of RIF-based routing. When the system is lightly loaded, the optimal strategy is to route exclusively to faster or closer cells (depending on query cost). Disc -RIF and Flow -RIF fail to make this distinction, resulting in sub-optimal performance by spilling requests to slower cells despite the availability of faster alternatives. When utilization is high, our policies yield substantially lower latencies and error rates compared with MNLB (and Rand ) in the evaluated scenarios. We also explore scenarios with different processing times in which we divide the token processing time by a factor of y and mul-tiply the request rate by the same factor y to keep utilization constant. Figure 10c shows results for y ∈ { 1/10 , 1/4, 1/2, 1, 2, 4, 10 }.18 (a) Baseline and others. (b) Impact of utilization.  
+
+> (c) Impact of processing times. (d) Impact of estimation errors.
+> Figure 10: Mean latency of different routing algorithms compared to random routing across different experiments.
+
+When requests are short ( y = 10), network latency has an outsized impact and RIF-based routing performs poorly. MNLB , which was optimized for these sand-type requests, performs remarkably well, beaten only by Flow -Grad . For longer processing times (y ≤ 1), our algorithms improve upon MNLB .Finally, we consider homogeneous cells with equal hardware (see Figure 10a). Because serving latencies are similar across cells and network latencies are small, routing according to the number of replicas in each cell provides good performance when utilization is not too high and none of the algorithms performs drastically better than Rand .
+
+## B.3 Demand Bursts and Capacity Outages 
+
+To study the impact of variability we consider demand bursts and capacity outages. We report mean latency, p90 latency, and error rate in Figures 10a, 11a and 12a in the appendix, respectively. For the demand burst experiment, we pick a cell at random and increase its demand so that overall system utilization increases to 95%. The disruption begins 3 minutes into the 10-minute simulation and lasts for 4 minutes. Our policies significantly improve upon Rand as they can better distribute requests across cells and avoid queue buildups. The long cycle times of MNLB lead to higher latency compared with our policies. Moreover, MNLB and Rand have higher error rates, caused by queues overflowing in the inference servers (Figure 12a). We simulate a capacity outage where multiple inference servers go offline. As before, the disruption begins after 3 minutes and lasts for 4 minutes. To model this capacity outage, we iteratively reduce the replica counts of randomly selected cells to a single unit until the total system utilization goes over 95%. The performance advantage of our policies over MNLB is slightly narrower in this specific experiment because MNLB is capacity-aware. That said, Rand and MNLB lead to higher tail latencies and error rates. 19 (a) Baseline and others. (b) Impact of utilization.  
+
+> (c) Impact of processing times. (d) Impact of estimation errors.
+> Figure 11: p90 latency of different routing algorithms compared to random routing across experiments.
+
+## C Details of Theoretical Analysis C.1 Continuous-Time Formulation 
+
+In the fluid model, the workload of cell j ∈ C at time t > 0 evolves according to the following delay differential equation: 
+
+ddt Nj(t) = ∑  
+
+> i∈C−(j)
+
+λixi j (t − τi j ) − μ j(Nj(t)) . (8) The first term captures the inflow of requests arriving to the cell, which is determined by the routing decisions and network latencies, and the second term gives the outflow of requests as determined by the processing rate function of the cell. To fully specify the dynamics of the workloads, we need to determine the evolution of the routing probabilities xi j (t). In the case of discrete routing, the routing probabilities are determined using equation (1). In the rest of this section, we describe the continuous-time limit of flow routing as the time between updates converges to zero. Continuous-time limits of recursive optimization algorithms have received considerable attention in the last decades as they provide tractable approximations using ordinary differential equations (see, e.g., [23, 27]). The exposition here follows [2]. We define T∆i (xi) to be the tangent cone of ∆i at xi, which is given by 
+
+T∆i (xi) = 
+
+(
+
+v ∈ R|C | : ∑
+
+> j∈C
+
+v j = 0, v j ≥ 0 if xi j = 0, v j = 0 for all j̸ ∈ C +(i)
+
+)
+
+.
+
+The tangent cone captures directions along which the cell can update the routing probabilities while maintaining feasibility. The components of a feasible direction v ∈ T∆i (xi) should sum up to zero to satisfy the constraint that probabilities sum up to one. Moreover, for cells whose probabilities are at zero, the corresponding component of the direction should be non-negative to preserve the non-negativity constraint. 20 (a) Baseline and others. (b) Impact of utilization.  
+
+> (c) Impact of processing times. (d) Impact of estimation errors.
+> Figure 12: Error rates of different routing algorithms across experiments.
+
+Equation (2) gives the discrete update of routing probabilities in flow routing when the difference between time updates is 
+
+δt > 0. Subtracting xi(t) on both sides, dividing by δt and taking the limit δt ↓ 0 we obtain the differential equation 
+
+ddt xi(t) = ΠT∆i (xi(t)) 
+
+  − ηi · ci(t) with ci(t) = ext 0
+
+ ci j (Nj(t − τi j ))  
+
+> j∈C+(i)
+
+
+
+. (9) where ΠT∆i (xi)(·) is Euclidean projection onto the tangent cone, and ext 0 pads the outgoing-arc cost vector with zeros on coordinates j /∈ C +(i). This padding is only a dimensional convention that embeds the cost vector in the same ambient space 
+
+R|C | as xi; it does not make non-arcs available at zero cost, because the definition of ∆i fixes xi j = 0 for j /∈ C +(i) and its tangent cone fixes the corresponding velocities at zero. Throughout, we consider feasible solutions of (8)–(9) that are absolutely continuous for t ≥ 0, with N(t) ∈ Rn 
+
+> ≥0
+
+and xi(t) ∈ ∆i.To initialize the workload dynamics, a feasible solution also includes arbitrary Lebesgue-measurable routing values xi(t) ∈ ∆i for 
+
+t ∈ [−¯τ, 0], agreeing with the initial routing vector at zero. 
+
+Assumption 4 (Admissible workload history) . The prescribed workload history N : [−¯τ, 0] → Rn 
+
+> ≥0
+
+is absolutely continuous. With v = max  
+
+> j∈C
+
+max 
+
+(
+
+# ∑  
+
+> i∈C−(j)
+
+λi, ¯μ j
+
+)
+
+,
+
+we assume ddt Nj(t) ≤ v almost everywhere on [−¯τ, 0].
+
+The workload equation itself implies the same bound for nonnegative times: both its arrival and service terms lie in [0, v], and hence 
+
+|Nj(t) − Nj(s)| ≤ v|t − s|, s,t ≥ − ¯τ. (10) The following lemma establishes that stationary points of the dynamics satisfy the definition of equilibrium points in Definition 1. 21 Lemma 2. Suppose Assumptions 1 and 3 hold, and consider either discrete routing or flow routing. If there exists a point (N∗, x∗)
+
+and a time t > 0 such that for all arcs (i, j) ∈ A and times s ∈ [t − τi j ,t] we have N j(s) = N∗ 
+
+> j
+
+and x i j (s) = x∗
+
+> i j
+
+, then (N∗, x∗) is an equilibrium point (Definition 1). Proof. We argue that stationary solutions are equilibrium points. Fix a stationary solution (N∗, x∗) and a time t > 0 such that for all arcs (i, j) ∈ A and times s ∈ [t − τi j ,t] we have Nj(s) = N∗ 
+
+> j
+
+and xi j (s) = x∗
+
+> i j
+
+. We need to show that (N∗, x∗) satisfies flow balance and complementary slackness. For flow balance, plugging the stationary trajectory into (8) yields, for each j ∈ C ,0 = ddt Nj(t) = ∑  
+
+> i∈C−(j)
+
+λixi j (t − τi j ) − μ j(Nj(t)) = ∑  
+
+> i∈C−(j)
+
+λix∗ 
+
+> i j
+
+− μ j(N∗ 
+
+> j
+
+).
+
+Hence ∑i∈C −( j) λix∗ 
+
+> i j
+
+= μ j(N∗ 
+
+> j
+
+) for all j, i.e., the flow balance condition in Definition 1 is satisfied. 
+
+Part 1 (Discrete routing). We argue that the complementary slackness condition holds for discrete routing. Under discrete routing, for each i ∈ C and each t, the routing vector satisfies 
+
+xi(t) ∈ arg min  
+
+> z∈∆i
+
+# ∑ 
+
+> j∈C+(i)
+
+ci j (Nj(t − τi j )) z j = arg min  
+
+> z∈∆i
+
+# ∑ 
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+)z j,
+
+where the last equation follows from stationarity. Let ci = min j∈C +(i) ci j (N∗ 
+
+> j
+
+) be the lowest cost observed by cell i ∈ C . By definition, we must have ci j (N∗ 
+
+> j
+
+) ≥ ci for all j ∈ C +(i) with equality whenever x∗ 
+
+> i j
+
+> 0, implying the complementary-slackness condition in Definition 1. Combining the two parts, (N∗, x∗) is an equilibrium point in the case of discrete routing. 
+
+Part 2 (Flow routing). We next move to flow routing. At the stationary solution, we have that dx i/dt (t) = 0 for every i ∈ C
+
+and (9) gives 0 = ΠT∆i (x∗ 
+
+> i)
+
+  − ηic∗
+
+> i
+
+ with c∗ 
+
+> i
+
+:= ext 0
+
+ (ci j (N∗ 
+
+> j
+
+)) j∈C +(i)
+
+ .
+
+By Lemma 4 in [2], there exists some ci such that ci j = ci for all (i, j) ∈ A with x∗ 
+
+> i j
+
+> 0 and ci j ≥ ci otherwise. The result follows. 
+
+## C.2 Proof of Lemma 1 
+
+Proof of Lemma 1. Before proving existence and uniqueness, we give a variational representation of finite equilibria. Because μ j
+
+is continuous, bounded, and strictly increasing with μ j(0) = 0, it maps [0, ∞) bijectively onto [0, ¯μ j). Its inverse is continuous and strictly increasing on this interval, and μ−1 
+
+> j
+
+(s) → ∞ as s ↑ ¯μ j. The composition f j ◦ μ−1 
+
+> j
+
+is therefore continuous and strictly increasing. Define 
+
+p j(z) :=
+
+
+
+Z z
+
+> 0
+
+f j
+
+ μ−1 
+
+> j
+
+(s) ds , 0 ≤ z ≤ ¯μ j,
+
++∞, z > ¯μ j,
+
+which is a lower-semicontinuous convex function, strictly convex on [0, ¯μ j) and differentiable with p′j(s) = f j
+
+ μ−1 
+
+> j
+
+(s), which is the workload component of the cost of a cell carrying inflow s. Define the Beckmann, McGuire, and Winsten potential 
+
+Ψ(x) := ∑
+
+> j∈C
+
+p j ∑  
+
+> i∈C−(j)
+
+λixi j 
+
+!
+
++ ∑ 
+
+> (i,j)∈A
+
+λigi j xi j . (11) Consider the feasible flows X = {xi j ≥ 0 : ∑ j∈C +(i) xi j = 1, xi j = 0 if (i, j) /∈ A}. The following lemma establishes the equivalence. 
+
+Lemma 3. A finite pair (N∗, x∗) is an equilibrium if and only if x ∗ solves 
+
+min  
+
+> x∈X
+
+Ψ(x) (12) 
+
+and, for every j, its induced inflow satisfies ∑i∈C −( j) λix∗ 
+
+> i j
+
+< ¯μ j and N ∗ 
+
+> j
+
+= μ−1 
+
+> j
+
+(∑i∈C −( j) λix∗
+
+> i j
+
+).
+
+22 Proof. We first argue that an optimal solution x∗ with N∗ 
+
+> j
+
+= μ−1 
+
+> j
+
+(∑i∈C −( j) λix∗
+
+> i j
+
+) is an equilibrium. Flow balance in Definition 1 follows by construction because μ j(N∗ 
+
+> j
+
+) = ∑i∈C −( j) λix∗
+
+> i j
+
+. We next argue that the complementary-slackness condition in Defi-nition 1 holds. Because the optimization problem min x∈X Ψ(x) has a differentiable objective and linear constraints, the KKT conditions are necessary for optimality [4]. The KKT conditions are the following. Introduce Lagrange multipliers ci for the constraints ∑ j∈C +(i) λixi j = λi (we multiplied the constraint of each cell by its arrival rate) and αi j ≥ 0 for the non-negativity constraints xi j ≥ 0. The Lagrangian of the optimization problem (12) is 
+
+L(x, c, α) = Ψ(x) − ∑
+
+> i∈C
+
+ci ∑ 
+
+> j∈C+(i)
+
+λixi j − λi
+
+!
+
+− ∑ 
+
+> (i,j)∈A
+
+αi j xi j .
+
+The first-order optimality conditions imply that the partial derivative of the Lagrangian with respect to xi j should be zero, which gives that 
+
+∂Ψ (x∗)
+
+∂xi j 
+
+− c∗ 
+
+> i
+
+λi − α∗ 
+
+> i j
+
+= 0 ,
+
+where 
+
+∂Ψ (x)
+
+∂xi j 
+
+= λi p′j ∑  
+
+> k∈C−(j)
+
+λkxk j 
+
+!
+
++ λigi j = λi f j μ−1 
+
+> j
+
+# ∑  
+
+> k∈C−(j)
+
+λkxk j 
+
+!! 
+
++ λigi j .
+
+If x∗ 
+
+> i j
+
+> 0, the KKT complementary slackness condition implies that α∗ 
+
+> i j
+
+= 0, which gives that λi f j(N∗ 
+
+> j
+
+) + λigi j − c∗ 
+
+> i
+
+λi = 0. Canceling the arrival rate λi > 0 and re-arranging, we obtain that f j(N∗ 
+
+> j
+
+) + gi j = c∗ 
+
+> i
+
+. If x∗ 
+
+> i j
+
+= 0, we obtain using a similar argument that f j(N∗ 
+
+> j
+
+) + gi j ≥ c∗ 
+
+> i
+
+because α∗ 
+
+> i j
+
+≥ 0. The claim follows because the cost function satisfies ci j (N∗ 
+
+> j
+
+) = f j(N∗ 
+
+> j
+
+) + gi j .We now argue that for every equilibrium point (N∗, x∗) the optimal routing probabilities x∗ are optimal for the optimization problem (12). The potential function Ψ(x) is convex because f j and μ−1 
+
+> j
+
+are increasing, their composition is increasing and the integral is convex, together with the fact that the sum of convex functions is convex. Therefore, the KKT conditions are sufficient for optimality. The claim follows because the KKT conditions of this program are exactly the complementary-slackness conditions in Definition 1, with multipliers (ci)i∈C , as we argued before. 
+
+Part 1 (Existence of an equilibrium). We establish existence by proving that the optimization problem (12) has an optimal solution. Let x′ be the matrix of routing probabilities in Assumption 2. First, note that Ψ(x′) < ∞. This follows because 
+
+f j(μ−1 
+
+> j
+
+(s)) < ∞ for all s ∈ [0, z′j] with z′j = ∑i∈C −( j) λix′ 
+
+> i j
+
+since μ−1 
+
+> j
+
+(z′j) = N′ 
+
+> j
+
+< ∞ and f j ◦ μ−1 
+
+> j
+
+is monotonically increasing. Because monotonically increasing functions are Riemann integrable, we conclude that p j(z′j) < ∞, proving the claim. By the monotone convergence theorem, we have that p j(z j) is lower semicontinuous. Because composition with a continuous function preserves lower semicontinuity, we conclude that Ψ(x) is lower semicontinuous. The Weierstrass theorem [17] implies that min x∈X Ψ(x) admits an optimal solution because the objective is lower semicontinuous, and the feasible set is closed, non-empty (since x′ ∈ X ) and bounded. Any optimal solution must have inflows strictly below capacity, since otherwise shifting slightly toward the strictly feasible routing x′ would lower the objective by relieving cells with unbounded marginal costs. Lemma 3 implies existence of an equilibrium point. 
+
+Part 2 (Uniqueness of equilibrium workloads). We argue that the optimization problem has unique optimal workload levels. If cost functions c are strictly increasing, then p j is strictly convex since f j ◦ μ−1 
+
+> j
+
+is strictly increasing. Let z j = ∑i∈C −( j) λixi j be the inflow to cell j ∈ C . Strict convexity of p j for j ∈ C implies that the optimal inflow vector z∗ is unique (otherwise, taking the midpoint of two solutions with different z∗ 
+
+> j
+
+for some cell j ∈ C would strictly decrease the objective value). Finally, since each μ j
+
+is strictly increasing, N∗ 
+
+> j
+
+= μ−1 
+
+> j
+
+(z∗ 
+
+> j
+
+) is unique for every j, so the equilibrium workload vector N∗ is unique. For the cost functions used by gradient-based routing, a corollary of Lemma 3 is that equilibrium points are optimal solutions to the following centralized static routing problem: min  
+
+> xi∈∆i,N∈R|C|≥0
+
+# ∑
+
+> j∈C
+
+Nj + 2 ∑ 
+
+> (i,j)∈A
+
+λixi j τi j (OPT) s.t. ∑  
+
+> i∈C−(j)
+
+λixi j = μ j(Nj) , ∀ j ∈ C .
+
+The first term in the objective captures, by Little’s Law, the steady state serving latency of all requests in the system while the second term measures the total network latency. The constraint imposes flow balance at the cells, i.e., the inflow of requests should be equal to the outflow processed at a cell. 23 C.3 Proof of Theorem 1 
+
+Throughout this proof, we use the shorthand D j(u) := D j(u, N∗ 
+
+> j
+
+). For routing probabilities xi ∈ ∆i for cell i ∈ C , define the 
+
+complementary slackness error :
+
+Si(xi) = ∑ 
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+) xi j − x∗
+
+> i j
+
+.
+
+The equilibrium complementary slackness gives Si(xi) ≥ 0 because xi ∈ ∆i. In particular, the current-time gap Si(xi(t)) is nonnegative. We will also encounter the mixed-delay quantity 
+
+Sτ 
+
+> i
+
+(t) = ∑ 
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+) xi j (t − τi j ) − x∗
+
+> i j
+
+.
+
+Its coordinates can come from different times and therefore may fail to form a vector in ∆i; consequently, Sτ 
+
+> i
+
+(t) can be negative. We will use two Lyapunov functions in our analysis. The first involves the routing probabilities and is given by 
+
+V (x) = ∑
+
+> i∈C
+
+λi
+
+2ηi
+
+∥xi − x∗ 
+
+> i
+
+∥22. (13) The second involves the cell workloads and is given by 
+
+Φ j(u) = 
+
+Z uN∗
+
+> j
+
+  f j(y) − f j(N∗ 
+
+> j
+
+) dy , Φ(N) = ∑
+
+> j∈C
+
+Φ j(Nj).
+
+The potential V is the traffic-weighted squared routing error, scaled by the inverse stepsizes, while Φ accumulates the marginal workload-cost deviation from equilibrium. Both are nonnegative and vanish only at their respective equilibrium states. Let di j (t) = xi j (t) − x∗ 
+
+> i j
+
+and define the cost–routing delay mismatch 
+
+Γi j (t) = ci j (Nj(t)) di j (t − τi j ) − ci j (Nj(t − τi j )) di j (t), (14) which compares current cost paired with delayed routing against delayed cost paired with current routing. It vanishes when 
+
+τi j = 0. The following fundamental lemma bounds the instantaneous drift of the Lyapunov functions in terms of the workload optimality gap, mixed-delay complementary slackness error, and cost–routing delay mismatch. 
+
+Lemma 4 (Composite Lyapunov drift) . For almost every t ≥ 0,ddt V (x(t)) + ddt Φ(N(t)) ≤ − ∑
+
+> j∈C
+
+D j(Nj(t)) − ∑
+
+> i∈C
+
+λiSτ 
+
+> i
+
+(t) + ∑ 
+
+> (i,j)∈A
+
+λiΓi j (t), (15) 
+
+Proof. Along the absolutely continuous feasible solution, continuity of each f j makes Φ continuously differentiable. Hence the chain rule applies almost everywhere. Fix a time t ≥ 0 at which the derivatives exist and the dynamics hold. Differentiating the routing-probability Lyapunov function gives 
+
+ddt V (x(t)) = ∑
+
+> i∈C
+
+λi
+
+ηi ∑ 
+
+> j∈C+(i)
+
+ xi j (t) − x∗
+
+> i j
+
+ ddt xi j (t)
+
+≤ − ∑
+
+> i∈C
+
+λi ∑ 
+
+> j∈C+(i)
+
+ xi j (t) − x∗
+
+> i j
+
+ci j (Nj(t − τi j )) = − ∑ 
+
+> (i,j)∈A
+
+λici j (Nj(t − τi j )) di j (t). (16) For the inequality, apply the first projection inequality in Lemma 10 with zi = −ηici(t) and vi = ddt xi(t). The equality follows from the definition of di j .24 We next differentiate the workload Lyapunov function. The chain rule and (8) give 
+
+ddt Φ(N(t)) = ∑
+
+> j∈C
+
+  f j(Nj(t)) − f j(N∗ 
+
+> j
+
+) ddt Nj(t)= ∑
+
+> j∈C
+
+  f j(Nj(t)) − f j(N∗ 
+
+> j
+
+) · ∑  
+
+> i∈C−(j)
+
+λixi j (t − τi j ) − μ j(Nj(t)) 
+
+!
+
+= ∑
+
+> j∈C
+
+  f j(Nj(t)) − f j(N∗ 
+
+> j
+
+) ·  μ j(N∗ 
+
+> j
+
+) − μ j(Nj(t)) 
+
++ ∑
+
+> j∈C
+
+  f j(Nj(t)) − f j(N∗ 
+
+> j
+
+) · ∑  
+
+> i∈C−(j)
+
+λi
+
+ xi j (t − τi j ) − x∗
+
+> i j
+
+. (17) The last equality adds and subtracts the equilibrium inflow ∑i∈C −( j) λix∗ 
+
+> i j
+
+= μ j(N∗ 
+
+> j
+
+) from (5). By the definition of D j, the first sum on the right-hand side is − ∑ j∈C D j(Nj(t)) ; see (7). For the remaining sum, exchange the order of summation and use the definition of di j to obtain 
+
+# ∑
+
+> j∈C
+
+  f j(Nj(t)) − f j(N∗ 
+
+> j
+
+)
+
+# ∑  
+
+> i∈C−(j)
+
+λi
+
+ xi j (t − τi j ) − x∗
+
+> i j
+
+
+
+= ∑
+
+> i∈C
+
+λi ∑ 
+
+> j∈C+(i)
+
+  f j(Nj(t)) − f j(N∗ 
+
+> j
+
+)di j (t − τi j )= ∑
+
+> i∈C
+
+λi ∑ 
+
+> j∈C+(i)
+
+  f j(Nj(t)) + gi j 
+
+di j (t − τi j )
+
+− ∑
+
+> i∈C
+
+λi ∑ 
+
+> j∈C+(i)
+
+  f j(N∗ 
+
+> j
+
+) + gi j 
+
+di j (t − τi j )= ∑ 
+
+> (i,j)∈A
+
+λici j (Nj(t)) di j (t − τi j ) − ∑
+
+> i∈C
+
+λiSτ 
+
+> i
+
+(t).
+
+The second equality adds and subtracts gi j , and the last equality uses the separable-cost identity (3) together with the definition of Sτ 
+
+> i
+
+(t). Substituting this identity into (17) yields 
+
+ddt Φ(N(t)) = − ∑
+
+> j∈C
+
+D j(Nj(t)) − ∑
+
+> i∈C
+
+λiSτ 
+
+> i
+
+(t) + ∑ 
+
+> (i,j)∈A
+
+λici j (Nj(t)) di j (t − τi j ). (18) Finally, add (16) and (18) and use the definition (14) to obtain the result. 
+
+Roadmap. We begin by providing a summary of the main steps of our analysis. If network delays were zero, then Sτ 
+
+> i
+
+(t) = 
+
+Si(xi(t)) ≥ 0 and Γi j (t) = 0. Lemma 4 would then imply that the drift of the Lyapunov functions is nonpositive. Because of heterogeneous delays, however, the mixed-delay routing gap might not be nonnegative and the cost–routing mismatch might not vanish. The main challenge is to control these two terms after integration. The main steps of our analysis are as follows: 1. In Subsection C.3.1, we control the cumulative mixed-delay routing gap Sτ 
+
+> T
+
+. Although  xi j (t − τi j )  
+
+> j∈C+(i)
+
+might not lie in ∆i,shifting each coordinate in time replaces its integral by the nonnegative current-time complementary slackness error. After the shift, only short intervals near 0 and T , each of length at most ¯ τ, remain. Their total contribution is bounded by a constant independent of T and the stepsizes. 2. In Subsection C.3.2, we control the cost–routing delay mismatch Γi j (t). The basic idea is to use the routing-speed bound from Lemma 10: when stepsizes are small, decisions do not change much during a round-trip delay window, so the two cross terms approximately cancel after integration. Because costs can be unbounded, we first split each cost exactly into a bounded component and an unbounded tail. For the bounded component, the projected dynamics bound changes in routing probabilities by the stepsize times a cost upper bound. With a sufficiently small stepsize, we can bound the bounded-component delay mismatch by a small fraction of the cumulative workload optimality gap. For the unbounded tail, (10) ensures that the workloads differ by at most 2 v¯τ. Additive slow variation (Assumption 3) makes the tail mismatch small relative to the workload optimality gap, while the contributions from the short intervals near 0 and T are bounded separately using the prescribed workload history and the workload Lyapunov function at time T , Φ(N(T )) .25 We conclude by integrating (15). Therefore, although the composite potential is not guaranteed to decrease at every instant, its cumulative drift yields the desired performance bound. After division by T , the initial routing potential contributes 1 /(T η), the bounded-component time shift contributes ¯ η, and the remaining contributions from the workload history and the beginning and end of the time horizon contribute 1 /T .
+
+C.3.1 The Mixed-Delay Routing Gap 
+
+Introduce the cumulative workload gap, mixed-delay routing gap, and current-time routing gap 
+
+DT = ∑
+
+> j∈C
+
+Z T
+
+> 0
+
+D j(Nj(t)) dt ,
+
+Sτ 
+
+> T
+
+= ∑
+
+> i∈C
+
+λi
+
+Z T
+
+> 0
+
+Sτ 
+
+> i
+
+(t) dt ,
+
+ST = ∑
+
+> i∈C
+
+λi
+
+Z T
+
+> 0
+
+Si(xi(t)) dt .
+
+We have 
+
+DT ≥ 0, ST ≥ 0. (19) The integrand defining Sτ 
+
+> T
+
+can be negative: heterogeneous delays can make (xi j (t − τi j )) j∈C +(i) fail to lie in ∆i. The next lemma shows that the cumulative delayed gap can nevertheless be replaced by the nonnegative current-time gap ST , up to an additive constant arising from the short intervals near 0 and T .
+
+Lemma 5 (Mixed-delay routing-gap comparison) . For every T ≥ ¯τ,
+
+Sτ 
+
+> T
+
+≥ ST − ¯τ ∑
+
+> i∈C
+
+λi max  
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+).
+
+Proof. For one origin cell, linearity and a change of variables give 
+
+Z T 
+
+> 0
+
+# ∑ 
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+) xi j (t − τi j ) − xi j (t) dt 
+
+= ∑ 
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+)
+
+Z 0
+
+> −τi j
+
+xi j (s) ds −
+
+Z TT −τi j 
+
+xi j (s) ds 
+
+
+
+.
+
+The first integral is nonnegative. Since the current routing vector lies in the simplex, the second integral is at most max  
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+)
+
+Z TT −¯τ ∑ 
+
+> j∈C+(i)
+
+xi j (s) ds = ¯τ max  
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+).
+
+Multiplying by λi and summing over i proves the result. 
+
+C.3.2 The Cost–Routing Delay Mismatch 
+
+We now control the cumulative contribution of the cost–routing mismatch terms Γi j (t). For finite thresholds ¯ Nj > N∗ 
+
+> j
+
+to be selected, we begin with the exact cost decomposition ci j (u) = bi j (u) + e j(u), where 
+
+bi j (u) = gi j + min { f j(u), f j( ¯Nj + 2v¯τ)},
+
+e j(u) =  f j(u) − f j( ¯Nj + 2v¯τ)
+
+> +
+
+.
+
+The bounded component bi j is at most f j( ¯Nj + 2v¯τ) + gi j . The unbounded tail e j is shared by all arcs entering cell j. The extra term 2 v¯τ appears because the time-shift argument compares Nj(t) and Nj(t − 2τi j ), whose distance is at most 2 vτi j ≤ 2v¯τ by (10). The proof relies on two estimates used to control the two parts of this decomposition. The first provides a global envelope for the raw costs. 26 Lemma 6 (Global cost–gap bound) . There exist finite thresholds ( ¯Nj) j∈C , with ¯Nj > N∗ 
+
+> j
+
+for every j, such that, for every workload u ≥ 0 and every arc (i, j) ∈ A,ci j (u) ≤ max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+ + 2D j(u)
+
+¯μ j − μ j(N∗ 
+
+> j
+
+) . (20) Lemma 6 is used in the bounded-component argument (Lemma 8) to replace each raw cost in the routing-speed bound by a fixed term plus a multiple of D j.Proposition 1 shows that the thresholds in Lemma 6 can be chosen so that the associated tail components also satisfy the following local estimate. We fix such a common threshold choice for the remainder of the proof. 
+
+Lemma 7 (Local tail mismatch) . For every cell j, if u , u′ ≥ 0 and |u − u′| ≤ 2v¯τ, then 
+
+|e j(u) − e j(u′)| ≤ D j(u) + D j(u′)
+
+8 ∑i∈C −( j) λi
+
+.
+
+The shift 2 v¯τ in the definition of e j matches the largest possible workload change between the two arguments compared in the time-shift argument. Thus, if one of the two tail values is nonzero, the smaller workload is above ¯ Nj, where additive slow variation makes the change in f j, and hence in e j, small relative to the workload gap. Consequently, Lemma 7 charges the tail mismatch to the workload gaps at its two endpoints; this is the estimate used in Lemma 9. The threshold construction and the proofs of both lemmas are deferred to Subsection C.3.4. The cost decomposition induces the same decomposition of the cumulative cost–routing mismatch. Define the bounded-component and tail contributions by 
+
+Γb(T ) = ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> 0
+
+bi j (Nj(t)) di j (t − τi j ) dt − ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> 0
+
+bi j (Nj(t − τi j )) di j (t) dt ,
+
+and 
+
+Γe(T ) = ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> 0
+
+e j(Nj(t)) di j (t − τi j ) dt − ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> 0
+
+e j(Nj(t − τi j )) di j (t) dt .
+
+By linearity, 
+
+# ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> 0
+
+Γi j (t) dt = Γb(T ) + Γe(T ).
+
+We proceed to bound Γb(T ) and Γe(T ) separately below. 
+
+The Bounded Component The bounded component can be handled by shifting the routing variables in time. 
+
+Lemma 8 (Bounded-component time shift) . Let K1 = max 
+
+> j∈C
+
+2¯μ j − μ j(N∗ 
+
+> j
+
+) ∑   
+
+> i∈C−(j)
+> ℓ∈C+(i)
+
+λi
+
+  fℓ( ¯Nℓ + 2v¯τ) + giℓ
+
+τiℓ,
+
+and set 
+
+η0(τ) = 
+
+(
+
+1/(16 K1), ¯τ > 0,
+
++∞, ¯τ = 0. (21) 
+
+For T ≥ 2¯ τ and ¯η ≤ η0(τ), we have 
+
+Γb(T ) ≤ 3K2 + 4K2 ¯ηT max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+ + 14 (H− + DT ) ,
+
+where K2 = ∑ 
+
+> (i,j)∈A
+
+λi
+
+  f j( ¯Nj + 2v¯τ) + gi j 
+
+τi j ,
+
+and H− = ∑
+
+> j∈C
+
+Z 0
+
+> −¯τ
+
+D j(Nj(s)) ds denotes the contribution of the initial workload history. 
+
+27 Proof. Fix an arc, abbreviate δ = τi j , d(t) = di j (t), and b(t) = bi j (Nj(t)) . A direct change of variables gives the exact identity 
+
+Z T
+
+> 0
+
+ b(t)d(t − δ) − b(t − δ)d(t)dt =
+
+Z T −δ
+
+> 0
+
+b(t) d(t − δ) − d(t + δ)dt 
+
++
+
+Z TT −δ
+
+b(t)d(t − δ)dt −
+
+Z 0
+
+> −δ
+
+b(t)d(t + δ)dt .
+
+The last two integrals each have absolute value at most   f j( ¯Nj + 2v¯τ) + gi j 
+
+δ, because |d(t)| ≤ 1 and bi j is bounded above by 
+
+f j( ¯Nj + 2v¯τ) + gi j .For the first term, on [0, δ], both routing coordinates lie in [0, 1], so |d(t − δ) − d(t + δ)| ≤ 1, contributing at most another   f j( ¯Nj + 2v¯τ) + gi j 
+
+δ. On [δ, T − δ], both routing times are nonnegative, and the equilibrium term cancels from the difference: 
+
+d(t − δ) − d(t + δ) = xi j (t − δ) − xi j (t + δ) = −
+
+Z t+δ
+
+> t−δ
+
+dds xi j (s) ds .
+
+Lemma 10 gives the routing-speed bound 
+
+ddt xi j (t) ≤ 2ηi max  
+
+> k∈C+(i)
+
+cik (Nk(t − τik )) .
+
+Fubini’s theorem counts each routing time for at most 2 δ units of the outer variable. Combining these observations gives 
+
+Z T
+
+> 0
+
+ b(t)d(t − δ) − b(t − δ)d(t)dt ≤ 3  f j( ¯Nj + 2v¯τ) + gi j 
+
+δ
+
++   f j( ¯Nj + 2v¯τ) + gi j 
+
+ Z T −δδ
+
+Z t+δ
+
+> t−δ
+
+dds xi j (s) ds dt 
+
+≤ 3  f j( ¯Nj + 2v¯τ) + gi j 
+
+δ + 4  f j( ¯Nj + 2v¯τ) + gi j 
+
+δη i
+
+Z T
+
+> 0
+
+max  
+
+> k∈C+(i)
+
+cik (Nk(s − τik )) ds .
+
+(22) The global cost–gap bound in Lemma 6 implies max  
+
+> k∈C+(i)
+
+cik (Nk(s − τik )) ≤ max 
+
+> (p,q)∈A
+
+  fq( ¯Nq) + gpq 
+
+ + ∑ 
+
+> ℓ∈C+(i)
+
+2Dℓ(Nℓ(s − τiℓ)) 
+
+¯μℓ − μℓ(N∗ 
+
+> ℓ
+
+) .
+
+For each delayed term, a change of variables yields 
+
+Z T
+
+> 0
+
+Dℓ(Nℓ(s − τiℓ)) ds ≤
+
+Z 0
+
+> −¯τ
+
+Dℓ(Nℓ(u)) du +
+
+Z T
+
+> 0
+
+Dℓ(Nℓ(u)) du .
+
+Multiplying (22) by λi, summing over arcs, and using the definitions of K2 and K1 gives 
+
+Γb(T ) ≤ 3K2 + 4K2 ¯ηT max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+ + 4K1 ¯η (H− + DT ) .
+
+Finally, ¯ η ≤ η0(τ) and (21) imply 4 K1 ¯η ≤ 1/4, which proves the stated bound. 
+
+The Unbounded Tail The tail can be unbounded, so we control its cumulative contribution using its change over two delay windows and the workload Lyapunov function at time T . The following lemma gives the complete bound used in the theorem proof. 
+
+Lemma 9 (Tail time shift) . For every T ≥ 2¯ τ,
+
+Γe(T ) ≤ K3 + 14 DT + 18 H− + 12 Φ(N(T )) + K4,
+
+Here H − is defined in Lemma 8. The beginning-of-horizon constant is K3 = ∑ 
+
+> (i,j)∈A
+
+λiτi j e j
+
+ Nj(0) + v¯τ,
+
+28 and the final-time constant is K4 = ∑
+
+> j∈C
+
+sup 
+
+> u≥0
+
+"
+
+2¯ τ ∑  
+
+> i∈C−(j)
+
+λi f j(u + 2v¯τ) − 12 Φ j(u)
+
+#
+
+> +
+
+. (23) 
+
+Proposition 2 proves that 0 ≤ K4 < ∞.Proof. Fix an arc and again abbreviate δ = τi j and d(t) = di j (t). A backward change of variables gives the exact identity 
+
+Z T
+
+> 0
+
+[e j(Nj(t)) d(t − δ) − e j(Nj(t − δ)) d(t)] dt =
+
+Z δ
+
+> 0
+
+e j(Nj(t)) d(t − δ)dt 
+
++
+
+Z T
+
+> δ
+
+[e j(Nj(t)) − e j(Nj(t − 2δ))] d(t − δ)dt 
+
+−
+
+Z TT −δ
+
+e j(Nj(t − δ)) d(t)dt .
+
+(24) • Initial term. For 0 ≤ t ≤ δ, monotonicity of e j and (10) give e j(Nj(t)) ≤ e j(Nj(0) + v¯τ). Since |d| ≤ 1, the first term in (24) is at most δe j(Nj(0) + v¯τ). After multiplying by λi and summing over arcs, these terms give K3.• Middle term. The two workload arguments differ by at most 2 v¯τ by (10). Since |d| ≤ 1, Lemma 7 bounds the middle term for this arc by 18 ∑k∈C −( j) λk
+
+Z T
+
+> δ
+
+[D j(Nj(t)) + D j(Nj(t − 2δ))] dt .
+
+The change of variables s = t − 2δ gives 
+
+Z T
+
+> δ
+
+D j(Nj(t − 2δ)) dt ≤
+
+Z 0
+
+> −¯τ
+
+D j(Nj(s)) ds +
+
+Z T
+
+> 0
+
+D j(Nj(s)) ds .
+
+Thus each incoming arc contributes at most 18 ∑k∈C −( j) λk
+
+
+
+2
+
+Z T
+
+> 0
+
+D j(Nj(t)) dt +
+
+Z 0
+
+> −¯τ
+
+D j(Nj(t)) dt 
+
+
+
+.
+
+After multiplying by λi and summing over incoming arcs, their weights cancel the denominator. Summing over cells therefore gives 
+
+# ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> τi j
+
+e j(Nj(t)) − e j(Nj(t − 2τi j )) dt ≤ 14 DT + 18 H−.
+
+• Final term. Because e j ≥ 0 and −d(t) ≤ | d(t)| ≤ 1, the sum of the last terms in (24) is at most 
+
+# ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z TT −τi j 
+
+e j(Nj(t − τi j )) dt .
+
+For an arc with delay δ, a change of variables maps this integral to [T − 2δ, T − δ], which is contained in [T − 2¯ τ, T ]. Since 
+
+T ≥ 2¯ τ, (10) gives, throughout this interval, 
+
+e j(Nj(s)) ≤ f j(Nj(s)) ≤ f j(Nj(T ) + 2v¯τ).
+
+Summing the incoming arc weights for cell j and enlarging each integration interval to [T − 2¯ τ, T ] gives 
+
+# ∑  
+
+> i∈C−(j)
+
+λi
+
+Z TT −τi j 
+
+e j(Nj(t − τi j )) dt ≤ 2¯ τ ∑  
+
+> i∈C−(j)
+
+λi f j(Nj(T ) + 2v¯τ)
+
+≤ 12 Φ j(Nj(T )) + sup 
+
+> u≥0
+
+"
+
+2¯ τ ∑  
+
+> i∈C−(j)
+
+λi f j(u + 2v¯τ) − 12 Φ j(u)
+
+#
+
+> +
+
+.
+
+Summing over j bounds the final contribution by 12 Φ(N(T )) + K4.Adding the bounds for the three terms proves the claim. 29 C.3.3 Putting the Estimates Together 
+
+Proof of Theorem 1. Integrating the inequality in Lemma 4 from 0 to T and moving the workload and delayed-routing terms to the left gives 
+
+V (x(T )) + Φ(N(T )) + DT + Sτ 
+
+> T
+
+≤ V (x(0)) + Φ(N(0)) + ∑ 
+
+> (i,j)∈A
+
+λi
+
+Z T
+
+> 0
+
+Γi j (t) dt . (25) Applying Lemma 5, Lemma 8, and Lemma 9, we obtain 
+
+V (x(T )) + Φ(N(T )) + DT + ST ≤ V (x(0)) + Φ(N(0)) + ¯τ ∑
+
+> i∈C
+
+λi max  
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+) + 3K2 + K3 + K4 + 4K2 ¯ηT max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+
+
++ 12 DT + 38 H− + 12 Φ(N(T )) .
+
+Since N is continuous and D j and Φ j are continuous, DT , H−, and Φ(N(T )) are finite for every finite T . Thus we may subtract  
+
+> 12
+
+DT and 12 Φ(N(T )) from both sides. This leaves V (x(T )) + 12 Φ(N(T )) on the left; discarding those two nonnegative final-time quantities gives 12 DT + ST ≤ V (x(0)) + Φ(N(0)) + ¯τ ∑
+
+> i∈C
+
+λi max  
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+) + 3K2 + K3 + K4 + 38 H− + 4K2 ¯ηT max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+.
+
+(26) Set 
+
+G1(τ) = 8K2 max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+,
+
+G2
+
+
+
+τ, N|[−¯τ,0]
+
+
+
+= 2Φ(N(0)) + 2¯ τ ∑
+
+> i∈C
+
+λi max  
+
+> j∈C+(i)
+
+ci j (N∗ 
+
+> j
+
+) + 6K2 + 2K3 + 2K4 + 34 H−.
+
+Using the definition of V (x(0)) in (13) and multiplying both sides of (26) by 2 /T , we obtain 
+
+DT
+
+T + 2ST
+
+T ≤ 1
+
+T ∑
+
+> i∈C
+
+λi
+
+ηi
+
+∥xi(0) − x∗ 
+
+> i
+
+∥22 + G1(τ) ¯η +
+
+G2
+
+
+
+τ, N|[−¯τ,0]
+
+
+
+T . (27) The result thus follows as ∥xi(0) − x∗ 
+
+> i
+
+∥22 ≤ 2 and 1 /ηi ≤ 1/η and ST ≥ 0 by (19). 
+
+C.3.4 Supporting Results Lemma 10. Fix a cell i ∈ C and a probability vector x i ∈ ∆i. Let v = ΠT∆i (xi) (zi) be the projection to the tangent cone of ∆i at x i
+
+of the vector z i ∈ R|C |. The following holds. 1. Contraction property. For every x ′ 
+
+> i
+
+∈ ∆i we have (xi − x′
+
+> i
+
+)⊤v ≤ (xi − x′
+
+> i
+
+)⊤zi.2. Boundedness. We have that ∥v∥∞ ≤ 2∥zi∥∞.Proof. We prove each part at a time. 
+
+Part 1 (Contraction Property). Recall that the tangent cone is given by 
+
+T∆i (xi) = 
+
+(
+
+v ∈ R|C | : ∑
+
+> j∈C
+
+v j = 0, v j ≥ 0 if xi j = 0, v j = 0 for all j̸ ∈ C +(i)
+
+)
+
+.
+
+Since T∆i (xi) is a closed convex cone, the projection v is uniquely characterized by the property that for any u ∈ T∆i (xi),
+
+(v − zi)⊤(u − v) ≥ 0.
+
+30 Taking u = 0 and u = 2v in this characterization gives (v − zi)⊤v = 0. Because T∆i (xi) is a cone, substitution of any u ∈ T∆i (xi)
+
+and this orthogonality identity then give 
+
+(v − zi)⊤u ≥ 0, ∀u ∈ T∆i (xi) . (28) Let x′ 
+
+> i
+
+∈ ∆i. Consider the vector u = x′ 
+
+> i
+
+− xi. It is straightforward to verify that u ∈ T∆i (xi) because u = x′ 
+
+> i
+
+− xi is a feasible direction in the tangent cone. By the projection property (28), we have: 
+
+(v − zi)⊤(x′ 
+
+> i
+
+− xi) ≥ 0 ,
+
+and the result follows from re-arranging terms. 
+
+Part 2 (Boundedness). The projection v is the solution to the optimization problem: min 
+
+> v
+
+12 ∑ 
+
+> j∈C+(i)
+
+(v j − zi j )2
+
+subject to ∑ 
+
+> j∈C+(i)
+
+v j = 0,
+
+v j ≥ 0, ∀ j ∈ C +(i) : xi j = 0 ,
+
+where we removed from the objective all j /∈ C +(i) because the tangent cone enforces v j = 0 for those indices, so their contribution (v j − zi j )2 = z2 
+
+> i j
+
+is constant with respect to v and does not affect the optimal solution. Let I0 = { j ∈ C +(i) : xi j = 0}. The Lagrangian is: 
+
+L(v, β, α) = 12 ∑ 
+
+> j∈C+(i)
+
+(v j − zi j )2 − β ∑ 
+
+> j∈C+(i)
+
+v j − ∑
+
+> j∈I0
+
+α jv j,
+
+where β is the Lagrange multiplier of the equality constraint and α j ≥ 0 are the Lagrange multipliers of the non-negativity constraints. The first-order optimality conditions are necessary and sufficient for optimality because the problem is convex with linear constraints, and differentiable. The first-order condition with respect to v j is: 
+
+∂L
+
+∂v j
+
+= v j − zi j − β − 1{ j ∈ I0}α j = 0 =⇒ v j = zi j + β + 1{ j ∈ I0}α j .
+
+We also have the complementary slackness condition α jv j = 0 for j ∈ I0.• If j ∈ I0 and the constraint is active ( v j = 0), then trivially |v j| = 0 ≤ ∥ zi∥∞.• If j /∈ I0 or the constraint is inactive ( α j = 0), then v j = zi j + β.The constant β is determined by the constraint ∑ j∈C +(i) v j = 0. Let S = C +(i) \ { j ∈ I0 | v j = 0} be the set of indices where the non-negativity constraint is inactive. This set is nonempty because xi has at least one positive component. Then: 
+
+# ∑
+
+> j∈S
+
+(zi j + β) = 0 =⇒ β = − 1
+
+|S| ∑
+
+> j∈S
+
+zi j .
+
+Thus, for non-zero components, 
+
+|v j| = zi j − 1
+
+|S| ∑
+
+> j′∈S
+
+zi j ′ ≤ ∥ zi∥∞ + 1
+
+|S| ∑
+
+> j′∈S
+
+∥zi∥∞ = 2∥zi∥∞ ,
+
+where the inequality follows from the triangle inequality together with |zi j ′ | ≤ ∥ zi∥∞. Thus, ∥v∥∞ ≤ 2∥zi∥∞.
+
+Lemma 11 (Two consequences of additive slow variation) . For every cell j and every fixed H ≥ 0,
+
+sup 
+
+> u≥r
+
+sup 
+
+> 0≤h≤H
+
+ f j(u + h)
+
+f j(u) − 1
+
+
+
+−→ 0 as r → ∞. (29) 
+
+Moreover, Φ j(u)
+
+f j(u) −→ ∞ as u → ∞. (30) 31 Proof. For 0 ≤ h ≤ H, monotonicity gives 0 ≤ f j(u + h)
+
+f j(u) − 1 ≤ f j(u + H)
+
+f j(u) − 1.
+
+The definition of a limit then makes the right-hand side uniformly small for all sufficiently large u, proving (29). Fix an arbitrary L > 0. For all sufficiently large u,
+
+Φ j(u) ≥ 
+
+> Zuu−L
+
+  f j(y) − f j(N∗ 
+
+> j
+
+) dy ≥ L  f j(u − L) − f j(N∗ 
+
+> j
+
+).
+
+Applying additive slow variation at u − L with shift L, and then taking reciprocals, gives f j(u − L)/ f j(u) → 1. Coercivity also gives f j(N∗ 
+
+> j
+
+)/ f j(u) → 0. Hence lim inf u→∞ Φ j(u)/ f j(u) ≥ L. Since L is arbitrary, (30) follows. We now justify the common threshold choice used in Lemmas 6 and 7. 
+
+Proposition 1 (Common workload thresholds) . For every cell j ∈ C , there exists a finite threshold ¯Nj > N∗ 
+
+> j
+
+with the following two properties. Above ¯Nj, f j is at most 2/(¯μ j − μ j(N∗ 
+
+> j
+
+)) times the workload gap D j. Moreover, starting from any workload at or above ¯Nj, every increment of length at most 2v¯τ increases f j by at most (¯μ j − μ j(N∗ 
+
+> j
+
+)) /(16 ∑i∈C −( j) λi) as a fraction of its initial value. Any larger threshold has the same two properties. Proof. The two quantities are positive because μ j is strictly increasing, N∗ 
+
+> j
+
+is finite, every cell has an in-neighbor, and every arrival rate is positive. We verify the two properties separately. 
+
+First property. For every sufficiently large ¯ Nj, we have 
+
+f j(u) ≤ 2D j(u)
+
+¯μ j − μ j(N∗ 
+
+> j
+
+) , u ≥ ¯Nj.
+
+For all sufficiently large u, coercivity gives f j(u) > 0, and the definition of D j gives lim 
+
+> u→∞
+
+D j(u)
+
+f j(u) = lim 
+
+> u→∞
+
+
+
+1 − f j(N∗ 
+
+> j
+
+)
+
+f j(u)
+
+  μ j(u) − μ j(N∗ 
+
+> j
+
+) = ¯μ j − μ j(N∗ 
+
+> j
+
+).
+
+Indeed, coercivity gives f j(N∗ 
+
+> j
+
+)/ f j(u) → 0, while bounded monotonicity gives μ j(u) → ¯μ j. Thus D j(u)/ f j(u) ≥ (¯μ j − μ j(N∗ 
+
+> j
+
+)) /2beyond some finite workload level. Rearranging gives the displayed estimate beyond that level. 
+
+Second property. For every sufficiently large ¯ Nj, we also have 2¯μ j − μ j(N∗ 
+
+> j
+
+) sup  
+
+> u≥¯Nj
+
+sup 
+
+> 0≤h≤2v¯τ
+
+ f j(u + h)
+
+f j(u) − 1
+
+
+
+≤ 18 ∑i∈C −( j) λi
+
+.
+
+Apply Lemma 11 with the fixed displacement H = 2v¯τ. By (29), the nested supremum in the display tends to zero as ¯ Nj → ∞.It is therefore at most (¯μ j − μ j(N∗ 
+
+> j
+
+)) /(16 ∑i∈C −( j) λi) for every sufficiently large choice of ¯ Nj; multiplying by 2 /(¯μ j − μ j(N∗ 
+
+> j
+
+)) 
+
+proves the displayed estimate. Choose one finite ¯ Nj > N∗ 
+
+> j
+
+large enough for both estimates, and do this for every cell. The proof of Lemma 6 below uses the first property, while the proof of Lemma 7 uses both. Hence this single collection of thresholds gives both conclusions simultaneously. Enlarging any threshold only shrinks the workload ranges on which the two properties must hold, so both remain valid. 
+
+Proof of Lemma 6. Fix a workload u ≥ 0 and an arc (i, j) ∈ A. If u < ¯Nj, monotonicity gives 
+
+ci j (u) = f j(u) + gi j ≤ f j( ¯Nj) + gi j ≤ max 
+
+> (k,ℓ )∈A
+
+  fℓ( ¯Nℓ) + gkℓ
+
+.
+
+If u ≥ ¯Nj, the same maximum bounds gi j , while the first property of Proposition 1 gives 
+
+f j(u) ≤ 2D j(u)
+
+¯μ j − μ j(N∗ 
+
+> j
+
+) .
+
+In the first case, the claimed inequality follows because D j(u) ≥ 0. In the second case, adding the bounds on gi j and f j(u) proves (20). 32 Proof of Lemma 7. Recall e j(u) =  f j(u) − f j( ¯Nj + 2v¯τ)
+
+> +
+
+. If max {u, u′} ≤ ¯Nj + 2v¯τ, then both tail values are zero. Otherwise, suppose without loss of generality that u ≥ u′ and u > ¯Nj + 2v¯τ. Then e j(u) ≥ e j(u′) and u′ ≥ u − 2v¯τ > ¯Nj. Moreover, 
+
+e j(u) − e j(u′) ≤ f j(u) − f j(u′) ≤ ¯μ j − μ j(N∗ 
+
+> j
+
+)
+
+16 ∑i∈C −( j) λi
+
+f j(u′) ≤ D j(u′)
+
+8 ∑i∈C −( j) λi
+
+.
+
+For the first inequality, equality holds when u′ ≥ ¯Nj + 2v¯τ. If u′ < ¯Nj + 2v¯τ, then e j(u′) = 0 and 
+
+e j(u) = f j(u) − f j( ¯Nj + 2v¯τ) ≤ f j(u) − f j(u′).
+
+The second inequality uses u′ > ¯Nj, u − u′ ≤ 2v¯τ, and the second property of Proposition 1; the third uses its first property. Interchanging u and u′ handles the other ordering. Since D j ≥ 0, either ordering implies the stated symmetric bound. We finally verify that the constant K4 used above is finite. 
+
+Proposition 2 (Finiteness of the final-time constant) . The quantity K 4 in (23) satisfies 0 ≤ K4 < ∞. For a fixed network, collection of arrival rates, service and cost functions, equilibrium, and delay profile, K 4 is independent of the horizon T , the trajectory, the workload history, and the stepsizes. Proof. Lemma 11, additive slow variation with H = 2v¯τ, and coercivity imply, for every cell j,
+
+Φ j(u)
+
+f j(u + 2v¯τ) = Φ j(u)
+
+f j(u)
+
+f j(u)
+
+f j(u + 2v¯τ) −→ ∞.
+
+Since the coefficient 2¯ τ ∑ i∈C −( j) λi is finite, the preceding limit gives, for all sufficiently large u,2¯ τ ∑  
+
+> i∈C−(j)
+
+λi f j(u + 2v¯τ) ≤ 12 Φ j(u).
+
+Therefore, the expression inside the positive part in (23) is nonpositive for all sufficiently large u. It is continuous in u, so its positive part attains a finite maximum on the remaining compact interval. Each supremum is thus finite, and their sum is finite because C is finite. Nonnegativity follows from the positive part. Finally, the definition of K4 involves only the fixed problem data listed in the proposition, which proves the claimed independence. In particular, if ¯ τ = 0, then every summand is sup u≥0[−Φ j(u)/2]+ = 0, so K4 = 0. 33
