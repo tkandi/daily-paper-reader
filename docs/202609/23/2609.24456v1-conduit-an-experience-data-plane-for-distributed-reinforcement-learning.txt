@@ -1,0 +1,924 @@
+Title: Conduit: An Experience Data Plane for Distributed Reinforcement Learning
+
+URL Source: https://arxiv.org/pdf/2609.24456v1
+
+Published Time: Tue, 22 Sep 2026 02:33:05 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# Conduit: An Experience Data Plane for Distributed Reinforcement Learning 
+
+Sitong Zhang 
+
+Aalto University 
+
+sitong.zhang@aalto.fi 
+
+Tuo Shi 
+
+Shenzhen University of Advanced Technology 
+
+shituo@suat-sz.edu.cn 
+
+Mario Di Francesco 
+
+Aalto University 
+
+mario.di.francesco@aalto.fi 
+
+Zeke Wang 
+
+Zhejiang University 
+
+wangzeke@zju.edu.cn 
+
+Bo Zhao 
+
+Aalto University 
+
+bo.zhao@aalto.fi 
+
+Abstract 
+
+Distributed reinforcement learning (RL) scales training by parallelizing actors and learners around an Experience Buffer .As RL workloads grow, however, the buffer becomes more than a replay queue: it is the storage substrate of a large-capacity, latency-critical experience path that every iteration traverses to move, transform, sample, and batch experiences before learner updates can begin. Existing RL systems em-bed this path inside framework control flow or expose it as a request-driven buffer service, leaving experience place-ment fixed and experience-path work difficult to schedule independently as a runtime-level optimization target. We present Conduit , a framework-agnostic runtime that exposes RL experience management as an explicit systems optimization problem. At its core is the Experience Data Plane 
+
+(EDP), a runtime abstraction that separates RL experience-handling semantics from framework-specific execution logic by exposing experience ingestion , experience placement , and 
+
+experience delivery as explicit control points. Built on EDP, Conduit introduces capacity-constrained, bandwidth-aware placement , which distributes experience state across CPU/GPU memory tiers and nodes under heterogeneous interconnect and device-memory constraints, and latency-aware schedul-ing , which controls when experience-path handling runs to reduce exposed experience-path latency while preserving RL semantics. Integrated with RLlib without changing its frame-work execution logic, Conduit reduces exposed experience-path latency by up to 97% and end-to-end iteration latency by up to 38%, scales to 1,024 GPUs, and preserves convergence. 
+
+1 Introduction 
+
+Distributed reinforcement learning (RL) increasingly oper-ates at scale, with large observations and heavy per-sample payloads [3, 4, 9, 17–19, 37, 39, 47, 48, 51]. In a typical dis-tributed RL system, actors generate experiences, learners update models, and an Experience Buffer bridges the two [23, 25, 29, 53]. As workloads grow, however, this buffer becomes 10 20 30 40 0100 200 0Actor rollout Experience-path handling Learner update                
+
+> Off-policy (DQN) in RLlib with 8 actors & 8 learners .
+> Experience-path handling is a major latency contributor.
+> 400 On-policy (PPO) in RLlib with 8 actors & 8 learners .
+> 20.3% 50.2% 29.5% 43.3% 26.2% 30.5%
+> Experience-path handling dominates latency.
+
+Fig. 1: Experience-path latency is a major component of iteration time in distributed RL: 50.2% in off-policy Deep Q-Network (DQN) and 26.2% in on-policy proximal policy optimization (PPO) across representative workloads on an 8ˆA100 cluster. DQN in RLlib (con fi g: 8 actors , 8 learners ): PPO in RLlib (con fi g: 8 actors , 8 learners ): ×8 ×25 per-iteration 33 operations = +×7 ×20 per-iteration 27 operations = +Actor Rollout Learner Update raw rollout data training batches     
+
+> Experience Data Plane
+> Data transfer: data movement in actor →buffer →learner path ( e.g., CPU-GPU, memcpy,... )Data processing: data batch computation ( e.g., concatenation, reshaping,... )
+> Experience Ingestion Experience Delivery Experience Placement
+> Experience Buffer
+> Experience-path handling includes two types of operations:
+
+... ... 
+
+Fig. 2: Experience-path handling drives latency through transfer and processing operations. Existing systems em-bed this handling in their actor/learner workflow; Conduit instead abstracts it into an explicit Experience Data Plane .
+
+the storage substrate of a large-capacity, latency-critical ex-perience path . Modern experiences carry large visual, multi-modal, or long-context payloads, and each iteration repeat-edly moves, transforms, samples, and batches these heavy payloads before learner update can begin. Despite extensive effort to optimize actors and learners, distributed RL systems still overlook experience-path latency :the repeated work that converts raw rollouts into training-ready batches, i.e., experience-path handling . Fig. 1 shows that this latency accounts for 50.2% of iteration time in off-policy DQN [27] and 26.2% in on-policy PPO [35]. Fig. 2 shows where this latency comes from: experience-path handling runs dozens of transfer and processing operations every iteration (33 for DQN, 27 for PPO in RLlib). 
+
+1arXiv:2609.24456v1 [cs.DC] 21 Sep 2026 The experience path is also capacity-constrained : large buffers often exceed a single GPU and must be distributed across CPUs, GPUs, and nodes on heterogeneous fabrics. Ex-isting systems, however, treat capacity management, place-ment, and scheduling as local framework tactics rather than as a runtime problem. Experience buffers built into RL frameworks such as RL-lib [23], MSRL [53], and SRL [25] embed handling within actor/learner execution at fixed locations (see Fig. 2 for the RLlib case); service-based systems such as Reverb [2] and Gear [44] are driven by incoming requests rather than proac-tively scheduling critical-path work to reduce end-to-end latency. Both designs treat the experience buffer as an inter-nal framework component or service endpoint, rather than exposing it as a runtime interface for optimization. Our key insight is that distributed RL needs precisely this missing abstraction: an explicit runtime interface for man-aging and optimizing experience data, which we call the 
+
+Experience Data Plane (EDP). RL frameworks retain control over which experiences to store and consume, while EDP manages the systems-level decisions of where those experi-ences reside and when ingestion and delivery occur. We introduce Conduit to realize EDP as a framework-agnostic experience-buffer runtime that exposes experience ingestion, placement, and delivery as explicit system-level control points (Fig. 2) while preserving framework execution logic. Built on EDP, Conduit introduces two mechanisms: 
+
+capacity-constrained, bandwidth-aware placement , which dis-tributes the Experience Buffer across CPU and GPU memory under heterogeneous interconnect bandwidths and device-memory limits; and latency-aware scheduling , which deter-mines when ingestion and delivery run. Conduit makes the following contributions: 
+
+(1) Experience Data Plane as a runtime abstraction. We introduce the Experience Data Plane (EDP), a runtime abstrac-tion that exposes experience ingestion , experience placement ,and experience delivery as explicit control points rather than framework-internal side effects. EDP decouples RL expe-rience semantics from framework-specific execution logic, creating an optimization surface for data residency, capacity management, and scheduling in distributed RL. (§4) 
+
+(2) Capacity-constrained, bandwidth-aware placement. 
+
+We design a placement mechanism that distributes the Ex-perience Buffer across CPU/GPU memory tiers and nodes by jointly accounting for actor Ñ buffer Ñ learner path costs, heterogeneous interconnect bandwidths, and device-memory constraints. This allows Conduit to support buffers larger than a single GPU while reducing data-movement cost on heterogeneous fabrics. (§5) 
+
+(3) Latency-aware scheduling of experience-path han-dling. We design a scheduling mechanism that decides when experience ingestion and delivery run, and at what granular-ity, to reduce exposed experience-path latency while preserv-ing on-policy freshness and off-policy replay semantics. This allows Conduit to overlap experience-path handling with rollout and learner update when semantics permit, while amortizing overhead through batching and pipelining. (§6) We implement Conduit and integrate it with RLlib [23]—a state-of-the-art reinforcement-learning framework—without changing its execution logic. We further show that Conduit generalizes beyond RLlib: it integrates into SRL [25], a dis-tributed RL framework with a different, streaming-dataflow execution model (Appendix B), and extends to large language model (LLM) post-training with the Verl [37] framework (Appendix A). Across on-policy and off-policy RL workloads, Conduit reduces both exposed experience-path latency (up to 97%) and end-to-end iteration latency (up to 38%), and scales efficiently to 1,024 GPUs. These results establish EDP as a practical optimization surface for distributed RL: a run-time abstraction that decouples capacity, placement, and scheduling decisions from framework execution logic. 
+
+2 Background and Motivation 
+
+This section motivates treating experience-path handling as an independently optimizable runtime component on the actor Ñ Experience Buffer Ñ learner path. §2.1 frames distributed RL through this path, §2.2 summarizes its re-sponsibilities, §2.3 states the three challenges that motivate Conduit, and §2.4 reviews existing approaches. 
+
+2.1 Actor Ñ Experience Buffer Ñ Learner Data Path 
+
+In RL, an agent learns a policy (typically a deep neural net-work, DNN) to act in an environment [38]. Each training iteration executes the current policy to generate rollouts (ex-perience tuples such as state, action, reward, and next state) and then performs learner update to train the policy DNN on those experiences. In practice, these tuples are rarely flat records: modern experiences increasingly contain large visual, multimodal, or long-context payloads augmented with termination flags and auxiliary metadata (e.g., policy_info , episode_ID ) [41, 42]. To scale training, modern RL systems parallelize actor rollout and learner update [24] by running many actors and learners, bridged by an Experience Buffer that ingests rollouts and serves training-ready batches (Fig. 3). The actor Ñ Experience Buffer Ñ learner connection forms a large-capacity, latency-critical experience path. Every it-eration must repeatedly move, transform, sample, and batch these heavy payloads into training-ready data under strict algorithmic constraints (e.g., freshness requirements in on-policy RL and reuse via replay in off-policy RL). To under-stand how capacity demands and execution latency along 
+
+> 2
+
+Tab. 1: Comparison of existing experience buffer implementations for distributed RL.                
+
+> Category System Decoupling Placement Scheduling Built-in Experience Buffers
+> RLlib [23] Embedded module Fixed (CPU) Reactive (inline in actor/learner loops) MSRL [53] Fixed (CPU/GPU) SRL [25] Fixed (pinned CPU) Reactive (fixed one-step overlap)
+> Experience Buffer Services
+> Reverb [2] Process-decoupled service Fixed (CPU) Reactive (request-driven) Gear [44] Fixed (pinned CPU & GPU-driven access)
+> Experience Management Layer Conduit Multi-dimensional Decoupling (system, algorithm, hardware) Adaptive (capacity-constrained, bandwidth-aware) Proactive (schedulable execution timing & processing granularity) Experience Buffer
+> experiences Policy Model
+> action state
+> Actors
+> Value Model Policy Model
+> Learners
+> sync weights
+> Environ-ment actor rollout learner update
+> Experience Ingestion Experience Delivery
+
+Fig. 3: Distributed deep reinforcement learning architecture. 
+
+this path shape end-to-end training efficiency, the next sub-section characterizes its logical responsibilities and connects them to the underlying operator graph. 
+
+2.2 Experience Path Responsibilities 
+
+Experience-path handling spans two complementary levels: (i) a logical view that defines what the path provides ( inges-tion , delivery , and placement ), and (ii) a physical execution plan that defines how this logical view is realized as operator graphs (transfer and processing operators). 
+
+(i) Logical view comprises two functional operations, ex-perience ingestion and experience delivery , and one physical control point, experience placement .
+
+Experience ingestion collects actor rollouts into buffer-resident experiences by running data-plane operators that materialize and organize incoming records. In on-policy training, ingestion assembles step-level tuples into trajecto-ries and applies preprocessing [30, 35] (e.g., boundary de-tection, padding/truncation, normalization, and computing returns/advantages) before forming batches for the current iteration. In off-policy training, it inserts transitions into a persistent replay dataset and maintains indices and metadata for future sampling and eviction [15, 34]. 
+
+Experience delivery extracts experiences from the buffer and produces training-ready batches for the learner by run-ning operators that select , assemble , and transform records under algorithmic constraints [15, 34]. In on-policy training, delivery consumes freshly ingested experiences within the same iteration by partitioning trajectories into mini-batches and applying lightweight batch transformations (e.g., shuf-fling and padding [35]). In off-policy training, it samples from a persistent replay dataset, materializes the selected transitions, and performs batch/layout transformations (e.g., concatenation and reshaping) required by the learner [28]. 
+
+Experience placement controls where and how expe-rience state resides across distributed resources (e.g., CPU memory, pinned host memory, GPU memory, or distributed across multiple nodes). As a logical knob, placement does not change the RL semantics of what experience ingestion or delivery must accomplish, but it dictates how capacity is distributed across devices. It determines where data-plane operators read/write records and which transfer edges are exercised. Because every experience must traverse this path, placement directly governs whether large datasets can fit in available memory, as well as the cost of cross-device data movement on heterogeneous fabrics. 
+
+(ii) Physical execution realizes experience ingestion and delivery as operator graphs with two operator types: data transfer moves rollouts/batches across devices, memory do-mains, and nodes, while data processing transforms them into learner-consumable layouts. Transfer operators include CPU ØGPU copies, GPU ØGPU transfers, inter-node send/recv, and shard movement via collectives [5, 43]. Processing opera-tors include trajectory assembly, concat/ stack, reshape/ slice, sampling, shuffling, and batching, optionally with padding/ packing for variable-length sequences [38]. Thus, ingestion and delivery define the logical phases, transfer and processing operators define physical execution, and experience placement determines capacity and locality, shaping the dominant transfer costs on the actor Ñ Experience Buffer Ñ learner path in Fig. 3. 
+
+2.3 Experience-Path Challenges and Opportunities 
+
+Existing RL frameworks face three challenges in managing the experience path. Each challenge motivates the design of the Experience Data Plane (EDP), which turns it into an optimization opportunity. 
+
+Challenge 1: Coupled execution serializes handling onto the critical path. Most distributed RL frameworks embed ingestion and delivery inside actor/learner execution: ingestion is tied to actor rollout, and delivery is tied to learner update. Although dependencies only constrain operators 
+
+within a batch, hard-wiring these operator graphs into fixed execution loops turns them into global barriers that block pipelining across batches (e.g., ingesting D𝑖 while generating 
+
+D𝑖 `1, or delivering D𝑖 `1 while updating on D𝑖 ; Fig. 5), forcing handling latency onto the critical path. 
+
+> 3GPU7
+> GPU6 GPU0
+> GPU1 GPU5
+> GPU4 GPU2
+> 400GB/s 200GB/s 100GB/s GPU3 72GB/s CPU Cores 0 - 64
+
+(a) Non-uniform GPU fabric. 2 53 145 146 141 146 80 107 52 3 144 146 146 147 105 107 145 146 2 54 81 106 144 146 142 146 51 3 106 107 146 146 142 146 74 107 3 42 146 146 142 147 105 107 40 3 144 146 77 105 144 147 146 146 2 41 102 107 146 147 144 147 40 3        
+
+> 050 100 150 2323332352 53 51 54 40 42 40 41 Destination rank 01234567Source rank 01234567
+
+(b) GPU ØGPU latency heatmap. 
+
+Fig. 4: Non-uniform intra-node transfers on an 8-GPU AMD MI250X node. (a) interconnect topology; (b) GPU ØGPU latency variation for a 5 GB transfer, making placement performance-critical. 
+
+Opportunity: Decoupling. By decoupling ingestion and delivery from framework execution, the EDP turns them into first-class objects that the system controls directly, granting three forms of autonomy: execution autonomy , to run them asynchronously and pipeline across batches when dependen-cies allow; semantic autonomy , to serve on-policy freshness and off-policy replay under one interface; and hardware au-tonomy , to detach experience placement from fixed frame-work bindings (e.g., CPU or a specific GPU). 
+
+Challenge 2: Fixed placement either overflows mem-ory or pays for slow fabric transfers. Where experience data resides determines both capacity and transfer cost, and the two pull against each other. Capacity binds at scale: in visual RL with 128 ˆ128–256 ˆ256 RGB inputs [11, 13, 32], a 10 6-sample buffer reaches 48–192 GB, exceeding a single GPU. But spilling elsewhere can be costly. Fig. 4 illustrates this non-uniformity within a single node 1: GPU pairs dif-fer in bandwidth (100–400 GB/s) and CPU ØGPU is slower (72 GB/s) (Fig. 4a), so a 5 GB GPU ØGPU transfer spans 40– 147 ms, a 3.7 ˆ spread (Fig. 4b). A fixed choice (always CPU or a fixed GPU) thus either overflows memory or repeatedly pays for slow transfers. 
+
+Opportunity: Placement. The EDP’s hardware autonomy lets Conduit treat placement as a runtime decision rather than a fixed binding. Through capacity-constrained, bandwidth-aware placement , Conduit distributes the buffer across CPU, GPU, and node tiers to fit memory limits while steering data onto fast edges—scaling capacity beyond a single device and avoiding the slowest fabric edges at the same time. 
+
+Challenge 3: Synchronous handling fully exposes its latency and wastes per-invocation overhead. Experience handling is far from free: ingestion and delivery perform non-trivial processing (trajectory assembly, batching, sampling, reshaping, shuffling, padding). Run synchronously between rollout and update, this work lands entirely on the critical path, where it becomes a major component of iteration time (Fig. 1); executed one unit at a time, its fixed per-invocation overhead is also paid repeatedly. 
+
+> 1
+
+We profile these fabrics on an AMD MI250X supercomputer D1 D1 D2 D2                     
+
+> ... D3 D4 D3 D4 D1 D2 D1 D2 D3 D4 D3 D4
+> ...
+> D1,2 D1 D2 D3 D4 D3,4 ...
+> D1 D1 D2 D2 ...
+> D3 D4 D3 D4 D1,2 D1 D2 D3 D4 D3,4
+> ...
+> (c) Batched exectution w/o breaking data dependency
+> (a) SOTA: Sequential execution
+> Ingestion
+> (b) Overlapped execution w/o breaking data dependency
+> Actor rollout Learner update Delivery
+> latency reduction latency reduction latency reduction latency reduction
+> D1 (D3) and D2 (D4) are batched
+> data dependent data independent
+> Learner update Learner update Actor rollout Actor rollout
+> D1 D2 D1 D2 D3 D4 D3 D4 ... Ingestion Ingestion Delivery Delivery
+
+Fig. 5: Operator dependencies ( D1 –D4 are batches): (a) sequen-tial, (b) overlapped via timing , (c) overlapped and batched via joint timing and granularity .Batch size D1-16 D1-8 D1-4 D1,2 D1 32 64 128 256 512  
+
+> Ingestion Delivery
+
+Fig. 6: Larger operator batches reduce per-transition process-ing cost for both ingestion and delivery. 
+
+Opportunity: Scheduling. The EDP’s execution autonomy lets Conduit schedule experience-path handling instead of running it inline. Because dependencies bind operators only within a batch (Fig. 5), two knobs reduce cost. Timing 
+
+overlaps ingestion for D𝑖 with rollout for D𝑖 `1, and delivery for D𝑖 `1 with the update on D𝑖 (Fig. 5b); granularity batches trajectories per invocation to amortize overhead (Fig. 5c). Both help: on RLlib [23], increasing the operator batch from 32 to 512 transitions cuts amortized ingestion from 0.20 to 0.085 ms/transition (2.4 ˆ) and delivery from 0.38 to 0.21 ms (1.8 ˆ) (Fig. 6). 
+
+Summary. Together, addressing these three challenges yields Conduit’s optimization opportunities— decoupling , place-ment , and scheduling —which it targets end-to-end on the actor Ñ Experience Buffer Ñ learner data path. 
+
+2.4 Limitations of Existing RL Experience Buffers 
+
+Existing RL buffer designs fall into two structural categories: framework-internal modules and standalone service end-points (Tab. 1). In both cases, experience handling remains reactive, placement-fixed, and tightly bound to framework execution, preventing systematic optimization across decou-pling, placement, and scheduling. 
+
+Built-in experience buffers (embedded and reactive). 
+
+RL frameworks such as RLlib [23] and SRL [25] implement the experience buffer as an internal framework component, so experience ingestion and delivery execute inline with ac-tor rollout and learner update. This hard-wires experience handling into framework-specific execution logic, prevent-ing principled pipelining across batches (see Fig. 5). Built-in 
+
+4experience buffers are also placement-fixed (CPU or pinned host memory), failing to manage capacity or optimize trans-fer costs across distributed GPU resources. MSRL [53] improves task placement across actors and learners via a fragmented dataflow graph, which is comple-mentary. However, it does not expose an explicit runtime surface for the experience path itself, leaving experience handling reactive and tied to task execution. 
+
+Experience buffer services (throughput-scaled, but not latency-optimized). Reverb [2] and Gear [44] decouple the experience buffer at the process level. However, they treat the buffer as a service endpoint rather than as a runtime control surface. They retain fixed placement (CPU resident) and request-driven execution. Reverb stores experience data in pageable CPU memory. Gear stores it in pinned CPU mem-ory while using GPUs to leverage DMA and RDMA reads, rather than dynamically placing experience data across GPU boundaries. By ignoring the joint optimization of capacity-constrained placement and proactive scheduling, these sys-tems focus on insertion/sampling throughput but do not directly optimize exposed experience-path latency. 
+
+Summary. Prior work treats the experience buffer as an internal component or external service rather than as an explicit Experience Data Plane, motivating Conduit. 
+
+3 Overview of Conduit 
+
+Conduit is a runtime system that realizes the Experience Data Plane (EDP) for the large-capacity, latency-critical ex-perience path. It separates RL experience handling from framework-specific execution by exposing experience inges-tion , experience placement , and experience delivery as runtime control points. Conduit integrates with existing distributed RL frameworks by intercepting buffer interfaces; on-policy freshness and off-policy replay semantics bound feasible scheduling and placement, so Conduit optimizes capacity and latency within these bounds. As shown in Fig. 7, the EDP exposes three control points around the persistent Experience Buffer —experience ingestion ,
+
+placement , and delivery —refining the rigid actor Ñ Experience Buffer Ñ learner execution into a fine-grained, independently controllable experience path. Actors push raw rollout pay-loads asynchronously ( 1 ); Conduit ingests them into the Experience Buffer ( 2 ) and delivers training-ready batches ( 3 ); learners then pull these staged batches for model up-dates ( 4 ). Because ingestion and delivery run as operators decoupled from actor and learner execution, they become 
+
+pipelineable constraints : Conduit can overlap ingestion with actor-environment interaction and delivery with policy DNN training, reducing exposed experience-path latency. Conduit integrates with existing RL frameworks through a low-intrusion interception layer (Fig. 8). Frameworks reg-ister their algorithm-specific ingestion and delivery logic via standard buffer hooks, while Conduit owns execution Experience Ingestion Experience Delivery Processing granularity Execution timing 
+
+> Latency-Aware Scheduling (§6) Capacity-Constrained, Bandwidth-aware Placement (§5)
+
+... ...      
+
+> Experience Buffer Learner Actor
+> Experience Data Plane (§4)
+> D1,D2 D3,D4 D1 D2 D3 D4 D1,D2 D1 D2 D3,D4 D3 D4
+
+... ... ... ... ... ... 
+
+> batched overlapped
+> Experience Placement
+
+Fig. 7: Conduit workflow: the Experience Data Plane exposes three control points— experience ingestion , placement , and 
+
+delivery —around the Experience Buffer. @conduit.register_ingestion(input="Actor", output="ExperienceBuffer") def ingestion(actor_in, exp_out): d = actor_in.read() # read from Actor d = fw_ingestion_ops(d) # recall framework-defined ingestion logic exp_out.write(d) # write to Experience Buffer @conduit.register_delivery(input="ExperienceBuffer",output="Learner") def delivery(exp_in, learn_out): d = exp_in.read() # read from Experience Buffer d = fw_delivery_ops(d) # recall framework-defined delivery logic learn_out.write(d) # write to Learner 
+
+> Register framework-de fi ned algorithm-speci fi c ingestion/delivery logic ( fw _*_ops )
+
+Fig. 8: Conduit integration interface: frameworks register ingestion/delivery logic via buffer hooks; Conduit controls placement and scheduling. 
+
+timing, granularity, and capacity distribution. This separa-tion lets frameworks keep defining which experiences are stored and consumed, while Conduit controls where they reside and when experience-path handling executes, leaving framework logic unchanged. Conduit addresses the capacity demands and data move-ment costs of large-scale RL through capacity-constrained, bandwidth-aware placement . Using measured interconnect bandwidths and device-memory limits, Conduit system-atically distributes the Experience Buffer across CPU and GPU memory tiers. This enables Conduit to host experience datasets that exceed any single GPU’s memory by distribut-ing them across devices, while actively avoiding the slowest transfer edges on heterogeneous, non-uniform fabrics (§5). Finally, Conduit implements latency-aware scheduling for experience-path handling. It dynamically determines when 
+
+experience ingestion and delivery execute (execution timing) and how much data they process per invocation (execution granularity). This cost-based scheduling lets Conduit over-lap experience-path handling with actor rollout and learner update whenever semantics allow, amortizing overheads through batching and minimizing exposed experience-path latency on the critical path (§6). 
+
+5Actor() ... Actor()           
+
+> Ingestion( ging )... ...
+> ...
+> Ingestion( ging )
+> ...
+> ...
+> (b) Decoupled Experience Ingestion enables overlap in off-policy ( ging ≥ 1)
+> (c) Decoupled Experience Ingestion enables overlap in on-policy (0 < ging <1)
+> (a) Coupled Ingestion: Sequential execution (off/on-policy) Actor( ging )Actor( ging )Actor() Ingestion() Actor() Ingestion()
+
+... Actor() ... Ingestion() Ingestion( ging )Learner() ...           
+
+> Delivery( gdel )... ...
+> (a) Coupled Delivery: Sequential execution (off/on-policy)
+> (b) Decoupled Experience Delivery enables overlap in off-policy (gdel ≥ 1 )
+> (c) Decoupled Experience Delivery enables overlap in on-policy (0 < gdel < 1) Learner() Learner( gdel )...
+> ... ...
+> Learner( gdel )
+
+... ... Learner() Delivery() Learner() Delivery() Learner() Delivery()  
+
+> Delivery( gdel )Delivery( gdel )
+
+Fig. 9: Decoupling ingestion (delivery) from actor (learner) execution. Actors push rollouts asynchronously, while the ingestion operator pulls data at configurable granularity, enabling batching and pipelining (left). The delivery operator prepares training-ready batches ahead of time, freeing learners from synchronous data-preparation waits (right). 
+
+4 Experience Data Plane 
+
+We formalize Conduit’s decoupling through the Experience Data Plane (EDP), which breaks the tightly coupled actor Ñ
+
+Experience Buffer Ñ learner dependency by turning expe-rience ingestion, placement, and delivery into first-class asynchronous runtime operators rather than inline steps in framework execution loops. This section focuses on the timing-related controls: ingestion, which governs how roll-outs enter the buffer (§4.1), and delivery, which governs how training-ready batches leave (§4.2); placement ( where data resides) is deferred to §5. This decoupling underpins Con-duit’s capacity-constrained, bandwidth-aware placement (§5) and latency-aware scheduling (§6). 
+
+4.1 Decoupling Experience Ingestion Concept. Experience ingestion is the control point that separates actor execution from experience-path handling. By making ingestion an explicit runtime operator, EDP lets actors push raw payloads asynchronously while ingestion pulls and processes data at its own pace. Users only pro-vide standard RL settings (e.g., rollout configuration and whether training is on/off-policy), and Conduit derives valid experience-path control choices automatically. We capture this knob using an ingestion granularity 𝑔 ing , defined as how much rollout data one ingestion invocation processes, mea-sured in multiples (or fractions) of one rollout unit. 2
+
+Enabling overlap and pipelining. Without decoupled in-gestion, each rollout unit must be ingested immediately af-ter it is generated, creating a strict one-to-one dependency between actor execution and experience handling. With de-coupled ingestion, actors push asynchronously, and 𝑔 ing de-termines how ingestion runs: (i) when 𝑔 ing ě 1, ingestion can batch multiple rollout units and process them together; (ii) when 0 ă𝑔 ing ă 1, ingestion can pipeline by processing a fraction of the current rollout while actor–environment interaction continues. This turns tight per-rollout dependen-cies into pipelineable constraints , enabling overlap without changing RL semantics (left side of Fig. 9). 
+
+Unifying off-policy and on-policy via 𝑔 ing . The feasi-ble range of 𝑔 ing encodes algorithm semantics (freshness vs. reuse) in a runtime boundary rather than hard-coding them 
+
+> 2
+
+A rollout unit is the RL algorithm-defined volume generated by one envi-ronment interaction phase, e.g., a rollout batch. 
+
+into framework-specific actor logic. Off-policy training tol-erates mild staleness, so ingestion may batch rollouts with 
+
+𝑔 ing P t 1, . . . , 𝑔 max ing u, where 𝑔 max ing caps staleness and memory overhead. On-policy training requires fresh samples: if a roll-out unit feeds 𝑀 mini-batch updates, ingestion can pipeline only at mini-batch granularity with 𝑔 ing P t 1 
+
+> 𝑀
+
+, 2 
+
+> 𝑀
+
+, . . . , 1u.
+
+4.2 Decoupling Experience Delivery Concept. Experience delivery separates experience-path handling from learner execution. As an explicit runtime operator, it lets EDP prepare training-ready batches ahead of time while learners asynchronously pull staged batches. Users specify only standard training configuration, and Con-duit derives valid control choices without manual tuning. We define delivery granularity 𝑔 del as the amount of training data prepared per delivery invocation, measured in multiples or fractions of one training batch. 
+
+Enabling overlap and pipelining. Without decoupled de-livery, each learner update waits for the next batch, leaving little scheduling freedom. With EDP boundaries, delivery runs proactively and stages batches, while 𝑔 del sets the work per invocation: when 𝑔 del ě 1, delivery can prefetch multi-ple batches, overlapping learner updates with delivery of upcoming batches; when 0 ă 𝑔 del ă 1, delivery feeds mini-batch chunks, enabling fine-grained intra-iteration pipelin-ing (right side of Fig. 9). 
+
+Unifying off-policy and on-policy via 𝑔 del . As with inges-tion, the feasible range of 𝑔 del captures semantic constraints at the EDP boundary. For off-policy training, delivery may prefetch multiple batches with 𝑔 del P t 1, 2, . . . , 𝑔 max del u, where 
+
+𝑔 max del bounds staleness and memory overhead. For on-policy 
+
+training, delivery preserves freshness within the current it-eration and provides mini-batches sequentially, so 𝑔 del “ 1 
+
+> 𝑀
+
+.
+
+4.3 Configuration and Correctness 
+
+Users do not tune buffer granularities directly. Instead, Con-duit derives feasible settings from RL configurations that frameworks already expose: whether training is off-policy 
+
+or on-policy , and (for on-policy) the mini-batch count 𝑀 per update. These inputs define safe batching and mini-batch pipelining ranges that preserve replay and freshness seman-tics. Within this safe space, Conduit selects execution mode 
+
+6and effective granularity automatically; users may option-ally cap batching to limit staleness or memory overhead, but sensible defaults typically suffice. These same bounds also preserve correctness: EDP changes when and where 
+
+experience-path handling runs, not what data it produces, and overlap/granularity choices are drawn only from spaces that preserve on-policy freshness and off-policy replay se-mantics. Formal invariants are summarized in Appendix C. Overall, EDP turns framework execution loops into pipelin-eable constraints , making experience-path operations inde-pendently schedulable while preserving RL semantics. 
+
+5 Capacity-Constrained, Bandwidth-Aware Experience Data Placement 
+
+Building on the Experience Data Plane (§4), Conduit treats experience placement as an explicit optimization that re-duces actor Ñ Experience Buffer Ñ learner overhead. For each candidate placement, it (i) estimates transfer latency from measured effective bandwidths (§5.1) and (ii) selects the lowest-latency placement that remains feasible under mem-ory constraints (§5.2). Since experience sizes can grow mid-run (e.g., richer observations or longer sequences), an initial placement may become infeasible; Conduit then performs (iii) online migration driven by a pre-computed placement map, avoiding runtime re-profiling (§5.3). 
+
+5.1 Transfer-Latency Model 
+
+An Experience Buffer placement 𝑝 induces two critical-path transfers: ( i) moving new experiences from actors into the buffer (experience ingestion), and ( ii ) moving sampled train-ing data from the buffer to learner GPUs (experience de-livery). We model per-sample transfer latency as the sum of these two legs: 𝑇 transfer p𝑝 q “ 𝑥 𝐵𝑊 pactor Ñ𝑝 q ` 𝑥 𝐵𝑊 p𝑝 ÑGPU q ,where 𝑥 is per-sample size and 𝐵𝑊 p¨q is the effective band-width of the path. Effective bandwidth is obtained from mi-crobenchmarks on the deployment stack and captures real-ized throughput under the hardware topology and runtime implementation [21, 22, 45]. To account for locality (intra- vs. inter-node and GPU-rank dependence), 𝐵𝑊 p¨q is looked up from measured bandwidth tables indexed by endpoint type and topology. We consider four placement options: CPU pageable, CPU pinned, sin-gle GPU, and shared GPU. These cover the two factors that govern transfer cost on heterogeneous fabrics: memory tier (pageable/pinned CPU vs. GPU) and device distribution (sin-gle device vs. sharded across multiple devices). Together with the actor-side device type, each placement uniquely deter-mines both legs, making 𝑇 transfer p𝑝 q directly computable. 
+
+Example. Consider a node with 8 GPUs wherein actors run on CPU, the Experience Buffer is sharded across GPUs, and learners run on GPUs. Then actor Ñ 𝑝 uses CPU Ñ GPU bandwidth, while 𝑝 Ñ GPU uses GPU Ñ GPU bandwidth. If a learner samples locally with probability 1 {8 (device-local copy) and remotely with probability 7 {8 (GPU Ñ GPU peer-to-peer), estimated from buffer sharding and sampling be-havior, the expected bandwidth 𝐵𝑊 p𝑝 Ñ GPU q reflects this mixture and yields an accurate latency estimate. 
+
+5.2 Placement Optimization 
+
+Given the transfer model above, Conduit selects the place-ment that minimizes transfer latency subject to buffer capac-ity. Let 𝐶 buf be the required buffer capacity, 𝑥 the per-sample size, and 𝑀𝑒𝑚 p𝑝 q the profiled memory available under place-ment 𝑝 . Among candidate placements P, Conduit solves: 
+
+𝑝 ˚ “ arg min  
+
+> 𝑝 PP
+
+𝑇 transfer p𝑝 q s.t. 𝐶 buf ¨ 𝑥 ď 𝑀𝑒𝑚 p𝑝 q. (1) 
+
+Configuration transparency. Users do not tune placement directly. Conduit derives actor/learner device types and 
+
+𝐶 buf from the RL configuration, profiles 𝑀𝑒𝑚 p¨q and effec-tive 𝐵𝑊 p¨q at initialization, and solves Eq. (1) automatically. Users may optionally restrict candidates, but defaults typ-ically suffice. Although Eq. (1) defines the target optimum, exhaustive search is impractical: effective bandwidths vary with contention and concurrency, and device-subset candi-dates can grow as Op2𝑛 q for 𝑛 devices. Conduit therefore uses an approximate, hardware-aware strategy (Alg. 1) that searches a small candidate set. 
+
+Approximate solution. Conduit chooses placement at startup and during occasional reconfiguration, off the train-ing critical path. It constructs P using two heuristics. ( i)
+
+Cross-node balance: in multi-node runs, Conduit distributes capacity across nodes to avoid inter-node hotspots, since inter-node links are slower than intra-node GPU ØGPU fabrics. ( ii ) Intra-node representatives: within a node, Con-duit considers CPU pinned placement and shared GPU placements over GPU subsets of increasing size, preferring high-bandwidth ranks on non-uniform fabrics. With 𝐺 ď 8GPUs per node, enumerating these subsets remains efficient. Given this reduced P, Conduit scans candidates (Alg. 1, lines 2–5) and selects the feasible placement with the small-est 𝑇 transfer p𝑝 q.
+
+Complexity. Each 𝑇 transfer p𝑝 q evaluation is constant-time, so selection costs Op| P|q . In practice, |P| is small and bounded (e.g., at most 2 𝐺 GPU subsets per node with 𝐺 ď 8), and placement runs outside the critical path. 
+
+5.3 Online Placement Migration 
+
+The placement optimizer selects the initial placement, but in some RL workloads the per-sample size 𝑥 grows during training as observations, sequences, or auxiliary fields ex-pand [37, 52]. When growth makes the current placement infeasible, Conduit switches via a pre-computed placement map to the next feasible low-latency placement, avoiding full online re-optimization. At runtime, migration briefly pauses ingestion and deliv-ery, transfers experience state using a pre-solved plan, and                                
+
+> 7overlap del = 0 , g del ≥1 no overlap + multi-granularity
+> overlap del = 1 , g del ≥1 overlap + multi-granularity
+> Learner Update Delivery
+> overlap del = 0 , g del =1 no overlap + single-granularity
+> D1 D2 D1,2 D4 D3,4 D3 D1,2 D1 D2 D3,4 D4 D3 D1 D1 D1 2D1 3D1 1D1 4
+> D1 2D1 3D1 1
+> D1 4
+> overlap del = 1 ,0<g del <1 overlap + sub-granularity
+> Tsync,del
+> Tdel (gdel )Tupdate
+> overlap ing = 0 , g ing ≥1 no overlap + multi-granularity
+> the latency reduction from overlap outweighs the sync overhead
+> overlap ing = 1 , g ingest ≥1 overlap + multi-granularity
+> Ting (ging )
+> multi-granularity overlap sync latency latency Strategies Scenarios
+
+(a) (b) 
+
+> off-policy on-policy
+
+(c) overlap ing = 0 , g ing =1 no overlap + single-granularity     
+
+> overlap ing = 1 ,0<g ing <1 overlap + sub-granularity
+
+(d)                         
+
+> (overlap ing = 0 ,0<g ing <1) ,(overlap ing = 1 , g ing =1), (overlap del = 0 ,0<g del <1 ) and ( overlap del = 1 , g del =1 ) are not suitable for on-policy
+> Actor Rollout Ingestion
+> Trollout
+> the sync overhead outweighs the latency reduction from overlap the sync overhead outweighs the latency reduction from overlap the latency reduction from overlap outweighs the sync overhead
+> D1 D2 D1,2 D3 D4 D3,4 D1 D2 D1,2 D3 D4 D3,4 D1 D1 D1 2D1 3D1 1D1 4
+> D1 2D1 3D1 1
+> D1 4
+> Tsync,ing
+
+Fig. 10: Ingestion /delivery-path modes: overlap ˆ granularity across iterations (D1–D4) and mini-batches (D1 1–D1 4). 
+
+Algorithm 1: Bandwidth-aware placement (linear scan): select the placement with minimum transfer latency. 
+
+Input: Actor-side device type, required buffer capacity 𝐶 buf , can-didates P, profiled 𝐵𝑊 p¨q and 𝑀𝑒𝑚 p¨q , per-sample size 𝑥 .
+
+Output: Selected placement 𝑝 ˚ 
+
+> 1
+
+𝑝 ˚ Ð None ; 𝑇 min Ð `8 ; 
+
+> 2
+
+foreach 𝑝 P P do  
+
+> 3
+
+if 𝐶 buf ¨ 𝑥 ď 𝑀𝑒𝑚 p𝑝 q then  
+
+> 4
+
+𝑇 Ð 𝑇 transfer p𝑝 q; 
+
+> 5
+
+if 𝑇 ă 𝑇 min then 𝑇 min Ð 𝑇 , 𝑝 ˚ Ð 𝑝 ; 
+
+> 6
+
+return 𝑝 ˚;
+
+resumes both operators under the new placement. Since the EDP decouples actor and learner execution, this adaptation does not stall either side of the training loop. Appendix D gives the migration algorithm and transfer-plan formulation. 
+
+6 Latency-Aware Scheduling of Experience Ingestion and Delivery 
+
+With placement fixed (§5), Conduit further reduces exposed 
+
+experience-path latency by scheduling experience ingestion 
+
+and delivery . Because the EDP (§4) makes these operators independently runnable, Conduit controls when they run (timing : sequential vs. overlapped) and how much each in-vocation processes ( granularity : fractional vs. batched). We outline these opportunities (§6.1), model their latency impact (§6.2), and formulate a cost-based optimizer for the latency-minimizing schedule (§6.3). 
+
+6.1 Scheduling Opportunities 
+
+Each RL iteration traverses two EDP paths: the ingestion path (actor rollout Ñexperience ingestion) and the delivery path (experience delivery Ñlearner update). The EDP makes ingestion and delivery schedulable rather than inline with rollout/update, enabling cross-iteration batching (off-policy) or intra-iteration pipelining (on-policy) to reduce latency. 
+
+Two semantic-free controls. Conduit schedules both op-erators with two knobs: (i) Timing , controlled by 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 ing 
+
+and 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 del P t 0, 1u, decides whether ingestion/delivery overlaps with rollout/update; and (ii) Granularity , controlled by 𝑔 ing and 𝑔 del (§4), decides how much work each invocation performs. Feasible granularities are constrained by Ging and 
+
+Gdel derived from standard RL configuration (§6.3), keeping scheduling algorithm-agnostic. Fig. 10 instantiates these knobs as execution modes. Non-overlapped timing corresponds to (a) and (c), while over-lap corresponds to (b) and (d). Along granularity, 𝑔 ą 1batches units in (a) and (b), 𝑔 “ 1 runs single-unit in (c), and 0 ă 𝑔 ă 1 pipelines mini-batches in (d). Together, these knobs cover the common RL settings—off-policy sequen-tial/overlapped and on-policy sequential/pipelined—under a unified scheduling interface. 
+
+6.2 Iteration-Latency Model 
+
+We model one RL iteration as 𝑇 iter “ 𝑇 ing-path ` 𝑇 del-path ,where 𝑇 ing-path (resp. 𝑇 del-path ) is the exposed latency of the ingestion (resp. delivery) path. Let 𝑇 rollout and 𝑇 update denote the execution time of one actor rollout and one learner up-date. Let 𝑇 ing p𝑔 q and 𝑇 del p𝑔 q denote the wall-clock time of one ingestion/delivery invocation that processes 𝑔 rollout units/training batches (including transfer and processing under placement 𝑝 ˚ from §5). 
+
+Granularity and timing. Processing more data per invo-cation amortizes fixed per-invocation overheads, so we use per-unit costs ¯ 𝑇 ing p𝑔 q “ 𝑇 ing p𝑔 q{ 𝑔 and ¯ 𝑇 del p𝑔 q “ 𝑇 del p𝑔 q{ 𝑔 .Overlap hides part of ingestion/delivery behind rollout/up-date, but adds synchronization overhead. Given a scheduling mode, the exposed ingestion-path time is 𝑇 ing-path “ 𝑇 rollout ` ¯𝑇 ing p𝑔 ing q ` 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 ing ¨ `𝑇 sync,ing ´
+
+ℎ𝑖𝑑𝑒 ing 
+
+˘, and the exposed delivery-path time is 𝑇 del-path “
+
+𝑇 update ` ¯𝑇 del p𝑔 del q` 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 del ¨`𝑇 sync,del ´ℎ𝑖𝑑𝑒 del 
+
+˘. The hidden terms ℎ𝑖𝑑𝑒 ing and ℎ𝑖𝑑𝑒 del capture the overlapable portion of 
+
+8operator latency under off-policy batching and on-policy pipelining; Appendix E details these cases. This compact model matches Fig. 10: larger 𝑔 lowers amortized cost, while overlap hides latency at the cost of synchronization. 
+
+6.3 Cost-Based Scheduling 
+
+Conduit minimizes iteration latency by jointly choosing overlap and granularity for both operators:           
+
+> min 𝑇 ing-path p𝑜𝑣𝑒𝑟𝑙𝑎𝑝 ing , 𝑔 ing q ` 𝑇 del-path p𝑜𝑣𝑒𝑟𝑙𝑎𝑝 del , 𝑔 del q
+> s.t. 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 ing , 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 del P t 0,1u, 𝑔 ing PGing , 𝑔 del PGdel .(2)
+
+Configuration transparency. Users do not tune overlap flags or granularities directly. Conduit derives Ging and Gdel 
+
+from RL configuration—integer granularities for off-policy replay and fractional mini-batch steps for on-policy training— optionally respecting user caps. It then profiles 𝑇 rollout , 𝑇 update ,and operator costs once, enumerates the resulting finite can-didate set, and selects the lowest-latency mode under Eq. (2). §7.5 shows it automatically selects the best configuration. 
+
+Complexity. Conduit solves Eq. (2) in constant time, Op1q.It enumerates all 4 ¨| Ging |¨| Gdel | candidates (two binary over-lap flags), scoring each in constant time from profiled costs; this count is fixed by the RL configuration and independent of workload scale, so the search runs once at initialization (and only re-runs if workload or resources change). 
+
+7 Evaluation 
+
+We evaluate Conduit along the three dimensions of the Experience Data Plane introduced in §2: (i) decoupling , (ii) 
+
+capacity-constrained, bandwidth-aware placement , and (iii) 
+
+latency-aware scheduling . After outlining the experimental setup (§7.1), the evaluation answers the following questions: (1) What is Conduit’s overall performance, and how does it reduce exposed experience-path latency in state-of-the-art distributed RL frameworks? (§7.2) (2) How well does Conduit’s capacity-constrained, bandwidth-aware placement adapt to workloads under heterogeneous interconnect and device-memory limits? (§7.3) (3) How effectively does Conduit’s latency-aware schedul-ing reduce exposed experience-path latency? (§7.4) (4) How does Conduit’s auto-optimizer compare against tuned manual baselines? (§7.5) (5) What is the scalability performance of Conduit? (§7.6) (6) Does Conduit preserve RL convergence? (§7.7) 
+
+7.1 Experimental Setup 
+
+Our experiments use the following setup. 
+
+Testbeds. We conduct experiments on two clusters: (1) an NVIDIA A100 cluster—two nodes, each equipped with eight NVIDIA A100 80 GB GPUs, two Intel Xeon Platinum 8342 CPUs (48 cores in total), and 2 TB RAM, running Red Hat En-terprise 9.5; and (2) an AMD MI250X supercomputer—each node containing eight AMD EPYC 7A53 CPUs (512 cores total) and eight AMD MI250X GPUs (64 GB per GPU die), run-ning SUSE Linux Enterprise Server 15 SP5. We use the A100 cluster for overall efficiency (§7.2), placement (§7.3), sched-uling (§7.4), joint adaptive control (§7.5), and convergence (§7.7). We use the MI250X supercomputer for scalability ex-periments (§7.6) to demonstrate hardware generality and leverage its larger GPU pool (up to 1,024 GPUs). 
+
+Baselines. We compare Conduit against the following three baselines: RLlib [23], an open-source RL framework whose experience buffer is embedded in actor/learner con-trol flow with default CPU placement and request-driven sampling; Gear [44], an RL buffer service that stores trajecto-ries in pinned host memory and uses GPU-driven zero-copy DMA/RDMA to accelerate transfers; and Reverb [2], a dis-tributed buffer service that hosts buffers in CPU memory for scalable ingestion. We also compare against two other RL frameworks, Verl [37] (LLM post-training) and SRL [25], in Appendices A and B. 
+
+RL algorithms. We evaluate three representative RL algo-rithms: Deep Q-Network (DQN) [27] and soft actor-critic (SAC) [12] as off-policy workloads, and proximal policy optimization (PPO) [35] as an on-policy workload. Appen-dix A additionally studies Group Relative Policy Optimiza-tion (GRPO) [36] in an LLM post-training pipeline. 
+
+Environments. We evaluate five environments that span different kinds of experience-path pressure: MountainCar [8], a classic control task with small fixed-size observations; Multi-agent CartPole [40], a cooperative multi-agent task that multiplies per-step experience volume; Meta-World [50] („48 KB per sample), a 50-task robotic manipulation bench-mark with visual observations; Open X-Embodiment [32] (OXE, „192 KB per sample), a large-scale multi-embodiment robotics dataset aggregating 60+ real-robot sources; and a configurable synthetic stress test following [2], whose tran-sition dimension varies from 128 to 20,000 for the placement, scheduling, and adaptive-control studies. 
+
+Metrics. We use end-to-end iteration latency —including actor rollout, experience-path handling, and learner update—as the primary metric. We also measure the exposed experience-path latency , which captures the portion of ingestion and delivery work that is not hidden by overlap with rollout or learner update within each iteration. 
+
+7.2 Overall Effectiveness and Efficiency 
+
+We first evaluate Conduit’s end-to-end benefit by integrat-ing it into RLlib , a production-grade distributed RL frame-work: Conduit drop-in replaces RLlib’s built-in experience buffer without modifying actor/learner control flow. This directly exercises the decoupling dimension, validating that the Experience Data Plane is structurally independent of framework execution logic. We report both end-to-end it-eration latency and exposed experience-path latency, and        
+
+> 9DQN-MC DQN-CP SAC-MW SAC-OXE PPO-MW PPO-OXE
+> 050 100 150 200
+> Latency per iteration (ms)  Exposed experience-path
+> 71%
+> 37%
+> 42%
+> 71%
+> 94% 97%
+> RLlib RLlib + CONDUIT
+> DQN-MC DQN-CP SAC-MW SAC-OXE PPO-MW PPO-OXE
+> 0200 400 600
+> Latency per iteration (ms)  End-to-end
+> 38%
+> 12% 38%
+> 24% 24%
+> 30%
+> RLlib RLlib + CONDUIT
+
+Fig. 11: Conduit’s per-iteration latency reduction over 
+
+RLlib : exposed experience-path (left), end-to-end (right). Workloads: MC=MountainCar, CP=MA-CartPole, MW=Meta-World, OXE=Open X-Embodiment 
+
+omit Gear and Reverb , which are standalone buffer services without compatible drop-in hooks. We test Conduit across three algorithms (DQN, SAC, PPO) and four environments: DQN on MountainCar and 
+
+Multi-agent CartPole , and SAC and PPO on Meta-World and OXE (large visual observations that stress both capacity and bandwidth), using eight actors and eight learners. Fig. 11 reports exposed experience-path latency (left) and end-to-end iteration latency (right) for each (algorithm, en-vironment) pair. Across all workloads, integrating Conduit with RLlib reduces exposed experience-path latency—by up to 71% for DQN, 71% for SAC, and 97% for PPO. These reductions translate into end-to-end improvements of up to 38% (DQN), 38% (SAC), and 30% (PPO). Two EDP levers drive these reductions: scheduling hides experience-path handling behind rollout and update, while bandwidth-aware placement distributes the large buffer across devices to keep transfer costs low. For off-policy DQN and SAC the sav-ings reach end-to-end latency, as replay adds cross-iteration overlap. For on-policy PPO, Conduit cuts experience-path latency sharply, but end-to-end gains remain bounded since freshness limits batching and the residual rollout/update time dominates the critical path. 
+
+Insights. Conduit’s end-to-end benefit scales with the ex-perience path’s share of the iteration: the larger that share, the greater the gain from EDP’s placement and scheduling optimizations. 
+
+7.3 Bandwidth-Aware Placement 
+
+Using the Synthetic Environment , we sweep transition di-mension from 128 to 20 ,000 with buffer capacity 10 6 and batch size 512. This sweep covers both axes of the placement 
+
+dimension: for small transitions, the buffer fits within one GPU and placement simply optimizes bandwidth ( bandwidth-dominated regime ); as transitions grow, the buffer exceeds per-GPU memory and capacity becomes the constraint—only placements with sufficient aggregate memory remain viable (capacity-dominated regime ). 
+
+Conduit vs. state-of-the-art buffer services. Fig. 12 com-pares Conduit against the four placements that Reverb 
+
+(CPU pageable) and Gear (CPU pinned, with GPU-driven 128 1000 2000 5000 10000 20000  
+
+> Transition dimension
+> 10 1
+> 10 2
+> 10 3
+> Exposed experience-path latency (ms, log)  Bandwidth-dominated Capacity-dominated
+> Reverb Gear Single GPU Shared GPU
+> CONDUIT
+> 4.1× 127×
+
+Fig. 12: Placement ablation: Conduit vs. four placements (Reverb =CPU pageable, Gear =CPU pinned with zero-copy ac-cess, single GPU, shared GPU). Missing points denote OOM. d = 128 d = 1000 d = 5000 d = 10000 d = 20000      
+
+> 10 2
+> End-to-end iteration latency (ms, log)
+> replacement (30 ms) replacement (30 ms)
+> OOM
+> Conservative (all-GPU) Greedy (single-GPU) CONDUIT
+> 010 20 30 Iteration number 010 Cumulative latency (s)
+> OOM
+> 1.9×
+
+Fig. 13: Online migration as transition dimension 𝑑 grows, vs. 
+
+Greedy (single GPU) and Conservative (all-GPU) baselines. Top: iteration latency (log scale); bottom: cumulative latency. 
+
+zero-copy access) instantiate, alongside single-GPU and shared-GPU placement. In the bandwidth-dominated regime (128– 5,000), all placements are feasible; single-GPU placement is fastest by eliminating CPU–GPU transfers, so Conduit adopts it, reducing latency by up to 130 ˆ over Reverb and 2.9ˆ over Gear at 𝑑 “5,000. Beyond 5 ,000, single GPU ex-ceeds per-GPU memory and Conduit switches to shared GPU, which dominates via fast GPU–GPU links ( „10 ˆ faster than CPU–GPU), leaving Conduit 127 ˆ faster than Reverb 
+
+and 4 .1ˆ faster than Gear at 𝑑 “20 ,000. These ratios primarily reflect memory-tier placement: both baselines keep experi-ence CPU-resident, and the gap quantifies what bandwidth-aware, GPU-resident placement buys. 
+
+Online migration. Fig. 13 traces this adaptive process over time: as transition dimension grows from 128 to 20 ,000, Con-duit automatically migrates from single GPU to shared GPU when the capacity boundary is crossed. We compare against two baselines that bracket the trade-off. Greedy selects the lowest-latency placement for the initial workload (single GPU per learner); it is fastest while it fits (52–103 ms) but exhausts GPU memory at 𝑑 ě10 ,000. Conservative shards the buffer across all 8 GPUs from the start to guarantee feasibility at peak size; it stays feasible throughout but pays multi-GPU coordination overhead at every dimension (151–403 ms). 
+
+10 32 64 128 256 512 1024                   
+
+> Batch size
+> 10 0
+> 10 1
+> 10 2
+> Exposed experience-path latency (ms, log)
+> Reverb Gear
+> CONDUIT g=2
+> CONDUIT g=4
+> CONDUIT g=8 128 512 1000 2000 5000 10000
+> Transition dimension
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Exposed experience-path latency (ms, log)
+> Reverb Gear
+> CONDUIT g=2
+> CONDUIT g=4
+> CONDUIT g=8 128 512 1000 2000 5000 10000
+> Transition dimension
+> 10 0
+> 10 2
+> Exposed experience-path latency (ms, log)
+> Reverb Gear
+> CONDUIT placement-only ( g=1, no overlap)
+> CONDUIT placement+overlap ( g=1)
+
+Fig. 14: Impact of granularity 𝑔 under varying batch sizes (left) and transition dimensions (middle) for 𝑔 =𝑔 ing =𝑔 del ; the right panel shows the impact of execution timing 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 under varying transition dimensions. 
+
+Conduit combines the strengths of both: it matches Greedy 
+
+while feasible, then absorbs two brief „30 ms replacement spikes (at 𝑑 “10 ,000 and 𝑑 “20 ,000) and holds iteration la-tency at 146 and 266 ms in the two largest segments, 34–46% below Conservative once Greedy has already failed. Each re-placement reallocates the buffer under the new shard layout, reusing freed HBM from the caching allocator so the spike stays in the tens of milliseconds. Over the full 40-iteration trace, Conduit accumulates 1 .9ˆ less cumulative latency than Conservative , while Greedy cannot complete the run. 
+
+Insights. Capacity and bandwidth jointly determine place-ment: Conduit’s cost model selects the lowest-latency fea-sible placement at each operating point, and the same model drives online migration when workload statistics shift, keep-ing placement aligned throughout training. 
+
+7.4 Latency-Aware Scheduling 
+
+This section isolates the benefit of Conduit’s latency-aware scheduling . We study how the two control knobs—execution 
+
+granularity (𝑔 ) and execution timing (𝑜𝑣𝑒𝑟𝑙𝑎𝑝 )—affect ex-posed experience-path latency under increasing workload pressure, and compare against Reverb and Gear (Fig. 14). 
+
+Execution granularity. Using the Synthetic Environment ,we fix timing to sequential execution ( 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 “ 0) and scale workload along two dimensions: (i) batch size 32–1 ,024 at fixed transition dimension 1 ,000, and (ii) transition dimen-sion 128–10 ,000 at fixed batch size 512. The left and middle panels of Fig. 14 report Conduit’s exposed experience-path latency at 𝑔 P t 2, 4, 8u against both baselines. Larger 𝑔 amortizes per-invocation overheads (ker-nel launch, inter-process communication, metadata, inter-rank synchronization) and enables batched GPU through-put (§6.2): on the batch sweep, exposed latency drops from 1.87 ms ( 𝑔 “2) to 0 .57 ms ( 𝑔 “8) at batch 1 ,024. The gain then reverses on harder workloads: at dimension 10 ,000 the op-timum shifts back to 𝑔 “4 (2 .33 ms) and 𝑔 “8 regresses to 3.67 ms, as the per-invocation chunk grows large enough that managing it outweighs the amortization benefit. 
+
+Execution timing. We next isolate timing by varying tran-sition dimension from 128 to 10 ,000 and comparing four con-figurations: Reverb , Gear , Conduit placement-only ( 𝑔 “1, 
+
+𝑜𝑣𝑒𝑟𝑙𝑎𝑝 “0), and Conduit with overlap ( 𝑔 “1, 𝑜𝑣𝑒𝑟𝑙𝑎𝑝 “1). The right panel of Fig. 14 shows that Reverb and Gear (no 128 256 512 1000 2000 5000 10000   
+
+> Transition dimension
+> 10 1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Exposed experience-path latency (ms, log)
+> Manual configurations CONDUIT
+
+Fig. 15: Auto vs. manual over the joint placement ˆ overlap 
+
+ˆ granularity space. Gray: 32 manual configs; red star: Con-duit’s auto pick. 
+
+overlap) suffer 27 ˆ and 4 .4ˆ growth in experience-path latency as transition dimension increases. By contrast, Con-duit’s placement-only mode grows only 2 .5ˆ (3 .12 to 7 .83 ms) by holding experience handling in fast memory; adding over-lap then hides most of this residual behind rollout and update, further reducing the exposed latency. 
+
+Insights. Conduit’s scheduling wins by combining overlap and granularity: overlap hides ingestion/delivery behind roll-out and update, while 𝑔 amortizes per-invocation overheads. 
+
+7.5 Joint Adaptive Control: Auto vs Manual 
+
+This subsection evaluates whether Conduit’s auto-optimizer correctly navigates the joint placement ˆscheduling design space. Using the Synthetic Environment , we sweep 32 man-ual configurations (4 placements ˆ 2 overlap settings ˆ 4granularities) across transition dimensions 128 to 10 ,000, and compare them against Conduit’s automatic choice. Fig. 15 shows that the cloud span widens from 82 .9 ms at dimension “ 128 to 888 .5 ms at dimension “ 10 ,000, and that the lowest manual point is reached by different configura-tions across dimensions: single GPU with overlap and 𝑔 “8at dimension “ 128, and single GPU with overlap and 𝑔 “2 at dimension “ 10 , 000. Conduit’s automatic choice sits on the lower envelope because the profile-driven cost model ranks candidates correctly at every operating point. Appendix F give further details of the cost model’s accuracy. 
+
+Insights. Conduit’s auto-optimizer matches the best man-ual point on every workload without re-tuning, while any fixed configuration must compromise across workloads. 
+
+11 1 2 4 8 16 
+
+> #GPUs
+> 10 1
+> 10 2
+> End-to-end iteration latency (ms, log)
+> Reverb Gear
+> CONDUIT
+> Ideal
+
+(a) A100 cluster: 1–16 GPUs at batch size 2,048. 8 16 32 64 128 256 512 1024 
+
+> #GPUs
+> 10 1
+> 10 2
+> 10 3
+> End-to-end iteration latency (ms, log)
+> Ideal
+> CONDUIT CONDUIT w/o adaptive placement
+> 256 512 1024 50 60 70 80
+
+(b) MI250X supercomputer: 8–1,024 GPUs at batch size 32,768. 
+
+Fig. 16: Strong scaling of Conduit with GPU count on an NVIDIA A100 cluster and an AMD MI250X supercomputer (end-to-end iteration time, log scale). 
+
+7.6 Scalability Analysis 
+
+We evaluate Conduit’s strong-scaling behavior on two plat-forms (Fig. 16). On the A100 cluster, we fix the total roll-out/training batch size to 2,048 and scale from 1 to 16 A100 GPUs, comparing against two buffer-service baselines, Gear 
+
+and Reverb . On the MI250X supercomputer, we scale Con-duit from 8 to 1,024 MI250X GPUs under a fixed work-load of 32,768 and compare against Conduit-w/o-adaptive-placement , which disables adaptive placement. Fig. 16a shows that Conduit scales more efficiently than both buffer-service baselines. From 1 to 16 GPUs, Conduit reduces end-to-end iteration latency from 95 ms to 15 ms (84% reduction), remaining consistently below both Gear 
+
+and Reverb at every scale. At 16 GPUs, Conduit achieves 57% lower latency than Gear (15 vs. 35 ms) and 65% lower than Reverb (15 vs. 43 ms). All systems deviate from ideal linear scaling at larger GPU counts due to synchronization overhead, but Conduit maintains the smallest gap. Fig. 16b shows that Conduit scales into the supercom-puter regime. From 8 to 1,024 GPUs, Conduit cuts end-to-end iteration latency from 614 ms to 50 ms (92%), and beats Conduit-w/o-adaptive-placement by 9–21% at all counts (e.g., 110 vs. 140 ms at 64 GPUs, 50 vs. 55 ms at 1,024). This gap reflects adaptive placement on the MI250X’s non-uniform intra-node fabric (links of roughly 100–400 GB/s): Conduit prefers higher-bandwidth GPU ranks (0/2/4/6 in Fig. 4a) over slower ones (1/3/5/7). We omit Gear and Reverb here, as they lack AMD support [1, 10]; this experiment thus shows hard-ware generality and adaptive placement at scale rather than a head-to-head comparison. 
+
+Insights. Conduit scales across both NVIDIA and AMD platforms, staying faster than baselines at every scale. It tracks the ideal trend at small scales and keeps a smaller gap at large scales by reducing exposed experience-path latency on the critical path. On the MI250X supercomputer, adaptive 0 4000 8000  
+
+> Iteration number
+> 200
+> 150
+> 100
+> Episode reward mean  DQN on MountainCar
+> RLlib + CONDUIT
+> RLlib
+
+(a) Reward vs. training iteration. 0 400 800   
+
+> Wall clock time (seconds)
+> 200
+> 150
+> 100
+> Episode reward mean  DQN on MountainCar
+> RLlib + CONDUIT
+> RLlib
+> 1.44× faster to 8000 iters
+
+(b) Reward vs. wall-clock time. 10 20 30 40 50  
+
+> Iteration number
+> 2000 4000
+> Episode reward mean  PPO on Meta-World
+> RLlib + CONDUIT
+> RLlib
+
+(c) Reward vs. training iteration. 0 100 200    
+
+> Wall clock time (seconds)
+> 02000 4000
+> Episode reward mean  PPO on Meta-World
+> RLlib + CONDUIT
+> RLlib
+> 1.25 ×faster to 50 iters
+
+(d) Reward vs. wall-clock time. 
+
+Fig. 17: Convergence analysis for Conduit on RLlib. 
+
+placement further improves scaling by avoiding slow ranks under non-uniform intra-node links. 
+
+7.7 Convergence and Correctness Analysis 
+
+We evaluate (Fig. 17) whether Conduit changes RL training behavior by comparing the learning curves of RLlib with and without Conduit on DQN/ MountainCar (off-policy) and PPO/ Meta-World (on-policy), each with eight actors and eight learners. The left column reports episode reward ver-sus training iteration; Conduit closely matches the baseline trend on both tasks, indicating no observable impact on con-vergence. The right column reports the same metric versus wall-clock time; Conduit reaches comparable reward lev-els sooner. This time-to-quality gain comes from reducing exposed experience-path latency, which shortens iteration time without changing algorithm semantics. Together with the invariant-preserving EDP boundary in §4, this result sup-ports semantics preservation across the evaluated on-policy and off-policy settings. 
+
+8 Related Work 
+
+Replay buffers and distributed RL systems. Large RL systems decouple actors and learners via replay buffers and actor/learner parallelism—Ape-X [15], importance-weighted actor-learner architectures (IMPALA) [7], and SEED RL [6]. Other work scales multi-GPU distributed reinforcement learn-ing (DRL) via finer-grained GPU sharing [46], and reinforce-ment learning from human feedback (RLHF)/large-model stacks optimize model execution and orchestration ( RLlib [23], 
+
+Verl [37], PUZZLE [20]), but these efforts target compute rather than the experience path. Replay-buffer services (Re-verb [2]) provide APIs and sampling but treat the buffer as passive storage driven by actor/learner loops. Conduit is complementary: it treats the experience path itself as the op-timization target, cutting exposed latency without changing algorithm logic. 
+
+Decoupling and pipelining for RL training. Asynchro-nous actor–learner execution improves throughput (A3C [26], IMPALA [7]), but experience-path handling often runs inline 
+
+12 or as fixed background behavior, limiting control over when 
+
+it runs and how much it processes. Conduit exposes this control explicitly through EDP. 
+
+Data movement and placement in heterogeneous train-ing stacks. Prior work reduces training overhead by op-timizing placement and movement across heterogeneous memory and network fabrics [21, 22, 45], and recent RL systems extend this to placing computation—models and parallelism—across heterogeneous GPUs (HetRL [14]). RL exacerbates these costs because transient experiences re-peatedly traverse the actor Ñ Experience Buffer Ñ learner path; Conduit targets this path with capacity-constrained, bandwidth-aware Experience Buffer placement. 
+
+Summary. Across these lines of work, the experience path remains embedded in framework execution or behind passive services; Conduit instead exposes it as an explicit, indepen-dently optimizable runtime surface. 
+
+9 Conclusion 
+
+We presented Conduit, a framework-agnostic runtime that makes the experience path an independently optimizable stage on the actor Ñ Experience Buffer Ñ learner path. Con-duit realizes the Experience Data Plane (EDP), exposing expe-rience ingestion , placement , and delivery as explicit runtime control points that run asynchronously while preserving on-policy freshness and off-policy replay semantics. Guided by measured bandwidths and a compact latency model, it applies capacity-constrained, bandwidth-aware placement and latency-aware scheduling, reducing exposed experience-path latency and improving end-to-end training across dis-tributed RL workloads. 
+
+References 
+
+[1] BigRL Team. 2023. GEAR: GPU-centric Experience Replay System. 
+
+https://github.com/bigrl-team/gear . Accessed: 2026-01-29. [2] Albin Cassirer, Gabriel Barth-Maron, Eugene Brevdo, Sabela Ramos, Toby Boyd, Thibault Sottiaux, and Manuel Kroiss. 2021. Reverb: A framework for experience replay. arXiv preprint arXiv:2102.04736 
+
+(2021). [3] Yuming Chen, Jiangyan Feng, Haodong Zhang, Lijun Gong, Feng Zhu, Rui Zhao, Qibin Hou, Ming-Ming Cheng, and Yibing Song. 2025. Re-Aligning Language to Visual Objects with an Agentic Workflow. In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net. https://openreview. net/forum?id=MPJ4SMnScw 
+
+[4] Pramod Chunduri, Jaeho Bang, Yao Lu, and Joy Arulraj. 2022. Zeus: Efficiently localizing actions in videos using reinforcement learning. In Proceedings of the 2022 International Conference on Management of Data . 545–558. [5] Daniele De Sensi, Lorenzo Pichetti, Flavio Vella, Tiziano De Matteis, Zebin Ren, Luigi Fusco, Matteo Turisini, Daniele Cesarini, Kurt Lust, Animesh Trivedi, et al. 2024. Exploring GPU-to-GPU communica-tion: Insights into supercomputer interconnects. In SC24: International Conference for High Performance Computing, Networking, Storage and Analysis . IEEE, 1–15. [6] Lasse Espeholt, Raphaël Marinier, Piotr Stanczyk, Ke Wang, and Marcin Michalski. 2019. SEED RL: Scalable and efficient deep-RL with acceler-ated central inference. arXiv preprint arXiv:1910.06591 (2019). [7] Lasse Espeholt, Hubert Soyer, Remi Munos, Karen Simonyan, Vlad Mnih, Tom Ward, Yotam Doron, Vlad Firoiu, Tim Harley, Iain Dunning, et al. 2018. IMPALA: Scalable distributed deep-RL with importance weighted actor-learner architectures. In International Conference on Machine Learning . PMLR, 1407–1416. [8] Farama Foundation. 2025. Gymnasium: Classic Control. https: //gymnasium.farama.org/environments/classic_control/ .[9] Wei Fu, Jiaxuan Gao, Xujie Shen, Chen Zhu, Zhiyu Mei, Chuyi He, Shusheng Xu, Guo Wei, Jun Mei, Jiashu Wang, et al. 2025. AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Lan-guage Reasoning. arXiv preprint arXiv:2505.24298 (2025). [10] Google DeepMind. 2023. Reverb Issue #120: AMD GPU Support. https: //github.com/google-deepmind/reverb/issues/120 . Accessed: 2026-01-29. [11] Jiayuan Gu, Fanbo Xiang, Xuanlin Li, Zhan Ling, Xiqiang Liu, Tongzhou Mu, Yihe Tang, Stone Tao, Xinyue Wei, Yunchao Yao, et al. 2023. ManiSkill2: A unified benchmark for generalizable manipulation skills. In International Conference on Learning Representations .[12] Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine. 2018. Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor. In International Conference on Machine Learning . PMLR, 1861–1870. [13] Nicklas Hansen, Hao Su, and Xiaolong Wang. 2024. TD-MPC2: Scalable, robust world models for continuous control. In International Conference on Learning Representations .[14] Yongjun He, Shuai Zhang, Jiading Gai, Xiyuan Zhang, Boran Han, Bernie Wang, Huzefa Rangwala, and George Karypis. 2026. HetRL: Efficient Reinforcement Learning for LLMs in Heterogeneous Envi-ronments. In Proceedings of Machine Learning and Systems (MLSys) .arXiv:2512.12476. [15] Dan Horgan, John Quan, David Budden, Gabriel Barth-Maron, Mat-teo Hessel, Hado Van Hasselt, and David Silver. 2018. Distributed prioritized experience replay. arXiv preprint arXiv:1803.00933 (2018). [16] Jian Hu, Xibin Wu, Wei Shen, Jason Klein Liu, Weixun Wang, Songlin Jiang, Haoran Wang, Hao Chen, Bin Chen, Wenkai Fang, et al. 2025. OpenRLHF: A Ray-based Easy-to-use, Scalable and High-performance RLHF Framework. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: System Demonstrations . 656– 666. [17] Zhe Huang. 2022. Distributed reinforcement learning for autonomous driving . Carnegie Mellon University. [18] Matthias Jasny, Tobias Ziegler, Tim Kraska, Uwe Roehm, and Carsten Binnig. 2020. DB4ML—An in-memory database kernel with machine learning support. In Proceedings of the 2020 ACM SIGMOD International Conference on Management of Data . 159–173. [19] Linus Jern, Valter Uotila, Cong Yu, and Bo Zhao. 2025. Agent-Q: Fine-Tuning Large Language Models for Quantum Circuit Generation and Optimization. 2025 IEEE International Conference on Quantum Computing and Engineering (QCE) 01 (2025), 1621–1632. https://api. semanticscholar.org/CorpusID:277786843 
+
+[20] Kinman Lei, Yuyang Jin, Mingshu Zhai, Kezhao Huang, Haoxing Ye, and Jidong Zhai. 2024. PUZZLE: Efficiently Aligning Large Language Models through Light-Weight Context Switch. In 2024 USENIX Annual Technical Conference (USENIX ATC 24) . USENIX Association, 127–140. [21] Ang Li, Shuaiwen Leon Song, Jieyang Chen, Jiajia Li, Xu Liu, Nathan R Tallent, and Kevin J Barker. 2019. Evaluating modern GPU inter-connect: PCIe, NVLink, NV-SLI, NVSwitch and GPUDirect. IEEE Transactions on Parallel and Distributed Systems 31, 1 (2019), 94–110. [22] Ang Li, Shuaiwen Leon Song, Jieyang Chen, Xu Liu, Nathan Tallent, and Kevin Barker. 2018. Tartan: Evaluating modern GPU interconnect via a multi-GPU benchmark suite. In 2018 IEEE International Sympo-sium on Workload Characterization (IISWC) . IEEE, 191–202. [23] Eric Liang, Zhanghao Wu, Michael Luo, Sven Mika, Joseph E Gonzalez, and Ion Stoica. 2021. RLlib Flow: Distributed reinforcement learning is 13 a dataflow problem. Advances in Neural Information Processing Systems 
+
+34 (2021), 5506–5517. [24] Zhihong Liu, Xin Xu, Peng Qiao, and Dongsheng Li. 2024. Acceler-ation for deep reinforcement learning using parallel and distributed computing: A survey. Comput. Surveys 57, 4 (2024), 1–35. [25] Zhiyu Mei, Wei Fu, Jiaxuan Gao, Guangju Wang, Huanchen Zhang, and Yi Wu. 2023. SRL: Scaling distributed reinforcement learning to over ten thousand cores. arXiv preprint arXiv:2306.16688 (2023). [26] Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu. 2016. Asynchronous methods for deep reinforcement learning. In International Conference on Machine Learning . PMLR, 1928– 1937. [27] Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Alex Graves, Ioannis Antonoglou, Daan Wierstra, and Martin Riedmiller. 2013. Playing Atari with Deep Reinforcement Learning. arXiv preprint arXiv:1312.5602 (2013). [28] Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare, Alex Graves, Martin Riedmiller, An-dreas K Fidjeland, Georg Ostrovski, et al. 2015. Human-level control through deep reinforcement learning. Nature 518, 7540 (2015), 529– 533. [29] Philipp Moritz, Robert Nishihara, Stephanie Wang, Alexey Tumanov, Richard Liaw, Eric Liang, Melih Elibol, Zongheng Yang, William Paul, Michael I. Jordan, and Ion Stoica. 2018. Ray: A Distributed Framework for Emerging AI Applications. In 13th USENIX Symposium on Operating Systems Design and Implementation, OSDI 2018, Carlsbad, CA, USA, October 8-10, 2018 , Andrea C. Arpaci-Dusseau and Geoff Voelker (Eds.). USENIX Association, 561–577. https://www.usenix.org/conference/ osdi18/presentation/nishihara 
+
+[30] Daniel Eugênio Neves, Lucila Ishitani, and Zenilton Kleber Goncalves do Patrocinio Junior. 2024. Advances and challenges in learning from experience replay. Artificial Intelligence Review 58, 2 (2024), 54. [31] Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll Wain-wright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, et al. 2022. Training language models to follow instructions with human feedback. Advances in Neural Information Processing Systems 35 (2022), 27730–27744. [32] Abby O’Neill, Abdul Rehman, Abhiram Maddukuri, Abhishek Gupta, Abhishek Padalkar, Abraham Lee, Acorn Pooley, Agrim Gupta, Ajay Mandlekar, Ajinkya Jain, et al. 2024. Open X-Embodiment: Robotic learning datasets and RT-X models. In 2024 IEEE International Confer-ence on Robotics and Automation (ICRA) . IEEE, 6892–6903. [33] Qwen. 2025. Qwen2.5-Math-7B. https://huggingface.co/Qwen/Qwen2. 5-Math-7B .[34] Tom Schaul, John Quan, Ioannis Antonoglou, and David Silver. 2016. Prioritized Experience Replay. In 4th International Conference on Learn-ing Representations, ICLR 2016, San Juan, Puerto Rico, May 2-4, 2016, Conference Track Proceedings , Yoshua Bengio and Yann LeCun (Eds.). 
+
+http://arxiv.org/abs/1511.05952 
+
+[35] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. 2017. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347 (2017). [36] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, YK Li, Yang Wu, et al. 2024. DeepSeekMath: Pushing the limits of mathematical reasoning in open language models. arXiv preprint arXiv:2402.03300 (2024). [37] Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2025. Hybrid-Flow: A flexible and efficient RLHF framework. In Proceedings of the Twentieth European Conference on Computer Systems . 1279–1297. [38] Richard S. Sutton and Andrew G. Barto. 2018. Reinforcement Learning: An Introduction (2nd ed.). MIT Press. [39] Zheyue Tan, Mustapha Abdullahi, Tuo Shi, Huining Yuan, Zelai Xu, Chao Yu, Boxun Li, and Bo Zhao. 2025. EARL: Efficient Agentic Reinforcement Learning Systems for Large Language Mod-els. CoRR abs/2510.05943 (2025). doi: 10.48550/ARXIV.2510.05943 
+
+arXiv:2510.05943 [40] Jordan Terry, Benjamin Black, Nathaniel Grammel, Mario Jayakumar, Ananth Hari, Ryan Sullivan, Luis S Santos, Clemens Dieffendahl, Car-oline Horsch, Rodrigo Perez-Vicente, et al. 2021. PettingZoo: Gym for multi-agent reinforcement learning. Advances in Neural Information Processing Systems 34 (2021), 15032–15043. [41] The Ray Team. [n. d.]. Episodes — RLlib Documentation. Ray Documen-tation. https://docs.ray.io/en/latest/rllib/single-agent-episode.html 
+
+Accessed: 2026-01-17. [42] The TensorFlow Authors. [n. d.]. tf_agents.trajectories.Trajectory. TensorFlow Agents API Documentation. https://www.tensorflow.org/ agents/api_docs/python/tf_agents/trajectories/Trajectory Accessed: 2026-01-17. [43] Sathish S Vadhiyar, Graham E Fagg, and Jack Dongarra. 2000. Auto-matically tuned collective communications. In SC’00: Proceedings of the 2000 ACM/IEEE Conference on Supercomputing . IEEE, 3–3. [44] Hanjing Wang, Man-Kit Sit, Congjie He, Ying Wen, Weinan Zhang, Jun Wang, Yaodong Yang, and Luo Mai. 2023. GEAR: A GPU-centric experience replay system for large reinforcement learning models. In 
+
+International Conference on Machine Learning . PMLR, 36380–36390. [45] Qi Wang, Ludmila Cherkasova, Jun Li, and Haris Volos. 2016. Intercon-nect emulator for aiding performance analysis of distributed memory applications. In Proceedings of the 7th ACM/SPEC on International Con-ference on Performance Engineering . 75–83. [46] Yuke Wang, Boyuan Feng, Zheng Wang, Guyue Huang, Tong Geng, Ang Li, and Yufei Ding. 2025. GMI-DRL: Empowering Multi-GPU DRL with Adaptive-Grained Parallelism. In 2025 USENIX Annual Technical Conference (USENIX ATC 25) . USENIX Association, 89–103. [47] Zhengtong Yan, Valter Uotila, and Jiaheng Lu. 2023. Join order se-lection with deep reinforcement learning: fundamentals, techniques, and challenges. Proceedings of the VLDB Endowment 16, 12 (2023), 3882–3885. [48] Zhewei Yao, Reza Yazdani Aminabadi, Olatunji Ruwase, Samyam Rajb-handari, Xiaoxia Wu, Ammar Ahmad Awan, Jeff Rasley, Minjia Zhang, Conglong Li, Connor Holmes, et al. 2023. DeepSpeed-Chat: Easy, fast and affordable RLHF training of ChatGPT-like models at all scales. 
+
+arXiv preprint arXiv:2308.01320 (2023). [49] Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo, Yu Yue, Weinan Dai, Tiantian Fan, Gaohong Liu, Lingjun Liu, et al. 2025. DAPO: An open-source LLM reinforcement learning system at scale. 
+
+arXiv preprint arXiv:2503.14476 (2025). [50] Tianhe Yu, Deirdre Quillen, Zhanpeng He, Ryan Julian, Karol Hausman, Chelsea Finn, and Sergey Levine. 2020. Meta-World: A benchmark and evaluation for multi-task and meta reinforcement learning. In 
+
+Conference on Robot Learning . PMLR, 1094–1100. [51] Ruiqi Zhang, Guang Chen, Jing Hou, Zhijun Li, and Alois Knoll. 2022. PIPO: Policy optimization with permutation-invariant constraint for distributed multi-robot navigation. In 2022 IEEE International Confer-ence on Multisensor Fusion and Integration for Intelligent Systems (MFI) .IEEE, 1–7. [52] Yinmin Zhong, Zili Zhang, Bingyang Wu, Shengyu Liu, Yukun Chen, Changyi Wan, Hanpeng Hu, Lei Xia, Ranchen Ming, Yibo Zhu, et al. 2025. Optimizing RLHF training for large language models with stage fusion. In 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) . 489–503. [53] Huanzhou Zhu, Bo Zhao, Gang Chen, Weifeng Chen, Yijie Chen, Liang Shi, Yaodong Yang, Peter Pietzuch, and Lei Chen. 2023. MSRL: Distributed reinforcement learning with dataflow fragments. In 2023 USENIX Annual Technical Conference (USENIX ATC 23) . 977–993. 14 A Using Conduit for LLM Post-Training 
+
+Conduit targets traditional distributed RL, but its EDP is defined over the experience path and is independent of frame-work execution logic. We show that it also generalizes to RL-based LLM post-training by integrating it into Verl [37]. 
+
+Ingestion and delivery costs. In LLM post-training, the work that turns rollouts into training-ready batches is sub-stantial: each sample requires reward (and, for actor-critic methods, value) computation [37, 52], and batches are variable-length sequences carrying auxiliary fields (e.g., rewards and masks) [16, 31]. Conduit abstracts this work as its two experience-path operators, ingestion and delivery , both of which lie on the critical path. 
+
+Integration with Verl . Verl [37] is a state-of-the-art RLHF framework whose per-iteration dataflow forms an experi-ence path: each iteration generates rollouts and then turns them—through log-prob, reward, and advantage computation— into the training batch consumed by the update. Conduit maps this post-generation processing onto experience inges-tion and the hand-off of the training batch to the learner onto experience delivery (Tab. 3). By exposing these as in-dependently schedulable operators, the EDP lets Conduit overlap ingestion work that Verl otherwise runs serially on the critical path: here, reward depends only on the generated sequences, so Conduit runs it concurrently with the remain-ing post-generation processing rather than afterward, with-out changing Verl ’s reward logic, loss, or compute engines. 
+
+Setup and results. We evaluate this integration by run-ning GRPO [36] on the DAPO-Math-17k [49] dataset with the Qwen2.5-Math-7B [33] model for the task of generating Python code to solve math problems on an 8-GPU NVIDIA A100 node (§7.1). Integrating Conduit reduces exposed experience-path latency from 42 s to 20 s per iteration (52% re-duction), which translates into a 4% end-to-end reduction, as LLM rollout and gradient update dominate iteration time; at industrial post-training scale, even single-digit per-iteration savings accumulate into substantial wall-clock and cost sav-ings. 
+
+B Using Conduit on SRL 
+
+We further verify this by integrating Conduit into SRL [25]. 
+
+Integration with SRL . SRL [25] is a state-of-the-art dis-tributed RL framework that splits RL training across ac-tor, policy, and trainer workers operating concurrently via streaming dataflows. Its experience-path, however, remains embedded: it resides in pinned CPU memory and runs reac-tively with a fixed one-step overlap (Tab. 1). Conduit drop-in replaces it: SRL ’s workers retain their streaming control flow, while Conduit takes over experience placement and the timing and granularity of ingestion and delivery. 
+
+Setup and results. We run off-policy DQN on Qbert [27] and on-policy PPO on Meta-World [50] on the NVIDIA A100 cluster (§7.1), with eight actors and eight learners; each               
+
+> Tab. 2: Conduit on SRL : per-iteration end-to-end and exposed experience-path latency (ms).
+> End-to-end Exp-path Workload SRL +Conduit SRL +Conduit DQN–Qbert 275.8 191.3 ( Ó31%) 106.6 18.6 ( Ó83%) PPO–Meta-World 235.9 193.6 ( Ó18%) 63.5 23.2 ( Ó63%)
+
+learner uses SRL ’s default policy network. Tab. 2 reports per-iteration latency. Integrating Conduit reduces exposed experience-path latency by 83% for DQN and 63% for PPO, translating into 31% and 18% lower end-to-end iteration la-tency, respectively. We observe a similar off-policy vs. on-policy trend as in RLlib (§7.2): replay permits batching and cross-iteration overlap, so DQN sees larger end-to-end gains; for PPO, rollout and update dominate iteration time to begin with, and freshness constraints further limit how much of the remaining experience-path latency can be hidden. 
+
+C Correctness Invariants 
+
+Conduit preserves RL training correctness by maintaining two invariants. 
+
+Invariant 1: Training-data integrity. Conduit preserves the semantic integrity of experience tuples along the ac-tor Ñ Experience Buffer Ñ learner path. (1) The Experience Data Plane introduces lightweight boundaries but does not change contents; it only stages data for decoupled execution (§4). (2) Bandwidth-aware placement changes only where 
+
+experiences reside (CPU/GPU, local/remote), not what they contain, so tuple semantics and batch composition are pre-served (§5). (3) Any processing during experience ingestion and experience delivery is algorithm-defined and registered through Conduit’s interface (§3); Conduit schedules and executes these functions without altering their behavior. 
+
+Invariant 2: Algorithm-specific freshness constraints. 
+
+Conduit enforces the freshness and replay semantics re-quired by the RL algorithm. For on-policy training, updates must consume samples from the current policy iteration, so Conduit allows only within-iteration mini-batch pipelin-ing and excludes cross-iteration reuse by construction (§4). For off-policy training, replay across iterations is permitted, so Conduit may batch and prefetch samples while bound-ing staleness through the EDP configurations (§4). Replay state such as priorities [34] is updated by algorithm-defined callbacks (Invariant 1(3)), whose buffer dependencies Con-duit leaves intact. In all cases, the scheduler chooses overlap and granularity only from these feasible spaces, ensuring optimization never violates correctness (§6). 
+
+D Placement-Migration Details 
+
+We detail the online placement migration introduced in §5.3: the runtime procedure (Alg. 2) and the transfer-plan formu-lation that minimizes migration makespan. 
+
+> 15
+
+Tab. 3: Conduit mapped onto Verl ’s per-iteration experience path (GRPO): post-generation processing (log-prob, reward, advantage) is ingestion ; the hand-off of the training batch to the update workers is delivery .
+
+# Verl stage Role 1 generate_sequences (rollout) actor (upstream) 2 old / ref log-prob 
+
+EDP ingestion 3 reward, KL penalty 4 compute_advantage 
+
+5 dispatch batch to update workers delivery 6 update_actor learner (downstream) 
+
+During the offline profiling phase, Conduit sweeps a dis-cretized range of per-sample sizes and solves the placement scan once per point, producing a compact placement map 
+
+M. At runtime, migration resolves Mp𝑥 q, briefly pauses in-gestion and delivery, transfers data to the new placement, and resumes under the updated placement. The EDP bound-aries keep actors and learners decoupled while the buffer reallocates. A placement specifies a device set and the data volume held on each device. Migrating from placement 𝑝 (device set 
+
+𝐷 ) to 𝑝 1 (device set 𝐷 1) requires deciding how much data each source device sends to each target device. Let 𝑓 𝑖 𝑗 denote the volume sent from 𝑑 𝑖 P𝐷 to 𝑑 1 
+
+> 𝑗
+
+P𝐷 1; since transfers execute in parallel on dedicated streams, the migration makespan is the slowest individual transfer. Conduit minimizes this makespan: min   
+
+> 𝑓 𝑖 𝑗 ě0
+
+max 
+
+> 𝑖,𝑗
+
+𝑓 𝑖 𝑗 
+
+𝐵𝑊 p𝑑 𝑖 Ñ𝑑 1 
+
+> 𝑗
+
+q s.t. ř 
+
+> 𝑗
+
+𝑓 𝑖 𝑗 “ 𝑉 𝑖 , ř 
+
+> 𝑖
+
+𝑓 𝑖 𝑗 “ 𝑉 1 
+
+> 𝑗
+
+, (3) where 𝑉 𝑖 is the data volume on 𝑑 𝑖 and 𝑉 1 
+
+> 𝑗
+
+is the required volume on 𝑑 1 
+
+> 𝑗
+
+. Since the placement map has only a small number of regions, Conduit pre-computes transfer plans for the expected transitions and reuses them online. 
+
+E Iteration-Latency Model Details 
+
+We expand the iteration-latency model introduced in §6.2, making explicit the hidden-latency terms behind its compact exposed-latency form. For ingestion and delivery, overlap can hide at most the shorter of the neighboring compute stage and the per-unit operator cost: 
+
+ℎ𝑖𝑑𝑒 ing “ 𝛾 p𝑔 ing q ¨ min `𝑇 rollout , ¯𝑇 ing p𝑔 ing q˘, (4) 
+
+ℎ𝑖𝑑𝑒 del “ 𝛾 p𝑔 del q ¨ min `𝑇 update , ¯𝑇 del p𝑔 del q˘. (5) The factor 𝛾 p𝑔 q captures how much of that bound is practi-cally overlapable: 
+
+𝛾 p𝑔 q “ 
+
+#
+
+1, 𝑔 ě 11 ´ 𝑔, 0 ă 𝑔 ă 1. (6) 
+
+Algorithm 2: Online placement migration.                                                       
+
+> Input: Placement map M, pre-solved transfer plans F, active placement 𝑝 ˚, per-sample size 𝑥 .
+> Output: Updated active placement 𝑝 ˚
+> 1𝑝 ˚
+> new ÐMp𝑥 q;// Oplog 𝑅 qlookup
+> 2If 𝑝 ˚
+> new “𝑝 ˚then return 𝑝 ˚;// no migration needed
+> 3t𝑓 𝑖 𝑗 u Ð Fp𝑝 ˚, 𝑝 ˚
+> new q;// pre-computed plan
+> 4Pause ingestion and delivery operators;
+> 5foreach p𝑑 𝑖 , 𝑑 1
+> 𝑗 qwith 𝑓 𝑖 𝑗 ą0in parallel do
+> 6Transfer 𝑓 𝑖 𝑗 data: 𝑑 𝑖 Ñ𝑑 1
+> 𝑗 on dedicated stream;
+> 7𝑝 ˚Ð𝑝 ˚
+> new ;
+> 8Resume ingestion and delivery under 𝑝 ˚;
+> 9return 𝑝 ˚;
+
+Tab. 4: Cost-model accuracy per workload dimension 𝑑 of Fig. 15 ( 32 configurations each). For every dimension, the pre-dicted ordering of the top-8 configurations exactly matches the measured ordering. 
+
+Best 𝑇 iter (ms) 
+
+𝑑 Measured Predicted Top-8 ranking match 128 17 .1 20 .1 ✓
+
+256 18 .3 20 .8 ✓
+
+512 25 .4 29 .9 ✓
+
+1,000 26 .4 33 .9 ✓
+
+2,000 30 .0 35 .8 ✓
+
+5,000 42 .6 43 .2 ✓
+
+10 ,000 48 .6 58 .9 ✓
+
+Thus, in off-policy batching ( 𝑔 ě 1), overlap can hide the full per-unit operator cost, while in on-policy fractional pipelin-ing (0 ă 𝑔 ă 1), only the unexposed fraction scales with 
+
+p1 ´ 𝑔 q.
+
+F Cost-Model Accuracy 
+
+Conduit’s optimizer selects configurations by argmin over cost-model predictions, so rank fidelity matters more than pointwise accuracy. We evaluate both on the 224 manual configurations of Fig. 15 (seven workload dimensions ˆ 32 configurations each), predicting each configuration’s 𝑇 iter 
+
+with the model of §6.2 and comparing against measure-ment (Tab. 4). The comparison here uses 𝑇 iter , the optimizer’s objective in Eq. (2), rather than the exposed experience-path latency plotted in Fig. 15. Pointwise, predictions follow measurements with near-perfect linear correlation (Pearson 
+
+𝑟 “0.990) and low absolute error (MAPE 20 .8%). Rank-wise, the model is stronger still: for every dimension, the predicted ordering of the eight lowest-latency configurations exactly matches the measured ordering, so the optimizer always picks the truly best configuration.

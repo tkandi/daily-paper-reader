@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-22</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-23</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 18 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 15 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-22 20:56:07 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-23 19:33:21 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成 18 篇论文筛选与阅读，其中 7 篇精读、11 篇速读，聚焦大模型训练、推理与联邦学习。</p>
-<p>最值得关注的是可变长度训练加速的嵌套序列并行，以及低精度流水线训练在捕获图环境下的状态与资源管理，两篇均获 10 分。</p>
-<p>建议普通读者先精读这两篇高分论文；若更关心应用落地，再关注多租户推理的延迟公平与大规模推理负载均衡。</p>
+<p>今日聚焦高效训练与大规模智能体基础设施，完成 15 篇论文筛选，其中 4 篇进入精读。</p>
+<p>最值得关注的是 JEPA 的掩码感知高效训练，以及 FlashBoB 对 Softmax Attention 精确二阶反传的 I/O 优化；同时可留意 DeepSeek 的大规模 Agentic 训练沙箱。</p>
+<p>普通读者建议先从两篇 8 分精读把握训练效率主线，再按兴趣延伸到联邦学习、RISC-V 与智能体训练。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="NSP: Accelerating Variable-Length LLM Training via Nested Sequence Parallelism">NSP: Accelerating Variable-Length LLM Training via Nested Sequence Parallelism</span></li><li><span class="dpr-home-dashboard-paper-title" title="Explicit State and Resource Contracts for Low-Precision Pipeline Parallel Training under Captured Graphs">Explicit State and Resource Contracts for Low-Precision Pipeline Parallel Training under Captured Graphs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Weave: Fine-Grained Dynamic SM Scheduling in an MoE Megakernel for Compute-Communication Overlap">Weave: Fine-Grained Dynamic SM Scheduling in an MoE Megakernel for Compute-Communication Overlap</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Mask-Aware Execution for Efficient JEPA Training">Mask-Aware Execution for Efficient JEPA Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="FlashBoB: I/O-Efficient Exact Backward-over-Backward for Softmax Attention">FlashBoB: I/O-Efficient Exact Backward-over-Backward for Softmax Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Conduit: An Experience Data Plane for Distributed Reinforcement Learning">Conduit: An Experience Data Plane for Distributed Reinforcement Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>7</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>4</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Token Latency Fairness: Performance Isolation for Multi-Tenant LLM Serving">Token Latency Fairness: Performance Isolation for Multi-Tenant LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedFIbOS: Fisher Importance based Optimal Submodelling for Heterogeneous Federated Learning">FedFIbOS: Fisher Importance based Optimal Submodelling for Heterogeneous Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="DLB: Distributed Load Balancing at Scale for Generative AI Inference">DLB: Distributed Load Balancing at Scale for Generative AI Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RISC-V and machine learning: a survey">RISC-V and machine learning: a survey</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedeRage: Provably Convergent Agnostic Federated Learning under General Client Drift">FedeRage: Provably Convergent Agnostic Federated Learning under General Client Drift</span></li><li><span class="dpr-home-dashboard-paper-title" title="DeepSeek Elastic Compute (DSec): A Sandbox Infrastructure for Effective Agentic Training at Scale">DeepSeek Elastic Compute (DSec): A Sandbox Infrastructure for Effective Agentic Training at Scale</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

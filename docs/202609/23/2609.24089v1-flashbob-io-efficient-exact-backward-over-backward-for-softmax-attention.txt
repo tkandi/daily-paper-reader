@@ -1,0 +1,2270 @@
+Title: FlashBoB: I/O-Efficient Exact Backward-over-Backward for Softmax Attention
+
+URL Source: https://arxiv.org/pdf/2609.24089v1
+
+Published Time: Tue, 22 Sep 2026 02:48:08 GMT
+
+Number of Pages: 40
+
+Markdown Content:
+# FlashBoB: I/O-Efficient Exact Backward-over-Backward for Softmax Attention 
+
+Anthony Givans, Michael Crawshaw, Mingrui Liu ∗
+
+Department of Computer Science George Mason University, Fairfax, VA 22030 
+
+agivans2@gmu.edu, mcrawsha@gmu.edu, mingruil@gmu.edu 
+
+## Abstract 
+
+Transformer models built on the attention mechanism have become a central build-ing block in modern deep learning, yet softmax attention remains a major bottleneck for long-context workloads. While FlashAttention makes the forward and first backward passes I/O-efficient, it does not support backward-over-backward (BoB), which enables exact differentiation through the backward pass for applications such as second-order optimization, test-time training, gradient-based memory, and meta-learning. Existing BoB implementations either materialize large intermediate tensors or exhaust GPU memory at long sequence lengths. We present F LASH BOB, an exact, I/O-efficient algorithm for BoB in softmax attention that keeps computation within on-chip tiles and avoids all N × N inter-mediate tensors, where N is the sequence length. The key insight is a hierarchical affine structure in the softmax double backward: two row-wise scalars determine all outputs through affine transformations. This yields a two-pass schedule with bounded on-chip static random-access memory (SRAM) usage and minimal off-chip high-bandwidth memory (HBM) traffic. F LASH BOB achieves Θ( N 2d2/M )
+
+HBM traffic ( d is the head dimension and M is the memory size) and, within the standard FlashAttention-style score-recomputation model, matches the inherited large-cache lower bound for exact forward attention. Empirically, it scales exact attention BoB to N = 262 K on a single A100 80GB GPU, where prior PyTorch exact baselines fail by N = 16 K, and is up to 6.3× faster than FlashBack. These results make exact second-order attention practical at long-context sequence lengths where prior implementations cannot run efficiently. 
+
+## 1 Introduction 
+
+Transformers are the dominant architecture for sequence modeling [49], and attention is their core operation. The cost of attention grows quadratically with sequence length and, at scale, is dominated by data movement between high-bandwidth memory (HBM) and on-chip SRAM. Two lines of work address this at long context. One modifies the operator: recurrent memories, sparse patterns, low-rank or kernelized attention, and state-space models reduce or replace the full pairwise interaction [7, 3, 54, 23, 50, 6, 21, 40, 39, 16]. The other, FlashAttention [10, 9, 45, 53], preserves exact softmax attention and redesigns the memory schedule to make it I/O-efficient: tiles are recomputed from saved statistics, and the full attention matrix is never materialized in HBM. The key design principle is that for exact attention, the memory schedule is part of the algorithm. This design principle has so far been limited to the forward and first backward passes of softmax attention. A growing class of methods places gradients inside the model’s computation and must dif-ferentiate through the attention backward pass itself; we call this primitive backward-over-backward 
+
+(BoB). Such methods arise across modern training paradigms, including second-order optimization  
+
+> ∗Corresponding Author. The implementation is at https://github.com/MingruiLiu-ML-Lab/FlashBoB
+> Preprint. arXiv:2609.24089v1 [cs.LG] 21 Sep 2026
+
+via Hessian-vector products for curvature estimation [29, 37, 31, 32, 17, 51], test-time training that differentiates through inner-loop updates [47], gradient-written memory that stores context via per-example gradient descent [24], and meta-learning that differentiates through inner optimiza-tion [14, 34, 43]. At the kernel level, all of these rely on the same BoB primitive, yet at long context none of the existing implementations scale. Generic automatic differentiation materializes intermediate tensors of quadratic (sequence-by-sequence) size and exhausts memory at sequence length N = 8 ,192 on a single A100 80GB GPU. GradMem [24] ships custom Hessian-vector product kernels that fuse parts of the second backward and avoid the worst materialization, raising the feasible context to N = 16 ,384 on the same hardware before they too exhaust memory. The closest prior non-materializing kernel, FlashBack [12], fuses the entire BoB into a single GPU kernel parallelized over rows, with several outputs accumulated by concurrent threads writing to the same memory locations through synchronized hardware updates that serialize and stall under contention. Crucially, none of these approaches extend FlashAttention’s memory discipline to backward-over-backward. Extending FlashAttention-style scheduling to backward-over-backward faces two key obstacles. First, the computation requires combining information in both row-wise and column-wise directions, which prevents a single consistent pass over the data. Second, the softmax double backward introduces global dependencies that must be resolved before downstream results can be finalized. Together, these constraints break the simple, single-pass execution pattern that keeps intermediate data in fast on-chip memory: a naive implementation either requires multiple passes or stores large intermediate tensors. Both options sacrifice the memory and I/O efficiency that makes FlashAttention effective. We resolve these challenges with F LASH BOB, an exact, I/O-efficient algorithm for backward-over-backward in softmax attention. The key idea is to expose a hierarchical affine structure in the softmax double backward, which allows the computation to be reorganized into a small number of passes that avoid materializing N × N tensors and keep intermediate data in fast on-chip memory. The resulting schedule closely follows the FlashAttention execution model, incurring only minimal overhead beyond the first backward pass while preserving efficient memory access patterns. As a result, F LASH BOB scales to sequence lengths far beyond prior exact implementations [24, 12] and enables long-context training methods that were previously impractical. Theoretically, it matches a large-cache I/O lower bound under the standard FlashAttention-style score-recomputation model, where score and probability tiles are recomputed from saved row statistics rather than stored as 
+
+N × N HBM tensors. Our contributions can be summarized as follows. • FlashBoB algorithm. We introduce an exact two-pass algorithm for softmax-attention BoB that preserves the FlashAttention execution model: no N × N HBM intermediates, bounded on-chip workspace, and one write per finalized output block. The key identity is a hierarchical affine structure in the softmax double backward (Proposition 4.1 and Figure 1) that collapses the natural four-pass schedule to two passes. • I/O analysis and optimality. We establish a Θ( N 2d2/M ) HBM upper bound for F LASH BOB(Theorem 4.3) and a matching large-cache lower bound under the standard FlashAttention-style score-recomputation model (Theorem 4.5). The lower bound is inherited from exact forward attention by embedding it inside a special BoB instance. • Kernel and model-level impact. On isolated attention BoB, F LASH BOB reaches N = 262 ,144 
+
+on a single A100 80GB GPU, where PyTorch materialization fails at N = 8 ,192 and GradMem-derived HVP baselines fail by N = 16 ,384 . It is up to 10 × faster and 28 × more memory-efficient than materializing PyTorch, up to 3.8× faster than GradMem-derived HVP kernels, and up to 6.3×
+
+faster than FlashBack. On a 1B-token GPT-2 Small FineWeb run with Sophia-H, F LASH BOBreduces Hessian-estimation time by 2.45 ×, full training wall time by 2.2×, and peak memory by 
+
+2.2× while preserving the loss trajectory. 
+
+## 2 Related Work 
+
+GPU memory hierarchy and kernel fusion. The performance principle behind FlashAttention is part of a broader systems literature: communication between memory levels can dominate arithmetic, recomputation can trade extra work for lower memory pressure, and combining multiple operations into one GPU kernel can avoid expensive reads and writes [18, 1, 4, 20, 22, 42, 5]. GPU programming systems such as CUDA and Triton expose the memory hierarchy well enough to keep small working sets in fast on-chip memory while using specialized hardware for matrix multiplication [35, 48, 30]. FLASH BOB applies this principle to a higher-order derivative: rather than changing the attention 2operator or introducing an approximation, it changes the execution schedule so that the exact BoB computation avoids unnecessary HBM traffic. 
+
+Attention I/O and exact streaming. Long-context attention has been pursued along two lines. Approximate or structured-attention methods change the operator: recurrent memories, sparse patterns, low-rank projections, kernelized attention, and state-space models reduce the explicit quadratic interaction by modifying the computation [7, 3, 54, 23, 50, 6, 21, 40, 39, 16]. Building on online softmax normalization and exact memory-efficient attention [33, 41], the FlashAttention family [10, 9, 45, 53] keeps exact softmax attention and changes the memory schedule: it recomputes attention blocks from saved softmax statistics so the full N × N attention matrix is never written to HBM. Lower-bound work formalizes these gains in two-level memory and red-blue pebble models [18, 1, 44, 27]. F LASH BOB belongs to this second line: it preserves exact softmax attention and extends FlashAttention’s streaming memory schedule to the second derivative. 
+
+Implementations of attention backward-over-backward. Existing implementations of exact attention BoB, and more general higher-order derivative tooling [8], fall into three broad categories. Generic reverse-mode automatic differentiation [2] through a PyTorch-style tensor graph [36] provides a natural correctness oracle, but stores quadratic-size intermediate tensors and therefore scales poorly at long context. GradMem [24] provides custom Hessian-vector product kernels ( HVP -M, HVP -S) that avoid the worst materialization, but they do not follow the FlashAttention-style streaming schedule. FlashBack [12] is the closest prior non-materializing kernel we are aware of: it fuses the BoB computation into a single GPU kernel, but relies on shared updates to global memory for some outputs and repeatedly recomputes attention blocks. In contrast, F LASH BOB separates the work into two streaming passes that match the natural structure of the BoB outputs, avoid shared global updates, and expose an affine reduction that a single-kernel design cannot exploit without additional synchronization or recomputation. 
+
+Applications of attention backward-over-backward. Backward-over-backward through attention appears in several long-context training settings. Second-order methods use Hessian-vector products to obtain curvature information without forming the Hessian explicitly, from classical Hessian-free and preconditioned optimization to modern stochastic curvature estimators [37, 31, 32, 17, 51, 29]. Meta-learning differentiates through inner gradient steps [14, 34, 43], while recent test-time training and gradient-written memory methods differentiate through inner-loop adaptation or per-example writing procedures [47, 24]. These settings motivate exact BoB implementations for softmax attention. 
+
+## 3 Background and Preliminaries 
+
+Single-Head Attention in Transformer. For a single attention head in a Transformer, the inputs 
+
+Q, K, V ∈ RN ×d are the query, key, and value matrices across N tokens of the sequence [49]. With 
+
+τ = 1 /√d, the forward pass is 
+
+S = τ QK T + Mmask , P = softmax( S), O = P V, (1) where Mmask ∈ { 0, −∞} N ×N encodes any attention mask (e.g., causal, sliding-window, or block patterns), and the softmax is applied row-wise. For row i ∈ [N ], let Vi = {j ∈ [N ] : ( Mmask )ij ̸ =
+
+−∞} denote the set of valid columns; all row sums below are over Vi. Lowercase letters denote row slices: qi, k i, v i, o i, do i ∈ Rd, where do i denotes the gradient of the loss with respect to oi and 
+
+i = 1 , . . . , N . Table 4 in Appendix A collects the full notation, including the BoB-specific objects introduced in §4.1. For simplicity, we consider only single-head attention in our derivations, and the analysis extends naturally to multiple heads. 
+
+Two-level GPU Hierarchy. We work in the standard two-level memory model [18, 1]: HBM is large and slow, SRAM is small and fast, and I/O counts elements moved between them. SRAM has capacity M elements. We process attention using a tiled (blocked) algorithm: let Br and Bc
+
+denote the row and column tile sizes, respectively, so that blocks of size Br × d and Bc × d from 
+
+Q, K, V (and associated workspace) are materialized in SRAM during computation. We work in the large-cache regime M = Ω( d2) so that these tiles and the necessary local workspaces fit on chip [10, 44]. The goal throughout the paper is to avoid HBM traffic for N × N intermediates while keeping the arithmetic exact. 
+
+Flash Attention. FlashAttention [10, 9] processes attention using a tiled algorithm, partitioning rows into blocks of size Br and columns into blocks of size Bc. The forward pass stores only the row-wise log-normalizer Li = log P 
+
+> j∈V i
+
+exp( Sij ) together with the output O, where Vi denotes the set of 3valid columns for row i. Later passes recompute probability tiles Pij = exp( Sij − Li) inside SRAM, so the full N × N matrix P is never stored in HBM. Given dO = ∂L/∂O , the attention backward computes dP, dV, dS, dQ, dK as 
+
+dP = dO V T, dV = P TdO, dS ij = Pij (dP ij − Di), (2) 
+
+dQ = τ dS K, dK = τ dS TQ, (3) where the row-wise scalar Di = P 
+
+> j∈V i
+
+Pij dP ij = do T 
+
+> i
+
+oi is the normalization constant. FlashAttention stores only row state (L, D ) and the output O; probability tiles are recomputed from 
+
+L inside SRAM, and P, dP, dS are never stored as full N × N matrices. F LASH BOB reuses this state and adds only two BoB row-state vectors, (α, E ), which are introduced in Section 4. 
+
+Motivating applications of backward-over-backward. The forward and first-backward kernels are insufficient for methods that differentiate through attention-containing gradient steps, including Sophia-H Hessian-vector products [29, 37], end-to-end test-time training [47], and gradient-written memory [24]. At the attention boundary, all of these supply upstream matrices UQ, U K , U V ∈ RN ×d
+
+at the first-backward outputs (dQ, dK, dV ). We define this BoB primitive formally in §4.1 and use Sophia-H and GradMem-derived kernels in the experiments. 
+
+## 4 FlashBoB: Algorithm and Analysis 
+
+This section develops the F LASH BOB schedule in five steps: we first define the BoB primitive (§4.1); derive closed-form identities (§4.2); present two row-scalar reductions that reduce the natural FlashAttention-style tiled schedule from four sweeps to two passes (§4.2); describe the resulting algorithm (§4.3);and finally analyze its I/O complexity together with a matching score-recomputation lower bound in the large-cache regime (§4.4). 
+
+4.1 Backward-over-backward 
+
+Let g(Q, K, V, dO ) = ( dQ, dK, dV ) denote the first-backward map of (2)–(3), and let Jg := 
+
+Dg (Q, K, V, dO ) denote its Jacobian with respect to (Q, K, V, dO ). Given matrices UQ, U K , U V ∈
+
+RN ×d, each setting of motivating applications (e.g., second-order optimization, test-time training, gradient-written memory) in §3 requires the Jacobian-transpose-vector product JT 
+
+> g
+
+(UQ, U K , U V ),which can be obtained by reverse-mode automatic differentiation applied to the scalar 
+
+Φ = ⟨dQ, U Q⟩ + ⟨dK, U K ⟩ + ⟨dV, U V ⟩, (4) where (dQ, dK, dV ) = g(Q, K, V, dO ) and ⟨A, B ⟩ = tr( ATB) denotes the Frobenius inner product. Backward-over-backward (BoB) computes the four resulting gradients 
+
+  ed(Q), ed(K), ed(V ), ed(dO ) := ∇Q,K,V,dO Φ. (5) For any intermediate variable X in the first-backward graph, ed(X) := ∂Φ/∂X is its BoB gradient ;when g is the gradient of a scalar loss, ∇Φ is the HVP applied to the attention block [37]. 
+
+4.2 Affine Fusion 
+
+Reverse-mode automatic differentiation applied to (4) (full derivation in Appendix C) yields the four BoB outputs as 
+
+ed(Q) = τ   ed(S) K + dS U K
+
+, ed(K) = τ   ed(S)TQ + dS TUQ
+
+, (6) 
+
+ed(V ) = ( P ⊙ h)TdO, ed(dO ) = P U V + ( P ⊙ h) V, (7) where ⊙ denotes elementwise multiplication; dP , dS , and Di are the first-backward intermediates from (2)–(3); and hij = Fij − αi, F = τ (UQKT + QU T 
+
+> K
+
+), C = dO U T 
+
+> V
+
+, αi = P 
+
+> j∈V i
+
+Pij Fij ,
+
+ed(P )ij = Cij + Fij (dP ij − Di) − αidP ij , Ei = P 
+
+> j∈V i
+
+Pij ed(P )ij , and ed(S)ij = Pij ( ed(P )ij − Ei).We write α = ( α1, . . . , α N ) and E = ( E1, . . . , E N ). Thus the second derivative introduces two row scalars, αi and Ei, which are the BoB analogs of the first-backward row scalar Di.The four outputs split according to how their sums are formed: ( ed(Q), ed(dO )) and the row scalars 
+
+(α, E ) sum over columns for each fixed row, while ( ed(K), ed(V )) sum over rows for each fixed 4HBM SRAM fixed stream 
+
+> kernel boundary
+
+PASS 1      
+
+> hold one row block, stream columns
+> Load
+> Qi, dO i, U Q,i
+> Kj, V j, U K,j , U V,j
+> Recompute
+> Pij
+> dP ij
+> Fij
+> Accumulate
+> αi, E ◦
+> i
+> Ωi, B i
+> Ri,ed(dO )◦
+> i
+> write once
+>  αi, E i,ed(Q)i,ed(dO )i
+> 
+> saved row state
+
+(α, E )  
+
+> O(N)scalars
+
+PASS 2        
+
+> hold one column block, stream rows
+> Load
+> Kj, V j, U K,j , U V,j
+> Qi, dO i, α i, E i
+> Recompute
+> Pij
+> dP ij
+> Fij
+> Reduce
+> ed(K)j
+> ed(V)j
+> write once
+>   ed(K)j,ed(V)j
+> 
+> write read
+
+Figure 1: F LASH BOB overview. The legend at top encodes memory tier (HBM, SRAM) and tile role; saturated text marks variables held fixed in registers, lighter text marks variables streamed through. Pass 1 holds a row block and streams column blocks to finalize the row-side outputs and write (α, E )
+
+to HBM. Across the kernel boundary, Pass 2 holds a column block, streams row blocks, reads (α, E ),and writes the remaining outputs. Only two length-N vectors cross the boundary, and no N ×N
+
+tensor is ever materialized in HBM. column. Under the FlashAttention execution model, this requires a row-wise and a column-wise pass. In addition, the row-wise computations appear to have the sequential dependence αi → ed(P )ij →
+
+Ei → ed(S)ij , which suggests four passes: one for α, one for E, one for ( ed(Q), ed(dO )) , and one column-wise pass for ( ed(K), ed(V )) . The key observation is that both row scalars enter later quantities only affinely : αi enters ed(P )ij through the term −αidP ij , and Ei enters ed(S)ij through a broadcast subtraction. These affine forms allow the row-wise computations to be fused: one can accumulate 
+
+α-free row quantities 2 first, and then apply the affine corrections once the row scalars are known, without revisiting the row. Proposition 4.1 makes this explicit by naming six row accumulators, five of which are α-free, and the corrections that finalize the row outputs within each row block. 
+
+Proposition 4.1 (Affine fusion) . There exist six row accumulators consisting of αi together with five α-free quantities E◦ 
+
+> i
+
+, B i, ed(dO )◦ 
+
+> i
+
+, R i, Ωi (defined in Appendix D), all with tilewise computable summands, such that 
+
+Ei = E◦ 
+
+> i
+
+− αiDi, ed(dO )i = ed(dO )◦ 
+
+> i
+
+− αioi, ed(Q)i = τ  Ωi − αiRi − EiBi
+
+. (8) The proof is by direct substitution; see Appendix D. A single-pass schedule for both row-owned and column-owned outputs would need to pay one of three costs: materializing an N × N tensor in HBM, accumulating column-owned outputs through global atomic adds, or holding Θ( N d ) partial column accumulators on chip. FlashBack [12] pays the second cost; F LASH BOB uses two passes to avoid all three. The schedule-level argument is given in Appendix G.1. 
+
+4.3 Algorithm 
+
+Algorithm 1 realizes the two-pass schedule in the block-streaming style of FlashAttention. HBM-resident inputs are Q, K, V, dO, U Q, U K , U V , O ∈ RN ×d and the saved row state L, D ∈ RN .Pass 1 keeps a query-row block in SRAM, streams over key-value blocks, accumulates the six row accumulators of Proposition 4.1, applies the corrections (8), and writes the auxiliary row quantities 
+
+(αi, E i) together with ( ed(Q)i, ed(dO )i) once per row block. Pass 2 keeps a key-value block in SRAM, streams over row blocks together with the saved (αi, E i), and writes ( ed(K)j , ed(V )j ) once per column block. No N × N intermediate is ever written to HBM. Block sizes follow the FlashAttention-style SRAM budget. With b = ⌊M/ (cBOBd)⌋, where cBOB > 0 accounts for all arrays and scalar buffers that must be stored in SRAM while processing one block, Pass 1 keeps a row block in SRAM and streams smaller column blocks, B(1)  
+
+> r
+
+= b and B(1)  
+
+> c
+
+= min( b, d ); Pass 2 reverses the orientation, using B(2)  
+
+> c
+
+= b and B(2)  
+
+> r
+
+= min( b, d ). Appendix H gives the SRAM budget derivation. 
+
+Theorem 4.2 (Correctness, FLOPs, and memory) . Algorithm 1 computes exactly the BoB outputs defined by Equations (6) –(7) , requires Θ( N 2d) FLOPs, uses O(N ) extra HBM beyond inputs,   
+
+> 2We describe a quantity as α-free if it can be computed without first computing α.
+
+5Algorithm 1 FLASH BOB: two-pass exact attention BoB. A fully annotated version with explicit tile shapes appears as Algorithm 2 in Appendix F. 
+
+Input: Matrices Q, K, V, dO, U Q, U K , U V , O ∈ RN ×d; row state L, D ∈ RN , all in HBM; SRAM size M
+
+Output: BoB outputs ed(Q), ed(K), ed(V ), ed(dO ) and row scalars α, E  
+
+> 1:
+
+b ← ⌊ M/ (cBOB d)⌋; B(1)  
+
+> r
+
+, B (2)  
+
+> c
+
+← b; B(1)  
+
+> c
+
+, B (2)  
+
+> r
+
+← min( b, d )
+
+PASS 1 ( ROW -MAJOR ): Accum. row summaries → apply scalar updates → write (α, E, ed(Q), ed(dO ))  
+
+> 2:
+
+for i = 1 to ⌈N/B (1)  
+
+> r
+
+⌉ do  
+
+> 3:
+
+Load active row tiles (Qi, dO i, U Q,i , O i) and saved row scalars (Li, D i) 
+
+> 4:
+
+Zero the six row accumulators ▷ Prop. 4.1  
+
+> 5:
+
+for j = 1 to ⌈N/B (1)  
+
+> c
+
+⌉ do  
+
+> 6:
+
+Load (Kj , V j , U K,j , U V,j ); recompute Pij ▷ from saved L 
+
+> 7:
+
+Form tile intermediates dP ij , F ij , C ij , ed(Pij )◦ on chip  
+
+> 8:
+
+Accumulate αi, E ◦ 
+
+> i
+
+, ed(dO )◦ 
+
+> i
+
+, Ωi, B i, R i 
+
+> 9:
+
+end for  
+
+> 10:
+
+Apply scalar updates to form Ei, ed(dO )i, ed(Q)i ▷ Eq. (8)  
+
+> 11:
+
+Write αi, E i, ed(Q)i, ed(dO )i to HBM  
+
+> 12:
+
+end for 
+
+PASS 2 ( COLUMN -MAJOR ): Load saved (α, E ) → accumulate and write ( ed(K), ed(V ))  
+
+> 13:
+
+for j = 1 to ⌈N/B (2)  
+
+> c
+
+⌉ do  
+
+> 14:
+
+Load active column tiles (Kj , V j , U K,j , U V,j ); zero ed(K)j , ed(V )j 
+
+> 15:
+
+for i = 1 to ⌈N/B (2)  
+
+> r
+
+⌉ do  
+
+> 16:
+
+Load streamed row tiles and saved row scalars (Li, D i, α i, E i); recompute Pij and tile intermediates  
+
+> 17:
+
+ed(V )j += ( Pij ⊙ hij )TdO i; ed(K)j += τ ( ed(S)T 
+
+> ij
+
+Qi + dS T 
+
+> ij
+
+UQ,i ) 
+
+> 18:
+
+end for  
+
+> 19:
+
+Write ed(K)j , ed(V )j to HBM  
+
+> 20:
+
+end for 
+
+outputs, the saved row state (L, D ), and the forward output O, and fits within the fast-memory budget 
+
+M for block sizes Br , B c satisfying Br Bc + ( Br + Bc)d = O(M ).
+
+The proof is in Appendix D; the only auxiliary HBM beyond inputs, outputs, the saved row state 
+
+(L, D ), and the forward output O is the two length-N vectors α, E .
+
+4.4 I/O complexity and large-cache optimality 
+
+We analyze HBM traffic in the standard two-level memory model from §3. SRAM has capacity M
+
+elements, and HBM traffic counts elements moved between HBM and SRAM. Let B(1)  
+
+> r
+
+, B (1)  
+
+> c
+
+denote the row and column block sizes in Pass 1, and B(2)  
+
+> r
+
+, B (2)  
+
+> c
+
+those in Pass 2. In this subsection, we focus on the large-cache regime where M = Ω( d2).
+
+Theorem 4.3 (HBM traffic) . For attention with N rows and head dimension d, Algorithm 1 performs 
+
+QFLASH BOB = 12 N d + 4 N + 4dN 2
+
+> B(1)
+> r
+
++ (3 d+4) N 2
+
+> B(2)
+> c
+
+HBM transfers, up to boundary effects. Remark . Only the reused block sizes B(1)  
+
+> r
+
+and B(2)  
+
+> c
+
+appear in Theorem 4.3: the streamed dimension cancels inside each pass. The 12 N d + 4 N term collects input loads, row-metadata reads, and output writes. Every N × N quantity is recomputed and consumed within SRAM before moving to the next block. The per-pass ledger is given in Appendix H. 
+
+Corollary 4.4 (Large-cache upper bound) . Assume d2 ≲ M ≲ N d and N ≥ d. With B(1)  
+
+> r
+
+=
+
+B(2)  
+
+> c
+
+= b, B(1)  
+
+> c
+
+= B(2)  
+
+> r
+
+= min( b, d ), and b = Θ( M/d ), FLASH BOB has HBM traffic QFLASH BOB =Θ( N 2d2/M ).Remark . Indeed, substituting b = Θ( M/d ) into Theorem 4.3 gives QFLASH BOB = 12 N d + 4 N +(7 d + 4) N 2/b = 12 N d + 4 N + Θ( N 2d2/M ). Under M ≲ N d , the Θ( N 2d2/M ) term dominates the stationary O(N d ) traffic. 
+
+Theorem 4.5 (Large-cache lower bound under score recomputation) . Assume M = Ω( d2), N ≥ d,
+
+M ≲ N d , and Θ( N 2) valid query-key interactions. This includes dense attention and causal 
+
+6Table 1: Attention-layer BoB on NVIDIA A100 80GB. Shape: GPT-2 Small attention, batch 4, 12 heads, head dimension 64, causal mask, BF16 inputs with FP32 reductions. OOM denotes out of memory; best wall-clock time is bold.                                                                  
+
+> Wall-clock time (ms) Peak memory (MiB)
+> NMATH HVP -MHVP -SFLASH BOBMATH HVP -MHVP -SFLASH BOB256 1.82 1.58 1.66 0.94 212 114 116 95
+> 512 4.95 2.31 2.33 1.29 668 315 318 171
+> 1 024 17.66 7.39 6.41 2.57 2 375 1 045 1 051 323
+> 2 048 68.80 28.34 22.73 7.53 8 957 3 805 3 817 630
+> 4 096 265.67 114.89 89.14 25.80 34 794 14 521 14 546 1 243
+> 8 192 OOM 468.93 356.84 95.11 –55 971 56 020 1 702
+> 16 384 OOM OOM OOM 365.73 –––3 372
+
+attention, since causal masking leaves N (N + 1) /2 = Θ( N 2) valid interactions. In the standard FlashAttention-style score-recomputation model formalized in Appendix E, every exact attention-BoB algorithm in this model requires Ω( N 2d2/M ) HBM transfers. 
+
+The proof is given in Appendix E. The reduction sets V = 0 , dO = 0 , UQ = UK = 0 , and UV = W ,giving F = 0 , α = 0 , h = 0 , and ed(dO ) = P W = softmax( τ QK T)W . Thus the lower bound is inherited from the large-cache exact-attention lower bound of [44, Lemma 3.4]. This is a conditional optimality statement: it applies to exact FlashAttention-style score-recomputation algorithms, not to arbitrary exact algorithms that use a different computational model. Combining Corollary 4.4 with Theorem 4.5, F LASH BOB has Θ( N 2d2/M ) HBM traffic in the regime 
+
+d2 ≲ M ≲ N d , matching the score-recomputation lower bound up to stationary O(N d ) input, output, and row-state traffic. 
+
+## 5 Experiments 
+
+We evaluate F LASH BOB at three levels: isolated attention BoB on A100 (§5.1), full-model GPT-2 second-order steps on B200 (§5.2), and a 1B-token Sophia-H pretraining run on 8×A6000 (§5.3). For the main causal-attention experiments, we use PyTorch’s nn.scaled_dot_product_attention 
+
+with the FlashAttention backend for the forward and first backward, and replace only the attention double backward with our two-pass Triton kernel. Experiments requiring features not covered by PyTorch, such as the sliding-window experiments in Appendix M, use the flash-attn package. Correctness, FlashBack comparisons, and environment details are in Appendices J, P, and B. 
+
+5.1 Attention-Layer kernel scaling 
+
+We compare four exact attention-BoB implementations: MATH , the PyTorch materializing reference; 
+
+> HVP
+
+-M and HVP -S, the GradMem-derived hand-written HVP kernels [24]; and F LASH BOB, the two-pass schedule of Algorithm 1. The HVP baselines avoid full materialization but do not preserve FlashAttention-style tile streaming at the BoB level. The full table can be found in Appendix K. The speedup of F LASH BOB over MATH grows with N (from 1.9× at N =256 to 10 .3× at N =4 ,096 ), and the memory ratio grows faster (from 2.2× to 28 .0×). F LASH BOB is the fastest method at every tested length, and the gap to HVP -S reaches 3.8× at N =8 ,192 . Beyond N =8 ,192 , every method except F LASH BOB exhausts the 80 GiB budget; F LASH BOB continues exactly to N =262 ,144 at 
+
+52 .7 GiB peak (53,952 MiB), a qualitative shift in feasibility rather than a marginal speedup. Appendix N confirms that the result is not an artifact of a single head dimension. Across d ∈{32 , 64 , 128 }, F LASH BOB is 1.27 × to 7.83 × faster than the GradMem-derived HVP baselines and uses 8.6× to 33 .1× less peak memory. The runtime gap narrows at d = 128 , where register and tile-memory pressure become more pronounced, but the HBM advantage persists because F LASH BOBstill avoids the large interaction-shaped intermediates used by the HVP baselines. 
+
+FlashBack comparison. FlashBack [12] is the closest prior non-materializing exact BoB attention kernel. On the NVIDIA A6000 setup supported by FlashBack, F LASH BOB is faster at every shared sequence length, with speedups of 2.07 ×–6.32 × over N = 256 to 65 ,536 (Appendix P). FlashBack reaches longer contexts than the PyTorch materializing and GradMem-derived HVP baselines, but its row-parallel single-kernel design uses global atomic updates for the column-owned outputs 7Table 2: End-to-end second-order GPT-2 step on NVIDIA B200. Batch 4, BF16 inputs with FP32 reductions. OOM denotes exceeding the measured memory budget. At small N , attention is only part of the total step; the gap widens when attention dominates runtime and memory.                                                                                   
+
+> Wall-clock time (ms) Peak memory (MiB) Model NMATH HVP -MHVP -SFLASH BOBMATH HVP -MHVP -SFLASH BOBSmall 4 096 397.7 417.5 304.0 190.9 79 058 17 649 17 804 17 804 8 192 OOM 1537.5 1017.3 509.1 –46 965 47 267 33 604
+> 32 768 OOM OOM OOM 5368.3 –––128 392
+> Medium 2 048 312.6 343.0 255.9 177.2 55 203 16 612 16 810 16 810 4 096 OOM 1028.5 726.1 420.9 –30 480 30 876 28 677
+> 16 384 OOM OOM OOM 3878.9 –––99 912
+> Large 2 048 562.2 614.6 450.4 304.3 100 554 27 666 28 040 28 045 4 096 OOM 1879.6 1313.4 740.3 –49 205 49 968 45 457
+> 16 384 OOM OOM OOM 7106.5 –––150 019
+
+( ed(K), ed(V )) . In contrast, F LASH BOB assigns these outputs to a column-major pass and writes each output tile once. We did not evaluate FlashBack at N = 131 ,072 or N = 262 ,144 . Our direct FlashBack comparison uses the A6000 setup supported by the FlashBack implementation, whereas the largest isolated F LASH BOB feasibility sweep in Table 8 is run on A100 80GB. We therefore report all shared A6000 lengths that we successfully benchmarked, and do not claim a shared-hardware FlashBack failure mode at the two largest A100-only sequence lengths. 
+
+5.2 Full-model benchmarks 
+
+We replace the attention double backward inside complete GPT-2 models of three sizes (Small, Medium, Large) and benchmark an end-to-end second-order step against MATH , HVP -M, and HVP -S.Non-attention components are unchanged, so whole-model gains lower-bound the isolated kernel gains. Table 2 reports representative configurations; the full sweep is located in Appendix L. FLASH BOB is fastest at every tested configuration. At the largest settings where all references fit, it is 1.76 to 2.08 × faster than MATH and 1.44 to 1.59 × faster than HVP -S, with 3.3 to 4.4× lower peak memory than MATH . It also runs at N =32 ,768 for GPT-2 Small and N =16 ,384 for GPT-2 Medium/Large, where every reference OOMs. A sliding-window sweep appears in Appendix M. 
+
+5.3 Training on FineWeb 
+
+We train GPT-2 Small on 1B tokens from FineWeb at N =2048 on 8×NVIDIA A6000 48GB, with per-GPU batch size 2 and gradient accumulation 16 (effective batch 256 , 1,908 optimizer steps). Following [29], we estimate the Hessian diagonal once every ten steps. We compare AdamW, Sophia-H with the PyTorch math reference, and Sophia-H with F LASH BOB. The AdamW curve is the best-performing AdamW reference from a small learning-rate sweep, while the two Sophia-H runs use matched optimizer, model, data-streaming, precision, seed, batch, and Hessian-estimation settings; the only intended difference between them is the attention BoB backend used during Hessian estimation. Full training hyperparameters are given in Appendix O. PyTorch’s scaled_dot_product_attention does not support double backward in any accelerated backend, so an exact second-order pipeline using the standard PyTorch path must fall back to the 
+
+math backend for the attention path. This affects more than the Hessian-estimation event: because the graph must remain compatible with double backward, the math-reference Sophia-H run loses the optimized attention path even on ordinary gradient steps. In contrast, F LASH BOB preserves the optimized forward and first backward and replaces only the attention double backward. As a result, the math-reference pipeline’s per-step non-Hessian time is itself substantially slower than FLASH BOB’s ( ≈4.9 s versus ≈2.3 s). FLASH BOB accelerates the Hessian-estimation event by 2.45 ×, isolating the kernel-level gain on exact attention BoB itself, and accelerates the full training loop by 2.17 × end to end, combining the BoB-kernel gain with the backend-integration gain from retaining optimized attention on standard steps. Peak memory drops by 2.22 ×, from roughly 30 GB to 14 GB per GPU. The two Sophia-H loss curves nearly overlap throughout training (Figure 2), and their final losses are also matched: 3.6674 
+
+8Table 3: GPT-2 Small training on 1B FineWeb tokens at N = 2048 (1,908 steps, effective batch 256). Sophia-H estimates the Hessian every ten steps. Hardware: 8×A6000. 
+
+Metric Sophia-H (math ref.) Sophia-H (F LASH BOB) Ratio Hessian estimation per event (ms) 13,500 5,500 2.45 ×
+
+Total Hessian time (min) 42.8 17.4 2.45 ×
+
+Total non-Hessian time (hr) 2.59 1.23 2.10 ×
+
+Full training wall time (hr) 3.30 1.52 2.17 ×
+
+Peak memory per GPU (MiB) 30,644 13,830 2.22 ×0 250 500 750 1000 1250 1500 1750         
+
+> Optimizer step
+> 46810
+> Loss
+> (a) Loss vs. optimizer step
+> AdamW Sophia-H (math SDPA) Sophia-H (FlashBoB) open markers = eval checkpoints
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0
+> Elapsed time (hours)
+> (b) Loss vs. elapsed time
+> AdamW Sophia-H (math SDPA) Sophia-H (FlashBoB) open markers = eval checkpoints
+
+Figure 2: Single-seed systems parity check. Final losses are 3.6759 for AdamW, 3.6674 for Sophia-H with the PyTorch math backend, and 3.6662 for Sophia-H with F LASH BOB; the elapsed-time panel shows that F LASH BOB preserves the Sophia-H trajectory while moving exact second-order training closer to AdamW in time-to-loss. for Sophia-H with the PyTorch math backend and 3.6662 for Sophia-H with F LASH BOB. AdamW reaches a final loss of 3.6759 in the same 1B-token budget. Figure 2 separates optimizer behavior from systems cost. The two Sophia-H curves overlap, showing that replacing the PyTorch BoB path with F LASH BOB preserves the reference Sophia-H trajectory. In elapsed-time space, however, the math-backend Sophia-H run reaches each loss level much later because exact second-order attention dominates the training loop. F LASH BOB shifts the Sophia-H curve substantially left in wall-clock time, bringing exact second-order training much closer to the AdamW time-to-loss curve while preserving the final Sophia-H loss. Thus, the main effect of FLASH BOB is not to change the optimization path, but to make that path practical: the Hessian-estimation event becomes fast enough to fit inside a normal training budget, and the full second-order training loop moves much closer to the wall-clock regime of a first-order baseline. A hybrid baseline that dispatches optimized attention on the nine-out-of-ten ordinary steps and switches to the math backend only for Hessian-estimation steps would close part of the end-to-end gap, but this is not exposed by the standard PyTorch double-backward attention path. We therefore report both quantities: the 2.45 × Hessian-event speedup isolates the attention-BoB kernel improvement, while the 2.17 × full-loop speedup measures the practical training effect of integrating exact BoB into an optimized attention pipeline. 
+
+## 6 Discussion 
+
+Long-context learning systems increasingly use gradients as model operations: test-time training, gradient-written memory, meta-learning, and second-order optimization all differentiate through updates, and attention inside those updates makes exact BoB the bottleneck. F LASH BOB makes this primitive FlashAttention-like: exact, tile-streaming, and free of N × N HBM intermediates. This opens exact end-to-end test-time training [47] to the contexts reached by our isolated attention bench-mark ( N =262 ,144 on a single A100), removes the attention-BoB kernel bottleneck in GradMem-style gradient-written memory [24], and preserves Sophia-H trajectories while roughly halving wall time and memory on FineWeb. Whether these methods retain or improve their algorithmic advantages once BoB is no longer dominant is left to future work. 
+
+Limitations. FLASH BOB is implemented in generic Triton [48] and does not yet exploit lower-level tile abstractions or architecture-specific kernel specialization [46]: warp specialization and asyn-9chronous tensor-core pipelines on Hopper, FP8 and softmax pipeline optimizations of FlashAttention-3, or the asymmetric scaling of FlashAttention-4 on Blackwell. The release covers standard multi-head attention; grouped-query and multi-query variants, flexible attention APIs [11], and paged KV lay-outs [25, 52] are natural extensions that the affine-fusion structure does not obstruct. We view the present work as the algorithmic and scheduling foundation for these specializations. 
+
+## References 
+
+[1] Grey Ballard, James Demmel, Olga Holtz, and Oded Schwartz. Minimizing communication in numerical linear algebra. SIAM Journal on Matrix Analysis and Applications , 32(3):866–901, 2011. [2] Atilim Gunes Baydin, Barak A. Pearlmutter, Alexey Andreyevich Radul, and Jeffrey Mark Siskind. Automatic differentiation in machine learning: A survey. Journal of Machine Learning Research , 18(153):1–43, 2018. URL https://jmlr.org/papers/v18/17-468.html .[3] Iz Beltagy, Matthew E. Peters, and Arman Cohan. Longformer: The long-document transformer. 
+
+arXiv preprint arXiv:2004.05150 , 2020. [4] Tianqi Chen, Bing Xu, Chiyuan Zhang, and Carlos Guestrin. Training deep nets with sublinear memory cost, 2016. URL https://arxiv.org/abs/1604.06174 .[5] Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin Zheng, Eddie Yan, Haichen Shen, Meghan Cowan, Leyuan Wang, Yuwei Hu, Luis Ceze, Carlos Guestrin, and Arvind Krishnamurthy. TVM: An automated end-to-end optimizing compiler for deep learning. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) , pages 578–594. USENIX Association, 2018. [6] Krzysztof Choromanski, Valerii Likhosherstov, David Dohan, Xingyou Song, Andreea Gane, Tamás Sarlós, Peter Hawkins, Jared Davis, Afroz Mohiuddin, Lukasz Kaiser, David Belanger, Lucy Colwell, and Adrian Weller. Rethinking attention with performers. In International Conference on Learning Representations , 2021. [7] Zihang Dai, Zhilin Yang, Yiming Yang, Jaime Carbonell, Quoc V. Le, and Ruslan Salakhutdinov. Transformer-XL: Attentive language models beyond a fixed-length context. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics , 2019. [8] Felix Dangel, Frederik Kunstner, and Philipp Hennig. BackPACK: Packing more into backprop. In International Conference on Learning Representations , 2020. URL https://openreview. net/forum?id=BJlrF24twB .[9] Tri Dao. FlashAttention-2: Faster attention with better parallelism and work partitioning. In 
+
+International Conference on Learning Representations , 2024. [10] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. FlashAttention: Fast and memory-efficient exact attention with IO-awareness. In Advances in Neural Information Processing Systems 35 , pages 16344–16359, 2022. [11] Juechu Dong, Boyuan Feng, Driss Guessous, Yanbo Liang, and Horace He. FlexAttention: A programming model for generating fused attention variants. In Proceedings of Machine Learn-ing and Systems , volume 7, 2025. URL https://proceedings.mlsys.org/paper_files/ paper/2025/hash/61a9278dfef5f871b5e472389f8d6fa1-Abstract-Conference. html .[12] Logan Engstrom and Axel Feldmann. Flashback: A FlashAttention backwards-over-backwards. 
+
+https://github.com/lengstrom/flashback , 2024. GitHub repository. Accessed: 2026-03-01. [13] Jiarui Fang and Shangchun Zhao. USP: A unified sequence parallelism approach for long context generative AI, 2024. URL https://arxiv.org/abs/2405.07719 .[14] Chelsea Finn, Pieter Abbeel, and Sergey Levine. Model-agnostic meta-learning for fast adapta-tion of deep networks. In International Conference on Machine Learning , pages 1126–1135, 2017. 10 [15] Daniel Y. Fu, Hermann Kumbong, Eric Nguyen, and Christopher Ré. FlashFFTConv: Efficient convolutions for long sequences with tensor cores. In International Conference on Learning Representations , 2024. URL https://openreview.net/forum?id=gPKTTAfYBp .[16] Albert Gu and Tri Dao. Mamba: Linear-time sequence modeling with selective state spaces. In First Conference on Language Modeling , 2024. URL https://openreview.net/forum? id=tEYskw1VY2 .[17] Vineet Gupta, Tomer Koren, and Yoram Singer. Shampoo: Preconditioned stochastic tensor optimization. In International Conference on Machine Learning , pages 2956–2964, 2018. [18] Jia-Wei Hong and H. T. Kung. I/O complexity: The red-blue pebble game. In Proceedings of the Thirteenth Annual ACM Symposium on Theory of Computing , pages 326–333, 1981. [19] Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuaiwen Leon Song, Samyam Rajbhandari, and Yuxiong He. DeepSpeed Ulysses: System optimizations for enabling training of extreme long sequence transformer models, 2023. URL https://arxiv.org/ abs/2309.14509 .[20] Paras Jain, Ajay Jain, Aniruddha Nrusimha, Amir Gholami, Pieter Abbeel, Joseph Gonzalez, Kurt Keutzer, and Ion Stoica. Checkmate: Breaking the memory wall with optimal tensor rematerialization. Proceedings of Machine Learning and Systems , 2:497–511, 2020. [21] Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and François Fleuret. Transformers are RNNs: Fast autoregressive transformers with linear attention. In International Conference on Machine Learning , 2020. [22] Marisa Kirisame, Steven Lyubomirsky, Altan Haan, Jennifer Brennan, Mike He, Jared Roesch, Tianqi Chen, and Zachary Tatlock. Dynamic tensor rematerialization. In International Confer-ence on Learning Representations , 2021. URL https://openreview.net/forum?id=Vfs_ 2RnOD0H .[23] Nikita Kitaev, Łukasz Kaiser, and Anselm Levskaya. Reformer: The efficient transformer. In 
+
+International Conference on Learning Representations , 2020. [24] Yuri Kuratov, Matvey Kairov, Aydar Bulatov, Ivan Rodkin, and Mikhail Burtsev. Grad-Mem: Learning to write context into memory with test-time gradient descent. arXiv preprint arXiv:2603.13875 , 2026. doi: 10.48550/arXiv.2603.13875. [25] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the 29th ACM Symposium on Operating Systems Principles , pages 611–626, 2023. doi: 10.1145/3600006.3613165. URL 
+
+https://doi.org/10.1145/3600006.3613165 .[26] Dacheng Li, Rulin Shao, Anze Xie, Eric P. Xing, Xuezhe Ma, Ion Stoica, Joseph E. Gonzalez, and Hao Zhang. DISTFLASHATTN: Distributed memory-efficient attention for long-context LLMs training. In First Conference on Language Modeling , 2024. doi: 10.48550/arXiv.2310. 03294. URL https://openreview.net/forum?id=pUEDkZyPDl .[27] Xiaoyu Li, Yingyu Liang, Zhenmei Shi, Zhao Song, Song Yue, and Jiahao Zhang. On fine-grained I/O complexity of attention backward passes. arXiv preprint arXiv:2410.09397 , 2024. doi: 10.48550/arXiv.2410.09397. [28] Hao Liu, Matei Zaharia, and Pieter Abbeel. RingAttention with blockwise transformers for near-infinite context. In International Conference on Learning Representations , 2024. URL 
+
+https://openreview.net/forum?id=WsRHpHH4s0 .[29] Hong Liu, Zhiyuan Li, David Hall, Percy Liang, and Tengyu Ma. Sophia: A scalable stochastic second-order optimizer for language model pre-training. In International Conference on Learning Representations , 2024. 11 [30] Stefano Markidis, Steven Wei Der Chien, Erwin Laure, Ivy Bo Peng, and Jeffrey S. Vetter. NVIDIA tensor core programmability, performance and precision. In Proceedings - 2018 IEEE 32nd International Parallel and Distributed Processing Symposium Workshops , pages 522–531. IEEE, 2018. doi: 10.1109/IPDPSW.2018.00091. [31] James Martens. Deep learning via hessian-free optimization. In International Conference on Machine Learning , pages 735–742, 2010. [32] James Martens and Roger Grosse. Optimizing neural networks with kronecker-factored ap-proximate curvature. In International Conference on Machine Learning , pages 2408–2417, 2015. [33] Maxim Milakov and Natalia Gimelshein. Online normalizer calculation for softmax, 2018. URL https://arxiv.org/abs/1805.02867 .[34] Alex Nichol, Joshua Achiam, and John Schulman. On first-order meta-learning algorithms. 
+
+arXiv preprint arXiv:1803.02999 , 2018. [35] John Nickolls, Ian Buck, Michael Garland, and Kevin Skadron. Scalable parallel programming with CUDA. Queue , 6(2):40–53, 2008. doi: 10.1145/1365490.1365500. [36] Adam Paszke, Sam Gross, Francisco Massa, Adam Lerer, James Bradbury, Gregory Chanan, Trevor Killeen, Zeming Lin, Natalia Gimelshein, Luca Antiga, Alban Desmaison, Andreas Köpf, Edward Z. Yang, Zachary DeVito, Martin Raison, Alykhan Tejani, Sasank Chilamkurthy, Benoit Steiner, Lu Fang, Junjie Bai, and Soumith Chintala. PyTorch: An imperative style, high-performance deep learning library. In Advances in Neural Information Processing Systems ,volume 32, pages 8024–8035, 2019. URL https://proceedings.neurips.cc/paper/ 2019/hash/bdbca288fee7f92f2bfa9f7012727740-Abstract.html .[37] Barak A. Pearlmutter. Fast exact multiplication by the hessian. Neural Computation , 6(1): 147–160, 1994. [38] Guilherme Penedo, Hynek Kydlíˇ cek, Loubna Ben Allal, Anton Lozhkov, Margaret Mitchell, Colin Raffel, Leandro Von Werra, and Thomas Wolf. The FineWeb datasets: Decanting the web for the finest text data at scale. In Advances in Neural Information Processing Systems 37 ,2024. doi: 10.52202/079017-0970. Datasets and Benchmarks Track. [39] Bo Peng, Eric Alcaide, Quentin Anthony, Alon Albalak, Samuel Arcadinho, Stella Biderman, Huanqi Cao, Xin Cheng, Michael Chung, Matteo Grella, Kranthi Kiran GV, Xuzheng He, Haowen Hou, Jiaju Lin, Przemyslaw Kazienko, Jan Koco´ n, Jiaming Kong, Bartlomiej Koptyra, Hayden Lau, Krishna Sri Ipsit Mantri, Ferdinand Mom, Atsushi Saito, Guangyu Song, Xiangru Tang, Bolun Wang, Johan S. Wind, Stanisław Wo´ zniak, Ruichong Zhang, Zhenyuan Zhang, Qihang Zhao, Peng Zhou, Qinghua Zhou, Jian Zhu, and Rui-Jie Zhu. RWKV: Reinventing RNNs for the transformer era. arXiv preprint arXiv:2305.13048 , 2023. [40] Michael Poli, Stefano Massaroli, Eric Nguyen, Daniel Y. Fu, Tri Dao, Stephen Baccus, Yoshua Bengio, Stefano Ermon, and Christopher Ré. Hyena hierarchy: Towards larger convolutional language models. In International Conference on Machine Learning , 2023. [41] Markus N. Rabe and Charles Staats. Self-attention does not need O(n2) memory, 2021. URL 
+
+https://arxiv.org/abs/2112.05682 .[42] Jonathan Ragan-Kelley, Connelly Barnes, Andrew Adams, Sylvain Paris, Frédo Durand, and Saman Amarasinghe. Halide: A language and compiler for optimizing parallelism, locality, and recomputation in image processing pipelines. In Proceedings of the 34th ACM SIGPLAN Conference on Programming Language Design and Implementation , pages 519–530. ACM, 2013. doi: 10.1145/2491956.2462176. [43] Aravind Rajeswaran, Chelsea Finn, Sham Kakade, and Sergey Levine. Meta-learning with implicit gradients. In Advances in Neural Information Processing Systems 32 , 2019. [44] Barna Saha and Christopher Ye. The I/O complexity of attention, or how optimal is Flash Attention? arXiv preprint arXiv:2402.07443 , 2024. doi: 10.48550/arXiv.2402.07443. 12 [45] Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. FlashAttention-3: Fast and accurate attention with asynchrony and low-precision. arXiv preprint arXiv:2407.08608 , 2024. doi: 10.48550/arXiv.2407.08608. [46] Benjamin Frederick Spector, Simran Arora, Aaryan Singhal, Arjun Parthasarathy, Daniel Y. Fu, and Christopher Ré. ThunderKittens: Simple, fast, and Adorable kernels. In International Conference on Learning Representations , 2025. URL https://openreview.net/forum? id=0fJfVOSUra .[47] Arnuv Tandon, Karan Dalal, Xinhao Li, Daniel Koceja, Marcel Rød, Sam Buchanan, Xiaolong Wang, Jure Leskovec, Sanmi Koyejo, Tatsunori Hashimoto, Carlos Guestrin, Jed McCaleb, Yejin Choi, and Yu Sun. End-to-end test-time training for long context. arXiv preprint arXiv:2512.23675 , 2025. doi: 10.48550/arXiv.2512.23675. [48] Philippe Tillet, H. T. Kung, and David Cox. Triton: An intermediate language and compiler for tiled neural network computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages , pages 10–19, 2019. [49] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In Advances in Neural Informa-tion Processing Systems 30 , 2017. [50] Sinong Wang, Belinda Z. Li, Madian Khabsa, Han Fang, and Hao Ma. Linformer: Self-attention with linear complexity. arXiv preprint arXiv:2006.04768 , 2020. [51] Zhewei Yao, Amir Gholami, Sheng Shen, Mustafa Mustafa, Kurt Keutzer, and Michael W. Mahoney. ADAHESSIAN: An adaptive second order optimizer for machine learning. In AAAI Conference on Artificial Intelligence , volume 35, pages 10665–10673, 2021. doi: 10.1609/aaai. v35i12.17275. [52] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. Flash-Infer: Efficient and customizable attention engine for LLM inference serving. In 
+
+Proceedings of Machine Learning and Systems , volume 7, 2025. doi: 10.48550/ arXiv.2501.01005. URL https://proceedings.mlsys.org/paper_files/paper/2025/ hash/dbf02b21d77409a2db30e56866a8ab3a-Abstract-Conference.html .[53] Ted Zadouri, Markus Hoehnerbach, Jay Shah, Timmy Liu, Vijay Thakkar, and Tri Dao. FlashAttention-4: Algorithm and kernel pipelining co-design for asymmetric hardware scaling. 
+
+arXiv preprint arXiv:2603.05451 , 2026. doi: 10.48550/arXiv.2603.05451. [54] Manzil Zaheer, Guru Guruganesh, Kumar Avinava Dubey, Joshua Ainslie, Chris Alberti, Santiago Ontañón, Philip Pham, Anirudh Ravula, Qifan Wang, Li Yang, and Amr Ahmed. Big bird: Transformers for longer sequences. In Advances in Neural Information Processing Systems 33 , 2020. 
+
+## A Notation 
+
+We collect the main symbols used throughout the paper in Table 4. All matrices are shown for a single attention head and a single batch element; the batch and head dimensions are independent outer dimensions and are omitted for readability. We use ti to denote the i-th row of a matrix T , and all row-wise scalar quantities such as L, D, α, and E are indexed by the query row. The notation 
+
+ed(·) denotes the backward-over-backward output associated with the corresponding first-backward quantity. 
+
+## B Software environment 
+
+Table 5 reports the software stack used for the experiments. We report the CUDA version from the PyTorch/kernel stack rather than the maximum CUDA compatibility version reported by nvidia-smi .We separately report the nvcc compiler release and the nvidia-smi CUDA compatibility version 13 Table 4: Notation used throughout the paper. Tile-level intermediates ( F, C, ed(P ), ed(S)) are intro-duced in Section 4.                                                                          
+
+> Symbol Shape Meaning
+> Q, K, V, dO RN×dForward inputs, first-backward upstream
+> ORN×dForward output, O=P V LRNSaved row log-normalizer, Li= log P
+> j∈V iexp( Sij )
+> dQ, dK, dV RN×dFirst-backward outputs
+> DRNSaved first-backward row summary, Di=do T
+> ioi
+> UQ, U K, U VRN×dBoB input matrices
+> ed(Q),ed(K),ed(V),ed(dO )RN×dBoB outputs
+> α, E RNBoB row scalars (Section 4)
+> Mscalar On-chip SRAM size in # of elements
+> Br, B c,Tr, T cscalar Row/column block sizes and counts Hardware PyTorch Triton flash-attn
+> PyTorch CUDA nvcc Driver
+> nvidia-smi
+> CUDA A6000 2.9.1+cu128 3.5.1 2.8.4 12.8 12.8 580.76.05 13.0 A100 2.11.0.dev20260123+cu126 3.6.0 2.8.3 12.6 12.6 560.35.05 12.6 B200 2.11.0+cu130 3.6.0 N/A 13.0 13.1 595.58.03 13.2
+
+Table 5: Software stack used for experiments. PyTorch CUDA denotes torch.version.cuda ;
+
+nvcc denotes the CUDA compiler release used for custom kernels; and nvidia-smi CUDA denotes the maximum CUDA compatibility version reported by the installed NVIDIA driver. N/A indicates that the package was not used for that hardware configuration. because these quantities can differ from torch.version.cuda . The A6000 experiments used Python 3.10.20, while the A100 and B200 experiments used Python 3.10.13. 
+
+Measurement protocol. Kernel timings use triton.testing.do_bench with warmup=25 and 
+
+rep=100 . In Triton, these parameters are time budgets in milliseconds rather than fixed iteration counts: the benchmark first estimates the runtime of the measured function and then chooses the number of warmup and measured repetitions that fit within the requested warmup and repetition windows. Reported values are medians over the measured repetitions.Whenever a timing table reports 
+
+x ± δ, we use the percentile spread: 
+
+x ± δ, x = p50 , δ = 12 (p80 − p20) .
+
+This spread is not a standard deviation; it is half of the 20th-to-80th percentile range returned by 
+
+do_bench . Tables without an explicit ±δ report median steady-state time. Full-model and training results are single-run throughput measurements; rerunning every full-model and training configuration with percentile or run-to-run summaries was outside our compute budget. Unless otherwise stated, A6000 experiments used Python 3.10.20, PyTorch 2.9.1+cu128, Triton 3.5.1, flash-attn 2.8.4, and CUDA 12.8 with NVIDIA driver 580.76.05. FlashBack experiments additionally used JAX 0.6.2 and jaxlib 0.6.2. A100 experiments used Python 3.10.13, PyTorch 2.11.0.dev20260123+cu126, Triton 3.6.0, flash-attn 2.8.3, and CUDA 12.6 with NVIDIA driver 560.35.05. B200 experiments used Python 3.10.13, PyTorch 2.11.0+cu130, Triton 3.6.0, and CUDA 13.0 with NVIDIA driver 595.58.03. On the B200 system, nvcc reports CUDA compiler release 13.1, while nvidia-smi reports CUDA compatibility up to 13.2. We did not install the flash-attn 
+
+package on the B200 system because the B200 experiments cover only causal attention and use PyTorch’s nn.scaled_dot_product_attention with the FlashAttention backend for the forward and first backward; the flash-attn package is used only for the sliding-window experiments in Appendix M, which were run on A100. The GradMem reference implementations, HVP -M and HVP -S, were evaluated at commit 3f40f11 .FlashBack was evaluated at commit 62a0e0e with its own autotuned configurations. The Sophia-H baseline was evaluated at commit 738c32b , the last commit in which Sophia-H was present. Random seeds were fixed per benchmark. Between configurations, we called torch.cuda.empty_cache() 
+
+14 and reset peak memory statistics before each trial. Measurements used the same PyTorch CUDA allocator configuration across compared methods unless otherwise noted. 
+
+B.1 Software and dataset licenses 
+
+We thank the authors and maintainers of the following software and data we used or compared against. Licenses below are reported as of the commit hashes used for our experiments (Appendix B); please consult each project’s repository for current terms. • PyTorch (BSD-3-Clause), https://github.com/pytorch/pytorch .• Triton (MIT), https://github.com/triton-lang/triton .• flash-attn (BSD-3-Clause), https://github.com/Dao-AILab/flash-attention .• JAX and jaxlib (Apache-2.0), https://github.com/jax-ml/jax .• FineWeb-derived training data . The training runs use VisionTheta/fineweb-1B ,a FineWeb-derived 1B-token dataset stream. The underlying FineWeb dataset [38] is distributed under the Open Data Commons Attribution License v1.0 (ODC-By) at 
+
+https://huggingface.co/datasets/HuggingFaceFW/fineweb ; use is also subject to Com-monCrawl’s Terms of Use. • GPT-2 model architecture (MIT), https://github.com/openai/gpt-2 .• Sophia reference implementation [29] ( https://github.com/Liuhong99/Sophia ). The repos-itory did not display a top-level LICENSE file at commit 738c32b ; we used the code only as a research baseline. The repository documents that its training code is derived from nanoGPT (MIT) and levanter (Apache-2.0). • GradMem reference HVP kernels [24], evaluated at commit 3f40f11 . Used solely as a research baseline under the terms of the upstream repository. • FlashBack [12] (https://github.com/lengstrom/flashback ), evaluated at commit 
+
+62a0e0e . The repository did not display a top-level LICENSE file at this commit; we used the code only as a research baseline. • NVIDIA CUDA Toolkit and drivers : used under the NVIDIA CUDA Toolkit End User License Agreement. 
+
+## C Full BoB derivation 
+
+This appendix derives every BoB identity in §4.2 from reverse-mode automatic differentiation applied to the first-backward graph of softmax attention. The derivation is deliberately step-by-step: each node is processed in turn, every local Jacobian is computed from scratch from its defining formula, and every chain-rule sum is written explicitly before being simplified. Readers familiar with the chain rule and the multi-child rule have all the prerequisites. 
+
+Notation summary 
+
+Throughout this appendix we use the following two conventions in parallel. For any node X in the first-backward graph, dX = ∂L/∂X is its first-order gradient (already computed by the ordinary attention backward), and ed(X) = ∂Φ/∂X is its BoB gradient (what we are computing here). The first-order gradients dQ, dK, dV, dP, dS, dO together with the saved row scalar D are inputs to BoB; the BoB gradients ed(Q), ed(K), ed(V ), ed(dO ), ed(P ), ed(S), ed(dP ), ed(dS ) are intermediates or outputs. The first-backward outputs dQ, dK, dV are the entry points of the BoB walk; reverse-mode begins with their BoB gradients 
+
+ed(dQ ) = UQ, ed(dK ) = UK , ed(dV ) = UV , (9) which follow directly from differentiating the BoB scalar Φ = ⟨dQ, U Q⟩ + ⟨dK, U K ⟩ + ⟨dV, U V ⟩ of (4). For matrices A, B of the same shape, ⟨A, B ⟩ = P 
+
+> i,j
+
+Aij Bij is the Frobenius inner product. Low-ercase letters denote row slices: qi, k j , v j , do i, u Q,i , u K,j , u V,j ∈ Rd. Whenever a row vector 
+
+D, α, E ∈ RN appears inside an N × N expression, it is broadcast across columns. 15 Reverse-mode chain rule 
+
+The only fact used in this appendix is the chain rule for a node X with children Y (1) , . . . , Y (m) in the first-backward graph (meaning that each Y (r) is computed from X during the first-backward pass): the BoB gradient at X is the sum of contributions through each child, with each contribution given by the local Jacobian acting on the BoB gradient at the child. In components, 
+
+ed(Xij ) = 
+
+> m
+
+X
+
+> r=1
+
+X
+
+> u,v
+
+ed(Y (r) 
+
+> uv
+
+) ∂Y (r)
+
+> uv
+
+∂X ij 
+
+. (10) Every equation that follows is one application of (10). 
+
+Step 1: F = ed(dS )
+
+The node dS has two children in the first-backward graph, dQ = τ dS K and dK = τ dS TQ.Applying (10), 
+
+ed(dS ij ) = X
+
+> a
+
+ed(dQ ia ) ∂dQ ia 
+
+∂dS ij 
+
++ X
+
+> a
+
+ed(dK ja ) ∂dK ja 
+
+∂dS ij 
+
+. (11) The local Jacobians come from the formulas dQ ia = τ P 
+
+> j
+
+dS ij Kja and dK ja = τ P 
+
+> i
+
+dS ij Qia ,giving 
+
+∂dQ ia 
+
+∂dS ij 
+
+= τ K ja , ∂dK ja 
+
+∂dS ij 
+
+= τ Q ia . (12) Substituting and using ed(dQ ia ) = UQ,ia and ed(dK ja ) = UK,ja from (9), 
+
+ed(dS ij ) = τ X
+
+> a
+
+UQ,ia Kja + τ X
+
+> a
+
+UK,ja Qia = τ u T
+
+> Q,i
+
+kj + τ q T 
+
+> i
+
+uK,j . (13) We name this quantity F . In matrix form, 
+
+F := ed(dS ) = τ  UQ KT + Q U T
+
+> K
+
+. (14) 
+
+Step 2: ed(dP ) and the row scalars α
+
+The node dP has children in the first-backward graph through the formula dS ik = Pik (dP ik − Di)
+
+together with Di = P 
+
+> r
+
+Pir dP ir . Holding P fixed (its BoB gradient is handled separately in Steps 4 and 5), dP ij enters dS ik through two routes: a direct route ( dP ij appears as dP ik when k = j) and an indirect route through the row scalar Di (every k in row i uses Di, which depends on dP ij ). Both contribute to the chain rule, so we compute the local Jacobian carefully: 
+
+∂dS ik 
+
+∂dP ij 
+
+= Pik 
+
+ ∂dP ik 
+
+∂dP ij 
+
+− ∂D i
+
+∂dP ij 
+
+
+
+. (15) The two pieces are 
+
+∂dP ik 
+
+∂dP ij 
+
+= δkj , ∂D i
+
+∂dP ij 
+
+= ∂∂dP ij 
+
+X
+
+> r
+
+Pir dP ir = Pij , (16) so ∂dS ik 
+
+∂dP ij 
+
+= Pik (δkj − Pij ). (17) Applying (10) with the single child dS and ed(dS ik ) = Fik ,
+
+ed(dP ij ) = X
+
+> k
+
+Fik Pik (δkj − Pij ) = Fij Pij 
+
+| {z }  
+
+> k=jterm
+
+− Pij 
+
+X
+
+> k
+
+Pik Fik 
+
+| {z }
+
+> row-sum term
+
+. (18) The row-sum factor P 
+
+> k
+
+Pik Fik is a row reduction; we name it αi:
+
+αi := X
+
+> k∈V i
+
+Pik Fik . (19) Substituting, 
+
+ed(dP ij ) = Pij (Fij − αi). (20) 16 Step 3: ed(V ) and the first contribution to ed(dO )
+
+The node V has only one child in the first-backward graph, dP = dO V T; that is, dP ij =P 
+
+> a
+
+dO ia Vja . Applying (10) for the BoB gradient at Vja ,
+
+ed(Vja ) = X
+
+> i
+
+ed(dP ij ) ∂dP ij 
+
+∂V ja 
+
+= X
+
+> i
+
+ed(dP ij ) dO ia = X
+
+> i
+
+Pij (Fij − αi) dO ia . (21) In matrix form, with h := F − α 1T broadcast over columns, 
+
+ed(V ) = ( P ⊙ h)T dO. (22) The same node dP = dO V T also sends one of two contributions into ed(dO ). For the BoB gradient at dO ia ,
+
+∂dP ij 
+
+∂dO ia 
+
+= Vja , so the contribution from dP is X
+
+> j
+
+ed(dP ij ) Vja = X
+
+> j
+
+Pij (Fij − αi) Vja .
+
+(23) We will combine this with the second contribution to ed(dO ) in Step 4. 
+
+Step 4: C, the contribution to ed(P ) from the dV child, and the rest of ed(dO )
+
+The node P has two children in the first-backward graph, dV and dS . We process the dV child here (it is algebraically simple) and defer the dS child to Step 5 (where the second row scalar will appear). The first-backward formula is dV ja = P 
+
+> i
+
+Pij dO ia . The local Jacobian is ∂dV ja /∂P ij = dO ia , and the BoB gradient at dV is ed(dV ja ) = UV,ja from (9). The dV -child contribution to ed(Pij ) is 
+
+X
+
+> a
+
+UV,ja dO ia = dO T 
+
+> i
+
+uV,j . (24) We name this quantity Cij . In matrix form, 
+
+C := dO U T 
+
+> V
+
+. (25) The same node dV = P TdO also sends the second contribution into ed(dO ). For the BoB gradient at 
+
+dO ia , ∂dV ja 
+
+∂dO ia 
+
+= Pij , so the contribution from dV is X
+
+> j
+
+Pij UV,ja . (26) Combining with the contribution from Step 3, 
+
+ed(dO ia ) = X
+
+> j
+
+Pij UV,ja + X
+
+> j
+
+Pij (Fij − αi) Vja , or ed(dO ) = P U V + ( P ⊙ h) V. (27) 
+
+Step 5: contribution to ed(P ) from the dS child 
+
+This is the second contribution to ed(P ). The variable Pij reaches dS ik along two routes through the formula dS ik = Pik (dP ik − Di): the outer factor Pik (when k = j) and the row scalar Di (which depends on every Pir ). Computing the local Jacobian by the product rule, with dP now held fixed, 
+
+∂dS ik 
+
+∂P ij 
+
+= ∂P ik 
+
+∂P ij 
+
+(dP ik − Di) + Pik 
+
+∂(dP ik − Di)
+
+∂P ij 
+
+(28) 
+
+= δkj (dP ik − Di) − Pik dP ij , (29) where in the second line we used ∂P ik /∂P ij = δkj and ∂D i/∂P ij = dP ij . Multiplying by 
+
+ed(dS ik ) = Fik and summing over k,
+
+X
+
+> k
+
+Fik 
+
+∂dS ik 
+
+∂P ij 
+
+= X
+
+> k
+
+Fik δkj (dP ij − Di)
+
+| {z }
+
+> outer-factor route
+
+− X
+
+> k
+
+Fik Pik dP ij 
+
+| {z } 
+
+> row-scalar route through Di
+
+(30) 
+
+= Fij (dP ij − Di) − αi dP ij , (31) 17 where the last step used the αi definition from (19). Adding the Cij contribution from (25) closes the BoB gradient at P :
+
+ed(Pij ) = Cij + Fij (dP ij − Di)
+
+| {z } 
+
+> ed(Pij )◦
+
+− αi dP ij . (32) Equation (32) also defines the α-free part ed(Pij )◦ of ed(Pij ).
+
+Step 6: ed(S) and the row scalars E
+
+The node S has one child, P = softmax( S). We first derive the softmax Jacobian from scratch by the quotient rule, then apply (10). For row i, Pik = exp( Sik )/Z i with Zi = P 
+
+> r
+
+exp( Sir ). By the quotient rule, 
+
+∂P ik 
+
+∂S ij 
+
+= [∂ exp( Sik )/∂S ij ] Zi − exp( Sik ) [ ∂Z i/∂S ij ]
+
+Z2
+
+> i
+
+. (33) The two numerator pieces are ∂ exp( Sik )/∂S ij = δkj exp( Sik ) and ∂Z i/∂S ij = exp( Sij ), so 
+
+∂P ik 
+
+∂S ij 
+
+= δkj exp( Sik )
+
+Zi
+
+− exp( Sik ) exp( Sij )
+
+Z2
+
+> i
+
+= Pik (δkj − Pij ). (34) Applying (10) at Sij with the single child P ,
+
+ed(Sij ) = X
+
+> k
+
+ed(Pik ) ∂P ik 
+
+∂S ij 
+
+= X
+
+> k
+
+ed(Pik ) Pik (δkj − Pij ) = Pij ed(Pij ) − Pij 
+
+X
+
+> k
+
+Pik ed(Pik ).
+
+(35) The row-sum factor is the second row scalar: 
+
+Ei := X
+
+> k∈V i
+
+Pik ed(Pik ). (36) Substituting, 
+
+ed(Sij ) = Pij ( ed(Pij ) − Ei), (37) the same shape as the first-backward formula dS ij = Pij (dP ij − Di).
+
+Step 7: ed(Q) and ed(K)
+
+The node Q has two children in the first-backward graph: S (through the indirect path Q → S →
+
+P → · · · ) and dK (through the direct path, since dK = τ dS TQ uses Q directly). The contribution from each child is computed below. 
+
+Indirect contribution through S. The first-backward formula is Sij = τ q T 
+
+> i
+
+kj + Mij , so the local Jacobian is ∂S ij /∂Q ia = τ K ja . The contribution to ed(Qia ) from S is 
+
+X
+
+> j
+
+ed(Sij ) τ K ja = τ X
+
+> j
+
+ed(Sij ) Kja , or in matrix form, τ ed(S) K. (38) 
+
+Direct contribution through dK . The first-backward formula is dK ja = τ P 
+
+> i
+
+dS ij Qia , so the local Jacobian is ∂dK ja /∂Q ib = τ dS ij δab . The contribution to ed(Qib ) from dK is 
+
+X
+
+> j,a
+
+ed(dK ja ) τ dS ij δab = τ X
+
+> j
+
+dS ij UK,jb , or in matrix form, τ dS U K . (39) Adding the two contributions, 
+
+ed(Q) = τ   ed(S) K + dS U K
+
+. (40) The same calculation with K in place of Q gives 
+
+ed(K) = τ   ed(S)TQ + dS TUQ
+
+. (41) 18 Final assembled identities 
+
+Collecting Equations (14), (19), (25), (32), (36), (37), (22), (27), (40), and (41), 
+
+F = τ (UQ KT + Q U T 
+
+> K
+
+), αi = P 
+
+> j
+
+Pij Fij , C = dO U T 
+
+> V
+
+,
+
+ed(Pij )◦ = Cij + Fij (dP ij − Di), ed(Pij ) = ed(Pij )◦ − αi dP ij , Ei = P 
+
+> j
+
+Pij ed(Pij ),
+
+ed(S) = P ⊙ ( ed(P ) − E 1T), ed(Q) = τ ( ed(S) K + dS U K ), ed(K) = τ ( ed(S)TQ + dS TUQ),
+
+ed(V ) = ( P ⊙ h)TdO, ed(dO ) = P U V + ( P ⊙ h) V, h = F − α 1T.
+
+These are the closed-form BoB identities used in Section 4.2. 
+
+## D Proofs of Proposition 4.1 and Theorem 4.2 
+
+Proof of Proposition 4.1. For (8), substitute ed(Pij ) = ed(Pij )◦ − αi dP ij into Ei =
+
+P 
+
+> j∈V i
+
+Pij ed(Pij ):
+
+Ei = X
+
+> j∈V i
+
+Pij ed(Pij )◦ − αi
+
+X
+
+> j∈V i
+
+Pij dP ij = E◦ 
+
+> i
+
+− αiDi.
+
+For (8), expand hij = Fij − αi in ed(dO )i = P 
+
+> j∈V i
+
+Pij uV,j + P 
+
+> j∈V i
+
+Pij hij vj :
+
+ed(dO )i = X
+
+> j∈V i
+
+Pij uV,j + X
+
+> j∈V i
+
+Pij Fij vj
+
+| {z }
+
+> ed(dO )◦
+> i
+
+−αi
+
+X
+
+> j∈V i
+
+Pij vj
+
+| {z }
+
+> oi
+
+.
+
+For (8), substitute ed(Pij ) = ed(Pij )◦ − αidP ij and dS ij = Pij (dP ij − Di) into ed(Q)i =
+
+τ P 
+
+> j∈V i
+
+(Pij ( ed(Pij ) − Ei)kj + dS ij uK,j ):
+
+ed(Q)i = τ
+
+ X 
+
+> j∈V i
+
+Pij ed(Pij )◦kj + X
+
+> j∈V i
+
+Pij (dP ij − Di)uK,j 
+
+| {z }
+
+> Ωi
+
+−αi
+
+X
+
+> j∈V i
+
+Pij dP ij kj
+
+| {z }
+
+> Ri
+
+−Ei
+
+X
+
+> j∈V i
+
+Pij kj
+
+| {z }
+
+> Bi
+
+
+
+.
+
+Proof of Theorem 4.2. By Proposition 4.1, the row-side outputs decompose as Ei = E◦ 
+
+> i
+
+− αiDi,
+
+ed(dO )i = ed(dO )◦ 
+
+> i
+
+−αioi, and ed(Q)i = τ (Ω i −αiRi −EiBi), where each of α, E ◦, ed(dO )◦, Ω, B, R 
+
+is a column reduction not depending on αi (stated in Proposition 4.1). The inner loop of Pass 1 is the blockwise realization of these column reductions, visiting each (i, j ) tile exactly once per row. 
+
+Di is loaded from the saved row state (L, D ). Pass 2 loads (αi, E i) from HBM and every tilewise intermediate is then the direct blockwise realization of its defining equation from Section 4.2. The column accumulations ed(V )j = P
+
+> i
+
+(Pij ⊙ hij )TdO i and ed(K)j = τ P
+
+> i
+
+( ed(Sij )TQi + dS T 
+
+> ij
+
+UQ,i )
+
+are the exact tile-sum forms of (6) and (7). For the FLOPs and memory bounds: Pass 1 forms the four B(1)  
+
+> r
+
+× B(1)  
+
+> c
+
+tiles dP ij , F ij , C ij , ed(Pij )◦
+
+via matrix products of N × d operands and accumulates six column reductions of total output dimension O(B(1)  
+
+> r
+
+d). Summed over all ⌈N/B (1)  
+
+> r
+
+⌉ · ⌈ N/B (1)  
+
+> c
+
+⌉ tile visits, the matrix-multiply work is Θ( N 2d) and the elementwise softmax work is O(N 2). Pass 2 has the same per-tile work in column-major orientation, also totalling Θ( N 2d). Auxiliary HBM beyond inputs, outputs, the saved row state (L, D ), and the forward output O consists only of the two N -vectors (α, E ), hence O(N ).The on-chip footprint per tile visit is bounded by the tile-budget analysis of Section 4.3. 
+
+## E Large-cache lower bound 
+
+This section proves Theorem 4.5. We use the standard two-level I/O model from Section 3: SRAM has capacity M scalar elements, HBM is unbounded, and I/O counts scalar transfers between them. The lower bound is stated for the standard FlashAttention-style score-recomputation model for exact tiled 19 attention. In this model, the full score matrix S = τ QK T and probability matrix P = softmax( S)
+
+are not given as HBM inputs. Score blocks are recomputed from the bilinear forms 
+
+Sij = τ q T 
+
+> i
+
+kj = τ
+
+> d
+
+X
+
+> ℓ=1
+
+Qiℓ Kjℓ ,
+
+probability blocks are obtained by exact row-wise softmax normalization, and the algorithm may receive the usual O(N ) saved row statistics, such as the row log-normalizer Li. This is the execution model used by exact FlashAttention-style kernels and by the attention I/O lower bounds invoked below. The proof has one inherited component and one new component. The inherited component is the large-cache I/O lower bound for exact forward softmax attention under the standard score-recomputation model. In particular, the large-cache lower bound of [44, Lem. 3.4] shows that, for M = Ω( d2),exact attention evaluated through the standard matrix-product score computation has I/O complexity 
+
+Ω( N 2d2/M ). This is where the N 2d2/M term enters the argument. The new component in this paper is the embedding: we show that a special BoB instance outputs exactly softmax( τ QK T)W .Therefore, an asymptotically faster exact BoB algorithm in the same score-recomputation model would imply an asymptotically faster exact forward-attention algorithm, contradicting the inherited lower bound. Intuitively, the factor N 2d2/M arises as follows. The attention score computation contains Ω( N 2d)
+
+scalar multiplication vertices of the form Qiℓ Kjℓ . In the large-cache regime, [44, Lem. 3.3] bound the number of such level-1 score vertices in each M -partition part by O(M 2/d ). Hence any M -partition needs Ω( N 2d2/M 2) parts, and the red-blue pebble partition lemma converts this into Ω( N 2d2/M )
+
+HBM transfers. 
+
+Lemma E.1 (Forward-attention lower bound with row statistics) . Under the standard FlashAttention-style score-recomputation model, exact forward softmax attention 
+
+Y = softmax( τ QK T)W
+
+with Q, K, W ∈ RN ×d, M = Ω( d2), N ≥ d, M ≲ N d , and Θ( N 2) valid query-key interactions requires Ω( N 2d2/M ) HBM transfers. Proof. This is exactly the large-cache forward-attention lower bound of [44, Lem. 3.4], applied to the standard FlashAttention-style score-recomputation model. The cited lemma is stated for unmasked attention. The argument it relies on is the standard matrix-multiplication I/O lower bound applied to the score subgraph, which only requires that the number of valid query-key interactions be Θ( N 2).Causal masks satisfy this condition (the lower-triangular pattern has N (N + 1) /2 = Θ( N 2) valid pairs), so the lemma transfers to the causal setting we evaluate. In that model, the full score matrix 
+
+S = τ QK T and probability matrix P = softmax( S) are not provided as HBM inputs; score blocks are recomputed from the bilinear products between Q and K, and only O(N ) row statistics may be supplied. Lemma 3.4 of [44] gives Q(M ) = Ω 
+
+ N 2d2
+
+> M
+
+
+
+for M = Ω( d2). The additional O(N )
+
+row statistics change the traffic only by row-state terms, which are dominated by N 2d2/M when 
+
+M ≲ N d . Therefore exact forward attention in this score-recomputation model requires Ω
+
+ N 2d2
+
+> M
+
+
+
+HBM transfers. 
+
+Lemma E.2 (Forward-attention embedding in BoB) . For any Q, K, W ∈ RN ×d, there is a valid BoB instance whose output ed(dO ) is exactly 
+
+ed(dO ) = softmax( τ QK T)W. 
+
+Proof. Choose 
+
+V = 0 , dO = 0 , UQ = 0 , UK = 0 , UV = W. 
+
+The required row state is valid: O = P V = 0 , Di = dO T 
+
+> i
+
+Oi = 0 , and the row normalizers are determined by Q and K. On this instance, 
+
+F = τ (UQKT + QU T 
+
+> K
+
+) = 0 , αi = X
+
+> j
+
+Pij Fij = 0 , hij = Fij − αi = 0 .
+
+20 Using the BoB identity for the upstream-output derivative, 
+
+ed(dO ) = P U V + ( P ⊙ h)V, 
+
+we obtain ed(dO ) = P W. 
+
+Thus this BoB instance computes exact forward softmax attention with value matrix W .
+
+Proof of Theorem 4.5. The argument uses the same score-recomputation model as Lemma E.1: the algorithm is not given S or P as HBM inputs, does not store them as N × N HBM tensors, and evaluates the score subgraph through the standard bilinear products Sij = τ q T 
+
+> i
+
+kj . Suppose, for contradiction, that there were an exact BoB algorithm with 
+
+o
+
+ N 2d2
+
+M
+
+
+
+HBM transfers under this model. Given an arbitrary forward-attention instance (Q, K, W ), construct the BoB instance from Lemma E.2 by setting V = 0 , dO = 0 , UQ = UK = 0 , and UV = W .Running the assumed BoB algorithm and reading its ed(dO ) output would compute 
+
+softmax( τ QK T)W. 
+
+This construction only relabels the forward-attention value matrix W as the BoB upstream matrix 
+
+UV , while V, dO, U Q, U K are fixed zero inputs and the required row state is determined by Q and 
+
+K. Thus it gives an exact forward-attention algorithm in the same score-recomputation model with asymptotically smaller HBM traffic than Lemma E.1 allows. This contradiction proves that any exact BoB algorithm in the stated score-recomputation model requires 
+
+Ω
+
+ N 2d2
+
+M
+
+
+
+HBM transfers. 
+
+## F FlashBoB: Fully Annotated Pseudocode 
+
+Algorithm 2 reproduces the schedule of Algorithm 1 with explicit tile shapes and inline commentary on the role of each quantity. Shapes are given for the divisible dense case; boundary tiles are padded and masked as in FlashAttention. All intermediates Pij , dP ij , F ij , C ij , ed(P )◦ 
+
+> ij
+
+, ed(P )ij , ed(S)ij 
+
+are formed only as Br × Bc tiles in SRAM/registers and are discarded after the tile update; no full 
+
+N × N intermediate is materialized in HBM. 
+
+## G Dependency graphs and schedule overlays 
+
+This appendix collects the dependency graphs underlying the derivation. Three simple graph ideas appear repeatedly. A fan-out means one quantity is computed once and then sent to several later expressions. A reduction detour means an N × N quantity is first compressed to one scalar per row and that row scalar is then used later. A two-factor product means a node is formed by multiplying information coming from two streamed operands. Figures 3 and 4 show these patterns in the forward and first-backward graphs, and Figure 5 shows how they reappear in BoB. Figures 6 and 7 then overlay the conservative three-pass and affine-fused two-pass schedules on the BoB graph. In all graphs, blue nodes are inputs, green nodes are intermediates, red nodes are outputs or incoming gradients from the next derivative level, and yellow circles are one-scalar-per-row quantities. Dashed gray nodes are recomputed tilewise quantities that are never materialized in HBM. 
+
+G.1 Three-pass versus two-pass: HBM savings and empirical comparison 
+
+Throughout this appendix, the FlashAttention execution model means an exact tiled attention execution with bounded O(M ) on-chip working sets, no global atomic adds on output tensors, no N × N HBM 21 Algorithm 2 FLASH BOB: fully annotated schedule. 
+
+Input: Q, K, V, dO, U Q, U K , U V , O ∈ RN ×d; row state L, D ∈ RN in HBM, SRAM size M , τ = 1 /√d
+
+Output: ed(Q), ed(K), ed(V ), ed(dO ) ∈ RN ×d and α, E ∈ RN
+
+1: b ← ⌊ M/ (cBOB d)⌋; B(1)  
+
+> r
+
+, B (2)  
+
+> c
+
+← b; B(1)  
+
+> c
+
+, B (2)  
+
+> r
+
+← min( b, d )
+
+PASS 1 ( ROW -MAJOR ). Finalize (α, E, ed(Q), ed(dO )) in a single sweep via affine fusion. 
+
+2: for i = 1 to ⌈N/B (1)  
+
+> r
+
+⌉ do 
+
+3: Load Qi, dO i, U Q,i , O i ∈ RB(1)   
+
+> r×d
+
+and saved row scalars Li, D i ∈ RB(1)  
+
+> r
+
+▷ active row block 
+
+4: αi, E ◦ 
+
+> i
+
+← 0 ∈ RB(1)  
+
+> r
+
+; ed(dO )◦ 
+
+> i
+
+, Ωi, B i, R i ← 0 ∈ RB(1)   
+
+> r×d
+
+▷ six row accumulators; five are α-free 
+
+5: for j = 1 to ⌈N/B (1)  
+
+> c
+
+⌉ do 
+
+6: Load Kj , V j , U K,j , U V,j ∈ RB(1)   
+
+> c×d
+
+▷ streamed column block 
+
+7: Recompute Sij , P ij ∈ RB(1)   
+
+> r×B(1)
+> c
+
+from (Qi, K j , L i) ▷ tilewise softmax 
+
+8: dP ij ← dO i V T 
+
+> j
+
+▷ upstream to P via dV path 
+
+9: Fij ← τ (UQ,i KT 
+
+> j
+
++ QiU T 
+
+> K,j
+
+) ▷ BoB gradient at dS , eq. (14) 
+
+10: Cij ← dO i U T 
+
+> V,j
+
+▷ contribution from dV path 
+
+11: ed(Pij )◦ ← Cij + Fij ⊙ (dP ij − Di) ▷ α -free base of ed(P ), eq. (32) 
+
+12: αi += rowsum( Pij ⊙ Fij ) ▷ row scalar for affine update 
+
+13: E◦ 
+
+> i
+
++= rowsum( Pij ⊙ ed(Pij )◦) ▷ α -free component of Ei
+
+14: ed(dO )◦ 
+
+> i
+
++= Pij UV,j + ( Pij ⊙ Fij )Vj ▷ α -free component of ed(dO )i
+
+15: Ωi += ( Pij ⊙ ed(Pij )◦)Kj + ( Pij ⊙ (dP ij − Di)) UK,j ▷ α -free component of ed(Q)i
+
+16: Bi += Pij Kj ; Ri += ( Pij ⊙ dP ij )Kj ▷ coefficients for update 
+
+17: end for 
+
+18: Ei ← E◦ 
+
+> i
+
+− αi ⊙ Di ▷ eq. (8) 
+
+19: ed(dO )i ← ed(dO )◦ 
+
+> i
+
+− αi ⊙ Oi ▷ eq. (8) 
+
+20: ed(Q)i ← τ (Ω i − αi ⊙ Ri − Ei ⊙ Bi) ▷ eq. (8) 
+
+21: Write αi, E i, ed(Q)i, ed(dO )i to HBM ▷ (α, E ) consumed in Pass 2 
+
+22: end for 
+
+PASS 2 ( COLUMN -MAJOR ). Consume saved (α, E ); accumulate and write ( ed(K), ed(V )) .
+
+23: for j = 1 to ⌈N/B (2)  
+
+> c
+
+⌉ do 
+
+24: Load Kj , V j , U K,j , U V,j ∈ RB(2)   
+
+> c×d
+
+▷ active column block 
+
+25: Initialize ed(K)j , ed(V )j ← 0 ∈ RB(2)  
+
+> c×d
+
+26: for i = 1 to ⌈N/B (2)  
+
+> r
+
+⌉ do 
+
+27: Load Qi, dO i, U Q,i ∈ RB(2)   
+
+> r×d
+
+and Li, D i, α i, E i ∈ RB(2)  
+
+> r
+
+▷ streamed row block + saved scalars 
+
+28: Recompute Sij , P ij ∈ RB(2)   
+
+> r×B(2)
+> c
+
+from (Qi, K j , L i)
+
+29: dP ij ← dO i V T 
+
+> j
+
+; Fij ← τ (UQ,i KT 
+
+> j
+
++ QiU T 
+
+> K,j
+
+); Cij ← dO i U T
+
+> V,j
+
+30: hij ← Fij − αi; dS ij ← Pij ⊙ (dP ij − Di) ▷ tile-wise quantities 
+
+31: ed(Pij ) ← Cij + Fij ⊙ (dP ij − Di) − αi ⊙ dP ij ▷ full ed(P ), eq. (32) 
+
+32: ed(Sij ) ← Pij ⊙ ( ed(Pij ) − Ei) ▷ second softmax-backward 
+
+33: ed(V )j += ( Pij ⊙ hij )TdO i ▷ column update for ed(V )j
+
+34: ed(K)j += τ ( ed(Sij )TQi + dS T 
+
+> ij
+
+UQ,i ) ▷ column update for ed(K)j
+
+35: end for 
+
+36: Write ed(K)j , ed(V )j to HBM 
+
+37: end for 
+
+intermediates, and probability tiles recomputed from saved row state (L, D ) rather than read from HBM. The four BoB outputs do not finish in the same traversal direction (§4.2), forcing one row-major and one column-major sweep. A single pass cannot satisfy the FlashAttention execution model: the column-side outputs ( ed(K), ed(V )) reduce over rows for fixed column, so accumulating them during a row-major traversal would require materializing an N × N intermediate in HBM, using global atomics for column-indexed outputs, or holding Θ( N d ) partial column accumulators on chip. Each path gives up the discipline that made FlashAttention fast. 22 inputs output 
+
+QKVS P O  
+
+> τ(·)KT
+> softmax (·)V
+
+Figure 3: Forward dependency graph. Three inputs flow through two N × N intermediates ( S and 
+
+P ) to a single N × d output. 
+
+GO
+
+dP dV Di
+
+dS dQ dK 
+
+(·)V T
+
+P T(·)
+
+rowdot PP ⊙ (·)
+
+subtract 
+
+τ (·)Kτ (·)TQ
+
+Figure 4: First-backward dependency graph. One upstream ( GO) produces three outputs via two 
+
+N × N intermediates, with a single row-scalar detour through Di.The three-pass schedule (Figure 6) is itself the result of one level of affine fusion: its second pass uses the delayed E-correction to finalize ed(Q) in a single row-major sweep. The two-pass F LASH BOBschedule (Figure 7) extends this with a second level of affine fusion that eliminates the dedicated 
+
+α-only sweep (Pass 1 of the three-pass schedule). The HBM saving is bounded by the streamed reads of the eliminated sweep, which loads exactly two B × d tensors per tile pair ( Kj and UK,j , the operands of Fij ). This is 2dN 2/B out of the three-pass total of (10 d + 4) N 2/B streamed traffic, about 2d/ (10 d + 4) ≈ 19% of the streamed budget at d=64 . With compute unchanged across schedules, the wall-time advantage scales the streamed-traffic ratio by the memory-bound fraction of the kernel. The measured 5–7% advantage at long context is consistent with the predicted streamed-traffic ratio. We view this as additional evidence for the schedule choice; the formal optimality argument is the large-cache I/O bound of Theorem 4.5. 
+
+## H Per-pass I/O ledger and proof of Theorem 4.3 
+
+Pass Stationary loads Streamed loads Writes 1 (row) Qi, U Q,i , do i, O i, L i, D i Kj , U K,j , V j , U V,j ed(Q)i, ed(dO )i, α i, E i
+
+2 (col) Kj , V j , U K,j , U V,j Qi, U Q,i , do i, L i, D i, α i, E i ed(K)j , ed(V )j
+
+Pass 1 element counts. Stationary reads: NB(1) 
+
+> r
+
+(4 B(1)  
+
+> r
+
+d + 2 B(1)  
+
+> r
+
+) = 4 N d + 2 N . Streamed reads: 
+
+> NB(1)
+> r
+> NB(1)
+> c
+
+· 4B(1)  
+
+> c
+
+d = 4dN 2
+
+> B(1)
+> r
+
+. Writes: NB(1) 
+
+> r
+
+(2 B(1)  
+
+> r
+
+d + 2 B(1)  
+
+> r
+
+) = 2 N d + 2 N .23 UQ UK UV                   
+
+> FdP Cαihed(P)◦
+> ed(P)
+> dS Eied(S)
+> ed(Q)ed(K)ed(V)ed(dO )
+> τ(·)KTτ Q (·)TdO (·)T
+> rowsum( P⊙ · )
+> τ(·)Kτ(·)TQ
+> (dO )T(P ⊙ · )(P ⊙ · )VP(·)(·)UK
+> (·)TUQ
+
+Figure 5: BoB dependency graph. Three upstream matrices produce four outputs through five N × N
+
+intermediates and two row scalars. The softmax backward identity appears twice (at αi → h and at 
+
+Ei → ed(S)). Table 6: Direct comparison between the three-pass control schedule and the affine-fused two-pass kernel on NVIDIA A100 (GPT-2 Small shape, batch 4, BF16 inputs with FP32 reductions). 
+
+N 3-PASS BOB (ms) FLASH BOB (ms) Ratio 1 024 2.70 2.57 1.05 ×
+
+4 096 27.30 25.80 1.06 ×
+
+16 384 389.14 365.73 1.06 ×
+
+65 536 6 227.59 5 843.14 1.07 ×
+
+262 144 100 696.16 94 853.72 1.06 ×
+
+Pass 2 element counts. Stationary reads: NB(2) 
+
+> c
+
+· 4B(2)  
+
+> c
+
+d = 4 N d . Streamed reads: NB(2) 
+
+> c
+> NB(2)
+> r
+
+(3 B(2)  
+
+> r
+
+d +4B(2)  
+
+> r
+
+) = (3 d+4) N 2
+
+> B(2)
+> c
+
+. Writes: NB(2) 
+
+> c
+
+· 2B(2)  
+
+> c
+
+d = 2 N d .Summing all reads and writes, 
+
+QFLASH BOB = (4 N d + 2 N ) + 4dN 2
+
+B(1) 
+
+> r
+
++ (2 N d + 2 N ) + 4 N d + (3 d + 4) N 2
+
+B(2) 
+
+> c
+
++ 2 N d 
+
+= 12 N d + 4 N + 4dN 2
+
+B(1) 
+
+> r
+
++ (3 d + 4) N 2
+
+B(2) 
+
+> c
+
+,
+
+proving Theorem 4.3. Setting B(1)  
+
+> r
+
+= B(2)  
+
+> c
+
+= b gives QFLASH BOB = 12 N d +4 N +(7 d+4) N 2/b .The constant cBOB in b = ⌊M/ (cBOBd)⌋ is fixed by the on-chip footprint of one tile visit. The footprint contains a constant number of row-vector blocks, column-vector blocks, interaction-shaped 
+
+Br × Bc tiles, and row/column scalar buffers. We can write the requirement as 
+
+M ≥ c1Br d + c2Bcd + c3Br Bc + O(Br + Bc),
+
+for implementation-dependent constants c1, c 2, c 3 > 0. The c3Br Bc term accounts for the constant number of interaction-shaped intermediates formed during a tile visit, such as probability-like, score-adjoint-like, and temporary product tiles. This constant-factor accounting does not change the asymptotic choice Br , B c = Θ( M/d ) in the large-cache regime used by Theorem 4.3; it only makes explicit that the SRAM budget hides more than one interaction tile. 24 Pass 1               
+
+> row-major compute α
+> Pass 2
+> row-major compute E, ¯Q, dO
+> Pass 3
+> column-major compute ¯K, ¯VUQUKUV
+> Fαi
+> CdP hed(P)◦
+> ed(P)
+> Ei
+> dS
+> ed(Q)ed(dO )
+> dS ed(S)
+> ed(K)ed(V)
+
+Figure 6: Three-pass schedule overlaid on the BoB graph. Pass 1 exists only to accumulate αi.Proposition 4.1 collapses Passes 1 and 2 into one. The experiments use block-causal masking, under which Pass 1 visits only (i, j ) pairs with j ≤ i
+
+and Pass 2 visits only (i, j ) pairs with i ≥ j, reducing the streamed-traffic count from Tr Tc to 
+
+Tr (Tr +1) /2 per pass. This scales the N 2 terms in (4.3) by ρ = (1 + 1 /T r )/2 → 12 as Tr → ∞ ; the stationary and write terms 12 N d + 4 N are unchanged. 
+
+## I Extensions 
+
+The derivation of Section 4 extends cleanly to three settings that appear in practice: variable-length packed sequences, dropout, and mixed precision. Variable-length packing and sparse masks require only that each row has a well-defined set of allowed columns and that masked entries have zero probability. For packed variable-length attention with total length N , define V as the set of block pairs with at least one unmasked entry and restrict the inner streamed loop over column blocks to those j with (i, j ) ∈ V . Under a causal mask, |V| is block-triangular, so roughly half of all tile visits are skipped. The I/O formulas carry over with every 
+
+Tr Tc replaced by |V| .Dropout applied after softmax with keep mask R ∈ { 0, 1}N ×N and inverse keep rate σ = (1 −
+
+pdrop )−1 defines eP = σ(R ⊙ P ), with O = eP V and dV = eP TdO . The softmax row reductions αi,
+
+Di, and Ei remain defined over the ungated P = softmax( S), since this is the form whose gradient parents are correct. Gating is confined to the paths through R:
+
+dP ij → σR ij dP ij , Cij → σR ij Cij ,
+
+ed(V )j = σ X
+
+> i
+
+Rij (Pij ⊙ hij )Tdo i, ed(dO )i = σ X
+
+> j
+
+Rij Pij uVj + σ X
+
+> j
+
+Rij Pij hij vj .
+
+Both terms of ed(dO )i are gated, including the direct dV path σ P 
+
+> j
+
+Rij Pij uVj : differentiating 
+
+dV = eP TdO with respect to dO gives eP U V = σ(R ⊙ P ) UV , not P U V . Since R is parameter-independent it introduces no additional gradient paths, and the mask is regenerated deterministically per tile visit via a counter-based PRNG such as Philox, so no additional HBM storage is required. 25 Pass 1           
+
+> row-major
+> Pass 2
+> column-major
+> UQUKUV
+> FCdP αihed(P)◦
+> ed(P)
+> Eied(Q)ed(dO )
+> ed(S)
+> dS dS
+> ed(K)ed(V)
+
+Figure 7: Affine-fused two-pass schedule (F LASH BOB) overlaid on the BoB graph. One horizontal cut separates row-side nodes (above) from column-side nodes (below). Pass 1 finalizes ed(Q) and 
+
+ed(dO ) by accumulating the six row accumulators from Proposition 4.1 and applying scalar corrections at the end of the sweep; Pass 2 consumes the saved (α, E ) and finalizes ed(K) and ed(V ) as natural column reductions.. The element counts in Theorem 4.3 are precision-agnostic, so mixed-precision execution requires no algorithmic change. A standard implementation stores Q, K, V, dO, U Q, U K , U V in BF16 or FP16 and accumulates all reductions ( L, D, α, E, E ◦) in FP32, matching the FlashAttention backward [9]. 
+
+## J Additional numerical agreement data 
+
+We measured the maximum absolute and relative discrepancy of each BoB output against the bit-for-bit math reference at sequence lengths N ∈ { 128 , 256 , 512 , 1024 , 2048 , 4096 , 8192 } for each non-reference backend. The math reference computes the BoB outputs by executing the closed-form identities of §4.2 in PyTorch with N × N intermediates fully materialized in HBM; it appears in the table with all-zero discrepancies as a sanity check. The four non-reference backends are the two F LASH BOB variants ( BOB _2 PASS = Algorithm 1; BOB _3 PASS = the three-pass schedule of Appendix G.1) and the two GradMem-derived hand-written HVP kernels ( HVP -M, HVP -S). Inputs are BF16 with FP32 accumulators, GPT-2 Small head shape (12 heads, head dim 64, batch 4, causal mask), evaluated on a single A6000. All four non-reference backends agree with the math reference to within roughly 10 −5 absolute and 
+
+10 −6 relative across every output and every sequence length, with discrepancies growing modestly with N as expected from floating-point non-associativity under different reduction orders. 
+
+## K Extended isolated-kernel scaling 
+
+Table 8 reports the full isolated attention-layer BoB scaling sweep corresponding to Table 1. The main text shows the range where all PyTorch baselines are still informative; here we include the longer sequence lengths to show the full feasibility frontier. Once the materializing MATH backend and the GradMem-derived HVP baselines exhaust memory, F LASH BOB continues to scale exactly to 
+
+N = 262 ,144 on a single A100 80GB GPU. 26 Table 7: Maximum absolute and relative discrepancy of each BoB output against the math reference, for N ∈ { 128 , . . . , 8192 }. Math reference shown for completeness as the all-zero baseline. In addition to the main methods from Table 1, we include a 3-pass BoB implementation as an auxiliary correctness check. Hardware: NVIDIA A6000 48GB; precision: BF16 inputs with FP32 reductions. 
+
+Max absolute discrepancy Max relative discrepancy 
+
+N Backend ed(Q) ed(K) ed(V ) ed(dO ) ed(Q) ed(K) ed(V ) ed(dO )
+
+128  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 2.38e-6 5.25e-6 1.43e-6 9.54e-7 5.74e-7 8.08e-7 3.31e-7 1.97e-7 
+
+> HVP
+
+-S 2.38e-6 5.25e-6 1.43e-6 9.54e-7 5.74e-7 8.08e-7 3.31e-7 1.97e-7 FLASH BOB 3.34e-6 3.58e-6 1.91e-6 2.38e-6 8.03e-7 5.51e-7 4.42e-7 4.92e-7 3-PASS BOB 2.62e-6 5.01e-6 1.91e-6 1.67e-6 6.31e-7 7.72e-7 4.42e-7 3.44e-7 256  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 1.31e-6 3.93e-6 1.43e-6 1.19e-6 3.74e-7 1.02e-6 3.84e-7 2.96e-7 
+
+> HVP
+
+-S 1.31e-6 3.93e-6 1.43e-6 1.19e-6 3.74e-7 1.02e-6 3.84e-7 2.96e-7 FLASH BOB 2.15e-6 4.53e-6 1.43e-6 1.91e-6 6.12e-7 1.18e-6 3.84e-7 4.74e-7 3-PASS BOB 2.15e-6 3.58e-6 1.43e-6 1.19e-6 6.12e-7 9.31e-7 3.84e-7 2.96e-7 512  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 1.31e-6 6.20e-6 1.43e-6 7.15e-7 3.51e-7 1.21e-6 3.80e-7 1.78e-7 
+
+> HVP
+
+-S 1.31e-6 6.20e-6 1.43e-6 7.15e-7 3.51e-7 1.21e-6 3.80e-7 1.78e-7 FLASH BOB 2.86e-6 5.96e-6 1.31e-6 1.91e-6 7.66e-7 1.17e-6 3.49e-7 4.74e-7 3-PASS BOB 1.91e-6 5.96e-6 1.55e-6 1.37e-6 5.11e-7 1.17e-6 4.12e-7 3.40e-7 1 024  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 1.79e-6 1.12e-5 1.91e-6 7.45e-7 3.57e-7 2.44e-6 5.25e-7 2.18e-7 
+
+> HVP
+
+-S 1.79e-6 1.12e-5 1.91e-6 7.45e-7 3.57e-7 2.44e-6 5.25e-7 2.18e-7 FLASH BOB 2.38e-6 6.20e-6 1.67e-6 1.85e-6 4.75e-7 1.35e-6 4.60e-7 5.40e-7 3-PASS BOB 1.91e-6 5.72e-6 1.67e-6 1.07e-6 3.80e-7 1.25e-6 4.60e-7 3.14e-7 2 048  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 2.15e-6 1.34e-5 2.15e-6 1.19e-6 5.29e-7 2.87e-6 5.74e-7 2.94e-7 
+
+> HVP
+
+-S 2.15e-6 1.34e-5 2.15e-6 1.19e-6 5.29e-7 2.87e-6 5.74e-7 2.94e-7 FLASH BOB 3.34e-6 1.12e-5 1.91e-6 2.15e-6 8.23e-7 2.41e-6 5.10e-7 5.29e-7 3-PASS BOB 3.70e-6 1.03e-5 1.91e-6 1.43e-6 9.11e-7 2.20e-6 5.10e-7 3.52e-7 4 096  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 2.06e-6 1.72e-5 1.67e-6 7.15e-7 3.54e-7 3.29e-6 3.06e-7 1.47e-7 
+
+> HVP
+
+-S 2.06e-6 1.72e-5 1.67e-6 7.15e-7 3.54e-7 3.29e-6 3.06e-7 1.47e-7 FLASH BOB 3.34e-6 1.26e-5 2.15e-6 1.97e-6 5.75e-7 2.42e-6 3.94e-7 4.04e-7 3-PASS BOB 2.15e-6 1.00e-5 2.15e-6 1.31e-6 3.69e-7 1.92e-6 3.94e-7 2.69e-7 8 192  
+
+> MATH
+
+0 0 0 0 0 0 0 0
+
+> HVP
+
+-M 2.33e-6 2.38e-5 1.67e-6 1.07e-6 6.33e-7 4.76e-6 4.12e-7 2.79e-7 
+
+> HVP
+
+-S 2.33e-6 2.38e-5 1.67e-6 1.07e-6 6.33e-7 4.76e-6 4.12e-7 2.79e-7 FLASH BOB 4.29e-6 2.11e-5 2.15e-6 2.41e-6 1.17e-6 4.22e-6 5.30e-7 6.28e-7 3-PASS BOB 2.74e-6 2.00e-5 1.91e-6 1.43e-6 7.47e-7 4.00e-6 4.71e-7 3.72e-7 
+
+## L Full GPT-2 benchmark sweeps 
+
+Full sweeps backing Table 2. For each N , we report wall time (ms) and peak memory (MiB) for all four methods. OOM marks out-of-memory failures on the reference platform. Table 10: GPT-2 Medium, batch 4, BF16 inputs with FP32 reductions. Hardware: NVIDIA B200 (192 GiB HBM); OOM denotes exceeding the 192 GiB budget. 
+
+Wall time (ms) Peak memory (MiB) 
+
+N MATH HVP -M HVP -S FLASH BOB MATH HVP -M HVP -S FLASH BOB512 88.4 102.8 104.0 81.9 10 443 7 851 7 900 7 900 1 024 125.6 125.2 120.9 98.8 20 562 10 769 10 869 10 869 2 048 312.6 343.0 255.9 177.2 55 203 16 612 16 810 16 810 4 096 OOM 1028.5 726.1 420.9 – 30 480 30 876 28 677 8 192 OOM 3944.0 2557.1 1196.6 – 74 523 75 315 52 429 16 384 OOM OOM OOM 3878.9 – – – 99 912 
+
+27 Table 8: Extended attention-layer BoB scaling on NVIDIA A100 80GB. Shape: GPT-2 Small attention, batch 4, 12 heads, head dimension 64, causal mask, BF16 inputs with FP32 reductions. OOM denotes out of memory; best wall-clock time and lowest peak memory are bold. 
+
+Wall-clock time (ms) Peak memory (MiB) 
+
+N MATH HVP -M HVP -S FLASH BOB MATH HVP -M HVP -S FLASH BOB256 1.82 1.58 1.66 0.94 212 114 116 95 
+
+512 4.95 2.31 2.33 1.29 668 315 318 171 
+
+1 024 17.66 7.39 6.41 2.57 2 375 1 045 1 051 323 
+
+2 048 68.80 28.34 22.73 7.53 8 957 3 805 3 817 630 
+
+4 096 265.67 114.89 89.14 25.80 34 794 14 521 14 546 1 243 
+
+8 192 OOM 468.93 356.84 95.11 – 55 971 56 020 1 702 
+
+16 384 OOM OOM OOM 365.73 – – – 3 372 
+
+32 768 OOM OOM OOM 1 449.06 – – – 6 744 
+
+65 536 OOM OOM OOM 5 843.14 – – – 13 488 
+
+131 072 OOM OOM OOM 23 528.87 – – – 26 976 
+
+262 144 OOM OOM OOM 94 853.72 – – – 53 952 
+
+Table 9: GPT-2 Small, batch 4, BF16 inputs with FP32 reductions. Hardware: NVIDIA B200 (192 GiB HBM); OOM denotes exceeding the 192 GiB budget.                                                                  
+
+> Wall time (ms) Peak memory (MiB)
+> NMATH HVP -MHVP -SFLASH BOBMATH HVP -MHVP -SFLASH BOB512 46.5 48.0 49.5 43.0 4 932 3 956 3 981 3 983 1 024 58.7 58.6 57.5 48.6 9 605 5 913 5 956 5 957 2 048 134.9 146.3 114.6 84.4 24 091 9 830 9 915 9 924 4 096 397.7 417.5 304.0 190.9 79 058 17 649 17 804 17 804 8 192 OOM 1537.5 1017.3 509.1 –46 965 47 267 33 604 16 384 OOM 4974.7 3421.6 1576.4 –147 483 148 082 65 194 32 768 OOM OOM OOM 5368.3 –––128 392
+
+Table 11: GPT-2 Large, batch 4, BF16 inputs with FP32 reductions. Hardware: NVIDIA B200 (192 GiB HBM); OOM denotes exceeding the 192 GiB budget.                                                          
+
+> Wall time (ms) Peak memory (MiB)
+> NMATH HVP -MHVP -SFLASH BOBMATH HVP -MHVP -SFLASH BOB512 131.3 135.4 139.3 122.3 19 720 14 856 14 956 14 965 1 024 215.4 216.6 192.7 154.4 37 496 19 120 19 335 19 342 2 048 562.2 614.6 450.4 304.3 100 554 27 666 28 040 28 045 4 096 OOM 1879.6 1313.4 740.3 –49 205 49 968 45 457 8 192 OOM 7322.2 4721.8 2162.8 –110 927 112 414 80 303 16 384 OOM OOM OOM 7106.5 –––150 019
+
+## M Sliding-window attention 
+
+Sliding-window attention (SWA) is supported by a small extension to the inner-loop column range: for each row tile, the streamed column tiles are restricted to those overlapping the window. The affine-fusion structure of Theorem 4.1 is unchanged ( αi, E ◦ 
+
+> i
+
+, B i, ed(dO )◦ 
+
+> i
+
+, R i, Ωi are α-free accumulators over the now-shorter rowwise supports), so both passes preserve exact semantics and the two-pass schedule carries over without modification. Table 12 reports an end-to-end second-order step on GPT-2 Small with window w = N/ 4, comparing FLASH BOB against the PyTorch MATH reference. We report only N ≥ 2048 : at shorter lengths, non-attention work and launch overhead dominate the step, and the gains there are in the measurement noise floor. The speedup and memory ratios grow with N exactly as in the dense setting. 28 Table 12: GPT-2 Small with sliding-window attention, w = N/ 4. Hardware: NVIDIA A100 80GB. Wall time reports the median ± half of the 20th-to-80th percentile spread. OOM denotes out of memory.                                                   
+
+> Wall time (ms) Peak memory (MiB)
+> NwMATH FLASH BOBSpeedup MATH FLASH BOBMem. ratio 2,048 512 175 .376 ±0.111 136 .254 ±0.125 1.29 ×8,366 .84 5,007 .09 1.67 ×
+> 4,096 1,024 432 .310 ±0.104 218 .646 ±0.113 1.98 ×21 ,809 .62 9,019 .05 2.42 ×
+> 8,192 2,048 1,330 .003 ±0.089 457 .850 ±0.061 2.90 ×66 ,801 .47 17 ,040 .55 3.92 ×
+> 16,384 4,096 OOM 1,136 .572 ±0.172 –OOM 33 ,104 .94 –
+
+Table 13: Head-dimension sensitivity for isolated attention BoB on NVIDIA A100 80GB. We fix 
+
+N = 4096 , batch size 4, number of heads 12 , causal mask, BF16 inputs, and FP32 reductions, and vary only the head dimension d. Times are medians from triton.testing.do_bench with 
+
+warmup=25 and rep=100 ; memory is peak allocated GPU memory in MiB. 
+
+d Method Time (ms) Peak memory (MiB) Time / F LASH BOB Mem. / F LASH BOB32 FLASH BOB 14 .214 423 .0 1.00 × 1.00 ×
+
+> HVP
+
+-M 111 .312 14 ,005 .4 7.83 × 33 .11 ×
+
+> HVP
+
+-S 82 .393 14 ,010 .0 5.80 × 33 .12 ×
+
+64 FLASH BOB 25 .676 843 .0 1.00 × 1.00 ×
+
+> HVP
+
+-M 114 .726 14 ,137 .4 4.47 × 16 .77 ×
+
+> HVP
+
+-S 89 .032 14 ,154 .0 3.47 × 16 .79 ×
+
+128 FLASH BOB 81 .694 1,683 .0 1.00 × 1.00 ×
+
+> HVP
+
+-M 120 .029 14 ,401 .4 1.47 × 8.56 ×
+
+> HVP
+
+-S 103 .995 14 ,442 .0 1.27 × 8.58 ×
+
+## N Head-dimension sensitivity 
+
+The main isolated-kernel benchmarks use GPT-2-style attention heads with d = 64 . Since both the I/O analysis and the kernel implementation are parametric in d, we additionally test whether the advantage of F LASH BOB persists as the head dimension changes. Increasing d makes the problem harder for a FlashAttention-style schedule: each tile carries larger Q, K, V, dO -like blocks, the feasible tile size decreases for a fixed on-chip memory budget, and register/SRAM pressure increases. The goal of this sweep is therefore not to introduce a new sequence-length scaling benchmark, but to check that the memory and runtime advantages are not an artifact of the d = 64 setting. FlashAttention head-dimension support has followed the same engineering pattern. FlashAttention-1 supported head dimensions up to d = 128 , while FlashAttention-2 extends the CUDA implementation to d ≤ 256 [10, 9]. Our main experiments use the GPT-2-style setting d = 64 , and Table 13 additionally evaluates d ∈ { 32 , 64 , 128 }.Extending the optimized F LASH BOB kernels to the larger d = 256 regime is therefore an engineering target rather than a change to the algorithm: the two-pass schedule and the I/O analysis of Section 4.4 are parametric in d, and Theorem 4.3 applies unchanged. The binding constraints at d = 256 are implementation-level. First, register pressure: the Br × d row-resident tiles ( Qi, dO i, U Q,i , O i) and the four Br × d row accumulators of Proposition 4.1 ( ed(dO )◦, Ω, B, R ) compete for the same register file inside Pass 1, and the per-thread register budget shrinks linearly in d. Second, shared-memory pressure: the simultaneously live interaction-shaped tiles ( Pij , dP ij , F ij , C ij , ed(P )◦ 
+
+> ij
+
+) scale as Br Bc
+
+and force a smaller Bc at larger d, which raises the streamed-tile re-load count proportionally. Third, tensor-core tiling: the native FlashAttention-3 pipelines on Hopper assume specific (Br , B c, d )
+
+shape tuples that do not transfer verbatim to the BoB schedule, so a d = 256 port would require re-deriving the warp specialization and asynchronous load schedules used by FlashAttention-3 and FlashAttention-4. Numerical issues are not the binding constraint at d = 256 in our preliminary experiments; the same BF16-input, FP32-accumulator pattern used at d = 64 , 128 extends without precision loss. We view a d = 256 specialization as the clearest follow-up systems work. Table 13 shows that F LASH BOB remains the fastest and most memory-efficient method at every tested head dimension. The runtime advantage is largest at smaller head dimensions: F LASH BOB29 Table 14: Shared data, batching, and evaluation configuration for the FineWeb GPT-2 Small training runs.                           
+
+> Setting Value Dataset VisionTheta/fineweb-1B
+> Dataset name default
+> Dataset mode streaming Tokenizer gpt2
+> Sequence length 2048
+> Training token budget 1,000 ,000 ,000 tokens Maximum optimizer steps 1908
+> Seed 17
+> Precision bfloat16 Number of GPUs 8
+> Per-GPU batch size 2sequences Gradient accumulation steps 16
+> Effective global batch size 256 sequences Local tokens per optimizer step 65 ,536
+> Global tokens per optimizer step 524 ,288
+> Evaluation interval every 250 optimizer steps Evaluation batches 32
+> Evaluation batch size 2per GPU Prefetch factor 2
+
+is 7.83 × faster than HVP -M and 5.80 × faster than HVP -S at d = 32 . As d increases, the speedup narrows, reaching 1.47 × over HVP -M and 1.27 × over HVP -S at d = 128 . This trend is expected: larger head dimensions reduce the amount of sequence tiling that fits on chip and increase register pressure, so the constant-factor benefit of the two-pass schedule becomes smaller. The memory result is more stable. The HVP baselines allocate roughly 14 GiB across the sweep, while F LASH BOB uses only 423 MiB at d = 32 , 843 MiB at d = 64 , and 1,683 MiB at d = 128 .Thus, even at the largest tested head dimension, the HVP baselines require about 8.6× more peak memory than F LASH BOB. This is the key systems point: increasing d makes the kernel more expensive, but it does not change the structural advantage of avoiding intermediate storage. The sweep therefore supports the claim that the memory benefit comes from the FlashAttention-style execution model itself rather than from a head-dimension-specific tuning artifact. 
+
+## O FineWeb training reproducibility 
+
+This section reports the full configuration for the 1B-token FineWeb training experiment in Section 5.3. The main comparison is between two Sophia-H runs: one using the PyTorch math attention backend for exact attention BoB and one using F LASH BOB. These two runs use the same model, dataset stream, seed, optimizer hyperparameters, Hessian-estimation schedule, batch geometry, precision, and token budget. The only intended difference is the attention BoB backend used during Hessian estimation. We use the Hugging Face dataset identifier VisionTheta/fineweb-1B , which is a 1B-token pre-pared subset derived from the FineWeb corpus of Penedo et al. [38]. The license and source attribution therefore follow the upstream FineWeb dataset, while the exact artifact used for these experiments is the VisionTheta/fineweb-1B Hugging Face dataset. We report the dataset identifier explicitly to make the data order and preprocessing reproducible. All FineWeb curves in Figure 2 are single runs with seed 17 . The AdamW curve is included as a first-order optimizer reference, not as a backend-equivalence experiment. To avoid comparing against a weak AdamW baseline, we selected the plotted AdamW curve from a small learning-rate sweep, described below. The Sophia-H learning-rate schedule is intentionally kept exactly as used in the best observed Sophia-H configuration from our tuning runs. Although the configured warmup length of 2000 steps exceeds the 1908 -step 1B-token run, this setting gave the best observed Sophia-H behavior and is held fixed for both the PyTorch math backend and F LASH BOB backend runs. Therefore, the comparison 30 Table 15: GPT-2 Small model configuration used for the FineWeb training runs.              
+
+> Setting Value Preset gpt2
+> Layers 12
+> Attention heads 12
+> Embedding dimension 768
+> Context length 2048
+> Vocabulary size 50 ,257
+> Bias terms enabled Total parameters 125 ,226 ,240
+> Attention parameters 28 ,348 ,416
+> Non-attention parameters 96 ,877 ,824
+> Embedding parameters 40 ,170 ,240
+> Attention parameter fraction 22 .64%
+
+Table 16: Sophia-H optimizer and Hessian-estimation configuration. These settings are identical for the PyTorch math-backend and F LASH BOB Sophia-H runs.                  
+
+> Setting Value Optimizer Sophia-H Learning rate 6.0×10 −4
+> Minimum learning rate 3.0×10 −5
+> β10.96
+> β20.99
+> ϵ10 −12
+> γ0.01
+> Weight decay 0.2
+> Gradient clipping 1.0
+> Hessian-estimation interval every 10 optimizer steps Hutchinson samples 1
+> Hutchinson batch size 32
+> Warmup steps 2000
+> Maximum optimizer steps 1908
+
+between the two Sophia-H curves isolates the effect of replacing the materializing math attention BoB path with F LASH BOB. 
+
+AdamW reference. Figure 2 also includes an AdamW reference curve. This run is not used to test backend equivalence; it is included as a familiar first-order optimizer reference for the same 1B-token FineWeb setup. To avoid comparing against a poorly tuned AdamW baseline, we ran a small learning-rate sweep over peak learning rates {3.0×10 −4, 4.5×10 −4, 6.0×10 −4, 8.0×10 −4, 1.0×10 −3}. Each sweep point used AdamW with β1 = 0 .9, β2 = 0 .95 , ϵ = 10 −8, weight decay 0.1, gradient clipping 
+
+1.0, linear warmup followed by cosine decay, and minimum learning rate 0.1 times the peak learning rate. The AdamW curve in Figure 2 uses the best-performing configuration from this sweep. The AdamW reference should therefore be interpreted as a tuned first-order baseline for context, while the central systems comparison is between the two matched Sophia-H runs. In that comparison, the optimizer, model, data stream, seed, precision, token budget, batch geometry, and Hessian-estimation schedule are fixed, and the exact attention BoB implementation is changed from the PyTorch math backend to F LASH BOB. 
+
+## P Detailed comparison with FlashBack 
+
+This appendix expands on the main-text comparison in §5.1. FlashBack [12] fuses the entire BoB into a single GPU kernel parallelized over rows, runs two sequential inner loops over column tiles per row block, and accumulates the column-owned outputs ( ed(K), ed(V )) through global atomic adds. FLASH BOB instead splits the work into a row-major Pass 1 that finalizes ( ed(Q), ed(dO ), α, E ) via 31 Table 17: Sophia-H backend comparison. The two runs differ only in the attention BoB backend used during Hessian estimation.       
+
+> Run name Optimizer Attention BoB backend
+> sophiah-math-ddp Sophia-H PyTorch math attention backend
+> sophiah-bob-ddp Sophia-H FLASH BOB
+
+Table 18: AdamW learning-rate sweep used to select the reference AdamW curve in Figure 2. All runs use AdamW with β1 = 0 .9, β2 = 0 .95 , ϵ = 10 −8, weight decay 0.1, gradient clipping 1.0,linear warmup followed by cosine decay, and minimum learning rate 0.1 times the peak learning rate.                   
+
+> Run Peak LR Min LR Role 13.0×10 −43.0×10 −5Conservative baseline 24.5×10 −44.5×10 −5Stable intermediate setting 36.0×10 −46.0×10 −5Canonical anchor 48.0×10 −48.0×10 −5Aggressive setting 51.0×10 −31.0×10 −4Highest-LR stress test
+
+affine fusion (Proposition 4.1), and a column-major Pass 2 that finalizes ( ed(K), ed(V )) as a natural column reduction. Both schedules recompute the probability tile P exactly twice across the BoB; they differ in how that recomputation work is distributed, in how column-owned outputs are accumulated, and in how much state is simultaneously live on chip.                     
+
+> Aspect FlashBack FLASH BOBKernel launches 1 (single fused) 2 (row-major + column-major)
+> ed(K),ed(V)writes atomic_add natural column reduction (no atomics) Affine fusion of αno yes Row-side work in first sweep scalar summaries only all row outputs (ed(Q),ed(dO ), E )
+> On-chip row scalars kept on chip (no HBM round trip) written and re-read via (α, E )
+
+The split-kernel design distributes register pressure across two launches, eliminates atomic writes on 
+
+( ed(K), ed(V )) , and uses Proposition 4.1 to extract more useful work from the first sweep. The trade is a small HBM cost for the two N -vectors (α, E ) between launches. Table 20 reports steady-state runtimes on an NVIDIA A6000 48GB after warmup. F LASH BOB is faster at every tested length, with gains from 2.07 × at N = 256 to a peak of 6.32 × at N = 4 ,096 ,and a stable 3.5 to 3.7× advantage at the longest lengths where both kernels remain in the regime dominated by tile-interaction I/O. Two architectural differences explain the gap. First, the column-major Pass 2 of F LASH BOB accumulates ( ed(K), ed(V )) in registers across the full sweep and writes once, whereas FlashBack must serialize concurrent updates to the same column indices through global atomic adds. Second, the affine fusion of Proposition 4.1 extracts more useful work per probability-tile recomputation: FlashBack’s first inner loop retains only scalar row sums and recomputes the 
+
+d-vector products from scratch in its second loop, whereas F LASH BOB’s Pass 1 accumulates both the scalar sums and all d-vector correction terms in a single sweep. FlashBack was benchmarked through N = 65 ,536 on A6000. We did not evaluate FlashBack at 
+
+N = 131 ,072 or N = 262 ,144 on that setup; the larger F LASH BOB-only feasibility numbers in Table 8 are A100 80GB results and are not shared-hardware FlashBack comparisons. We report shared-hardware FlashBack wall time but not FlashBack peak memory. The public FlashBack path runs through a different JAX/XLA allocation stack, whose process-level memory reservation is not directly comparable to torch.cuda.max_memory_allocated used for the Py-Torch and F LASH BOB measurements. We therefore restrict the FlashBack comparison to wall time and report memory comparisons only for baselines measured through the same PyTorch/CUDA allocation interface. 32 Table 19: Selected AdamW reference-run configuration used for the FineWeb plot. This was the best-performing run from the sweep in Table 18. 
+
+Setting Value Run name fineweb_adamw_lr_1em3 
+
+Optimizer AdamW Attention backend FlashAttention backend Seed 17 
+
+Learning-rate schedule linear warmup followed by cosine decay Peak learning rate 1.0×10 −3
+
+Minimum learning rate 1.0×10 −4
+
+Warmup steps 150 
+
+Maximum optimizer steps 1908 
+
+β1 0.9
+
+β2 0.95 
+
+ϵ 10 −8
+
+Weight decay 0.1
+
+Gradient clipping 1.0
+
+Precision bfloat16 Compilation disabled Per-GPU batch size 2 sequences Gradient accumulation steps 16 
+
+Effective global batch size 256 sequences Global tokens per optimizer step 524 ,288 
+
+Training token budget 1,000 ,000 ,000 tokens Evaluation interval every 250 optimizer steps Evaluation batches 32 
+
+Table 20: F LASH BOB vs. FlashBack on NVIDIA A6000 48GB, steady-state wall time after warmup (GPT-2 Small shape, batch 4, BF16 inputs with FP32 reductions). 
+
+N FLASH BOB (ms) FlashBack (ms) Ratio 256 0.94 1.94 2.07 ×
+
+512 1.52 6.22 4.09 ×
+
+1 024 3.80 22.16 5.83 ×
+
+2 048 11.73 67.25 5.74 ×
+
+4 096 41.51 262.47 6.32 ×
+
+16 384 651.28 2 421.36 3.72 ×
+
+32 768 2 682.60 9 659.78 3.60 ×
+
+65 536 10 729.20 38 442.11 3.58 ×
+
+131 072 – – not evaluated 262 144 – – not evaluated 
+
+## Q Broader long-context systems context 
+
+FLASH BOB targets the exact single-device attention BoB primitive, which is complementary to distributed and inference-oriented long-context attention systems. Sequence-parallel systems shard long-context attention across devices [19, 28, 26, 13], while inference systems optimize KV-cache layout, request scheduling, and serving-time attention kernels [25, 52]. Other long-sequence kernel systems similarly show that algorithmic restructuring and kernel fusion can make nonstandard sequence operators hardware-efficient [15]. These directions are orthogonal to F LASH BOB: they change distributed execution, serving-time memory layout, or the sequence operator, whereas our work keeps exact softmax attention and changes the local schedule for backward-over-backward. 33 NeurIPS Paper Checklist 
+
+1. Claims 
+
+Question: Do the main claims made in the abstract and introduction accurately reflect the paper’s contributions and scope? Answer: [Yes] Justification: Yes. All claims made in the abstract and introduction were taken from experimental results, which formed the basis of our contributions. Guidelines: • The answer [N/A] means that the abstract and introduction do not include the claims made in the paper. • The abstract and/or introduction should clearly state the claims made, including the contributions made in the paper and important assumptions and limitations. A [No] or [N/A] answer to this question will not be perceived well by the reviewers. • The claims made should match theoretical and experimental results, and reflect how much the results can be expected to generalize to other settings. • It is fine to include aspirational goals as motivation as long as it is clear that these goals are not attained by the paper. 2. Limitations 
+
+Question: Does the paper discuss the limitations of the work performed by the authors? Answer: [Yes] Justification: We make sure to state all the current limitations of the project, so that all stakeholders can be privy of them. We believe that some of these limitations are exciting future work, so we ensured that we stated them exactly. Guidelines: • The answer [N/A] means that the paper has no limitation while the answer [No] means that the paper has limitations, but those are not discussed in the paper. • The authors are encouraged to create a separate “Limitations” section in their paper. • The paper should point out any strong assumptions and how robust the results are to violations of these assumptions (e.g., independence assumptions, noiseless settings, model well-specification, asymptotic approximations only holding locally). The authors should reflect on how these assumptions might be violated in practice and what the implications would be. • The authors should reflect on the scope of the claims made, e.g., if the approach was only tested on a few datasets or with a few runs. In general, empirical results often depend on implicit assumptions, which should be articulated. • The authors should reflect on the factors that influence the performance of the approach. For example, a facial recognition algorithm may perform poorly when image resolution is low or images are taken in low lighting. Or a speech-to-text system might not be used reliably to provide closed captions for online lectures because it fails to handle technical jargon. • The authors should discuss the computational efficiency of the proposed algorithms and how they scale with dataset size. • If applicable, the authors should discuss possible limitations of their approach to address problems of privacy and fairness. • While the authors might fear that complete honesty about limitations might be used by reviewers as grounds for rejection, a worse outcome might be that reviewers discover limitations that aren’t acknowledged in the paper. The authors should use their best judgment and recognize that individual actions in favor of transparency play an impor-tant role in developing norms that preserve the integrity of the community. Reviewers will be specifically instructed to not penalize honesty concerning limitations. 3. Theory assumptions and proofs 
+
+Question: For each theoretical result, does the paper provide the full set of assumptions and a complete (and correct) proof? 34 Answer: [Yes] Justification: We state all assumptions and ensure that we have a complete proof to ac-company our theoretical results. We also ensure that the proofs are easy to read and self-contained. Guidelines: • The answer [N/A] means that the paper does not include theoretical results. • All the theorems, formulas, and proofs in the paper should be numbered and cross-referenced. • All assumptions should be clearly stated or referenced in the statement of any theorems. • The proofs can either appear in the main paper or the supplemental material, but if they appear in the supplemental material, the authors are encouraged to provide a short proof sketch to provide intuition. • Inversely, any informal proof provided in the core of the paper should be complemented by formal proofs provided in appendix or supplemental material. • Theorems and Lemmas that the proof relies upon should be properly referenced. 4. Experimental result reproducibility 
+
+Question: Does the paper fully disclose all the information needed to reproduce the main ex-perimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)? Answer: [Yes] Justification: We specify all that is needed to reproduce all our main claims, including a very detailed pseudocode of our Triton kernel. We also specify the exact setup and software configuration needed to reproduce our results. Guidelines: • The answer [N/A] means that the paper does not include experiments. • If the paper includes experiments, a [No] answer to this question will not be perceived well by the reviewers: Making the paper reproducible is important, regardless of whether the code and data are provided or not. • If the contribution is a dataset and/or model, the authors should describe the steps taken to make their results reproducible or verifiable. • Depending on the contribution, reproducibility can be accomplished in various ways. For example, if the contribution is a novel architecture, describing the architecture fully might suffice, or if the contribution is a specific model and empirical evaluation, it may be necessary to either make it possible for others to replicate the model with the same dataset, or provide access to the model. In general. releasing code and data is often one good way to accomplish this, but reproducibility can also be provided via detailed instructions for how to replicate the results, access to a hosted model (e.g., in the case of a large language model), releasing of a model checkpoint, or other means that are appropriate to the research performed. • While NeurIPS does not require releasing code, the conference does require all submis-sions to provide some reasonable avenue for reproducibility, which may depend on the nature of the contribution. For example (a) If the contribution is primarily a new algorithm, the paper should make it clear how to reproduce that algorithm. (b) If the contribution is primarily a new model architecture, the paper should describe the architecture clearly and fully. (c) If the contribution is a new model (e.g., a large language model), then there should either be a way to access this model for reproducing the results or a way to reproduce the model (e.g., with an open-source dataset or instructions for how to construct the dataset). (d) We recognize that reproducibility may be tricky in some cases, in which case authors are welcome to describe the particular way they provide for reproducibility. In the case of closed-source models, it may be that access to the model is limited in some way (e.g., to registered users), but it should be possible for other researchers to have some path to reproducing or verifying the results. 35 5. Open access to data and code 
+
+Question: Does the paper provide open access to the data and code, with sufficient instruc-tions to faithfully reproduce the main experimental results, as described in supplemental material? Answer: [Yes] Justification: Our training dataset is publicly available, and we release code artifacts that detail, verbatim, how to reproduce all experiments. Guidelines: • The answer [N/A] means that paper does not include experiments requiring code. • Please see the NeurIPS code and data submission guidelines ( https://neurips.cc/ public/guides/CodeSubmissionPolicy ) for more details. • While we encourage the release of code and data, we understand that this might not be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not including code, unless this is central to the contribution (e.g., for a new open-source benchmark). • The instructions should contain the exact command and environment needed to run to reproduce the results. See the NeurIPS code and data submission guidelines ( https: //neurips.cc/public/guides/CodeSubmissionPolicy ) for more details. • The authors should provide instructions on data access and preparation, including how to access the raw data, preprocessed data, intermediate data, and generated data, etc. • The authors should provide scripts to reproduce all experimental results for the new proposed method and baselines. If only a subset of experiments are reproducible, they should state which ones are omitted from the script and why. • At submission time, to preserve anonymity, the authors should release anonymized versions (if applicable). • Providing as much information as possible in supplemental material (appended to the paper) is recommended, but including URLs to data and code is permitted. 6. Experimental setting/details 
+
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperpa-rameters, how they were chosen, type of optimizer) necessary to understand the results? Answer: [Yes] Justification: We detail all that is needed to replicate our experiments, in addition to the actual experimentation code as well. Guidelines: • The answer [N/A] means that the paper does not include experiments. • The experimental setting should be presented in the core of the paper to a level of detail that is necessary to appreciate the results and make sense of them. • The full details can be provided either with the code, in appendix, or as supplemental material. 7. Experiment statistical significance 
+
+Question: Does the paper report error bars suitably and correctly defined or other appropriate information about the statistical significance of the experiments? Answer: [No] Justification: We do not report error bars and/or statistical significance of our experiments, due to computational cost. Guidelines: • The answer [N/A] means that the paper does not include experiments. • The authors should answer [Yes] if the results are accompanied by error bars, confidence intervals, or statistical significance tests, at least for the experiments that support the main claims of the paper. 36 • The factors of variability that the error bars are capturing should be clearly stated (for example, train/test split, initialization, random drawing of some parameter, or overall run with given experimental conditions). • The method for calculating the error bars should be explained (closed form formula, call to a library function, bootstrap, etc.) • The assumptions made should be given (e.g., Normally distributed errors). • It should be clear whether the error bar is the standard deviation or the standard error of the mean. • It is OK to report 1-sigma error bars, but one should state it. The authors should preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis of Normality of errors is not verified. • For asymmetric distributions, the authors should be careful not to show in tables or figures symmetric error bars that would yield results that are out of range (e.g., negative error rates). • If error bars are reported in tables or plots, the authors should explain in the text how they were calculated and reference the corresponding figures or tables in the text. 8. Experiments compute resources 
+
+Question: For each experiment, does the paper provide sufficient information on the com-puter resources (type of compute workers, memory, time of execution) needed to reproduce the experiments? Answer: [Yes] Justification: We stated, verbatim, all the GPUs we used, along with the exact software stack needed to replicate all our experiments. In addition, we provide code to make this process easier for all stakeholders. Guidelines: • The answer [N/A] means that the paper does not include experiments. • The paper should indicate the type of compute workers CPU or GPU, internal cluster, or cloud provider, including relevant memory and storage. • The paper should provide the amount of compute required for each of the individual experimental runs as well as estimate the total compute. • The paper should disclose whether the full research project required more compute than the experiments reported in the paper (e.g., preliminary or failed experiments that didn’t make it into the paper). 9. Code of ethics 
+
+Question: Does the research conducted in the paper conform, in every respect, with the NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines ?Answer: [Yes] Justification: To the best of our knowledge, the work uses standard public datasets and does not involve human subjects or other procedures that would conflict with NeurIPS Code of Ethics. Guidelines: • The answer [N/A] means that the authors have not reviewed the NeurIPS Code of Ethics. • If the authors answer [No], they should explain the special circumstances that require a deviation from the Code of Ethics. • The authors should make sure to preserve anonymity (e.g., if there is a special consid-eration due to laws or regulations in their jurisdiction). 10. Broader impacts 
+
+Question: Does the paper discuss both potential positive societal impacts and negative societal impacts of the work performed? Answer: [No] 37 Justification: We do not discuss broader positive and/or negative societal impacts, since this work primarily focuses on optimizing throughput for neural network training. Guidelines: • The answer [N/A] means that there is no societal impact of the work performed. • If the authors answer [N/A] or [No], they should explain why their work has no societal impact or why the paper does not address societal impact. • Examples of negative societal impacts include potential malicious or unintended uses (e.g., disinformation, generating fake profiles, surveillance), fairness considerations (e.g., deployment of technologies that could make decisions that unfairly impact specific groups), privacy considerations, and security considerations. • The conference expects that many papers will be foundational research and not tied to particular applications, let alone deployments. However, if there is a direct path to any negative applications, the authors should point it out. For example, it is legitimate to point out that an improvement in the quality of generative models could be used to generate Deepfakes for disinformation. On the other hand, it is not needed to point out that a generic algorithm for optimizing neural networks could enable people to train models that generate Deepfakes faster. • The authors should consider possible harms that could arise when the technology is being used as intended and functioning correctly, harms that could arise when the technology is being used as intended but gives incorrect results, and harms following from (intentional or unintentional) misuse of the technology. • If there are negative societal impacts, the authors could also discuss possible mitigation strategies (e.g., gated release of models, providing defenses in addition to attacks, mechanisms for monitoring misuse, mechanisms to monitor how a system learns from feedback over time, improving the efficiency and accessibility of ML). 11. Safeguards 
+
+Question: Does the paper describe safeguards that have been put in place for responsible release of data or models that have a high risk for misuse (e.g., pre-trained language models, image generators, or scraped datasets)? Answer: [N/A] Justification: We do not release new high-risk pretrained models, scraped datasets, or other assets that would require a responsible-release safeguard discussion. Guidelines: • The answer [N/A] means that the paper poses no such risks. • Released models that have a high risk for misuse or dual-use should be released with necessary safeguards to allow for controlled use of the model, for example by requiring that users adhere to usage guidelines or restrictions to access the model or implementing safety filters. • Datasets that have been scraped from the Internet could pose safety risks. The authors should describe how they avoided releasing unsafe images. • We recognize that providing effective safeguards is challenging, and many papers do not require this, but we encourage authors to take this into account and make a best faith effort. 12. Licenses for existing assets 
+
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in the paper, properly credited and are the license and terms of use explicitly mentioned and properly respected? Answer: [Yes] Justification: We cite all existing works that we use in our experiments, in order to preserve fairness. Guidelines: • The answer [N/A] means that the paper does not use existing assets. • The authors should cite the original paper that produced the code package or dataset. 38 • The authors should state which version of the asset is used and, if possible, include a URL. • The name of the license (e.g., CC-BY 4.0) should be included for each asset. • For scraped data from a particular source (e.g., website), the copyright and terms of service of that source should be provided. • If assets are released, the license, copyright information, and terms of use in the package should be provided. For popular datasets, paperswithcode.com/datasets 
+
+has curated licenses for some datasets. Their licensing guide can help determine the license of a dataset. • For existing datasets that are re-packaged, both the original license and the license of the derived asset (if it has changed) should be provided. • If this information is not available online, the authors are encouraged to reach out to the asset’s creators. 13. New assets 
+
+Question: Are new assets introduced in the paper well documented and is the documentation provided alongside the assets? Answer: [Yes] Justification: We will release fully documented code, open-sourcing our Triton kernels and experimentation suite. We ensured that the code is documented, making it easy for all stakeholders to interact with the codebase. Guidelines: • The answer [N/A] means that the paper does not release new assets. • Researchers should communicate the details of the dataset/code/model as part of their submissions via structured templates. This includes details about training, license, limitations, etc. • The paper should discuss whether and how consent was obtained from people whose asset is used. • At submission time, remember to anonymize your assets (if applicable). You can either create an anonymized URL or include an anonymized zip file. 14. Crowdsourcing and research with human subjects 
+
+Question: For crowdsourcing experiments and research with human subjects, does the paper include the full text of instructions given to participants and screenshots, if applicable, as well as details about compensation (if any)? Answer: [N/A] Justification: Our work neither involves crowdsourcing nor human-subject research. Guidelines: • The answer [N/A] means that the paper does not involve crowdsourcing nor research with human subjects. • Including this information in the supplemental material is fine, but if the main contribu-tion of the paper involves human subjects, then as much detail as possible should be included in the main paper. • According to the NeurIPS Code of Ethics, workers involved in data collection, curation, or other labor should be paid at least the minimum wage in the country of the data collector. 15. Institutional review board (IRB) approvals or equivalent for research with human subjects 
+
+Question: Does the paper describe potential risks incurred by study participants, whether such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) approvals (or an equivalent approval/review based on the requirements of your country or institution) were obtained? Answer: [N/A] 39 Justification: Our work does not involve crowdsourcing or human-subject research, so IRB approval is not applicable. Guidelines: • The answer [N/A] means that the paper does not involve crowdsourcing nor research with human subjects. • Depending on the country in which research is conducted, IRB approval (or equivalent) may be required for any human subjects research. If you obtained IRB approval, you should clearly state this in the paper. • We recognize that the procedures for this may vary significantly between institutions and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the guidelines for their institution. • For initial submissions, do not include any information that would break anonymity (if applicable), such as the institution conducting the review. 16. Declaration of LLM usage 
+
+Question: Does the paper describe the usage of LLMs if it is an important, original, or non-standard component of the core methods in this research? Note that if the LLM is used only for writing, editing, or formatting purposes and does not impact the core methodology, scientific rigor, or originality of the research, declaration is not required. Answer: [N/A] Justification: LLMs are not an important or non-standard component of our proposed method, or experimental methodology. We only use LLMs for writing, editing, and/or formatting purposes. Guidelines: • The answer [N/A] means that the core method development in this research does not involve LLMs as any important, original, or non-standard components. • Please refer to our LLM policy in the NeurIPS handbook for what should or should not be described. 40
