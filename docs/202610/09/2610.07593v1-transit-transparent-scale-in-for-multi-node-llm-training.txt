@@ -1,0 +1,477 @@
+Title: TRANSIT: Transparent Scale-in for Multi-Node LLM Training
+
+URL Source: https://arxiv.org/pdf/2610.07593v1
+
+Published Time: Wed, 07 Oct 2026 00:38:56 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# TRANSIT: Transparent Scale-in for Multi-Node LLM Training 
+
+## Hyungyo Kim 1† , Nicholas Satchanov 1, Hrishi Shah 1, Gaohan Ye 1, Jiaqi Lou 1,Robert Walkup 2, Shweta Salaria 2, I-Hsin Chung 2, Hubertus Franke 2,Seetharami Seelam 2, Apoorve Mohan 2∗ , Nam Sung Kim 1∗ 1University of Illinois at Urbana-Champaign 2IBM Research 
+
+## Abstract 
+
+TRANSIT is a transparent scale-in framework to enable multi-node model training on fewer GPUs while maintaining train-ing efficiency by transparently leveraging CPU DRAM as an extension of GPU memory during distributed training. It achieves this through a user-space interposition layer, requir-ing no modifications to the application, training framework, cluster scheduler, device driver, or operating system. Fur-thermore, TRANSIT achieves higher efficiency by leveraging a zero-copy data path for CPU-GPU transfers. We evaluate TRANSIT on dense and MoE models across scales up to 64 NVIDIA H100 GPUs and multiple parallelism configurations over a RoCE network. Our evaluation shows that TRANSIT can: (a) outperform state-of-the-art framework-managed offloading techniques, achieving up to 68%, 59%, and 42% higher per-GPU throughput than TorchTitan, ZeRO-Offload, and ZeRO-Infinity, respectively, (b) enables training with 50% fewer GPUs while maintaining over 90% of baseline per-GPU throughput, (c) lower per-node network traffic by up to 33%, and (d) improve per-GPU throughput by up to 35% in communication-bound settings. 
+
+## 1 Introduction 
+
+Motivation: The cost of training large AI models has grown to the point where it shapes fundamental decisions about in-frastructure, methodology, and organizational strategy [16]. A common root cause underlies the constraints practition-ers face: GPU memory cannot accommodate modern models within a reasonable number of devices [21], forcing scale-out across additional GPUs for memory capacity. For many orga-nizations, training may fail before it begins due to GPU short-ages, procurement overheads, export controls, and budget constraints, leaving sufficient GPU capacity unavailable [18]. For those who can provision enough GPUs, scale-out in-troduces a new problem: as the number of GPUs increases to meet memory requirements, so does the number of par-ticipants in collective operations, increasing communication 
+
+> †This work was initiated during Hyungyo Kim’s internship at IBM Re-search and was subsequently continued through the IBM-Illinois Discovery Accelerator Institute (IIDAI).
+> ∗Corresponding authors: Apoorve Mohan (Apoorve.Mohan@ibm.com) and Nam Sung Kim (nam.sung.kim@gmail.com).
+
+volume and synchronization overhead [19]. A memory con-straint thus translates directly into communication cost, mak-ing training performance increasingly sensitive to network conditions [34, 43]. Memory capacity and communication demand are therefore coupled through node count: adding nodes to relieve one constraint tightens the other. This sensitivity is exacerbated by datacenter network de-sign. Oversubscribed spine layers reduce effective bandwidth under load [20, 37, 44], and synchronized collective commu-nication can induce congestion and unpredictable perfor-mance [17, 22, 44, 54]. Prior work on production RDMA-based AI training clusters shows that network contention degrades performance in up to ∼36% of training jobs [17], where congestion alone can cause slowdowns exceeding 30% [38, 42], and up to 50% under packet loss [11]. These results highlight the fragility of collective communication in modern AI clusters and the increasing likelihood of network bottlenecks as systems scale out. Such scale-out ultimately affects cluster efficiency, as train-ing jobs are forced to be provisioned with a static resource configuration. Users specify the number of GPUs required for a training job, and the scheduler must allocate the exact number requested before execution can begin. Thus, if the exact requested number of GPUs is not immediately avail-able at the time of submission, jobs are forced to wait in the queue [23, 25, 35, 51]. This delay is particularly costly in development environments, where rapid iteration often matters more than peak throughput. 
+
+Questions: The limitations practitioners face, i.e., in-frastructure cost, GPU memory capacity, and network con-straints in oversubscribed and congested scale-out AI clus-ters, thus prompt the following questions: (i) Is it possible to enable multi-node training of models on fewer GPUs with-out modifying or requiring support from existing training frameworks, while preserving per-GPU performance? (ii) 
+
+If such a reduction in node count is possible, how does it af-fect the amount and structure of distributed communication during training? (iii) Does reducing node count translate into measurable reductions in rack-level and spine-level net-work traffic in datacenter deployments? (iv) How do these effects impact system efficiency under practical conditions, including network contention and limited cluster resources? 
+
+> 1arXiv:2610.07593v1 [cs.DC] 6 Oct 2026
+
+Table 1. Comparison of mechanisms and systems for scaling-in LLM training across transparency (T), no privileged changes required (P), offload granularity (G), data-fetch mechanism (M), and demonstrated scale (S).                                    
+
+> Approach TPGMS
+> ZeRO-Offload [41] ✗✓Coarse On-demand Multi-node ZeRO-Infinity [40] ✗✓Coarse Prefetch Multi-node TorchTitan [30] ✗✓Coarse On-demand Multi-node DeepUM [27] ✓✗Page Prefetch Single-GPU G10 [53] ✓✗Page Prefetch Single-GPU
+> TRANSIT ✓✓Page Multiple Multi-node (Prefetch, Zero-copy)
+
+Opportunity: Modern GPU servers provision hundreds of gigabytes to terabytes of CPU DRAM capacity, far exceed-ing GPU HBM, and unlike remote GPU memory, accessing this capacity does not require inter-node communication. Critically, local DRAM access over PCIe is 4–6× faster than remote GPU HBM access via GPUDirect RDMA for small transfers, narrowing to 2–3 × at larger sizes, with the gap widening further under network congestion (see §2.3). Ab-sorbing memory overflow locally rather than distributing it across the network can therefore reduce communication vol-ume, lower sensitivity to inter-node bandwidth, and enable training configurations that the GPU memory limit would otherwise preclude. 
+
+Prior Art: Several recent efforts have explored ways to extend effective GPU memory capacity for LLM train-ing [27, 30, 40, 41, 53]; however, they suffer from various limitations (see Table 1). The most widely adopted scale-in approaches today rely on framework-managed offloading systems such as ZeRO-Offload [41], ZeRO-Infinity [40], and TorchTitan [30]. These systems explicitly manage model parameters, gradients, and optimizer states to extend ef-fective GPU memory capacity. While effective at enabling larger models to fit, they require framework-specific integra-tion and support, limiting deployment across heterogeneous training environments. Furthermore, they typically manage memory at a coarse granularity and move substantially more data than the workload actually requires, thus leading to in-efficiency (see §4.2). An alternative is Unified Virtual Memory (UVM) [2, 13], a virtual memory abstraction supported in modern GPU runtimes that transparently extends GPU memory capac-ity using host memory without requiring modifications to applications or training frameworks. UVM is therefore an at-tractive foundation for transparent scale-in. However, UVM is rarely used as the default mechanism for large-scale train-ing because its performance is "widely perceived to be in-efficient" [4]. Recent works have sought to improve UVM performance by modifying runtimes, kernels, and device drivers [27, 53]. While effective in controlled settings, their reliance on privileged changes to the system software stack limits deployability in large-scale shared clusters. As a result, they have been demonstrated only within a single node, leav-ing their practicality for large-scale distributed training less established. Consequently, no existing approach simultane-ously satisfies the requirements of transparency, efficiency, deployability, and distributed scalability. Finally, existing approaches do not support multiple data movement policies. 
+
+Requirements: For scale-in to deliver cluster-wide ben-efits, it must satisfy the following requirements: First , it must preserve training efficiency: saving GPUs while pro-portionally extending training time leaves cluster efficiency unchanged. Second , it must be transparent and broadly de-ployable, requiring no modifications to applications, frame-works, schedulers, runtimes, or device drivers. Third , it must be effective in distributed multi-node environments, where memory pressure and communication overhead are most pronounced. Fourth , it must be fine-grained to minimize data movement between CPU memory and GPU memory, thereby limiting its impact on training efficiency. 
+
+Our Approach: We present TRANSIT (TRANsparent Scale-In for Training), a lightweight scale-in framework for dis-tributed LLM training workloads. TRANSIT enables existing training workloads to execute on fewer GPUs without requir-ing modifications to applications, frameworks, schedulers, kernels, or device drivers. It transparently instruments LLM training workloads at execution time to leverage CPU DRAM as an extension of GPU HBM using UVM. TRANSIT further extends UVM capabilities to augment or override its default reactive behavior at execution time, enabling policies such as fused prefetching and zero-copy access. Zero-copy allows the GPU to directly fetch CPU-resident data into the GPU L2 cache without copying it to GPU HBM, reducing data movement overhead (see §3). At a high level, TRANSIT comprises three components: a memory allocation interceptor that transparently redirects all GPU memory allocations (e.g., parameters, gradients, op-timizer states, and activations) to UVM-backed memory; an activity recorder that captures kernel launch activity and migration history; and a policy optimizer that reduces data transfer overhead between CPU and GPU memories. 
+
+TRANSIT tracks all managed memory allocations to un-derstand memory allocation patterns during initial training iterations (i.e., warm-up period) and strategically applies optimization policies at key points during each training iter-ation (e.g., around the midpoint of the iteration) to minimize data movement overhead between CPU and GPU memory. This allows frequently reused data, such as activations and half-precision model parameters, to remain resident in GPU memory, while less frequently accessed data (including opti-mizer states and full-precision parameters), is accessed di-rectly from host memory through zero-copy. As a result, our approach significantly reduces unnecessary page migrations and page faults, improving overall training efficiency. 
+
+> 2
+
+By reducing the minimum node count required to fit a model, TRANSIT directly reduces the number of partici-pants in collective communication, lowering per-node net-work traffic and reducing sensitivity to network congestion. TRANSIT is implemented as a user-space shared library in-jected via LD_PRELOAD at job launch time, requiring no modifications to applications, frameworks, schedulers, run-times, kernels, or device drivers, thus making it immediately deployable across heterogeneous workloads in shared envi-ronments. 
+
+Key Results: We evaluate TRANSIT on distributed LLM training workloads spanning dense and mixture-of-experts models, multiple parallelization strategies, and a range of cluster and network configurations using up to 64 NVIDIA H100 GPUs over a RoCE network. To assess the datacenter-level impact, we conduct a simulation study using production job traces from two production clusters. Key results/insights are as follows: 
+
+(a) Zero-copy is the key enabler: Training throughput im-proves by up to 3.4 × over the reactive page-fault-driven UVM behavior by avoiding migration thrashing and page-fault handling overhead. 
+
+(b) TRANSIT outperforms framework-managed techniques : It achieves 68%, 59%, and 42% higher per-GPU TFLOPS than TorchTitan, ZeRO-Offload, and ZeRO-Infinity, respectively. 
+
+(c) TRANSIT preserves efficiency under scale-in : It reduces the GPU count by up to 50% while maintaining over 90% of the per-GPU TFLOPS achieved by the baseline configuration that uses more GPUs without offloading. 
+
+(d) TRANSIT delivers cluster-scale gains : Simulation using real-world traces shows that TRANSIT reduces inter-rack traffic by 15–49%, job queue time by up to 95% under capacity-constrained deployment, and allows a half-capacity cluster to match the job throughput of a full-sized deployment without 
+
+TRANSIT .To the best of our knowledge, TRANSIT is the first system to demonstrate that transparent scale-in can be both prac-tical and efficient for distributed multi-node LLM training, outperforming framework-managed offloading approaches while enabling existing workloads to execute on fewer GPUs without modifications to the application, training framework, cluster scheduler, device driver, or operating system. 
+
+## 2 Background and Motivation 
+
+2.1 Distributed LLM Training 
+
+A typical node in a modern GPU cluster consists of 4 to 8 GPUs, interconnected via high-speed, low-latency fabrics such as NVIDIA NVLink [10] or AMD Infinity Fabric [6], pro-viding on the order of hundreds of Gbps of bandwidth. Each node is further equipped with multiple high-performance NICs ( e.g., NVIDIA Mellanox ConnectX [3]), each typically providing 100–400 Gbps of bandwidth, to support high ag-gregate network throughput. Across nodes, communication relies on either Infini-Band [8] or Ethernet-based networking. InfiniBand provides low latency and high bandwidth with native RDMA support, while RDMA over Converged Ethernet (RoCE) [1] offers sim-ilar zero-copy semantics over Ethernet infrastructure. Com-bined with GPUDirect RDMA (GDR) [5] or PeerDirect [7], these technologies enable direct GPU-to-GPU communica-tion across nodes, bypassing CPU staging buffers and reduc-ing communication overhead during collective operations. To accommodate the large memory footprint of the model states, modern LLM training frameworks employ a combina-tion of parallelization techniques across multiple dimensions. Within a node, tensor parallelism (TP) [43] is commonly used to exploit high-bandwidth interconnects by partition-ing model parameters across GPUs and performing fine-grained collective operations. Across nodes, pipeline paral-lelism (PP) [26, 33] partitions layers into stages to distribute memory and computation, while fully sharded data paral-lelism (FSDP) [30] and ZeRO [39] partition model parameters, gradients, and optimizer states across data-parallel work-ers, trading additional communication for improved mem-ory efficiency. More recently, expert parallelism (EP) [29] has been introduced for Mixture-of-Experts (MoE) models, distributing experts across devices and incurring all-to-all communication depending on routing decisions. In practice, these strategies are composed into hybrid multi-dimensional parallelism configurations [30, 43, 48]. Through such multi-dimensional parallelism, the aggregate memory capacity of the cluster is effectively pooled, enabling models to be trained beyond the limits of a single device or node, while introducing corresponding communication and coordination overheads that must be carefully managed. 
+
+2.2 Scale-Out vs. Stragglers and Failures 
+
+Distributed training relies on tightly synchronized execu-tion across GPUs, where collective operations ( e.g., all-gather, reduce-scatter) introduce global barriers. Thus, each iteration is gated by the slowest participating device, making training highly sensitive to tail behavior. Even a single GPU or node experiencing degraded performance—due to network con-gestion, transient interference, or resource contention—can delay the entire job [32, 50]. In our experiments, limiting the NIC bandwidth of a single node to 100 Gbps while others op-erate at 400 Gbps reduces training throughput by 50% when training Llama4-Scout on 64 H100 GPUs across 16 nodes. Scale-out further increases exposure to failures: as a job spans more GPUs and nodes, the probability of at least one unavailable component rises, while recovery requires more simultaneously healthy replacement resources. Reducing the number of nodes required to train a model therefore mitigates both stragglers and failures by involving fewer participants and reducing traffic across shared network in-frastructure.     
+
+> 302000 4000 6000 8000 Message Size (KB) 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Latency (μsecs)
+> Small msg: 5–6× slower Large msg: 2–3× slower
+> Remote Read (GDR) Remote Write (GDR) Local Read Local Write
+
+Figure 1. Read and write latencies for accessing local CPU DRAM over PCIe compared to remote GPU HBM accessed via GPUDirect RDMA (GDR) on NVIDIA H100 systems. 
+
+2.3 Local DRAM vs. Remote GPU HBM Access 
+
+During distributed training, collective communication gath-ers and reconstructs model states that are partitioned across GPUs. Consequently, each device frequently accesses remote HBM residing on GPUs in other nodes. Remote access in-curs additional overheads due to network latency, synchro-nization, and contention, making the effective access cost significantly higher. In contrast, CPU DRAM within a node provides a large-capacity memory tier that can be accessed without inter-node communication. While DRAM access over PCIe has lower bandwidth and higher latency than local HBM, it avoids distributed communication overheads such as collective synchronization and network-induced variability. Figure 1 compares the latency of fetching data from lo-cal CPU DRAM with that of accessing remote GPU HBM on another node via GPUDirect RDMA (GDR) on an H100 system. We evaluate a range of transfer sizes, where local CPU–GPU communication occurs over PCIe Gen5, while remote accesses traverse a 400 Gbps ConnectX-7 (CX-7) NIC. For small transfers, local DRAM access is 4–6 × faster than remote HBM, primarily due to the absence of network round-trip latency and synchronization overheads. As transfer size increases, this gap narrows to 2–3 ×, as higher bandwidth al-lows remote HBM accesses to better amortize their fixed over-heads. However, remote accesses continue to incur coordina-tion and potential congestion costs that are absent from local memory accesses. As discussed in Section 1, these commu-nication overheads become increasingly dominant at scale, particularly in oversubscribed datacenter networks where ef-fective bandwidth degrades under contention [38, 42]. These results reveal an opportunity to improve performance in communication-bound regimes by prioritizing local DRAM over remote HBM, thereby avoiding network overheads and reducing sensitivity to congestion. cudaMalloc  cudaMallocManaged    
+
+> Memory Allocation
+> Interception
+> TRANSIT
+> Offloading
+> Optimization Policies
+> Activity Recorder
+> CUDA Runtime
+> TRANSIT-Prefetch
+> cuBLAS cuDNN NCCL
+> CUDA Libraries
+> Transformers TorchTitan PyTorch
+> Frameworks
+> Managed
+> allocation list
+> Per-kernel
+> migration table
+> UVM NVLink CUDA Driver
+> NVIDIA Driver
+> Interception
+> Merge migrations
+> &
+> Prefetch
+> Install zero-copy
+> via
+> SetAccessedBy
+> TRANSIT-Advise
+> Kernel Space
+> User Space
+
+Figure 2. TRANSIT : a transparent framework that enables UVM-based memory offloading and incorporates prefetching and memory advice optimizations guided by activity records. 
+
+## 3 TRANSIT Overview 
+
+We present TRANSIT (TRANsparent Scale-In for Training), a framework that transparently instruments distributed train-ing workloads at execution time to leverage CPU DRAM as an extension of GPU HBM, without modifying the applica-tion, training framework, or cluster scheduler. 
+
+3.1 Design 
+
+The design of TRANSIT follows the requirements established in Section 1: preserving training efficiency, remaining trans-parent and deployable, operating effectively at multi-node scale, and minimizing unnecessary CPU–GPU data move-ment. To satisfy these requirements, TRANSIT builds on NVIDIA’s UVM as a transparent memory substrate and aug-ments it with runtime-guided optimization policies. Modern GPU runtime and driver ecosystems expose ab-stractions that naturally support transparent memory man-agement: UVM enables dynamic data movement between GPU HBM and CPU DRAM without application involvement. In practice, however, these mechanisms are rarely used in distributed training due to their high and unpredictable la-tency overheads under the default reactive page-fault policy. 
+
+TRANSIT leverages this ecosystem as its substrate and aug-ments it with runtime-driven optimization policies that ad-dress the second and third requirements, converting reactive, fine-grained fault-driven behavior into proactive, overlap-friendly data movement guided by observed access patterns. As shown in Figure 2, TRANSIT comprises three compo-nents: a memory allocation interceptor, an activity recorder, and optimization policies. The interceptor transparently redi-rects all GPU memory allocations to UVM-backed memory, enabling oversubscription without application changes. The activity recorder captures kernel launch activity and migra-tion history during a short warm-up phase, providing the runtime observations that guide placement decisions. The op-timization policies use these observations to improve UVM efficiency while preserving full transparency. Together, these components realize the requirements above: the interceptor      
+
+> 4UVM Driver/Runtime
+> Host Memory
+> L1 Cache Host CPU
+> GPU Memory
+> PCIe
+> GPU
+> SM TLB GMMU
+> MSHR Page Table CUDA/Tensor
+> Cores
+> L2 Cache
+> MSHR
+> Cache Banks Cache Banks
+> On-demand page migration
+> Zero-copy (remote access)
+> ①②③
+> ④
+> ⑤
+> ⑥
+> ①
+> ②
+
+Figure 3. UVM data access paths: on-demand page migration uses page-fault–triggered, DMA-based transfers (red arrow), while zero-copy directly accesses CPU-resident data without migration (blue arrow). provides transparent deployment, the activity recorder en-ables access-pattern-aware placement without framework integration, and the optimization policies reduce PCIe ac-cess overhead through proactive data movement and stable placement decisions while remaining entirely in user space. 
+
+3.2 Opportunity for Prefetch and Zero-copy 
+
+NVIDIA introduced Unified Virtual Memory (UVM) in CUDA 6 [13], providing a unified address space shared by CPU and GPU. Under UVM, memory allocated via 
+
+cudaMallocManaged is accessible from both processors, and the runtime transparently manages data placement by mi-grating pages on demand or enabling direct access when possible. This abstraction eliminates the need for explicit host–device memory copies, simplifying programming while allowing applications to operate on datasets that exceed the physical GPU memory capacity. When a GPU accesses a page not resident in GPU memory, the default UVM behavior is to trigger a page fault and mi-grate the page from CPU memory. As shown in the red path in Figure 3, when CUDA/Tensor cores issue a memory access to a page not resident in GPU memory, address translation misses in the TLB and the page table walk detects a non-resident page, triggering a page fault. The fault is buffered in the GMMU and forwarded to the UVM driver on the host CPU. If GPU memory is oversubscribed, resident pages may be evicted to free space. The requested page is then migrated from CPU memory to GPU memory via DMA, the page table is updated, and the faulting warp resumes after stalling. Such migration introduces significant latency overhead when a page fault occurs. 
+
+Runtime guidance mechanisms for UVM. While the default UVM behavior uses on-demand paging, 
+
+cudaMemAdviseSetAccessedBy allows a given processor (e.g., a specific GPU) to maintain valid page table mappings and directly access data via zero-copy even when it is not resident on that processor. As illustrated by the blue path in Figure 3, when a GPU accesses CPU-resident data with Virtual Memory Address   
+
+> Time
+> Iteration N Iteration N+1 Iteration N+2
+
+Figure 4. Data migration behavior under UVM across three training iterations of Llama3-8B on a single H100 GPU with 141% memory oversubscription. 
+
+cudaMemAdviseSetAccessedBy enabled, the access is ser-viced as a cache miss: an L2 miss triggers a remote fetch over the interconnect, and the returned cacheline is filled into the GPU cache hierarchy without page migration. These two paths exhibit different performance trade-offs. Page migration is beneficial when data exhibits high tempo-ral locality, as the cost of transferring a page to GPU memory can be amortized over many subsequent accesses. In contrast, zero-copy is preferable for data with low reuse or streaming access patterns, as it avoids the overhead of page faults and migration by servicing accesses directly from CPU memory. In addition, cudaMemPrefetchAsync provides an explicit mechanism to proactively migrate memory pages to a tar-get device before they are accessed. Unlike demand pag-ing, which reacts to page faults, prefetching allows data movement to be overlapped with computation and reduces stall latency during execution. Prefetching can be issued asynchronously on a CUDA stream, enabling finer-grained control over data movement without requiring full manual memory management. 
+
+Migration pattern during LLM training. LLM training workloads exhibit structured spatial and temporal locality across tensors, including parameters, gradients, optimizer states, and activations. Spatial locality arises within each tensor due to contiguous accesses, while temporal locality varies across tensors: some are accessed repeatedly within short windows, whereas others are touched only once per iteration. During the forward pass, parameters are accessed layer by layer to produce activations, which are revisited in the backward pass. Consequently, parameters, activations, and their gradients are accessed multiple times within an iteration, especially when multiple forward and backward passes are performed before an update ( i.e., due to gradient accumulation). In contrast, optimizer states and the higher-precision parameter copies used for updates are accessed primarily during the parameter update step, resulting in more temporally separated access patterns. Figure 4 illustrates this behavior by showing page migra-tion patterns under UVM across multiple training iterations 
+
+> 5
+
+of Llama3-8B on a single H100 GPU with a memory over-subscription ratio of 141%. Contiguous migration regions highlight spatial locality, indicating opportunities for effi-cient bulk data movement, while the uneven reuse patterns reveal temporal locality, where only a subset of data is re-peatedly accessed. These observations suggest opportunities for efficient memory management across CPU and GPU. Spa-tial locality can be leveraged to move data in larger chunks, while temporal locality can guide data placement to keep fre-quently reused data closer to the GPU, reducing redundant transfers and unnecessary data movement. We therefore ex-plore runtime-guided UVM mechanisms that exploit these locality patterns by adapting data movement and access be-havior during execution. 
+
+3.3 Implementation 
+
+TRANSIT is implemented as a user-space shared library, injected via LD_PRELOAD at job launch time. This allows 
+
+TRANSIT to interpose on CUDA runtime APIs without modi-fying or recompiling the original program. As shown in Fig-ure 2, TRANSIT interposes on CUDA memory management APIs, redirecting device allocation calls to UVM-backed al-locations at runtime. For example, cudaMalloc is replaced with cudaMallocManaged , ensuring that all allocations (in-cluding model parameters, gradients, optimizer states, and intermediate activations) reside in a unified virtual address space accessible from both CPU and GPU. We verify that this interception covers the full training set by ensuring that all GPU memory allocations route through this path. By do-ing so, TRANSIT enables seamless memory oversubscription beyond physical GPU capacity, allowing training to proceed even when the working memory size exceeds device mem-ory limits, while preserving original program semantics and execution flow. In contrast to prior approaches that require explicit user annotations, API changes, or deep integration into training frameworks, TRANSIT is entirely transparent and immediately deployable across a wide range of work-loads. This configuration corresponds to TRANSIT -Base. While TRANSIT -Base provides transparent oversubscrip-tion, its default reactive behavior leads to two key inefficien-cies under memory oversubscription. First, page-fault-driven migrations are inherently fine-grained, clustering in the KB-to-tens-of-KB range and poorly amortizing per-migration overheads such as fault handling, scheduling, and DMA setup, resulting in low effective PCIe bandwidth. Second, the interaction between on-demand migration and UVM’s heuristic eviction policy leads to data thrashing: different working sets take turns occupying limited GPU memory, generating redundant transfers and repeated page table up-dates. TRANSIT addresses both through two optimization policies described in the following subsections. 010 20       
+
+> 30
+> 40 50 1.E+02 1.E+03 1.E+04
+> 1.E+05
+> 1.E+06 1.E+07 [4K, 16K) [16K, 64K) [64K, 256K) [256K, 1M) [1M, 4M) Migration Data Size (bytes) TRANSIT-Base TRANSIT-Prefetch Throughput
+> Number of Occurrence  10 7
+> 10 6
+> 10 5
+> 10 4
+> 10 3
+> 10 2
+> Throughput (GB/s)
+
+Figure 5. Number of occurrences and throughput of data migration events by migration size for TRANSIT -Base and 
+
+TRANSIT -Prefetch during Llama3-8B training on a single NVIDIA H100 GPU with 141% memory oversubscription. 
+
+3.4 Policy Exploration 
+
+We denote the unoptimized baseline as TRANSIT -Base, which relies solely on default UVM behavior without additional optimization. While TRANSIT -Base provides transparency by automatically managing data placement and migration through UVM, its default behavior driven by reactive page-fault handling often leads to inefficient data movement un-der memory oversubscription. In particular, two key limi-tations arise. First, page-fault-driven migrations are inher-ently fine-grained, resulting in low effective bandwidth due to poor amortization of per-migration overheads. Second, the interaction between on-demand migration and UVM’s heuristic, access-driven eviction policy can lead to frequent page movement and thrashing. To address these limita-tions, TRANSIT implements two complementary policies that improve UVM behavior without sacrificing transparency. First, TRANSIT -Prefetch introduces a merged prefetching mechanism that transforms fine-grained, fault-driven mi-grations into coarse-grained transfers, improving migration efficiency. Second, TRANSIT -Advise leverages zero-copy ac-cess via cudaMemAdvise to reduce unnecessary data move-ment and stabilize data placement. Note that both techniques operate entirely in user space and require no modifications to applications, training frameworks, or the UVM driver. 
+
+(a) TRANSIT -Prefetch. The left light-blue bar in Figure 5 shows the distribution of host-to-device (HtoD) UVM mi-gration sizes and the corresponding achieved throughput of TRANSIT -Base, collected via CUPTI [9] during Llama3-8B training on a single NVIDIA H100 GPU with a memory oversubscription factor of 141%. The results show that mi-grations are dominated by small transfers, typically ranging from a few KB to tens of KB. This behavior stems from GPU page-fault-driven migration: while faults occur at page granularity, the UVM driver typically migrates only a small contiguous region around the faulting address ( e.g., via neigh-boring prefetch), resulting in migration sizes that cluster in the KB-to-tens-of-KB range rather than at MB scale. As a result, the effective migration throughput is substantially lower for these small transfers, indicating that per-migration overheads—such as fault handling, scheduling, and DMA    
+
+> 602468
+> Page Fault Events ( ×10 6)
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 010 20 30
+> 080 160 240 320
+> Zero-copy Mapping (GB)
+> Average PCIe BW (GB/s)
+> PCIe Transfer Amount (GB)
+> 000
+> TRANSIT-Prefetch TRANSIT-Advise TRANSIT-Base
+
+Figure 6. UVM and PCIe statistics under TRANSIT -Base, 
+
+TRANSIT -Prefetch, and TRANSIT -Advise during Llama3-8B training on a single NVIDIA H100 GPU with 141% memory oversubscription. Page faults and PCIe transfer volume are measured over a single training iteration. setup—are poorly amortized at KB-scale granularity. While device-to-host (DtoH) migrations for eviction also occur, they operate at a fixed granularity of 2 MB, as determined by UVM, and thus achieve near-peak PCIe bandwidth. 
+
+Improving migration efficiency. To mitigate the ineffi-ciency arising from fine-grained HtoD migrations, TRANSIT -Prefetch coalesces the migration events. The key observa-tion is that although HtoD migrations are triggered by page faults, these faults tend to exhibit strong spatial locality dur-ing LLM training due to accesses to large tensor objects (Fig-ure 4). TRANSIT -Prefetch first profiles HtoD migration events for two warm-up training iterations using CUPTI unified-memory counters while concurrently recording kernel ac-tivity. To associate each migration with a kernel, TRANSIT -Prefetch injects an external correlation ID at every kernel launch that uniquely labels each kernel launch by its order within that iteration. Each migration event is assigned to the most likely kernel based on timestamps and the external correlation ID. From the assigned events, TRANSIT -Prefetch constructs per-kernel address ranges [addr, addr+bytes) 
+
+and coalesces them to amortize the migration overhead. In addition to merging contiguous regions, it merges ranges whose gap is within a fixed threshold ( e.g., 128KB), which reduces the number of prefetch calls and increases effective migration granularity. After profiling completes, profiling is disabled and the final per-kernel mapping is used for replay: on each subsequent kernel launch, TRANSIT -Prefetch issues 
+
+cuMemPrefetchAsync for the merged ranges on the same CUDA stream prior to kernel execution. Figure 5 shows that TRANSIT -Prefetch significantly re-duces the number of small-sized migrations by merging them into larger transfers. As a result, large migrations ( i.e., 
+
+>1 MB) dominate, where migration throughput is substan-tially higher. By prefetching data prior to kernel execution, 
+
+TRANSIT -Prefetch also avoids page-fault-driven on-demand migrations, thereby eliminating fault events. Figure 6 shows that TRANSIT -Prefetch reduces page faults by 97% while in-creasing average PCIe bandwidth utilization by 2.4 ×.
+
+(b) TRANSIT -Advise. While TRANSIT -Prefetch improves the efficiency of on-demand migration, it does not funda-mentally alter the data placement dynamics of UVM. Under memory oversubscription, UVM migrates data between host and GPU memory on demand. When new data is brought into GPU memory, existing data must be evicted to make space, resulting in a tightly coupled migration–eviction cy-cle. As a result, different working sets take turns occupying limited GPU memory in a round-robin-like manner, leading to severe data thrashing. For example, when training a 6B-parameter variant of Llama (derived from the 8B model) with UVM, even a modest oversubscription of 10 GB beyond a single H100 GPU’s 94 GB memory capacity causes the entire working set to be migrated at least once. This back-and-forth movement not only incurs redundant data transfers but also introduces additional overhead from repeated page table updates, ultimately degrading performance. Zero-copy ad-dresses this limitation by allowing such data to remain in host memory while still being directly accessible by the GPU, thereby eliminating unnecessary migrations and breaking the migration–eviction cycle. 
+
+Stabilizing data placement. To realize this, TRANSIT -Advise leverages UVM’s zero-copy mode to stabilize data placement and reduce unnecessary movement. Instead of migrating data into GPU memory on demand, zero-copy enables the GPU to directly access host-resident data via PCIe through persistent mappings, mitigating thrashing. 
+
+TRANSIT -Advise enables this behavior using cudaMemAdvise 
+
+with SetAccessedBy set to the GPU. To apply this mecha-nism across all managed data, TRANSIT -Advise maintains a table of memory allocation regions, constructed during the interception of cudaMalloc calls and their replacement with cudaMallocManaged . cudaMemAdvise is then applied to all tracked allocation regions in this table. TRANSIT -Advise applies memory advice during the forward/backward execu-tion, allowing frequently reused data ( e.g., activations and half-precision parameters) to remain resident in GPU mem-ory during compute-intensive phases, while less frequently accessed data ( e.g., optimizer states and full-precision param-eters) is served via zero-copy from host memory, reducing unnecessary migrations. To realize this, TRANSIT -Advise in-tercepts execution-level events to identify iteration bound-aries ( i.e., the optimizer step) and uses CUPTI callbacks to track kernel launches and estimate the total number of ker-nels per iteration. After a short warm-up phase, we apply 
+
+cudaMemAdvise at the midpoint of each iteration, based on the observed kernel count. This heuristic is motivated by the phase structure of training iterations: forward and backward computation repeatedly touch activations and half-precision parameters, while optimizer-related states are primarily ac-cessed near the update phase. This preserves hot data in GPU memory while allowing cold data to be served through zero-copy access from host memory. 
+
+> 7
+
+Table 2. Summary of the evaluated models, their architec-tural types, parallelization strategies, global and local batch sizes (GB and LB), and the corresponding minimum number of GPUs required without memory offloading.                               
+
+> Model Type Parallelism GB LB Min. Num. of GPUs
+> Qwen3-32B Dense FSDP 128 18Llama3-70B Dense FSDP 240 124 FSDP+TP 48 116 TP+PP 30 30 12 Qwen3-30B-A3B MoE FSDP 240 420 Llama4-Scout MoE FSDP+TP 64 464
+
+Figure 6 shows that TRANSIT -Advise eliminates page fault events and instead enables zero-copy mappings by retain-ing page mappings for host-resident data. This transition from migration-driven access to zero-copy access reduces PCIe transfer volume by 3 × compared to TRANSIT -Base and improves effective bandwidth utilization by 2.5 ×.
+
+## 4 Evaluation 
+
+4.1 Setup Training workload. We use TorchTitan [30] as the train-ing framework and evaluate four representative models: Llama3-70B, Llama4-Scout (MoE), Qwen3-32B, and Qwen3-30B-A3B (MoE). Our evaluation covers both fully sharded data parallelism (FSDP) and hybrid configurations that com-bine intra-node tensor parallelism (TP) with inter-node FSDP and pipeline parallelism (PP). For FSDP-based parallelism, we use a local batch size of 1 for dense models and 4 for MoE models, increasing it when PP is enabled to mitigate pipeline bubbles. For each model and parallelism configuration, re-ducing the node count with memory offloading changes the data-parallel degree; therefore, we set the global batch size to the common multiple of the data-parallel degrees, ensur-ing compatibility across all evaluated node counts. We use mixed-precision training by default in TorchTitan, where model parameters are maintained in FP32 while computation is performed in lower precision BF16. For TP+PP configu-rations, which do not support mixed-precision training in TorchTitan, we instead use BF16 training where all tensors are maintained in BF16. We enable activation recomputation across all configurations, reflecting its widespread use for mitigating memory pressure. The evaluated training config-urations are summarized in Table 2. 
+
+Metrics and baseline. We use per-GPU TFLOPS as the primary performance metric, computed by dividing the to-tal number of floating-point operations in each training iteration by the iteration time and number of GPUs. To quantify network communication, we measure per-node network traffic, defined as the aggregated network traffic 
+
+Table 3. Summary of the multi-node cluster configurations used for the evaluation.                     
+
+> Configuration Cluster-A Cluster-B
+> Nodes 16 3GPUs per node 4×H100 (80GB) 8×H100 (80GB) CPU–GPU interconnect PCIe Gen4 PCIe Gen5 NICs per node 4×ConnectX-7 8×ConnectX-7 NIC line rate 400 Gbps 400 Gbps NVLink BW per GPU 300 GB/s 900 GB/s Host CPU Intel Sapphire Rapids, 80 cores CPU memory per node 2 TB
+
+per node during a single training iteration, measured us-ing device-level transmit and receive counters. As a base-line, we consider the configuration with the minimum num-ber of nodes (GPUs) required to train each model without memory offloading. When the number of available GPUs is smaller than this baseline configuration, memory offloading becomes necessary to fit the training job. In these memory-constrained settings, we compare different approaches: 
+
+TRANSIT -Base, TRANSIT -Prefetch, TRANSIT -Advise, TorchTi-tan, ZeRO-Offload [41], and ZeRO-Infinity [40]. For TorchTi-tan, we set enable_cpu_offloading=true in the training configuration and refer to this configuration as TorchTitan-Offload hereafter. For ZeRO-Offload and ZeRO-Infinity, we use their corresponding offloading configurations through DeepSpeed. 
+
+Multi-node cluster. We evaluate TRANSIT on two H100-based GPU clusters, both deployed in an OpenShift envi-ronment. Table 3 summarizes their hardware configurations. Both clusters use Sapphire Rapids host CPUs with 80 cores and 2 TB of host memory per node. Cluster-A consists of 2 racks, each hosting up to 8 nodes, and interconnected via top-of-rack (ToR) switches that provide 10.4 Tbps of aggregate switching capacity, with the ToRs directly connected to each other. Each Cluster-A node has four NVIDIA H100 80 GB GPUs and four 400 Gbps NVIDIA ConnectX-7 (CX7) NICs. Cluster-B consists of 3 nodes, each with eight NVIDIA H100 80 GB GPUs and eight 400 Gbps CX7 NICs. In Cluster-A, GPUs communicate with the host CPU through PCIe Gen4, whereas Cluster-B uses PCIe Gen5. Cluster-A provides up to 300 GB/s bidirectional NVLink bandwidth per GPU, whereas Cluster-B provides up to 900 GB/s. Unless otherwise speci-fied, all NICs operate at their peak 400 Gbps line rate. We additionally evaluate bandwidth-limited configura-tions to capture settings where the available network band-width is lower than the nominal line rate. Large-scale GPU clusters are increasingly exposed to partial hardware and network degradations, where failures or degraded compo-nents can reduce the throughput of otherwise healthy dis-tributed training jobs [14, 28]. Beyond these degradations,        
+
+> 80100 200 300 400
+> 500 20 16 12 8
+> Number of GPUs
+> Per-GPU TFLOPS
+> No Offloading (24 GPUs)
+> TRANSIT-Base
+> TorchTitan-Offload
+> TRANSIT-Prefetch TRANSIT-Advise 0
+> 50
+> 100
+> 150
+> 20 16 12 8
+> TorchTitan-Offload
+> TRANSIT
+> Number of GPUs
+> Offloaded data per GPU (GB)
+
+Figure 7. Per-GPU TFLOPS during Llama3-70B training across different GPU scales, comparing TorchTitan-Offload, 
+
+TRANSIT -Base, TRANSIT -Prefetch, and TRANSIT -Advise on Cluster-A; the 24-GPU baseline without offloading is shown as a dashed line. The amount of offloaded data per GPU is shown for both TRANSIT and TorchTitan. bandwidth limitations can also arise from deployment con-straints, as academic or shared research clusters may not be provisioned with uniformly high-bandwidth interconnects. To study these cases in a controlled setting, we emulate a degraded or bandwidth-limited scenario by capping the NICs to 100 Gbps using mlnx_qos . In particular, we configure each NIC at 100 Gbps to analyze the impact of network bandwidth on training performance in §4.2. 
+
+4.2 Scale-in Performance Different offloading mechanisms. Figure 7 shows per-GPU TFLOPS during Llama3-70B training under an FSDP configuration across varying node counts. The minimum configuration without offloading requires 6 nodes (24 GPUs), and its per-GPU TFLOPS is indicated by the blue dashed bar. For smaller node counts where memory oversubscription necessitates offloading, we compare TRANSIT -Base, TRANSIT -Prefetch, and TRANSIT -Advise. Across all methods, per-GPU TFLOPS generally decreases as we scale in. This trend arises from an increased amount of data offloaded to CPU memory due to sharding model states across fewer GPUs as shown in Figure 7, which amplifies data fetch overheads. Com-pared with TRANSIT -Base, TRANSIT -Prefetch and TRANSIT -Advise improve per-GPU TFLOPS by 1.04–1.99 × and 1.10– 3.43 ×, respectively, demonstrating the effectiveness of data movement and placement optimizations. Among all the ap-proaches, TRANSIT -Advise achieves the best overall perfor-mance. Notably, when reducing the GPU count by 16–32%, 
+
+TRANSIT -Advise slightly exceeds the no-offloading baseline by 3–4%, due to the reduced communication volume from us-ing fewer GPUs, a trend we examine more thoroughly in the next paragraph. It maintains up to 90% of baseline per-GPU TFLOPS even at 50% GPU reduction, before performance be-gins to degrade more severely beyond this point. Compared with TorchTitan-Offload, TRANSIT achieves higher per-GPU TFLOPS in moderate scale-in settings, even with TRANSIT -Base. As scale-in becomes more aggressive, TRANSIT -Base 0     
+
+> 50
+> 100 150
+> 0100
+> 200
+> 300
+> 400 500
+> Per-GPU TFLOPS
+> TRANSIT-Base
+> TorchTitan-Offload
+> TRANSIT-Prefetch TRANSIT-Advise
+> No Offloading (24 GPUs)
+> ZeRO-Offload ZeRO-Infinity
+> Offloaded data
+> per GPU (GB)
+> TRANSIT Prior Work TRANSIT Prior Work
+
+Figure 8. Comparison between TRANSIT and existing offload-ing frameworks for Llama3-70B training with 16 GPUs on Cluster-B. The left panel shows per-GPU TFLOPS, where the dashed line indicates the 24-GPU no-offloading TorchTitan baseline. The right panel shows the amount of data offloaded per GPU. and TRANSIT -Prefetch fall below TorchTitan, but TRANSIT -Advise consistently outperforms TorchTitan-Offload by 1.57– 1.87 ×. Figure 7 shows that TorchTitan-Offload offloads a larger amount of data to the CPU than TRANSIT , as it con-servatively offloads entire parameter and optimizer states for each GPU shard, while TRANSIT ’s UVM-based offloading utilizes available GPU memory capacity before spilling over to CPU memory. 
+
+Comparison with existing offloading frameworks. We next compare TRANSIT with existing framework-level of-floading mechanisms, including not only TorchTitan-Offload but also ZeRO-Offload and ZeRO-Infinity, with 16 GPUs across 2 nodes on Cluster-B. The no-offloading baseline requires 24 GPUs to train Llama3-70B and achieves 418 per-GPU TFLOPS. TRANSIT -Base, TRANSIT -Prefetch, and 
+
+TRANSIT -Advise sustain 411, 422, and 433 per-GPU TFLOPS, respectively, closely matching or slightly exceeding the 24-GPU no-offloading baseline. In contrast, existing offload-ing frameworks achieve substantially lower throughput: TorchTitan-Offload reaches 258 per-GPU TFLOPS, while ZeRO-Offload and ZeRO-Infinity achieve 272 and 305 per-GPU TFLOPS, respectively. As a result, the best variant of 
+
+TRANSIT , TRANSIT -Advise, improves per-GPU TFLOPS by 1.42–1.68 × over these existing frameworks. The performance gap comes from how each system uses the available GPU memory. The offloaded-data measure-ment further shows that TRANSIT places substantially less data in CPU memory than existing offloading frameworks. TorchTitan-Offload, ZeRO-Offload, and ZeRO-Infinity of-fload 80 GB, 108 GB, and 125 GB per GPU, respectively. In contrast, TRANSIT offloads only 26 GB per GPU by using UVM-based memory management to utilize available GPU memory before spilling data to CPU memory. This corre-sponds to 3.1–4.8 × less offloaded data, allowing TRANSIT to sustain higher throughput under the same 16-GPU setting. In the remainder of this section, we focus on TRANSIT -Advise, as it provides the strongest performance among the evalu-ated methods.              
+
+> 960 70 80 90 100 110 0100 200 300 400 500 24 20 16 12 816 12 812 8Full FSDP FSDP + TP TP + PP
+> No Offloading TRANSIT-Advise Per-node Network Traffic
+> Number of GPUs
+> Per-GPU TFLOPS
+> Normalized Per-node Traffic (%)
+
+Figure 9. Per-GPU TFLOPS for Llama3-70B training across different parallelism strategies and GPU counts on Cluster-A, along with per-node network traffic normalized to the base-line without offloading for each parallelism configuration. 
+
+Different parallelisms. Figure 9 shows the scaling behav-ior of Llama3-70B training across different parallelization strategies (FSDP, FSDP+TP, and TP+PP), along with the corresponding per-node communication traffic as the num-ber of nodes decreases. Across all parallelization strategies, 
+
+TRANSIT -Advise maintains over 90% of the per-GPU through-put at half the number of GPUs, relative to the no-offloading baseline. More importantly, for both FSDP and FSDP+TP, the per-node communication volume per step decreases as the system scales in. This trend arises because FSDP’s collective operations (all-gather and reduce-scatter) scale with model sharding, causing communication volume to decrease as the number of participating devices is reduced. For full FSDP, the reduction is gradual since sharding occurs across all GPUs. In contrast, FSDP+TP exhibits a steeper reduction because FSDP operates across nodes, leading to a 33% decrease in per-node communication volume when scaling from 4 to 2 nodes. In contrast, TP+PP does not exhibit a similar reduction, as its inter-node communication is dominated by pipeline-parallel activation exchanges, which are point-to-point and remain largely invariant to the number of nodes. 
+
+Sensitivity to network bandwidth. To understand the memory-communication coupling and the benefits enabled by TRANSIT , we introduce a bandwidth-sensitivity metric 
+
+𝜌 (𝐵 1, 𝐵 2), defined as the ratio of training throughput at net-work bandwidth 𝐵 1 to that at 𝐵 2 for a fixed configuration. A system with 𝜌 = 1.0 is completely insensitive to network con-ditions. A system with high 𝜌 degrades sharply as bandwidth decreases. This metric provides a measure of how strongly training performance depends on network bandwidth. Figure 10 reports the bandwidth sensitivity metric 
+
+𝜌 (𝐵 1, 𝐵 2), defined as the ratio of the training throughput at bandwidth 𝐵 1 to that at 𝐵 2 for a fixed configuration, where 
+
+𝐵 1 = 400 Gbps and 𝐵 2 = 100 Gbps for each NIC. For full FSDP, TRANSIT-Advise reduces 𝜌 from 1.6 at 20 GPUs to 1.3 at 8 GPUs, indicating that performance becomes less dependent on network bandwidth as node count decreases. This reduc-tion reflects a narrowing of the performance gap between high- and low-bandwidth settings. While absolute per-GPU 200          
+
+> 300 400 500
+> 24 20 16 12 8
+> Number of GPUs
+> Per-GPU TFLOPS
+> 400 Gbps NIC
+> 100
+> 150 200 250 300
+> 16 12 8
+> Full FSDP FSDP+TP
+> 100 Gbps NIC
+> 𝝆 = 𝟏. 𝟔
+> 𝝆 = 𝟏. 𝟑
+> 𝝆 = 𝟐. 𝟏 𝝆 = 𝟏. 𝟓
+
+Figure 10. Per-GPU TFLOPS for Llama3-70B training across parallelism strategies and GPU counts under different NIC bandwidths (400 Gbps vs. 100 Gbps) along with the corre-sponding bandwidth sensitivity metric 𝜌 on Cluster-A. TFLOPS at 400 Gbps declines due to increased memory of-floading overhead, the degradation at 100 Gbps is propor-tionally smaller, indicating that TRANSIT-Advise degrades more gracefully under network congestion. The effect is more pronounced under FSDP+TP, where inter-node communication scales with the number of data-parallel nodes. Scaling from 16 to 8 GPUs reduces 𝜌 from 2.1 to 1.5, while simultaneously improving absolute perfor-mance in the bandwidth-constrained regime. At 100 Gbps, TRANSIT-Advise at 8 GPUs achieves 161 TFLOPS, compared to 112 TFLOPS for the no-offloading baseline at the same bandwidth (44% improvement). In this regime, reducing the node count lowers communication volume sufficiently to ab-sorb the additional offloading overhead, effectively shifting the bottleneck away from the network and turning band-width sensitivity from a limitation into an advantage. 
+
+Different models and scales. Figure 11 illustrates the scal-ing behavior of different models across varying node counts. Despite differences in model size and minimum GPU require-ments, a consistent trend emerges: TRANSIT -Advise sustains per-GPU throughput comparable to the no-offloading base-line while using only half the number of GPUs. This indicates that the benefits of reducing inter-node communication and mitigating network bottlenecks generalize across models, even as their memory footprints and parallelization char-acteristics differ. However, when scaling beyond this point, per-GPU TFLOPS degrades noticeably. For example, through-put drops by 18% and 25% for Qwen3-30B-A3B and Llama4-Scout, respectively, when the GPU count is reduced by 60% and 75%. This degradation arises from higher memory over-subscription, which amplifies data movement overhead and limits the effectiveness of memory offloading. 
+
+4.3 Cluster-level Simulation Simulator design. We build a discrete-event simulator to study the cluster-wide impact of our framework using real production traces. The simulator models a multi-rack GPU cluster and evaluates two representative topologies with 4 and 8 GPUs per node. We assume a fixed rack capacity of             
+
+> 10 60
+> 80 100 120 8420 16 12 864 32 16 Qwen3-32B Qwen3-30B-A3B Llama4-Scout No Offloading (min GPUs to fit) TRANSIT-Advise Network
+> 0
+> 40 80 120
+> Number of GPUs
+> Normalized Per-GPU TFLOPS (%)
+> Normalized Per-node Traffic (%)
+
+Figure 11. Per-GPU TFLOPS under scale-in for the no-offloading baseline and TRANSIT -Advise across different mod-els on Cluster-A alongside per-node network traffic normal-ized to the baseline. 32 GPUs and scale the cluster size by varying the number of racks. The scheduler employs a locality-aware placement policy that prioritizes intra-rack allocations when possible, using either packing or spreading strategies [12, 45], and falls back to multi-rack placement when necessary. For cluster-level evaluation, we compare two scenarios: (1) a baseline that replays the trace without modification, and (2) a TRANSIT -enabled scenario that applies node count reduc-tion. In the TRANSIT -enabled scenario, node count reduction is applied only to eligible jobs, reducing their node count by a fixed fraction of 25–50%, while all other jobs remain unchanged. Eligible jobs are defined as multi-node jobs ( i.e., 
+
+jobs that require more than one node), since only these can benefit from reduced cross-node communication. Execution time is first scaled inversely with the degree of node reduc-tion ( e.g., 50% reduction in node count results in 2 × longer job duration). On top of this, the simulator distinguishes cases where cross-rack communication is eliminated, intro-duced, or partially reduced, and incorporates these effects into job duration. The simulator incorporates scaling factors to capture these effects under different placement transi-tions, extracted from the results in §4.2. Specifically, when an inter-rack job becomes intra-rack, we apply a speedup factor derived from TRANSIT -Advise at 400 Gbps NIC con-fig, normalized to a no-offloading baseline at 100 Gbps NIC config (0–137%). When an intra-rack job becomes inter-rack, we apply a slowdown factor based on TRANSIT -Advise at 100 Gbps NIC config, normalized to a 400 Gbps baseline NIC config (0–55%). For jobs that remain intra-rack or inter-rack before and after applying TRANSIT -Advise, we apply a scal-ing factor corresponding to TRANSIT -Advise performance relative to the baseline under the same placement and net-work setting (ranging from −5% to 5%). The simulator reports a range of cluster-level metrics across both eligible jobs and all jobs, including cluster throughput, makespan, queue time, rack usage, and GPU utilization. In particular, rack traversal serves as a proxy for network pressure, while idle GPU time reflects overall utilization. 0
+
+> 20 40
+> 60
+> Inter-Rack Traffic Queue Time TRANSIT-25% TRANSIT-50%
+> Reduction (%)
+> Seren Trace under 72 Racks
+
+(a) 0  
+
+> 20
+> 40
+> 60 80
+> 100
+> 120 Job Throughput Queue Time Inter-Rack Traffic
+> Baseline (76 Racks) TRANSIT-50% (32 Racks)
+> Normalized (%)
+> Seren Trace, Different Cluster Sizes
+
+(b) 
+
+Figure 12. Cluster-level impact of TRANSIT under full-scale and reduced-scale settings using the Seren trace. TRANSIT -25% and TRANSIT -50% denote configurations where TRANSIT 
+
+reduces the number of GPUs required per eligible job by 25% and 50%, respectively. 
+
+Workload. Input traces are pre-processed from the ACME datacenter trace [25], specifically the Kalos and Seren sub-sets, to retain only meaningful GPU jobs. Kalos represents a relatively lightly loaded workload, while Seren captures a more heavily loaded setting. 
+
+Performance improvement across different loads. We first evaluate TRANSIT at production scale under different workload conditions. We begin with the Seren trace on a full-scale 72-rack cluster, representing a heavily loaded setting. As shown in Figure 12a, TRANSIT consistently reduces inter-rack traffic by 15%–49% across all evaluated configurations, with the reduction scaling predictably with the degree of node consolidation and remaining robust across all through-put assumptions. These gains arise from applying node count reduction selectively to eligible jobs, which improves place-ment locality without affecting the rest of the workload. This improved locality also translates into system-level benefits: average queue time decreases by up to 6.8% and 11.2% at 25% and 50% node count reductions, respectively. In the 8 GPUs per node configuration, 40.6% of eligible jobs collapse to a single node under 50% node count reduction, eliminating inter-node communication for those jobs. We next evaluate the Kalos trace on a full 76-rack cluster under the same production-scale setting, comparing TRANSIT 
+
+against a baseline without TRANSIT . In this lightly loaded scenario, cluster-level queue time benefits do not materialize because freed nodes remain idle rather than serving queued jobs. However, rack traffic reduction remains substantial at 24.2% and 49.2% under 25% and 50% node count reductions, respectively, while idle GPU time changes by less than 1%. 
+
+Performance under reduced cluster size. We now eval-uate TRANSIT under capacity constraints using the Seren trace on a reduced 32-rack cluster, less than half the 72-rack production deployment, and compare against a baseline run-ning the same workload on the full 72-rack cluster without 
+
+TRANSIT . As shown in Figure 12b, at 50% node count reduc-tion and assuming a 50% throughput improvement for jobs 
+
+> 11
+
+that transition from cross-rack to intra-rack communication, the TRANSIT -enabled 32-rack cluster outperforms the 72-rack baseline across all metrics: eligible job throughput improves by 5.2%, average eligible queue time decreases by 82.4%, and rack traffic reduces by 38.2%. This demonstrates that reduc-ing node counts for eligible jobs allows a smaller cluster to match or exceed the performance of a larger deployment. We finally evaluate the effect of contention using the Ka-los trace on a reduced 32-rack cluster, comparing TRANSIT 
+
+against a baseline under the same cluster size. Under this setting, queue time reductions emerge, reaching 85.2% at 25% node count reduction and 95.3% at 50% node count reduction. Notably, varying the assumed throughput improvement for jobs that transition from cross-rack to intra-rack commu-nication has negligible impact, confirming that the gains are driven primarily by node count reduction and improved placement locality rather than per-job throughput changes. 
+
+## 5 Discussion 
+
+Potential improvements to TRANSIT . While TRANSIT -Prefetch and TRANSIT -Advise are conceptually complemen-tary, in our current design TRANSIT -Advise installs zero-copy mappings for all spilled data, effectively eliminating migra-tions and leaving little opportunity for TRANSIT -Prefetch to contribute. A more flexible design could selectively apply zero-copy and rely on migration for the remaining data, en-abling the two mechanisms to operate in tandem. Realizing such a design requires identifying which data should remain migration-based versus zero-copy, allowing prefetching to improve transfer efficiency while retaining the benefits of stable placement. However, identifying such distinctions is challenging due to the limited visibility available at the shim layer. Among the available signals, migration history proves to be a poor proxy for true access patterns, as it captures when data is moved across CPU and GPU but not how fre-quently it is reused; a page may be accessed many times by the GPU after a single migration before being evicted, which is not reflected in migration activity alone. Accurately cap-turing access patterns would require fine-grained tracking of data reuse at the GPU, which is not exposed through existing profiling interfaces such as CUPTI and would require deeper integration with the runtime or driver. 
+
+Co-optimizing communication, compute, and memory offloading. Prior work has explored optimizing distributed training performance by searching over parallelization strate-gies and training configurations, such as tensor/pipeline par-allelism and local/micro batch size, to balance computation and communication costs [15, 47, 55]. However, these ap-proaches typically treat GPU memory capacity as a hard constraint, limiting the feasible design space to configura-tions that fit within aggregate device memory. Transparent memory offloading relaxes this constraint by extending GPU memory with host memory, enabling training under more flexible parallelization and configuration choices that would otherwise be infeasible. This expanded design space intro-duces new opportunities to reduce communication overhead, for example by operating with fewer GPUs or favoring paral-lelization strategies with lower synchronization costs while demanding larger memory. At the same time, offloading introduces additional data movement overheads, making performance dependent on the interplay between compu-tation, communication, and memory offloading. Designing efficient strategies that navigate this enlarged space, while accounting for the dynamic costs of offloading, remains an important direction for future work. 
+
+## 6 Related Work 
+
+Training LLMs with data offloading. Fine-grained sys-tems such as G10 [27], TeraIO [52], and SSDTrain [49] tightly integrate with the training framework, using run-time profiling and scheduling to orchestrate data placement across memory tiers ( e.g., GPU HBM, CPU DRAM, or NVMe SSDs). While effective, they require deep integration and be-come increasingly complex under multi-dimensional paral-lelism. In contrast, widely adopted solutions favor simplicity. ZeRO-Offload [41], ZeRO-Infinity [40], and TorchTitan [30] adopt coarse-grained strategies that offload entire classes of data ( e.g., parameters or optimizer states), trading effi-ciency for ease of deployment. These framework-dependent approaches are tightly coupled to specific implementations, limiting portability across models and systems. To improve programmability, recent work explored application-transparent offloading via NVIDIA Unified Vir-tual Memory (UVM) [13], decoupling memory management from the training framework. However, default UVM behav-ior is often inefficient for training, motivating prior work to introduce custom prefetching and migration policies [27, 31]. These approaches require deeper system support: Forest [31] modifies the UVM driver for fine-grained control over page placement and migration, while DeepUM [27] introduces a custom kernel-space driver alongside runtime integration to intercept page faults and orchestrate prefetching. These re-quirements limit deployability: modifying the UVM driver or introducing kernel-level components makes such approaches difficult to apply transparently, restricting their use not only in containerized environments and public clouds, but also in private clusters where administrative control is limited. 
+
+Communication optimizations for distributed LLM training. Prior work mitigates network bottlenecks by re-ducing communication volume, restructuring parallelism, improving job placement, or overlapping communication with computation. ZeRO++ lowers communication cost via low-precision transfers and hierarchical partitioning [46]. 
+
+> 12
+
+Pipeline parallel approaches such as PipeDream replace fre-quent global synchronization with stage-wise communica-tion, while improved schedules reduce pipeline inefficien-cies [24, 34]. Another line of work focuses on topology- and bandwidth-aware job placement, mapping training jobs onto clusters to minimize cross-node communication and avoid network contention [17, 23, 35, 55]. Orthogonally, systems such as ByteScheduler improve overlap by introducing fine-grained, priority-based communication scheduling, enabling better utilization than conventional greedy overlap [36]. De-spite these advances, existing approaches primarily optimize communication given a fixed degree of parallelism and re-source allocation, and do not address the regime where scal-ing to more GPUs to meet memory capacity exacerbates network bottlenecks. 
+
+## 7 Conclusion 
+
+We presented TRANSIT , a transparent scale-in framework that enables distributed LLM training to run on fewer GPUs by using CPU DRAM as an extension of GPU mem-ory. By augmenting UVM with runtime-guided data move-ment policies, including fused prefetching and zero-copy access, TRANSIT improves CPU–GPU data movement effi-ciency without requiring changes to applications, frame-works, schedulers, runtimes, kernels, or device drivers. Our results show that appropriate user-space runtime orchestra-tion can overcome UVM’s poor default performance, with zero-copy avoiding migration thrashing and preserving high per-GPU efficiency under scale-in. As a result, TRANSIT out-performs default UVM and framework-managed offloading while reducing network traffic, queueing delay, and cluster resource pressure. 
+
+## 8 Acknowledgement 
+
+This work was supported in part by grants from the IBM-Illinois Discovery Accelerator Institute (IIDAI) and the Insti-tute of Information & Communications Technology Planning & Evaluation (IITP) grant funded by the Korean government (MSIT) (No. RS-2025-02214497, Development of low-level op-timization program API technology for AI semiconductors). The authors acknowledge the National Artificial Intelligence Research Resource (NAIRR) Pilot (NAIRR250426), the AI Al-liance and resources from IBM, Red Hat and the Mass Open Cloud for contributing to this research result. The authors thank Padmanabhan Santhanam (IBM Research) for his con-stant support during the NAIRR Pilot administrative process, and Kevin O’Connor (IBM Reserach), Jason Schlessman (Red Hat), Taj Salawu (Red Hat), Naved Ansari (MOC), and Hakan Saplakoglu (MOC), for their support in provisioning and maintaining the infrastructure used for large-scale GPU ex-periments. 
+
+## References 
+
+[1] Accessed in 2026. About RoCE — RDMA over Converged Ethernet. 
+
+https://www.roceinitiative.org/roce-introduction/ .[2] Accessed in 2026. Beyond GPU Memory Limits with Unified Memory on Pascal. https://developer.nvidia.com/blog/beyond-gpu-memory-limits-unified-memory-pascal/ .[3] Accessed in 2026. ConnectX NICs. https://www.nvidia.com/en-us/networking/ethernet-adapters/ .[4] Accessed in 2026. CUDA semantics. https://docs.pytorch.org/docs/2. 12/notes/cuda.html .[5] Accessed in 2026. Developing a Linux Kernel Module using GPUDirect RDMA. https://docs.nvidia.com/cuda/gpudirect-rdma/index.html .[6] Accessed in 2026. Engineering the Future of AI: How AMD Intercon-nects Compute. https://www.amd.com/en/blogs/2025/engineering-the-future-of-ai.html .[7] Accessed in 2026. GPU-enabled Message Passing Interface. https: //rocm.docs.amd.com/en/docs-6.0.0/how-to/gpu-enabled-mpi.html .[8] Accessed in 2026. Introduction to InfiniBand™. https://network.nvid ia.com/pdf/whitepapers/IB_Intro_WP_190.pdf .[9] Accessed in 2026. NVIDIA CUDA Profiling Tools Interface (CUPTI) -CUDA Toolkit. https://developer.nvidia.com/cupti/ .[10] Accessed in 2026. NVIDIA NVLink and NVLink Switch. https://www. nvidia.com/en-us/data-center/nvlink/ .[11] Accessed in 2026. Overcoming the 4 Critical Networking Challenges in AI Clusters. https://www.fs.com/blog/overcoming-the-4-critical-networking-challenges-in-ai-clusters-b46755.html .[12] Accessed in 2026. Pod Topology Spread Constraints. https://kube rnetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/ .[13] Accessed in 2026. Unified Memory in CUDA 6. https://developer.nvid ia.com/blog/unified-memory-in-cuda-6/ .[14] Daiyaan Arfeen, Dheevatsa Mudigere, Ankit More, Bhargava Gopireddy, Ahmet Inci, and Gregory R. Ganger. 2025. Nonuniform-Tensor-Parallelism: Mitigating GPU failure impact for Scaled-up LLM Training. arXiv:2504.06095 [cs.DC] https://arxiv.org/abs/2504.06095 
+
+[15] Jehyeon Bang, Yujeong Choi, Myeongwoo Kim, Yongdeok Kim, and Minsoo Rhu. 2024. vtrain: A simulation framework for evaluating cost-effective and compute-optimal large language model training. In 2024 57th IEEE/ACM International Symposium on Microarchitecture (MICRO) . IEEE, 153–167. [16] Sascha Brodsky. 2024. The Hidden Costs of AI: How Generative Models Are Reshaping Corporate Budgets. https://www.ibm.com/think/insi ghts/ai-economics-compute-cost . Accessed: April 15, 2026. [17] Jiamin Cao, Yu Guan, Kun Qian, Jiaqi Gao, Wencong Xiao, Jianbo Dong, Binzhang Fu, Dennis Cai, and Ennan Zhai. 2024. Crux: Gpu-efficient communication scheduling for deep learning training. In Proceedings of the ACM SIGCOMM 2024 Conference . 1–15. [18] Runxiang Cheng, Chris Cai, Selman Yilmaz, Rahul Mitra, Malay Bag, Mrinmoy Ghosh, and Tianyin Xu. 2023. Towards GPU memory effi-ciency for distributed training at scale. In Proceedings of the 2023 ACM Symposium on Cloud Computing . 281–297. [19] Jared Fernandez, Luca Wehrstedt, Leonid Shamis, Mostafa Elhoushi, Kalyan Saladi, Yonatan Bisk, Emma Strubell, and Jacob Kahn. 2024. Hardware scaling trends and diminishing returns in large-scale dis-tributed training. arXiv preprint arXiv:2411.13055 (2024). [20] Adithya Gangidi, Rui Miao, Shengbao Zheng, Sai Jayesh Bondu, Guilherme Goes, Hany Morsy, Rohit Puri, Mohammad Riftadi, Ashmitha Jeevaraj Shetty, Jingyi Yang, et al. 2024. Rdma over eth-ernet for distributed training at meta scale. In Proceedings of the ACM SIGCOMM 2024 Conference . 57–70. [21] Amir Gholami, Zhewei Yao, Sehoon Kim, Coleman Hooper, Michael W Mahoney, and Kurt Keutzer. 2024. Ai and memory wall. IEEE Micro 
+
+44, 3 (2024), 33–39. [22] Soudeh Ghorbani, Yimeng Zhao, Srikanth Sundaresan, Ying Zhang, Yijing Zeng, Abhigyan Sharma, Prashanth Kannan, and Cristian 
+
+> 13
+
+Lumezanu. 2025. Congestion Patterns in a Large-scale RDMA Datacen-ter. In Proceedings of the 2025 ACM Internet Measurement Conference .944–951. [23] Juncheng Gu, Mosharaf Chowdhury, Kang G. Shin, Yibo Zhu, Myeong-jae Jeon, Junjie Qian, Hongqiang Liu, and Chuanxiong Guo. 2019. Tiresias: A GPU Cluster Manager for Distributed Deep Learning. In 16th USENIX Symposium on Networked Systems Design and Im-plementation (NSDI 19) . USENIX Association, Boston, MA, 485–500. 
+
+https://www.usenix.org/conference/nsdi19/presentation/gu 
+
+[24] Aaron Harlap, Deepak Narayanan, Amar Phanishayee, Vivek Seshadri, Nikhil Devanur, Greg Ganger, and Phil Gibbons. 2018. Pipedream: Fast and efficient pipeline parallel dnn training. arXiv preprint arXiv:1806.03377 (2018). [25] Qinghao Hu, Zhisheng Ye, Zerui Wang, Guoteng Wang, Meng Zhang, Qiaoling Chen, Peng Sun, Dahua Lin, Xiaolin Wang, Yingwei Luo, et al. 2024. Characterization of large language model development in the datacenter. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) . 709–729. [26] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui Wu, and zhifeng Chen. 2019. GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism. In Advances in Neural Informa-tion Processing Systems , H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E. Fox, and R. Garnett (Eds.), Vol. 32. Curran Asso-ciates, Inc. https://proceedings.neurips.cc/paper_files/paper/2019/file /093f65e080a295f8076b1c5722a46aa2-Paper.pdf 
+
+[27] Jaehoon Jung, Jinpyo Kim, and Jaejin Lee. 2023. Deepum: Tensor mi-gration and prefetching in unified memory. In Proceedings of the 28th ACM International Conference on Architectural Support for Program-ming Languages and Operating Systems, Volume 2 . 207–221. [28] Apostolos Kokolis, Michael Kuchnik, John Hoffman, Adithya Kumar, Parth Malani, Faye Ma, Zachary DeVito, Shubho Sengupta, Kalyan Saladi, and Carole-Jean Wu. 2025. Revisiting reliability in large-scale machine learning research clusters. In 2025 IEEE International Sym-posium on High Performance Computer Architecture (HPCA) . IEEE, 1259–1274. [29] Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen. 2020. GShard: Scaling Giant Models with Condi-tional Computation and Automatic Sharding. arXiv:2006.16668 [cs.CL] 
+
+https://arxiv.org/abs/2006.16668 
+
+[30] Wanchao Liang, Tianyu Liu, Less Wright, Will Constable, Andrew Gu, Chien-Chin Huang, Iris Zhang, Wei Feng, Howard Huang, Junjie Wang, Sanket Purandare, Gokul Nadathur, and Stratos Idreos. 2025. TorchTitan: One-stop PyTorch native solution for production ready LLM pretraining. In The Thirteenth International Conference on Learn-ing Representations . https://openreview.net/forum?id=SFN6Wm7YBI 
+
+[31] Mao Lin, Yuan Feng, Guilherme Cox, and Hyeran Jeon. 2025. Forest: Access-aware GPU UVM Management. In Proceedings of the 52nd Annual International Symposium on Computer Architecture . 137–152. [32] Mao Lin and Hyeran Jeon. 2025. Understanding oversubscribed mem-ory management for deep learning training. In Proceedings of the 5th Workshop on Machine Learning and Systems . 46–55. [33] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R. Devanur, Gregory R. Ganger, Phillip B. Gibbons, and Matei Zaharia. 2019. PipeDream: generalized pipeline parallelism for DNN training. In Proceedings of the 27th ACM Symposium on Operating Systems Principles (Huntsville, Ontario, Canada) (SOSP ’19) . Association for Computing Machinery, New York, NY, USA, 1–15. doi: 10.1145/33 41301.3359646 
+
+[34] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGres-ley, Mostofa Patwary, Vijay Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, et al. 2021. Efficient large-scale language model training on gpu clusters using megatron-lm. In Proceedings of the international conference for high performance computing, networking, storage and analysis . 1–15. [35] Yanghua Peng, Yixin Bao, Yangrui Chen, Chuan Wu, and Chuanxiong Guo. 2018. Optimus: an efficient dynamic resource scheduler for deep learning clusters. In Proceedings of the Thirteenth EuroSys Conference .1–14. [36] Yanghua Peng, Yibo Zhu, Yangrui Chen, Yixin Bao, Bairen Yi, Chang Lan, Chuan Wu, and Chuanxiong Guo. 2019. A generic communication scheduler for distributed DNN training acceleration. In Proceedings of the 27th ACM Symposium on Operating Systems Principles . 16–29. [37] Kun Qian, Yongqing Xi, Jiamin Cao, Jiaqi Gao, Yichi Xu, Yu Guan, Binzhang Fu, Xuemei Shi, Fangbo Zhu, Rui Miao, et al. 2024. Alibaba hpn: A data center network for large language model training. In 
+
+Proceedings of the ACM SIGCOMM 2024 Conference . 691–706. [38] Sudarsanan Rajasekaran, Manya Ghobadi, and Aditya Akella. 2024. 
+
+{CASSINI }:{Network-Aware } job scheduling in machine learning clusters. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI 24) . 1403–1420. [39] Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong He. 2020. Zero: Memory optimizations toward training trillion param-eter models. In SC20: International Conference for High Performance Computing, Networking, Storage and Analysis . IEEE, 1–16. [40] Samyam Rajbhandari, Olatunji Ruwase, Jeff Rasley, Shaden Smith, and Yuxiong He. 2021. ZeRO-infinity: breaking the GPU memory wall for extreme scale deep learning (SC ’21) . Association for Computing Machinery, New York, NY, USA, Article 59, 14 pages. doi: 10.1145/34 58817.3476205 
+
+[41] Jie Ren, Samyam Rajbhandari, Reza Yazdani Aminabadi, Olatunji Ruwase, Shuangyan Yang, Minjia Zhang, Dong Li, and Yuxiong He. 2021. {Zero-offload }: Democratizing {billion-scale } model training. In 
+
+2021 USENIX Annual Technical Conference (USENIX ATC 21) . 551–564. [42] Aashaka Shah, Vijay Chidambaram, Meghan Cowan, Saeed Maleki, Madan Musuvathi, Todd Mytkowicz, Jacob Nelson, Olli Saarikivi, and Rachee Singh. 2023. {TACCL }: Guiding collective algorithm syn-thesis using communication sketches. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) . 593–612. [43] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2019. Megatron-lm: Training multi-billion parameter language models using model parallelism. arXiv preprint arXiv:1909.08053 (2019). [44] Min Si, Pavan Balaji, Yongzhou Chen, Ching-Hsiang Chu, Adi Gangidi, Saif Hasan, Subodh Iyengar, Dan Johnson, Bingzhe Liu, Regina Ren, et al. 2025. Collective communication for 100k+ GPUs. arXiv preprint arXiv:2510.20171 (2025). [45] Abhishek Verma, Luis Pedrosa, Madhukar Korupolu, David Oppen-heimer, Eric Tune, and John Wilkes. 2015. Large-scale cluster man-agement at Google with Borg. In Proceedings of the tenth european conference on computer systems . 1–17. [46] Guanhua Wang, Heyang Qin, Sam Ade Jacobs, Connor Holmes, Samyam Rajbhandari, Olatunji Ruwase, Feng Yan, Lei Yang, and Yux-iong He. 2023. Zero++: Extremely efficient collective communication for giant model training. arXiv preprint arXiv:2306.10209 (2023). [47] Weiyang Wang, Moein Khazraee, Zhizhen Zhong, Manya Ghobadi, Zhihao Jia, Dheevatsa Mudigere, Ying Zhang, and Anthony Kewitsch. 2023. {TopoOpt }: Co-optimizing network topology and parallelization strategy for distributed training jobs. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI 23) . 739–767. [48] Zheng Wang, Anna Cai, Xinfeng Xie, Zaifeng Pan, Yue Guan, Weiwei Chu, Jie Wang, Shikai Li, Jianyu Huang, Chris Cai, et al. 2025. {WLB-LLM }:{Workload-Balanced } 4D Parallelism for Large Language Model Training. In 19th USENIX Symposium on Operating Systems Design and Implementation (OSDI 25) . 785–801. [49] Kun Wu, Jeongmin Brian Park, Xiaofan Zhang, Mert Hidayetoğlu, Vikram Sharma Mailthody, Sitao Huang, Steve Lumetta, and Wen-Mei Hwu. 2025. SSDTrain: An activation offloading framework to ssds for 
+
+> 14
+
+faster large language model training. In 2025 62nd ACM/IEEE Design Automation Conference (DAC) . IEEE, 1–7. [50] Tianyuan Wu, Wei Wang, Yinghao Yu, Siran Yang, Wenchao Wu, Qinkai Duan, Guodong Yang, Jiamang Wang, Lin Qu, and Liping Zhang. 2024. Falcon: Pinpointing and mitigating stragglers for large-scale hybrid-parallel training. arXiv preprint arXiv:2410.12588 (2024). [51] Wencong Xiao, Romil Bhardwaj, Ramachandran Ramjee, Muthian Sivathanu, Nipun Kwatra, Zhenhua Han, Pratyush Patel, Xuan Peng, Hanyu Zhao, Quanlu Zhang, et al. 2018. Gandiva: Introspective cluster scheduling for deep learning. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI 18) . 595–610. [52] Ziqi Yuan, Haoyang Zhang, Yirui Eric Zhou, Apoorve Mohan, I Chung, Seetharami Seelam, Jian Huang, et al. 2025. Cost-Efficient LLM Train-ing with Lifetime-Aware Tensor Offloading via GPUDirect Storage. 
+
+arXiv preprint arXiv:2506.06472 (2025). [53] Haoyang Zhang, Yirui Zhou, Yuqi Xue, Yiqi Liu, and Jian Huang. 2023. G10: Enabling an efficient unified gpu memory and storage architecture with smart tensor migrations. In Proceedings of the 56th Annual IEEE/ACM International Symposium on Microarchitecture . 395– 410. [54] Xiaoyang Zhao, Zhe Zhang, and Chuan Wu. 2024. Adapcc: Making collective communication in distributed machine learning adaptive. In 2024 IEEE 44th International Conference on Distributed Computing Systems (ICDCS) . IEEE, 25–35. [55] Lianmin Zheng, Zhuohan Li, Hao Zhang, Yonghao Zhuang, Zhifeng Chen, Yanping Huang, Yida Wang, Yuanzhong Xu, Danyang Zhuo, Eric P Xing, et al. 2022. Alpa: Automating inter-and {Intra-Operator }
+
+parallelism for distributed deep learning. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . 559–578.

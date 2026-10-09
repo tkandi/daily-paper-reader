@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-08</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-09</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 0 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 30 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>19</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-08 19:00:01 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-09 21:41:21 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,7 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日无新推荐，系统未产出可展示论文。</p>
+<p>分布式训练与联邦学习成为今日重点：30 篇论文中精读 19 篇、速读 11 篇。</p>
+<p>最值得关注 MoE 专家路由的内存优化与面向张量重分片的拓扑感知通信，同时联邦学习聚焦信息共享、LLM 微调和低秩梯度压缩。</p>
+<p>普通读者可先读两篇满分精读，把握大规模训练的效率瓶颈，再按需延伸到联邦学习的通信与存储优化。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -78,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">19 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Memory-Efficient Expert Routing for Distributed MoE Training">Memory-Efficient Expert Routing for Distributed MoE Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="NCCL M2N: A Layout- and Topology-Aware Collective for Distributed Tensor Resharding">NCCL M2N: A Layout- and Topology-Aware Collective for Distributed Tensor Resharding</span></li><li><span class="dpr-home-dashboard-paper-title" title="TRANSIT: Transparent Scale-in for Multi-Node LLM Training">TRANSIT: Transparent Scale-in for Multi-Node LLM Training</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>19</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -91,12 +93,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Latent Information Sharing for Accelerating Federated Learning">Latent Information Sharing for Accelerating Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedFit: Federated Fine-Tuning of LLMs via Vector-Bank Parameterization and Quantization">FedFit: Federated Fine-Tuning of LLMs via Vector-Bank Parameterization and Quantization</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedLore: Communication and Memory Efficient Federated Learning via Shared Gradient Low-Rank Projection">FedLore: Communication and Memory Efficient Federated Learning via Shared Gradient Low-Rank Projection</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 

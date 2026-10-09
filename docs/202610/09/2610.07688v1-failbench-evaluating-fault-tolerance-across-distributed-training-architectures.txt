@@ -1,0 +1,556 @@
+Title: FailBench: Evaluating Fault Tolerance Across Distributed Training Architectures
+
+URL Source: https://arxiv.org/pdf/2610.07688v1
+
+Published Time: Wed, 07 Oct 2026 00:45:33 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+> 1
+
+# FAIL BENCH : Evaluating Fault Tolerance Across Distributed Training Architectures 
+
+Khaled Aljbab and Amine Barrak 
+
+Abstract —Distributed deep learning relies on data, pipeline, tensor, and hybrid parallelism, yet fault-tolerance mechanisms are typically evaluated only on the architecture for which they were designed. This leaves practitioners with little guidance when choosing mechanisms across architectures. FAIL BENCH 
+
+provides a unified evaluation harness covering seven distributed training architectures, eight crash-fault-tolerance mechanisms and a no-FT baseline, and single, concurrent, and cascading fail-stop failures. We evaluate 142 (architecture, mechanism, trace) combinations on an 8 ×V100 cluster, with per-rank checkpoint states ranging from 205 MB to 2.7 GB. Three findings emerge. First, no mechanism is universally best: on A2, disk checkpointing has the lowest steady-state overhead (0.5%), in-memory replication restores fastest ( ∼17 ms), and just-in-time checkpointing avoids periodic steady-state checkpoint cost but incurs ∼0.9 s upon failure. When process-group re-formation takes seconds, mechanisms differ more in runtime overhead than restore speed. Second, gossip training increases sample throughput by 17.9% after losing a worker, yet shows no detectable improvement in loss progress over a matched no-fault baseline. Third, mechanism cost depends strongly on architecture: in-memory replication overhead ranges from 3.7% to 176%. We translate these findings into a decision framework for selecting fault-tolerance mechanisms and release F AIL BENCH 
+
+as an open artifact. 
+
+Index Terms —Distributed deep learning, fault tolerance, checkpointing, redundancy, empirical study, benchmark. 
+
+I. I NTRODUCTION 
+
+# TRAINING large neural networks has become an exercise in endurance computing. Modern language and vision models have grown from millions to hundreds of billions of parameters in under a decade [1], [2], and neither the model nor the dataset fits on a single accelerator any longer. Prac-titioners therefore rely on distributed training: the model, the data, or both are partitioned across many GPUs that exchange gradients or activations on every training step. The dominant parallelism strategies (data, pipeline, and tensor parallelism, often composed into three-dimensional hybrids [3], [4]) each carry their own communication pattern, memory layout, and failure topology. Frontier-scale runs span weeks of wall time on thousands of GPUs [5], consume megawatts of power, and cost millions of dollars per training cycle. At this scale, failure is routine rather than exceptional. Meta’s OPT-175B log reports roughly one hundred hardware failures over a two-month run [1]; the Llama-3 405B campaign was interrupted more than 400 times in 54 days, dominated by GPU and HBM failures [2]; and reports from ByteDance [5] 
+
+> K. Aljbab and A. Barrak are with the Department of Computer Science and Engineering, Oakland University, Rochester, MI 48309 USA. Corresponding author: A. Barrak (e-mail: aminebarrak@gmail.com).
+
+and Alibaba [6] document crashes, link drops, fail-slow strag-glers, and silent data corruption. In response, the systems and machine learning communities have produced a collection of fault tolerance (FT) mechanisms, cataloged by several surveys [7]–[9]. The common approach periodically saves model and optimizer state and replays from the latest checkpoint after a failure; recent work accelerates it through in-memory replication [10], asynchronous and lazy disk writes [11], [12], and just-in-time capture triggered by an impending preemption [13]. A second family duplicates the work, running each pipeline stage on more than one rank so a surviving peer takes over immediately [14]–[16]. A third applies coding theory, distributing redundant computation so that any sufficient subset of workers reconstructs the aggregate update [17]. A fourth accepts convergence cost in exchange for graceful degradation: decentralized parallel SGD [18], PyTorch Elastic [19], and Horovod Elastic [20] keep training alive at a smaller cluster size instead of crashing. Despite this diversity, the literature shares a methodological limitation: each mechanism is evaluated only inside its own design space . Checkpoint systems are compared against other checkpoint variants [10], [11], redundancy systems against vanilla pipeline parallelism [14], [15], and gossip-SGD inside the peer-to-peer overlay [18], [21]. No published study mea-sures these mechanisms head-to-head across the spectrum of training architectures on the same cluster under a common fault schedule. A practitioner who has chosen an architecture for performance reasons therefore has no quantitative basis for picking the FT strategy that minimizes expected wall time given the cluster’s mean time between failures. We propose F AIL BENCH , a harness for evaluating crash-fault tolerance across distributed training architectures under controlled fault schedules. It covers 133 of the 171 viable (architecture, mechanism, trace) tuples plus all nine struc-turally infeasible tuples. Four conditions bound what follows. We inject fail-stop crashes only, so Byzantine behavior, silent data corruption, and fail-slow stragglers are out of scope. The mechanisms span checkpointing, state replication, and reconfiguration, but not coded computation, which needs an aggregation topology we do not implement. The schedule is fixed across architectures except for injection time, which scales with per-rank state size so reactive mechanisms can finish an emergency save before the crash. We measure at 8 GPUs on 0.2–2.7 GB of per-rank checkpoint state, parameters plus optimizer buffers, so the transferable results are structural: which architectures halt, which pairings are infeasible, and the shape of the overhead-versus-recovery trade-off, rather than absolute overheads at frontier scale. arXiv:2610.07688v1 [cs.DC] 6 Oct 2026 2
+
+Contributions. This paper makes four contributions. 1) FAIL BENCH , a unified harness that pairs seven distrib-uted training architectures with eight crash-fault toler-ance mechanisms and a no-FT baseline under a shared fault injector, enabling the first cross-cutting comparison on identical hardware and a common trace family. 2) A compatibility map of 63 architecture–mechanism pairs that distinguishes viable, degenerate, and structurally infeasible configurations, including three infeasible pairs yielding nine tuples across the trace family. 3) A 142-tuple empirical study showing that (i) six config-urations halt completely on a single worker crash, while A1-async and A6 gossip degrade gracefully and gos-sip’s raw throughput rises post-fault without improving learning efficiency, and (ii) disk, in-memory, and JIT checkpointing form a Pareto frontier ranging from zero periodic checkpoint work to 3.8% measured steady-state overhead, with 17 –900 ms restore time, on which no mechanism dominates. 4) A measurement-grounded decision framework that translates the empirical results into principled fault-tolerance selection, minimizing expected job completion time under user-supplied failure rate, state size, check-point interval, and service-level constraints. We release F AIL BENCH , all configurations, fault schedules, and the harvesting and analysis scripts, together with the rollup outputs behind every table, as an open artifact. 1
+
+II. B ACKGROUND 
+
+This section summarizes distributed training architectures and fault-tolerance mechanisms considered in F AIL BENCH .
+
+A. Distributed Training Architectures 
+
+Modern DDL parallelizes SGD through data , pipeline ,and tensor parallelism. F AIL BENCH studies seven resulting architectures that differ in communication pattern and failure exposure. 
+
+(A1) Parameter Server, synchronous and asynchronous. 
+
+Workers compute local gradients and send them to a pa-rameter server, which applies the optimizer update and dis-tributes weights. Rank 0 hosts the optimizer and ranks 
+
+1, . . . , N −1 are workers. The synchronous variant uses 
+
+torch.distributed.gather and broadcast over NCCL and waits for all workers. The asynchronous variant uses per-worker communication over gloo/TCP and applies updates without waiting for every worker. Both are built on 
+
+torch.distributed , without ps-lite or BytePS. Failure impact therefore depends both on whether the failed rank is the server or a worker and on the synchronization policy. 
+
+(A2) Ring All-Reduce. Workers form a ring and exchange gradient shards through a bandwidth-efficient collective. We use PyTorch DDP over NCCL 2.20. Because all ranks partic-ipate in every collective, a single worker failure stalls training until the ring is repaired. 
+
+> 1https://zenodo.org/records/23025990
+
+(A3) Hierarchical / Tree All-Reduce. We use the same PyTorch DDP/NCCL compute path as A2 but force 
+
+NCCL_ALGO=Tree . The resulting logical tree reduces gra-dients upward and broadcasts them downward. Unlike a ring, failure impact depends on tree position, with internal-node loss generally more disruptive than leaf loss. 
+
+(A4) Pipeline Parallelism (PP). The model is parti-tioned by layer depth across workers, while micro-batches flow through the resulting pipeline. Our implementation uses 
+
+torch.distributed point-to-point communication: acti-vations move forward through dist.send /dist.recv and gradients backward through the same primitives. Each rank hosts one stage of a custom feed-forward chain rather than ResNet-50 because variable-shape convolutional activations do not pipeline cleanly. Losing any stage halts the pipeline. 
+
+(A5) Tensor Parallelism (TP). Individual layers are split across workers using a hand-rolled torch.distributed 
+
+implementation of the Megatron transposed-MLP pattern: a column-parallel linear layer, GELU, and a row-parallel linear layer whose partial outputs are combined with all_reduce .We use a four-block transposed-MLP stack. Every rank in the TP group participates in each step, so losing one rank breaks the distributed matrix operation. 
+
+(A6) Decentralized Peer-to-Peer (D-PSGD). Workers maintain local models and average parameters with neighbors over a gossip topology [18]. We implement D-PSGD using raw 
+
+torch.distributed with per-edge Gloo subgroups. Each rank performs a local SGD update and exchanges post-update parameters with live ring neighbors under a per-round timeout, averaging parameters that arrive in time. Timed-out neighbors are removed from the live set and the overlay reconfigures without a central coordinator. The lack of a global collective enables graceful degradation after worker loss. 
+
+(A7) 3D Hybrid (DP ×PP ×TP). Large-model training commonly combines data, pipeline, and tensor parallelism. We compose A4’s pipeline implementation, A5’s tensor paral-lelism, and a data-parallel all_reduce across replicas. At world size 8, the configuration is DP × PP × TP = 2 × 2 × 2.Its failure topology therefore combines all three axes, and recovery cost depends on the axis containing the failed worker. 
+
+B. Fault Tolerance Mechanisms 
+
+We study eight crash-fault-tolerance mechanisms, plus a no-FT baseline (FT9), spanning checkpointing, state replication, and runtime reconfiguration. Table I summarizes them. 
+
+Checkpoint-class recovery (FT1–FT4): (FT1) Periodic disk checkpoint. Every T steps, model, optimizer, and RNG state are serialized to a shared file system and restored after failure. Persistence cost scales with model size, while lost work is bounded by T steps; Young–Daly theory gives the optimal interval under exponential failure arrivals [22], [23]. 
+
+(FT2) In-memory replication. The latest checkpoint is mirrored to a peer worker’s GPU or host memory [10], avoiding file-system access during recovery at the cost of peer memory and communication. 
+
+(FT3) Asynchronous / lazy disk checkpoint. State is staged in a CPU-side buffer and persisted by a background 3                     
+
+> TABLE I FAULT -TOLERANCE CONFIGURATIONS STUDIED BY FAIL BENCH .
+> ID Mechanism Family FT1 Periodic disk checkpoint Checkpoint FT2 In-memory replication Checkpoint FT3 Asynchronous / lazy checkpoint Checkpoint FT4 Just-in-time checkpoint Checkpoint FT5 Continuous state replication State replication FT6 k-replica state redundancy State replication FT7 Data redistribution Reconfiguration FT8 Elastic process group Reconfiguration FT9 No-FT baseline Baseline
+
+thread, removing the synchronous disk flush from the train-ing step [11], [12]. This allows shorter effective checkpoint intervals at comparable throughput cost. 
+
+(FT4) Just-in-time checkpoint. State is captured only when a preemption signal arrives [13], requiring no periodic steady-state checkpoint work. Our implementation captures the lead-time-reactive behavior of Bamboo/Gemini-JIT but not shadow-rank lineage replay. It therefore incurs emergency state-transfer cost and cannot protect against unannounced crashes. 
+
+State replication (FT5–FT6): (FT5) Continuous state replication. The full model and optimizer state are mirrored to a peer at every training step. FT5 serves as a replication-cost proxy for compute-redundant systems such as Bamboo and Oobleck [14]–[16]: it captures their steady-state bandwidth and memory costs without duplicating shadow-rank computa-tion. Consequently, it is faithful on steady-state overhead but pessimistic on recovery latency. 
+
+(FT6) k-replica state redundancy. State is written to k peer replicas on each save ( k = 2 ), allowing any surviving replica to supply recovery state. FT6 provides state redundancy rather than Reed–Solomon gradient coding [17], [24]; our harness therefore does not perform coded-gradient reconstruction or a head-to-head gradient-coding comparison. 
+
+Reconfiguration and baseline (FT7–FT9): (FT7) Data re-distribution. After failure, surviving ranks rebalance their data partitions and continue at a smaller world size. This applies only to architectures with per-rank data shards. 
+
+(FT8) Elastic process group. PyTorch Elastic [19] and Horovod Elastic dynamically re-form the process group after worker loss, allowing training to resume on the reduced cluster without application-level intervention. 
+
+(FT9) No-FT baseline. FT9 attaches no fault-tolerance ma-chinery at all: every hook is a no-op and recovery is declined, so the runner propagates the underlying training exception. It is the control against which the other eight mechanisms are measured, and it is what exposes each architecture’s inherent failure behaviour in RQ1. Asynchronous gradient submission without a barrier [25], [26] is a property of the A1-async 
+
+architecture rather than an FT mechanism, and is treated as such throughout. We call FT1–FT8 mechanisms and FT9 the baseline; the compatibility matrix records which architecture–mechanism pairs are viable, degenerate, or structurally infeasible. III. R ELATED WORK 
+
+We group prior crash-FT work into checkpointing, redun-dancy and coding, and decentralized or elastic optimization. 
+
+A. Fault Tolerance in Distributed Deep Learning 
+
+Survey treatments catalog the design space without re-porting empirical comparisons [7]–[9]; large-scale production reports [1], [2], [5], [6] motivate the problem but do not themselves compare mechanisms. 
+
+Checkpoint-based recovery. Checkpoint–restart has been the dominant fault-tolerance strategy in HPC since the 1970s, and the classical theory of optimal checkpoint placement under exponential failure arrivals is due to Young and Daly [22], [23]. General-purpose transparent checkpointing tools such as DMTCP [27] predate the deep-learning era and serve as baselines for DDL-specific systems. Within DDL, modern work targets the multi-terabyte state of large models. Check-Freq [28] adapts the checkpoint interval to keep persistence cost near zero. Gemini [10] replicates the checkpoint into peer GPU and host memory to make restoration near-instantaneous. DataStates-LLM [11] and ByteCheckpoint [12] push the save path off the critical path through asynchronous and lazy persistence, and just-in-time checkpointing [13] captures state only when a preemption signal arrives. Each of these systems is benchmarked against other checkpoint variants on the ar-chitecture and workload that showcase its design choice. 
+
+Proactive redundancy and coded computing. A second group of systems pre-provisions redundancy so that a failed worker’s role is taken over immediately instead of being recovered from a checkpoint. Bamboo [14] and Oobleck [15] replicate pipeline stages onto pre-warm backups. Varuna [16] layers redundant scheduling on top of cloud preemption, and SWIFT [29] explores redundancy in the tensor-parallel setting. At the algorithm layer, gradient coding [17] and coded matrix multiplication [24] apply erasure codes to worker gra-dients so that any sufficient subset reconstructs the aggregate update, providing straggler tolerance with provable bounds. Each of these systems is evaluated against vanilla parallelism in the regime the system targets; cross-comparison against checkpoint-class mechanisms is uncommon. 
+
+Benchmarks and fault injection. Community benchmarks such as MLPerf [30] standardize performance comparison across training systems but do not inject faults or char-acterize recovery; general-purpose chaos-engineering tools such as Chaos Mesh [31] inject faults but are agnostic to training semantics and report no training-specific metrics. FAIL BENCH occupies the intersection: MLPerf-style fixed configuration disclosure combined with controlled fault sched-ules and recovery-specific metrics. Orthogonally, a line of work addresses non-crash failure models: Byzantine-robust aggregation [32]–[35] and silent data corruption [36], [37]. These we deliberately scope out: F AIL BENCH injects fail-stop crashes only, and its mechanisms assume sane survivors. 
+
+Decentralized, asynchronous, and elastic optimization. 
+
+A third group avoids tightly-coupled synchronization in the first place, accepting some convergence cost in exchange for graceful degradation. Decentralized parallel SGD [18] replaces 4
+
+the all-reduce with peer-to-peer averaging over a gossip over-lay, and subsequent theoretical work bounds the convergence penalty under topology changes and worker failures [21], [38]. Asynchronous parameter servers [25] and Hogwild! [26] tolerate stragglers and crashes by design at the cost of stale gradients. PyTorch Elastic [19] and Horovod Elastic [20] ex-pose explicit process-group reconfiguration APIs so the cluster can grow and shrink during training; production frameworks such as Megatron-LM [3] and DeepSpeed [4] layer elasticity hooks on top of these primitives. The works above typically evaluate mechanisms within the design space they target: checkpoint work against other checkpoint variants, redundancy work against vanilla paral-lelism, and gossip-SGD within the peer-to-peer overlay. In this paper, we instead vary both the training architecture and fault-tolerance mechanism on the same cluster (the framework sec-tion describes the 7 ×9 compatibility matrix and 142 reported tuples). Gradient coding requires coded-gradient arithmetic and a compatible aggregation topology that our harness does not implement, so we do not report a head-to-head comparison. The 7 ×9 matrix further distinguishes viable, degenerate, and structurally infeasible (S) architecture–mechanism pairs. The latter are explicitly considered but cannot execute without redesigning the architecture or mechanism, exposing com-patibility constraints that per-mechanism evaluations do not systematically characterize. IV. T HE FAIL BENCH FRAMEWORK 
+
+FAIL BENCH pairs distributed-training architectures with fault-tolerance mechanisms under a common fault injector and metric collector. The implementation is released as an artifact. 
+
+A. Design Goals 
+
+Four goals guide the design: common interfaces , with ar-chitectures and mechanisms implemented as plug-ins behind two abstract base classes; determinism , where a seed and fault schedule reproduce a run up to CUDA floating-point nondeterminism; architecture-agnostic injection , where faults target ranks rather than framework internals; and comparable metrics , collected under consistent definitions. 
+
+B. Architecture–Mechanism Compatibility Matrix                                                                                      
+
+> TABLE II ARCHITECTURE –MECHANISM COMPATIBILITY MATRIX :VVIABLE ,D
+> DEGENERATE ,AND SSTRUCTURALLY INFEASIBLE .
+> FT1 FT2 FT3 FT4 FT5 FT6 FT7 FT8 FT9 Per Mem Async JIT Repl k-repl Redist Elastic No-FT A1 PS VVVVVVVVVA2 Ring-AR VVVVVVVVVA3 TreeAR VVVVVVVVVA4 Pipeline VVVVVVDVVA5 Tensor VVVVVVDVVA6 P2P VSVVSSVVVA7 3D Hybrid VVVVVVDVV
+
+Table II defines the architecture–mechanism configuration space. Each pair is classified as:  
+
+> •
+
+V – viable. The mechanism can be implemented as designed and evaluated by F AIL BENCH . 
+
+> •
+
+D – degenerate. The pair is implementable, but the mechanism collapses into a no-op or an already measured alternative. For example, FT7 on A4, A5, and A7 has no per-rank data shard to redistribute and reduces to checkpoint-based restart.  
+
+> •
+
+S – structurally infeasible. The mechanism’s commu-nication protocol is incompatible with the architecture’s process-group topology without redesign. For example, FT2 requires a globally addressable mirror rank, whereas A6 exposes only per-edge gossip subgroups. Across the three fault traces, the matrix yields 180 candidate (architecture, mechanism, trace) tuples after excluding degen-erate cells; F AIL BENCH reports 142. Coverage and measure-ment provenance ( m versus a) are detailed in the methodology. The matrix therefore exposes whether a mechanism remains viable, becomes degenerate, or is structurally infeasible when transferred across training architectures. 
+
+C. Fault Injector 
+
+The injector executes deterministic, architecture-agnostic fault schedules by issuing an in-process SIGKILL to the target rank. The schedule format, crash traces, and fault-model scope are defined in the methodology. Figure 1 illustrates the resulting failure topology under F1. Per-step measurements and fault events are logged in 
+
+jsonl and aggregated offline; metric definitions are given in the methodology. V. E XPERIMENTAL METHODOLOGY 
+
+This section describes the execution platform, fault-injection protocol, workloads, sweep parameters, metrics, and statistical procedures used in the evaluation. 
+
+A. Execution Platform: Matilda HPC 
+
+All experiments run on Oakland University’s Matilda HPC cluster. Each compute node has four NVIDIA Tesla V100 PCIe 16 GB GPUs, 32 CPU cores, and 192 GB of host memory, interconnected by HDR InfiniBand and BeeGFS. NCCL ring all-reduce achieves 9.7 GB/s effective bus bandwidth on 8 GPUs across 2 nodes (16 MiB tensors, 100 iterations). Jobs are submitted through SLURM, with one array task per (architecture, mechanism, fault-trace, seed) cell. The software stack comprises PyTorch 2.3.0, CUDA 12.1, NCCL 2.20.5, and Python 3.10. All architectures run as FAIL BENCH plug-ins over this stack. 
+
+B. Fault Injection Techniques 
+
+The F AIL BENCH injector executes a JSON-described fault schedule of (time, rank, type, params) tuples. We use three fixed crash traces:  
+
+> •
+
+F1 – Single fail-stop crash. One worker rank receives 
+
+os.kill(getpid(), SIGKILL) from its injector daemon at t ∈ [30 , 120] s, and at t = 180 s for A6. Injection is delayed for large-state architectures so JIT mechanisms 5                       
+
+> A1 Sync-PS
+> 01234567
+> A2 Ring-AR
+> 01234567
+> A3 Tree-AR
+> 01234567
+> A4 Pipeline
+> 01245673
+> A5 Tensor-Par.
+> 01234567
+> A6 P2P
+> 01234567
+> ring of 7 continues
+> A7 3D Hybrid
+> 01234567
+> DP ×PP ×TP
+> SIGKILL victim halts on failed-rank dependency survives broken edge
+> Fig. 1. Per-architecture failure topology when rank 3 is SIGKILL’d. Orange ranks halt when they next require the failed rank, green ranks continue through graceful degradation, and dashed red lines mark broken edges.
+
+can complete their emergency save; survivors observe the failure through their architecture-specific communication or detection path.  
+
+> •
+
+F2 – Concurrent crashes. Two simultaneous F1 events target ranks r and r+2 , exposing single-replica ring mechanisms to replica collision.  
+
+> •
+
+F3 – Cascading crashes. Three F1 events occur at 
+
+t, t+30 s, and t+60 s; TTD and recovery latency are recorded separately for each fault. The injector runs as a daemon thread in each rank’s runner and dispatches events in registration order: the metric collector logs the event, the recovery supervisor marks it pending, the architecture receives on_failure so eager-membership schemes can drop the failed rank, FT mechanism prepares for recovery, and the executor applies the fault on the target rank. The injector is architecture-agnostic: the same OS-level action is used across frameworks, with fixed fault type, rank selection, fault count, and inter-arrival spacing across all seven architectures. Only injection time varies with per-rank state size; A6 uses t = 180 s because its per-edge subgroups require 
+
+∼60 s to stabilize. We assume the SLURM scheduler, NCCL, and kernel TCP/IB stack are correct. 
+
+C. Workloads 
+
+Workloads are chosen per architecture family to preserve relevant inter rank tensor shapes. Data parallel architectures (A1, A2, A3, A6) train ResNet 50 on synthetic data with micro batch 32 per rank and fp32 SGD with momentum 0.9, yielding approximately 200 MB of state per rank. To exercise A4, A5, and A7 under realistic pipeline, tensor, and 3D parallel settings, we use Megatron style MLP stacks with 2.5 to 2.7 GB of state per rank. The MLPs reproduce the Transformer feed forward sublayer through column parallel expansion, element wise nonlinearity, and row parallel contraction. They preserve properties rele-vant to fault tolerance, including per rank state size, tensor shapes, communication volume, collectives, and process group topology, while omitting attention, embeddings, and sequence processing. Thus, they capture the communication and state behavior of large Transformer training without implementing a complete language model. 
+
+D. Sweep Parameters 
+
+All experiments use 8 V100 GPUs across two nodes. Across the study, viable configurations are evaluated under crash traces F1, F2, and F3, with architecture specific layouts but fixed GPU count: 1 PS and 7 workers for A1, an 8 rank ring for A2, an 8-rank tree for A3, an 8 stage pipeline for A4, a TP group of 8 for A5, an 8 peer gossip overlay for A6, and a DP ×PP ×TP = 2 ×2×2 mesh for A7. 
+
+E. Statistical Protocol 
+
+Sample sizes range from n = 1 to 7, depending on wall clock cost and experiment type. Structurally infeasible ( S) cells are confirmed by smoke runs and provide no viable Trestore .FT7 and FT8 activate only after a failure and thus add no steady state overhead. Their Trestore values are analytical lower bounds rather than direct measurements because recovery depends on external rendezvous and process reinitialization that the runner cannot execute, such as PyTorch Elastic or a c10d rendezvous server. Crash experiments with no fault tolerance mechanism en-abled report the mean with a 95% Student’s t confidence interval. Fault tolerance mechanism experiments report the mean and half range, (max − min) /2, because their smaller sample sizes do not support a reliable normality assumption. Outliers are retained, and runs using the same seed replay the same deterministic fault schedule. 
+
+F. Metric Definitions 
+
+We report four metrics: steady state overhead ( SS overhead ), time to detect ( TTD ), effective state restore cost Trestore , and recovery time Trecover :
+
+SS overhead = Toff /T on − 1, (1) 
+
+TTD = tdetected − tfault , (2) 
+
+Trestore = effective state restore cost , (3) 
+
+Trecover = Trestore + TPG + Tinit . (4) 
+
+Ton and Toff denote throughput with and without FT, re-spectively. Detection is the first failure indication observed by a surviving rank. Trestore captures the mechanism’s effective restore cost. TPG is the time to rebuild the process group after a failure, including rendezvous and communicator setup, while Tinit is the time to reinitialize the FT mechanism and its required state. Total fault to resume latency is TTD + Trecover .Recovery latency entries are marked m when measured and a
+
+when analytical. 6
+
+G. Restore Time Model and Validation 
+
+On the halting architectures, we cannot observe Trestore after a worker crash. Surviving ranks block on communication with the failed rank until PyTorch’s 600 s process-group watchdog fires. The watchdog invokes std::terminate from a C++ thread, killing the process before the Python recovery path can log the restore event. We therefore estimate Trestore from the mechanism’s dominant state transfer path. For in memory FT2 and the restore component of FT4, the estimate is state size divided by the PCIe Gen 3 band-width ( ∼12 GB/s). For disk based FT1 and FT3, it is state size divided by the measured filesystem read bandwidth. For FT4, the measured emergency save cost is added separately when reporting its effective restore cost. When the recovery supervisor observes training resume, Trecover is measured di-rectly. Otherwise, recovery is reported as a lower bound by combining analytical Trestore with the estimated process group reformation cost TPG and mechanism reinitialization cost Tinit .
+
+a) M1 validation of the analytical model: We validate the analytical restore model with a microbenchmark covering transfer paths and two state sizes: approximately 205 MB for ResNet 50 and 2.6 GB for the MLP workload. Each condition uses n = 10 cold cache iterations. Disk measurements load serialized .pt state dictionaries and include torch.load 
+
+deserialization, while PCIe measurements time pinned mem-ory to GPU transfer from a preloaded buffer.                                       
+
+> TABLE III M1 VALIDATION OF THE ANALYTICAL TRESTORE MODEL USING STANDALONE RESTORE PATH MICROBENCHMARKS (n= 10 ). D EVIATION IS (MEASURED −PREDICTED )/PREDICTED .
+> Condition State (MB) Predicted (ms) Measured (ms ±CI95) Deviation PCIe / small state 204.7 17 .120 .5±0.7+20 .2%
+> PCIe / large state 2600.0 216 .7289 .8±0.9+33 .7%
+> Disk / large state 2600.0 1968 .23270 .5±70 .3+66 .2%
+> Disk / small state 204.7 155 .0340 .2±5.2+119 .5%
+
+M1 validates the analytical model as a conservative lower bound and quantifies the gap between bandwidth based es-timates and realized restore time. Measured restore time is approximately 20%–120% above the analytical bound. The smaller PCIe gap reflects transfer and synchronization over-head, whereas the larger disk gap also includes torch.load 
+
+deserialization costs, which are particularly significant for small checkpoints containing many tensors. We therefore treat analytical Trestore values throughout the paper as lower bounds rather than exact restore times. 
+
+H. Measurement Provenance Across the 142 Tuples 
+
+The 142 reported tuples comprise 133 viable and 9 struc-turally infeasible ( S) cases. Table IV summarizes their mea-surement provenance. Of the viable tuples, 10 have directly observed post fault recovery or continuation, while 123 use analytical Trestore or reconfiguration bounds. Steady state over-head is measured where applicable and is zero by construction for reactive only mechanisms such as FT7 and FT8. All 9 S
+
+cases halted in smoke tests due to structural infeasibility. The 10 directly observed tuples are A6+FT1/FT4 under F1– F3, A6+FT9 F1, A1 async+FT9 F1, A5+FT4 F2, and A7+FT4   
+
+> TABLE IV MEASUREMENT PROVENANCE OF THE 142 REPORTED TUPLES .
+
+Provenance N Recovery evidence Direct observation 10 Measured Analytical bound 123 Analytical Structurally infeasible 9 No viable recovery 
+
+Total 142 
+
+F2. The reported set covers 133 viable tuples across F1–F3, split as 43 (F1), 46 (F2) and 53 (F3) unique (architecture, mechanism) pairs at n ∈ { 1, 2} seeds per cell and boosted to 
+
+n = 5 on the seven cells cited by the decision framework, together with all 9 structurally infeasible cases. The F1 count is the smallest because a subset of FT7/FT8 seed sets failed during warmup and never reached steady state. VI. RQ1: I NHERENT FAILURE EXPOSURE IN 
+
+DISTRIBUTED DEEP LEARNING ARCHITECTURES 
+
+A. Motivation 
+
+Before evaluating fault-tolerance mechanisms, we first char-acterize each architecture’s inherent response to worker loss: whether surviving ranks can continue training and how quickly they observe the failure. This no-FT baseline establishes what a recovery mechanism must improve upon and reveals how the communication topology itself shapes failure exposure. 
+
+B. Approach 
+
+For each architecture, we run the corresponding workload without an FT mechanism and inject F1, a single SIGKILL of one worker rank. The fault is injected at t = 30 s, except for A6, where it is delayed to t = 180 s so its per-edge subgroups reach stable pre-fault throughput. We record whether surviving ranks continue training, time-to-detect (TTD), post-fault throughput, and final job outcome. TTD is the interval from SIGKILL to the first failure indication observed by a surviving rank or failure detector. Sample sizes are n = 5 for the six halting configurations, n = 3 for A1-async, and n = 7 for A6. Table V summarizes the F1 measurements: pre-fault throughput, TTD, post-fault throughput, aggregate slowdown, and whether training halts or degrades gracefully. 
+
+C. Results 
+
+Configurations that depend on the failed rank halt after a single worker failure. A1-sync, A2, A3, A4, A5, and A7 halt under F1, with no surviving seed resuming training. In each case, surviving ranks eventually block on communication that requires the failed rank: parameter-server synchronization in A1-sync, all-reduce in A2/A3/A5, pipeline communication in A4, and one or more of the DP, PP, and TP communication paths in A7. Their TTDs cluster around PyTorch’s default 600 s process-group watchdog, ranging from 600 .13 ± 0.03 son A4 to 615 .24 ± 0.58 s on A7. Thus, the observed detection delay is primarily a runtime timeout effect rather than an inherent property of the training topology. 7                            
+
+> TABLE V F1 EXPOSURE ON 8×V100 (SIGKILL AT t= 30 S; A6 AT t= 180 S). W ORKLOADS ARE RES NET -50 FOR A1–A3/A6 AND MEGATRON STYLE MLP S FOR
+> A4/A5/A7; THROUGHPUT IS COMPARABLE ONLY WITHIN WORKLOAD FAMILY . V ALUES ARE MEAN ±95% CI. A GGREGATE SLOWDOWN IS
+> 1−TPOST NPOST /(TPRE NPRE ),WITH NACTIVE WORKERS ;NEGATIVE VALUES INDICATE HIGHER POST FAULT AGGREGATE THROUGHPUT .
+
+ID n Backend Pre-fault thpt TTD Halts? Post-fault thpt Agg. slowdown (samples/s/rank) (s) (samples/s/rank) (%) A1 Synchronous PS 5 NCCL+IB 174 .9 ± 0.4 600 .6 ± 0.3 yes 0 (halted) 100 A1 Asynchronous PS 3 gloo+TCP 32 .4 ± 0.3 5.26 ± 0.01 no 32 .6 ± 0.6 13 .65 ± 1.34 
+
+A2 Ring All-Reduce 5 NCCL+IB (ring) 284 .9 ± 0.1 601 .7 ± 1.8 yes 0 (halted) 100 A3 Tree All-Reduce 5 NCCL+IB (tree) 277 .1 ± 0.1 605 .9 ± 0.2 yes 0 (halted) 100 A4 Pipeline Parallelism 5 NCCL+IB (send/recv) 951 .5 ± 3.2 600 .13 ± 0.03 yes 0 (halted) 100 A5 Tensor Parallelism 5 NCCL+IB (all-reduce) 1013 .5 ± 0.6 604 .21 ± 1.50 yes 0 (halted) 100 A6 P2P / D-PSGD (gossip) 7 gloo+TCP 10 .68 ± 0.59 ≈ 0.5 no 14 .38 ± 5.53 −17 .87 (aggregate up) A7 3D Hybrid (DP ×PP ×TP) 5 NCCL+IB (3 axes) 85 .9 ± 0.1 615 .24 ± 0.58 yes 0 (halted) 100 
+
+A1-async continues under F1 with a permissive respon-der threshold. Unlike A1-sync, the asynchronous parameter server uses non-blocking worker receives under a 5 s timeout and averages whatever gradients arrive within that window. We set the responder threshold to one, so a round completes as long as any single worker replies and the server never waits on a quorum. Under F1, the server detects the missing worker in 
+
+5.26 ± 0.01 s, removes it from the live set, and continues with the remaining six workers. All three seeds complete the 1500-step run. Aggregate throughput decreases from 226 .8 ± 2.1 to 
+
+195 .9 ± 3.4 samples/s, corresponding to a 13 .65% ± 1.34% 
+
+slowdown, close to the structural loss 1 − 6/7 ≈ 14 .3% . The shorter TTD therefore comes from the asynchronous receive timeout rather than from the global process-group watchdog. 
+
+The 600 s TTD is controlled by the process-group timeout. To isolate the source of the long detection latency, we rerun A2 under F1 with process-group timeouts of 30, 120, and 600 s. As Table VI shows, measured TTD follows the configured timeout almost exactly: 30 .01 ± 0.01 ,
+
+120 .03 ± 0.01 , and 600 .03 ± 0.01 s, respectively. The approximately 600 s TTD observed across the six halting configurations is therefore a consequence of PyTorch’s default process-group timeout, not an architecture-imposed detection floor. Deployments that pass a shorter timeout to 
+
+torch.distributed.init_process_group obtain proportionally faster failure detection. The NCCL_TIMEOUT 
+
+environment variable does not control this watchdog: an earlier sweep over {30 , 120 , 600 } s that left the 
+
+init_process_group argument unchanged still produced 
+
+∼600 s TTD on every seed, because the watchdog timeout is fixed when the process group is constructed.       
+
+> TABLE VI A2 R ING -AR + F1 NO -FT BASELINE AT THREE P G _T I M E O U T SETTINGS ,
+> SHOWING THAT TTD TRACKS THE CONFIGURED TIMEOUT .
+
+pg_timeout n Measured TTD (s) TTD / setting 30 s 3 30 .01 ± 0.01 1.00 ×
+
+120 s 3 120 .03 ± 0.01 1.00 ×
+
+600 s 3 600 .03 ± 0.01 1.00 ×
+
+A6 degrades gracefully, but higher sample throughput does not improve loss progress. A6 has no global collective: each rank communicates only with its live gossip neighbors and receives failure information through membership notifica-tion. Because its per-edge subgroups require up to ∼60 s to reach a stable timing regime, F1 is injected at t = 180 s. The failure is observed within approximately 500 ms, after which the two neighbors of the failed rank continue with one gossip partner while the remaining ranks retain two. Mean per-rank throughput rises from 10 .68 ± 0.59 to 
+
+14 .38 ± 5.53 samples/s after the failure. Consequently, ag-gregate sample throughput increases by 17.9%, from 85.4 to 100.7 samples/s. The gain is concentrated where the topology predicts it: the two ranks adjacent to the failed worker now wait on a single gossip partner per round and run at 2×
+
+their pre-fault rate, while the five non-adjacent ranks stay near baseline. This distribution is consistent with reduced synchronization pressure; given the wide confidence interval at n = 7 , we treat the 17.9% aggregate increase as descriptive. The throughput increase does not translate into faster op-timization. Measured from the fault over a window matched against the eight-rank no-fault baseline, the fault runs reduce loss by 0.130 on average and the baseline by 0.126 , with no statistically detectable difference despite the fault runs process-ing roughly 18% more samples per second. Figure 2 shows a transient loss increase shortly after the fault, but the no-fault baseline produces one of the same size ( 0.30 against 0.32 nats, both peaking near t = 220 s), so it reflects gossip overlay dynamics on this workload rather than recovery from the fault. A6 demonstrates graceful execution after worker loss, but its post-fault throughput gain reflects reduced communication pressure rather than improved learning efficiency. 0 200 400 600 800 1000 Wall-clock (s) 6.8 6.9 7.0 7.1 7.2 7.3 7.4 7.5 7.6 Training loss (20-step moving avg.)     
+
+> A6 + F1 fault A6 no-fault (8 ranks) SIGKILL injection
+> Fig. 2. A6 P2P gossip training loss (20-step moving average) for seven F1 seeds and three eight-rank no-fault seeds over a common 1123 s window. The dashed line marks the SIGKILL at t= 180 s. 8
+
+VII. RQ2: R ESILIENCE –C OST TRADE -OFFS 
+
+A. Motivation 
+
+Once an architecture is fixed, choosing an FT mecha-nism is a two-axis trade-off: continuous steady-state overhead 
+
+(storage, network, redundant compute) during normal training versus recovery latency (Trestore ) once a fault fires. Without a quantitative view of how alternative mechanisms compare on these two axes, the practitioner cannot tell whether two mechanisms are substitutes or complements, or whether a given mechanism is even Pareto-competitive. Existing FT papers each report a favorable single point on this trade-off for the mechanism they propose [10], [13], [14], [17]; head-to-head comparisons across mechanism families on the same workload are uncommon. RQ2 reconstructs this frontier empirically on a fixed deployment. 
+
+B. Approach 
+
+We hold every choice except the FT mechanism constant. Workload: ResNet-50 on a synthetic dataset, micro-batch 32, fp32 SGD with momentum ( ∼205 MB per-rank state). Cluster: 8×V100 across 2 nodes. Architecture: A2 Ring-AR; disk-based mechanisms use BeeGFS scratch. Fault trace: F1, a single SIGKILL fail-stop at t = 30 s. On this deployment we evaluate every configuration marked V in Table II. Per-cell seed count n is scaled to wall-clock cost: n = 6 for FT2, FT3, FT5 and FT6, where seed variance is informative, and n = 3 for FT1 and FT4. FT7 (data redistribution) and FT8 (elastic reconfiguration) are reactive-only and reported analyt-ically. We log SS overhead (relative throughput loss vs. the failure-free RQ1 baseline, Table V), effective Trestore , per-save cost, and expected lost work, then place each configuration on the (SS, Trestore ) plane and identify the frontier. We run two nested experiments. First , FT1 and FT2 use the same 100-step full-state checkpoint but different persistence paths: BeeGFS for FT1 and peer pinned host memory via gloo for FT2. This tests whether in-memory replication (Gemini-style [10]) dominates disk or forms a Pareto trade-off. Second ,all remaining V configurations are included, with FT7 and FT8 reported analytically. Table VII summarizes both. 
+
+C. Results 
+
+FT1 (disk) vs FT2 (in-memory) on A2 + F1. Both mechanisms checkpoint every 100 steps over a 1500-step run and persist the same 204.7 MB state, model parameters plus SGD momentum buffers post-serialization. BeeGFS scratch delivers ∼1.37 GB/s write and ∼1.32 GB/s read, comparable to the gloo-over-IB ring bandwidth FT2 uses, so the comparison is not confounded by raw transport speed. The two sit on a genuine Pareto trade-off, not a dominance relation. FT1 achieves ∼8× lower SS overhead ( 0.48% vs 
+
+3.78% ) despite only ∼1.5 × lower per-save cost ( 283 ms vs 
+
+423 ms), because their foreground coupling differs: FT1 writes only from rank 0 with no barrier, so the other seven ranks overlap the write with compute, whereas FT2’s coordinated ring send/recv puts all eight ranks on the critical path. FT2 achieves ∼9× lower Trestore (∼17 ms vs ∼155 ms), restoring from a pinned host buffer in a single PCIe transfer rather than re-reading 204.7 MB from BeeGFS. The 9× is a ratio of analytical bounds; M1’s cold-cache measured values ( 20 .5
+
+vs 340 .2 ms, Table III) widen it to ∼17 ×, so the ordering is robust. Pareto-incomparability does not by itself settle which to deploy. Both checkpoint at the same interval and so lose the same work on a fault, leaving a 3.3-point overhead gap against a 138 ms restore gap; scalarizing by expected completion time therefore favors FT1 unless faults arrive every few seconds. We make that threshold explicit in the decision framework. 
+
+FT4 emergency save on A2. FT4 inherits Gemini’s [10] peer-pair in-memory storage but with Bamboo’s [14] reactive trigger, conceptually closest to the JIT-checkpoint mechanism of Gupta et al. [13]: it performs a single save inside the lead-time window opened by a predictive fault signal. We use a 2.0 s lead time. Across three seeds the emergency save completes in 884 .7 ± 89 .8 ms, well inside the window; the dominant cost is pinned-buffer allocation, which FT2 amortizes at attach time and FT4 must pay on the critical path. Restore reuses FT2’s peer-pinned-to-GPU path, so FT4 inherits FT2’s ∼17 ms 
+
+Trestore .
+
+Multi-mechanism Pareto cross-section on A2. Table VII places FT4 alongside FT1, FT2, and the FT9 no-FT baseline on the A2 + F1 axis, and adds FT3, FT5–FT8 for a complete cross-section. The per-save column is the warm amortized cost for periodic mechanisms (FT1–FT3, FT5, FT6) and the one-shot pre-fault cost for FT4. FT4 performs no periodic per-step checkpoint work, so its SS entry is a design value rather than a measured throughput difference. The effective Trestore column adds the save-at-failure cost to the restore cost for FT4 because the emergency save is on the critical path, whereas FT1–FT3 and FT5–FT6 amortize theirs off it. The lost work column is the expected re-execution under uniform fault arrival: half the checkpoint interval for periodic mechanisms and ∼0 for FT4, undefined for FT7/FT8, which keep no checkpoint and reconfigure rather than restore, and unbounded for FT9; every reported cell fired its fault after the first completed save. The FT7/FT8 Trestore entries are analytical rendezvous / reinit bounds; FT8’s applies a fixed 700 ms rendezvous + NCCL communicator-setup budget identically to every architecture. We construct the Pareto frontier over FT1–FT6, whose reported values represent comparable state-preservation paths. FT7 and FT8 appear in Table VII for completeness but are excluded from the frontier: recovery requires external recon-figuration the harness does not execute, so their latencies are analytical lower bounds rather than comparable measurements. On that basis the A2 frontier carries three non-dominated points: FT1 disk (low SS, mid Trestore ), FT2 in-mem (mid SS, low Trestore ), and FT4 JIT (zero periodic SS work, high 
+
+Trestore ). FT4 does not dominate FT2 because its Trestore is about 50 × higher, and FT2 does not dominate FT4 because FT2 incurs 3.78% steady-state overhead and FT4 incurs no periodic checkpoint work. The lost-work column adds a third consideration the two axes do not capture: at the 100-step interval and A2’s ∼112 ms/step (Table V), a periodic mechanism re-executes ∼50 steps ≈ 5.6 s per fault under uniform arrival [22], [23], whereas FT4 re-executes almost nothing when the warning fires early enough. FT4’s viability is 9
+
+TABLE VII A2 R ING -AR + R ES NET -50 CROSS -SECTION (8 ×V100). F OR FT2, FT3, FT5 AND FT6, STEADY -STATE AND SAVE -COST STATISTICS POOL TWO SEEDS FROM EACH OF F1–F3 ( n = 6 ); F1 FIXES THE RECOVERY OPERATING POINT . E FFECTIVE TRESTORE IS LABELED m (MEASURED ), a
+
+(ANALYTICAL ), OR m+a FOR FT4 ( MEASURED SAVE + ANALYTICAL RESTORE ).                                                                                        
+
+> Configuration nSS overhead Per-save (ms) Effective Lost work
+> Trestore (ms) (steps) FT1 disk (BeeGFS) 30.48 ±0.03% 283 .3(warm) ∼155 a∼50 FT2 in-mem 100-step 63.78 ±0.16% 423 .4±17 .6(warm) ∼17 a∼50 FT3 async-lazy disk 61.19 ±0.04% 133 .7±5.0(snap) ∼300 a∼50
+> FT4 JIT 2 s lead 30% (design) 884 .7±89 .8∼902 m+a∼0FT5 cont. repl. (interval 1) 6372 .30 ±41 .16% 417 .0±46 .1(warm) ∼17 a∼0.5 FT6 k=2 replica 66.75 ±0.34% 756 .0±38 .4(warm) ∼17 a∼50 FT7 redistribution 10% none ∼50 ano ckpt FT8 elastic reconfig 10% none ∼710 ano ckpt FT9 no-FT baseline 10% none ∞∞
+
+bounded below by its emergency-save cost: a lead-time signal shorter than ∼885 ms at this state size degrades it to no-FT for that fault, so production use needs either a longer-lead signal or composition with FT2 as a fallback. Pareto position alone does not determine deployment choice. Section IX folds failure rate, lost work and signal coverage into expected completion time and resolves ranking. 
+
+FT5 on A2. Realized as FT2 with interval_steps = 1, FT5 costs 372 .30 ± 41 .16% SS at the same ∼17 ms Trestore as FT2, so it is Pareto-dominated by FT2: both restore in roughly 17 ms, while FT5 pays about 100 × the steady-state overhead. Its only advantage is progress loss on fault: at most one re-executed step against up to 99 for FT2 at interval 100. 
+
+D. From Restore Time to End-to-End Recovery 
+
+The times above exclude process-group re-formation. End-to-end recovery is Trecover = Trestore +TPG +Tinit , and TPG is not measurable on the halting architectures. We therefore examine 
+
+TPG ∈ [2 , 10] s as a sensitivity range. This scale is consistent with rendezvous and restart costs: the FT8 estimate in Ta-ble VII assigns ∼700 ms to the rendezvous and NCCL setup alone, while Bamboo [14] reports multi-second teardown and restart. Section VIII provides direct multi-fault reconvergence measurements at the same order of magnitude. Holding the mechanism-specific Tinit fixed or negligible, adding the common TPG term, identical for FT1, FT2 and FT4 since the process group is re-formed once per fault regardless of which mechanism populated the survivors, preserves the ordering FT2 ≺ FT1 ≺ FT4 and the absolute gaps (138 ms and 
+
+∼747 ms), but compresses the ratios: the FT1/FT2 recovery ratio collapses from ∼9× to 1.01 –1.07 × as TPG dominates. Once TPG dominates, the recovery axis becomes less discrim-inating between mechanisms and steady-state cost becomes decisive: FT4 has no periodic checkpoint work, while FT1 and FT2 incur 0.48% and 3.78% measured SS overhead. VIII. RQ3: S ENSITIVITY ACROSS DEPLOYMENTS 
+
+A. Motivation 
+
+RQ2 establishes the mechanism trade-off on a fixed A2 deployment. We next ask how far that trade-off moves when the training architecture, per-rank state size, or fault regime changes. If any of them reshuffles the ranking, a single-cell recommendation is unsafe for production. 10 1 10 0 10 1    
+
+> SS overhead (%, log)
+> 10 1
+> 10 2
+> 10 3
+> Trestore  (ms, log)
+> SS=0
+> (a) Small state
+> 10 110 010 110 2
+> SS overhead (%, log)
+> 10 2
+> 10 3
+> 10 4
+> SS=0
+> (b) Large state
+> FT1 disk FT2 in-mem FT4 JIT hollow: A2 FT1 ref. A1 sync-PS A2 Ring-AR A3 Tree-AR A6 P2P A4 Pipeline A5 Tensor A7 3D Hybrid A2@2.6GB
+
+Fig. 3. Cross-architecture resilience–cost trade-offs under F1. (a) Small-state architectures (∼205 MB/rank). (b) Large-state architectures (2.5– 2.7 GB/rank), including the matched-state A2 control. Marker shape denotes FT mechanism and color denotes architecture. Hollow circles mark the A2 FT1 reference, measured only on A2. Zero-overhead FT4 cells are placed on the dotted floor of the log-scale x-axis. 
+
+B. Approach 
+
+We evaluate sensitivity along three axes. First, we evaluate FT2 ( n = 6 on the measured cells) and FT4 ( n = 3 ) across the matrix under F1. Second, M2 reruns A2 with a 2.6 GB per-rank state to partially separate state size from architecture. Third, F2 and F3 test whether the single-fault conclusions persist under multiple worker losses. Runs use 8 ×V100; multi-fault cells use n ≤ 2 exploratorily, with the cells used by the decision framework boosted to n = 5 . Figure 3 plots the F1 sweep on the (SS overhead, Trestore ) plane. 
+
+C. Results 
+
+Architecture sweep: FT2 across the architecture matrix. 
+
+We ran FT2 on every architecture whose FT2 cell is marked V
+
+(viable), with FT2 configured identically (interval = 100 steps, full model + optimizer state, ring replication to the peer’s pinned host memory). Table VIII summarises the seven cells. Its A2 Ring-AR (M2) row is the matched-state control whose deadlock is analysed below (Table X). Three findings stand out. (1) Warm-save throughput is 
+
+∼460–510 MB/s across A2–A5 and A7 despite their differing topologies and parallelism dimensions; A1 sync-PS sits lower (∼290 MB/s), consistent with its serialized PS-side extraction path. This is the gloo-over-IB ring bandwidth bound: FT2 uses a separate gloo subgroup on NCCL-primary architectures and the default PG on gloo-primary ones, so training communica-tion does not contend with it. (2) SS overhead is the ratio of save cost to step time, so a nearly constant save cost yields very different percentages across architectures. A4 pipeline and A5 tensor parallelism exceed 100% (each FT2 save takes longer than 100 steps of compute would in their absence) because their per-step compute is fast (33 ms) relative to their 2.5 GB state; A7 hybrid 3D parallelism sits at 14% only because its per-step compute is already slow (372 ms/step). 10                                                                                                     
+
+> TABLE VIII FT2 CROSS -ARCHITECTURE CHARACTERIZATION ON 8×V100 (100-STEP INTERVAL ,GLOO +IB RING REPLICATION TO PEER PINNED HOST RAM);
+> MEAN ±HALF -RANGE OVER TWO SEEDS FROM EACH OF F1–F3 ( n= 6 ),
+> POOLED BECAUSE STEADY -STATE COST IS TRACE -INDEPENDENT . F1
+> FIXES THE RECOVERY POINT . A1–A3/A6 USE RES NET -50 AND A4/A5/A7 MEGATRON -STYLE MLP S,SO SS OVERHEAD REFLECTS BOTH ARCHITECTURE AND WORKLOAD . A DASH DENOTES AN UNDEFINED VALUE : A2 (M2) DEADLOCKED BEFORE FAULT INJECTION ,WHILE
+> A6+FT2 IS STRUCTURALLY INFEASIBLE .
+> Arch State nWarm save SS oh. Trestore
+> (MB) (ms) (%) (ms) A1 sync-PS 204.7 6714 .9±24 .63.91 ±0.13 ∼17 a
+> A2 Ring-AR 204.7 6423 .4±17 .63.78 ±0.16 ∼17 a
+> A2 Ring-AR (M2) 2600.0 0/3 deadlock ––A3 Tree-AR 204.7 6424 .9±17 .43.69 ±0.15 ∼17 a
+> A4 Pipeline 2567.0 65521 .9±797 .2167 .33 ±24 .16 ∼214 a
+> A5 Tensor-Par. 2616.9 65647 .7±821 .5176 .49 ±25 .67 ∼218 a
+> A6 P2P gossip 204.7 0infeasible ( S)–17.17 ( μbench) m
+> A7 3D Hybrid 2734.7 65354 .8±303 .814 .39 ±0.82 ∼228 a
+
+The viable small-state FT2 cells (A1–A3) cluster at 3.69 –
+
+3.91% SS overhead. (3) A6+FT2 is structurally infeasible because FT2’s periodic save needs a long-lived full-rank ring process group, which A6 never forms: it keeps only short-lived per-edge groups alive between gossip rounds. Its 17.17 ms warm-cache observation is retained only as a consistency check on the analytical PCIe restore model, not as an operating point, and FT4’s successful 881 .1 ± 103 .5 ms emergency save on A6 (Table IX) shows that network reachability is not the barrier. 
+
+Architecture sweep: FT4 across the seven architectures. 
+
+We run FT4 across all seven architectures with lead times scaled to state size. All seven emergency saves complete within the warning window (Table IX); none falls back to FT9. Because the save runs only after a warning arrives, both it and the subsequent restore lie on the critical path, so the effective 
+
+Trestore column sums the measured emergency save with the analytical restore cost (state MB / PCIe Gen-3 ∼12 GB/s). Three findings stand out. (1) FT4 has zero periodic steady-state checkpoint work by construction on every architecture: its only per-step hook is empty. (2) Effective Trestore ranges from 889 ms (A3) to nearly 11 s (A5, A7), spanning more than a decade, dominated by the emergency-save cost which scales linearly with state size at the gloo ring bandwidth (∼500 MB/s). FT4’s ∼0.9 s small-state result therefore does not carry over to the 2.5–2.7 GB workloads, where its effective 
+
+Trestore reaches roughly 10 s. (3) Even at identical state size (204.7 MB), the parameter-server architecture (A1) pays a 
+
+∼70% higher emergency-save cost than the other small-state architectures (A1 1479 .5 ± 231 .9 ms vs. A2 884 .7 ± 89 .8, A3 
+
+871 .8 ± 39 .3, A6 881 .1 ± 103 .5). The gap is consistent across all three seeds and consistent with A1’s slower state extraction path, since the PS-only optimizer state is materialized on rank 0 before serialization begins. 
+
+State-size control: A2 with a 2.6 GB workload. The architecture sweep couples state size with architecture fam-ily: A1/A2/A3/A6 train ResNet-50 while A4/A5/A7 train Megatron-style MLPs. To partially separate them we run A2 Ring-AR with a ∼2.6 GB per-rank state (a single Linear(H, H) with H = 18000 , chosen so 2H2 · 4 bytes ≈ 2.6 GB), matching A4/A5/A7’s per-rank state. Fault trace F1, n = 3                
+
+> TABLE IX FT4 CROSS -ARCHITECTURE CHARACTERIZATION ON 8×V100 UNDER F1;
+> VALUES ARE MEAN ±HALF -RANGE . E FFECTIVE TRESTORE COMBINES MEASURED EMERGENCY SAVE WITH ANALYTICAL PCI E RESTORE (m+a). A1–A3/A6 USE RES NET -50; A4/A5/A7 USE MEGATRON -STYLE MLP S.
+
+Arch State n Lead Emergency save Eff. Trestore 
+
+(MB) (s) total (ms) (ms) A1 sync-PS 204.7 3 2 1479 .5 ± 231 .9 1,497 m+a
+
+A2 Ring-AR 204.7 3 2 884 .7 ± 89 .8 902 m+a
+
+A3 Tree-AR 204.7 3 2 871 .8 ± 39 .3 889 m+a
+
+A4 Pipeline 2567.0 3 15 9697 .0 ± 330 .3 9,911 m+a
+
+A5 Tensor-Par. 2616.9 3 15 10558 .7 ± 1493 .4 10,777 m+a
+
+A6 P2P gossip 204.7 3 2 881 .1 ± 103 .5 898 m+a
+
+A7 3D Hybrid 2734.7 3 15 10314 .6 ± 324 .4 10,543 m+a
+
+seeds per mechanism. Two findings emerge. (i) A larger per-rank state shifts FT1’s operating point with the architecture held fixed. Despite a ∼13 × larger state and a 5 × shorter checkpoint interval, FT1’s SS overhead rises only from 0.48 ± 0.03% at 205 MB (Table VII) to 3.14 ± 0.24% at 2.6 GB. Because both cadence and model change, M2 is a partial rather than a pure state-size deconfound. (ii) FT2 does not scale to 2.6 GB per-rank state on A2 as implemented. All three FT2 seeds terminated on the NCCL watchdog at 600 s, timing out on a default-process-group ALLREDUCE well before the fault fired, so 
+
+training itself deadlocked . A plausible explanation is inter-leaving between FT2’s peer-replication subgroup and the DDP process group at this state size. A4/A5/A7 complete FT2 at the same state size, consistent with their schedulers streaming state in smaller shards. This remains a hypothesis, since the root cause (subgroup participation vs. memory-pressure stall) is not isolated. We therefore report FT2 as not measurable at 2.6 GB on A2 in its current implementation. 
+
+Fault-type sweep: F2 and F3 multi-fault traces. Because Python-side recover() does not run on the halting architec-tures under fault, we instrument the runner with a lightweight 
+
+recovery supervisor that watches step events after each fault and tags each seed gracedeg (training continued), halted (no post-fault step event), or mixed . Table XI reports each cell’s attribution and measured Trecover . Three findings emerge. (1) SS overhead is nearly trace-independent for periodic mechanisms on A1–A5 and A7. FT2, FT3, and FT6 there show at most a 1.1 pp F1–F2–F3 spread, consistent with steady-state cost being determined by per-step work rather than the future fault schedule; FT5 spreads 3–8 pp against its far larger F1 baseline. A6 is excluded because its F2/F3 throughput was sampled in the first 30 s, inside the ∼60 s its per-edge TCP subgroups need to reach a stable gossip cadence, so we defer to RQ1’s A6 measurement (Table V), which fires the fault at 
+
+t = 180 s to escape the transient. (2) Among the tested collective and partitioned configura-tions, F2 is not recovered reliably; only A6 gossip recovers consistently. A2 ×{ FT2,FT3,FT5,FT6 } and A4/A5/A7 ×FT2 all halt across seeds. A5+FT4 recovers on 2/5 seeds ( 128 ±
+
+2 ms) and A7+FT4 on 3/5 seeds (mean 206 s, right-skewed), at 
+
+n = 5 from the M4 seed-boost campaign. A6 gossip recovers reliably: A6+FT1 F2 at 2537 ± 2272 ms ( n = 5 ) and A6+FT4 F2 spanning ≈0.1–24 s across 5 seeds. FT6’s k = 2 replication 11            
+
+> TABLE X M2 MATCHED -STATE CONTROL : A2 R ING -AR WITH A ∼2.6 GB MLP
+> UNDER F1 ( n= 3 ). SS OVERHEAD IS RELATIVE TO THE SAME -STATE FT9
+> BASELINE ,EXCEPT FT4, WHOSE ZERO ENTRY IS A DESIGN VALUE ;
+> TRESTORE IS AN ANALYTICAL LOWER BOUND . D ASH DENOTES RUNS THAT DID NOT REACH FAULT INJECTION .
+
+Mechanism n SS overhead Trestore (ms) FT1 disk (BeeGFS) 20-step 3 3.14 ± 0.24% 1968 a
+
+FT2 in-mem 100-step 0/3 NCCL deadlock (600 s) –FT4 JIT 15 s lead 3 0% (design) 217 a
+
+FT9 no-FT baseline 3 0.00 ± 0.04% ∞
+
+was designed to tolerate F2 structurally, but the runner never activates the second replica before the collective blocks. (3) F3 cascading is handled structurally on A6 and halts every non-A6 configuration. A6’s membership service drops dead ranks in ∼1.6 s; A6+FT1 completes all 2000 steps under F3 on all five M4 seeds, with recovery at 3905 ± 2445 ms, 
+
+∼1.5 × the F2 mean and consistent with three cascading recoveries whose reconvergence windows overlap. All tested non-A6 F3 cells halt within a few hundred steps of the first fault because the runner cannot re-form the process group at 
+
+N −2 ranks before fault 2 fires 30 s later. In these cells F3 therefore distinguishes stored-state availability from end-to-end runtime reconfiguration; only A6 demonstrates execution. Three reporting conventions apply to Table XI. For mixed cells, the finite Trecover summarizes only the seeds that resumed training. Cells labeled expl. remain at n ≤ 2 and are not cited in the decision framework (Table XII); the rest are boosted to n =5. The three A6+FT4 cells and A7+FT4 F2 are heavily right-skewed, so mean ± half-range would place the lower bound below zero; we therefore report observed ranges for the A6 cells and the mean alone for A7+FT4. 
+
+Synthesis. The RQ2 trade-off persists, but its operating point shifts with deployment. On small-state workloads, signal coverage and storage tier decide the choice rather than the shape of the frontier: FT2 trades 3.69 –3.91% SS overhead for ∼17 ms restore on A1–A3, while FT4 removes periodic checkpoint overhead at ∼0.9–1.5 s effective restore. On large-state workloads FT2 rises to 14 –176% SS overhead while FT4 reaches 9.9–10 .8 s. M2 shows that a large per-rank state can shift the operating point even with the architecture fixed, although workload and state size remain coupled. FT5 and FT6 fail on A6 for the same structural reason as FT2, accounting for nine A6 ring-replication cells. Multi-fault results add a separate constraint: preserved state alone does not ensure recovery when the runtime cannot re-form its communication topology; among the tested F2/F3 cells, only A6 consistently continues. IX. D ECISION FRAMEWORK 
+
+What “cost” means. We minimize expected job completion time; storage, host memory, and device memory enter only as feasibility constraints, since a mechanism whose replica does not fit is not a candidate. For no-FT failure-free wall time T0
+
+and mechanism m of steady-state overhead Om, with fail-stop events arriving at mean time between failures M ,
+
+E[Ttot ] = T0(1+ Om) + E[Nf ] Tdet + Trec + Tlost 
+
+, (5)                                                                                                            
+
+> TABLE XI F2/F3 RECOVERY OUTCOMES ON 8×V100, WITH A6 F1 FOR REFERENCE .
+> TRECOVER IS SUPERVISOR -MEASURED (m).
+> Arch FT Trace Trecover Outcome A2 Ring-AR FT2 F2 ∞halted (expl.) A2 Ring-AR FT2 F3 ∞halted (expl.) A2 Ring-AR FT3 F2 ∞halted (expl.) A2 Ring-AR FT3 F3 ∞halted (expl.) A2 Ring-AR FT5 F2 ∞halted (expl.) A2 Ring-AR FT5 F3 ∞halted (expl.) A2 Ring-AR FT6 F2 ∞halted (expl.) A2 Ring-AR FT6 F3 ∞halted (expl.) A4 Pipeline FT2 F2 ∞halted (expl.) A4 Pipeline FT4 F2 ∞halted (expl.) A5 Tensor-Par. FT2 F2 ∞halted (expl.) A5 Tensor-Par. FT4 F2 128 ±2ms mixed (2/5 grace) A6 P2P gossip FT1 F1 18367 ±12364 ms gracedeg (expl.) A6 P2P gossip FT1 F2 2537 ±2272 ms gracedeg A6 P2P gossip FT1 F3 3905 ±2445 ms gracedeg A6 P2P gossip FT4 F1 range ≈0.1–23 s gracedeg A6 P2P gossip FT4 F2 range ≈0.1–24 s gracedeg A6 P2P gossip FT4 F3 range ≈3–33 s gracedeg A7 3D Hybrid FT2 F2 ∞halted (expl.) A7 3D Hybrid FT4 F2 206 s (mean, skewed) mixed (3/5 grace)
+
+where E[Nf ] ≈ T0(1+ Om)/M , neglecting the second-order chance of a fault arriving during recovery. Every coefficient is measured, bounded, or derived from the empirical tables. 
+
+Tdet is detection latency, Trec = Trestore + TPG + Tinit , and 
+
+Tlost = 12 I t step for a periodic mechanism at interval I, near zero for a reactive one under a covered warning. Across mechanisms needing the same process-group reconstruction on a fixed architecture, TPG is common and shifts their recovery costs equally. Rows based on native graceful degradation fall outside this additive model, continuing at a changed post-fault operating point, and are reported directly in Table XII. Selection minimizes Eq. (5) over the characterized viable candidates subject to a steady-state cap Om ≤ css and a pause-on-fault cap. On the halting architectures Tdet is common to the compared candidates, so Table XII states the actionable restore cap Trestore ≤ crestore .
+
+Which term dominates. The overhead term scales with T0
+
+and the recovery term with T0/M , so of two mechanisms differing by ∆O in overhead and ∆C in per-fault cost, the higher-overhead one wins only when M < ∆C/ ∆O. On A2 at 205 MB, FT1 and FT2 checkpoint at the same interval and so lose the same work, leaving ∆O = 3 .3 points against 
+
+∆C = 138 ms: FT2 minimizes completion time only below 
+
+M ≈ 4.2 s, or 9.7 s using the cold-cache measured restores. Both are far below the production failure intervals reported in [1], [2], [5], so scalarizing by completion time orders a pair RQ2 reports as Pareto-incomparable: FT1 minimizes expected time unless the restore cap binds or the storage tier is slow enough to lift its overhead above the cap. FT4 is gated by signal coverage instead. Under a warning whose lead time exceeds the emergency-save cost it carries O = 0 by design and Tlost ≈ 0, which makes it the Eq. (5) minimizer over the measured A2 candidates at every M ; on the large-state cells its 
+
+∼10 s effective restore must be weighed against FT2’s restore under 230 ms. Without a covered warning it preserves no state and is not a candidate at all. Table XII instantiates the framework from these mea-surements and stated extrapolations. Rows with mechanism 12 
+
+TABLE XII DECISION FRAMEWORK FROM EQ. (5) USING MEASURED AND EXTRAPOLATED OPERATING POINTS . S ELECTIONS ARE AMONG CHARACTERIZED CANDIDATES ; EVIDENCE AND LATENCY SEMANTICS ARE DEFINED IN THE TEXT .                                                                                                       
+
+> Architecture class State per rank Failure regime Binding constraint Selected FT SS oh. Relevant latency Ev. Small-state DDP/PS/AR ∼205 MB F1, signaled Warning lead ≥2 s available FT4 , lead = 2 s 0% (design) 0.89 –1.50 sMSmall-state DDP/PS/AR ∼205 MB F1, unsignaled Fast tier ( ≥1 GB/s), no restore cap FT1 , interval = 100 0.48% ∼155 ms ESmall-state DDP/PS/AR ∼205 MB F1, unsignaled Slow tier, or restore cap <150 ms FT2 , interval = 100 3.7–3.9% ∼17 ms MLarge-state DDP/AR (M2) ∼2.6 GB F1, unsignaled Continuous oh. tolerated up to 5% FT1 , interval = 20 3.14% ∼1.97 s MLarge-state pipeline / TP 2.5–2.7 GB F1, unsignaled Continuous oh. tolerated up to 35% FT2 , interval = 500 ∼33% ∼0.2 s ELarge-state pipeline / TP 2.5–2.7 GB F1, signaled Warning lead ≥15 s available FT4 , lead = 15 s 0% (design) 9.9–10 .8sMLarge-state 3D hybrid 2.73 GB F1, unsignaled SS-tolerated ( ≤15%) FT2 , interval = 100 14% ∼0.23 s MGossip/D-PSGD (A6) ∼205 MB F1 single fail-stop Graceful degradation already provides FT none (FT9) +membership svc. 0% ∼0.5–1.6 s DAsync-PS (A1 async) ∼205 MB F1 single fail-stop Graceful degradation already provides FT none (FT9) +receive timeout 0% ∼5 s DGossip / D-PSGD (A6) ∼205 MB F2 or F3 multi-fault Any (arch handles it) none (FT9) +membership svc. 0% 2.5–3.9 s ETested non-A6 configs. Any F2 or F3 multi-fault Any Compose FT with external election Mech. dep. Runner-side –
+
+selections carry an evidence code: M measured directly, E
+
+extrapolated under a stated assumption, and D derived from the architecture’s own no-FT degradation, where the mea-sured answer is that no mechanism is needed for crash-only faults. “Relevant latency” means effective Trestore for the state-preserving mechanisms and measured detection or reconver-gence latency for the graceful-degradation rows. Selections are among the characterized candidates rather than the full viable set, since FT1, for instance, is not measured on A4/A5/A7. Absolute values should be re-derived on the target cluster; the transferable axes are per-rank state size and signal coverage. 
+
+Reading the table. Match on architecture class and state, then on failure regime and binding constraint. The three small-state rows are alternative regimes rather than competing answers: a covered warning selects FT4, and its absence hands the choice to the storage tier and the restore cap. The small-state FT1 row is coded E because its 0.48% and 155 ms are measured on A2 only, whereas the FT4 row is M across all four small-state architectures, its range spanning A3 (889 ms) to A1 (1497 ms). The M2 FT1 row is measured, and FT2 is excluded there because all three M2 seeds deadlocked before fault injection. The subsequent pipeline / TP FT2 row is E,projected from the 100-step cell of Table VIII on the assump-tion that SS overhead scales inversely with interval. The A6 F2/F3 row is E because its latency comes from runs with FT1 or FT4 attached but is dominated by native membership handling; its spread is wide enough that a deployment should provision for several seconds of reconvergence rather than the mean alone. The final row is a requirement rather than an Eq. (5) minimizer: no mechanism we evaluated completes end-to-end recovery under F2 or F3 without external orchestration. Relatedly, on the halting architectures we verify recoverability 
+
+but not completed recovery, so Trec is a lower bound there. X. T HREATS TO VALIDITY 
+
+Internal validity. Injector timing skew is below 20 ms, and we discard the first 50 steps of each run. Sub-20 ms analytical restore bounds are not treated as measured end-to-end recovery. The A1-sync/A1-async comparison changes both backend and synchronization policy, and A1-async uses responder threshold one, so the server proceeds on a single reply and its graceful degradation under one fault is close to guaranteed by construction; its result therefore characterizes this configuration rather than asynchronous parameter servers generally. On NCCL-primary architectures, Trestore is an ana-lytical lower bound; Table III shows measured costs 20–120% higher. Fault victims are fixed by trace, limiting generalization of position-dependent effects. 
+
+Construct and recovery validity. SS overhead measures amortized FT cost relative to the failure-free baseline. FT4’s zero SS entry is structural, not a throughput estimate: it does no periodic checkpoint work, and its emergency save is charged to effective Trestore . FT7/FT8 report only pre-fault SS overhead, having no state-preservation path. On the halting architectures (A1-sync, A2–A5, A7), we establish recover-ability but not completed end-to-end recovery because the runner does not perform survivor election and process-group reconstruction. A6 reconfigures natively, while A1-async is native graceful continuation rather than FT recovery. 
+
+Coverage and implementation fidelity. Exploratory F2/F3 cells use n ≤ 2, while cells used by the decision framework are boosted to n = 5 ; multi-fault conclusions are therefore limited to the tested configurations. FT4–FT6 are simplified produc-tion proxies, and A5 omits Megatron’s full autograd wrappers. They preserve the state-transfer and failure structures targeted by our metrics but are not end-to-end convergence evaluations. For small-n FT experiments, we report mean ± half-range. 
+
+External validity. Measurements use 8 V100 GPUs across two nodes with HDR InfiniBand and BeeGFS scratch (∼1.37 GB/s write, ∼1.32 GB/s read), whereas the cited pro-duction runs operate at much larger scale, so absolute over-heads and crossover points may change with filesystem, in-terconnect, and world size. We use ResNet-50 and Megatron-style feed-forward stacks rather than a full Transformer; the workloads preserve key determinants of our metrics, including per-rank state size and communication structure, but activa-tion checkpointing, larger Adam-style optimizer state, and sequence-parallel communication remain outside our mea-surements. Structural results are less timing-dependent, but crossover points should be re-derived on the target system. 
+
+A6 learning efficiency. A6’s post-fault throughput increase does not imply improved optimization. Truncating both groups to a 1123 s window from the fault instant, neither loss reduc-tion nor time to target differs detectably against the matched no-fault baseline ( p = 0 .67 and p = 0 .83 ; n = 7 fault, n = 3 
+
+baseline), despite roughly 18% higher sample throughput. Validation on a real training workload remains open. 
+
+Fault-model scope. F1–F3 inject fail-stop worker crashes and never fail the A1 parameter-server coordinator. Coordina-13 
+
+tor failure, stragglers, and network partitions are outside scope; they interact differently with architectures and FT mechanisms and require dedicated fault traces. XI. C ONCLUSION 
+
+We presented F AIL BENCH , a unified evaluation of crash fault tolerance across seven distributed-training architectures, eight FT mechanisms, and a no-FT baseline, covering 142 (architecture, mechanism, trace) tuples. Three findings stand out. First, six configurations halt after a single worker failure, whereas A1-async and A6 gossip degrade gracefully; A6’s post-fault sample throughput rises 17.9% without a detectable improvement in loss progress. Second, disk, in-memory, and JIT checkpointing form a Pareto frontier on A2, but their operating points shift strongly with architecture and state size. Third, compatibility itself limits mechanism transfer: some architecture–mechanism pairs are structurally infeasible rather than merely unevaluated. We translate these results into a measurement-grounded decision framework that selects among characterized candi-dates using failure rate, state size, checkpoint interval, signal availability, and service-level constraints. Future work should validate these trade-offs on larger clusters, full Transformer workloads, and broader fault models. REFERENCES [1] S. Zhang, S. Roller, N. Goyal, M. Artetxe, M. Chen et al. ,“OPT: Open pre-trained transformer language models,” arXiv preprint arXiv:2205.01068 , 2022. [2] Meta AI, “The Llama 3 herd of models,” 2024, technical report / model card. [3] M. Shoeybi et al. , “Megatron-LM: Training multi-billion param-eter language models using model parallelism,” arXiv preprint arXiv:1909.08053 , 2019. [4] J. Rasley, S. Rajbhandari, O. Ruwase, and Y. He, “DeepSpeed: System optimizations enable training deep learning models with over 100 billion parameters,” in KDD , 2020. [5] Z. Jiang et al. , “MegaScale: Scaling large language model training to more than 10,000 GPUs,” in NSDI , 2024. [6] Q. Wu et al. , “Characterization of large language model development in the datacenter,” in NSDI , 2024. [7] F. Cappello et al. , “Toward exascale resilience: 2014 update,” Super-computing Frontiers and Innovations , 2014. [8] W. Shi et al. , “A survey of fault-tolerance techniques for embedded systems running deep learning models,” ACM Computing Surveys , 2020. [9] S. Khan et al. , “A hierarchical survey of fault tolerance for deep learning systems,” arXiv preprint arXiv:2204.01942 , 2022. [10] Z. Wang et al. , “Gemini: Fast failure recovery in distributed training with in-memory checkpoints,” in SOSP , 2023. [11] A. Maurya et al. , “DataStates-LLM: Lazy asynchronous checkpointing for large language models,” in HPDC , 2024. [12] B. Wan et al. , “ByteCheckpoint: A unified checkpointing system for LFM development,” arXiv preprint arXiv:2407.20143 , 2024. [13] T. Gupta et al. , “Just-in-time checkpointing: Low cost error recovery from deep learning training failures,” in EuroSys , 2024. [14] J. Thorpe et al. , “Bamboo: Making preemptible instances resilient for affordable training of large DNNs,” in NSDI , 2023. [15] I. Jang et al. , “Oobleck: Resilient distributed training of large models using pipeline templates,” in SOSP , 2023. [16] S. Athlur et al. , “Varuna: Scalable, low-cost training of massive deep learning models,” in EuroSys , 2022. [17] R. Tandon, Q. Lei, A. G. Dimakis, and N. Karampatziakis, “Gradient coding: Avoiding stragglers in distributed learning,” in ICML , 2017. [18] X. Lian et al. , “Can decentralized algorithms outperform centralized algorithms? a case study for decentralized parallel SGD,” in NeurIPS ,2017. [19] Meta AI, “TorchElastic: Elastic and fault-tolerant distributed training in PyTorch,” 2021, documentation, https://pytorch.org/docs/stable/elastic/. [20] A. Sergeev and M. Del Balso, “Horovod: Fast and easy distributed deep learning in TensorFlow,” arXiv preprint arXiv:1802.05799 , 2018. [21] A. Koloskova et al. , “A unified theory of decentralized SGD with changing topology and local updates,” in ICML , 2020. [22] J. W. Young, “A first order approximation to the optimum checkpoint interval,” Communications of the ACM , vol. 17, no. 9, pp. 530–531, 1974. [23] J. T. Daly, “A higher order estimate of the optimum checkpoint interval for restart dumps,” in Future Generation Computer Systems , 2006. [24] K. Lee et al. , “Coded computation for multicore setups,” in ISIT , 2017. [25] M. Li et al. , “Scaling distributed machine learning with the parameter server,” in OSDI , 2014. [26] B. Recht, C. Re, S. Wright, and F. Niu, “Hogwild!: A lock-free approach to parallelizing stochastic gradient descent,” in NeurIPS , 2011. [27] J. Ansel, K. Arya, and G. Cooperman, “DMTCP: Transparent check-pointing for cluster computations and the desktop,” in IPDPS , 2009. [28] J. Mohan, A. Phanishayee, and V. Chidambaram, “CheckFreq: Frequent, fine-grained DNN checkpointing,” in FAST , 2021. [29] Y. Li et al. , “SWIFT: Expedited failure recovery for large-scale DNN training,” in PPoPP , 2023. [30] P. Mattson et al. , “MLPerf training benchmark,” Proceedings of MLSys ,2020. [31] CNCF, “Chaos Mesh: A cloud-native chaos engineering platform,” 2020, https://chaos-mesh.org. [32] P. Blanchard, E. M. El Mhamdi, R. Guerraoui, and J. Stainer, “Ma-chine learning with adversaries: Byzantine tolerant gradient descent,” in 
+
+NeurIPS , 2017. [33] D. Yin, Y. Chen, R. Kannan, and P. Bartlett, “Byzantine-robust distrib-uted learning: Towards optimal statistical rates,” in Proceedings of the 35th International Conference on Machine Learning (ICML) , 2018, pp. 5650–5659. [34] S. P. Karimireddy, L. He, and M. Jaggi, “Learning from history for Byzantine robust optimization,” in ICML , 2021. [35] E. M. El Mhamdi, R. Guerraoui, and S. Rouault, “The hidden vul-nerability of distributed learning in Byzantium,” in Proceedings of the 35th International Conference on Machine Learning (ICML) , 2018, pp. 3521–3530. [36] H. D. Dixit et al. , “Silent data corruptions at scale,” in arXiv preprint arXiv:2102.11245 , 2021. [37] P. H. Hochschild et al. , “Cores that don’t count,” in HotOS , 2021. [38] M. Assran et al. , “Stochastic gradient push for distributed deep learning,” in ICML , 2019. 
+
+Khaled Aljbab received the B.Sc. degree in com-puter science from Jouf University and the M.S. degree in computer science from California Lutheran University. He is currently pursuing the Ph.D. degree in computer science and engineering at Oakland University. His research interests include fault tol-erance and fair scheduling for distributed machine learning systems. 
+
+Amine Barrak received the M.Sc. degree in soft-ware engineering from Polytechnique Montr´ eal and the Ph.D. degree in computer science from the Universit´ e du Qu´ ebec. He is currently an Assistant Professor with the Department of Computer Science and Engineering, Oakland University. His research interests include MLOps, serverless computing, dis-tributed and federated machine learning, and cloud-native systems for large-scale AI. He received the Tunisian Government Excellence Scholarship and the Best Student Paper Award at CASCON2019.

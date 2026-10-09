@@ -1,0 +1,761 @@
+Title: Beaver: Elastic GPU Sharing between ML and Latency-Critical vRAN Workloads
+
+URL Source: https://arxiv.org/pdf/2610.02522v1
+
+Published Time: Mon, 05 Oct 2026 00:19:35 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# Beaver: Elastic GPU Sharing between ML and Latency-Critical vRAN Workloads 
+
+# Yuncheng Yao 1, Zhenzhou Qi 2, Junyao Zheng 2, Chung-Hsuan Tung 2,Danyang Zhuo 1, Tingjun Chen 2
+
+Departments of Computer Science 1 and Electrical & Computer Engineering 2, Duke University 
+
+Abstract 
+
+Within the shared industry vision of AI-RAN, AI-and-RAN seeks to co-locate virtualized radio access network (vRAN) workloads and AI services on shared GPUs. This sharing is inherently asymmetric: vRAN workload is latency-critical, whereas the machine learning (ML) workload is a throughput-oriented, best-effort co-tenant. We present Beaver, a GPU sharing system that jointly manages compute and memory resources while protecting the vRAN’s strict processing dead-line. Beaver sizes the vRAN’s streaming multiprocessor (SM) allocation from each slot’s scheduled workload, repartitions SM allocations at slot granularity, and rewrites compiled ML kernels to yield HBM bandwidth during the vRAN’s memory-critical phases. We implement Beaver and evaluate it using NVIDIA Aerial with heterogeneous multi-cell workloads, real-world cellular traces, production inference kernels, and full-stack LLM serving. On an H200 GPU, Beaver keeps the vRAN’s p99.9 latency within its 1.5 ms uplink deadline while retaining 74% of Llama-3.3-70B serving throughput. It also incurs no observed deadline misses under replayed cellular traces, protects a 375 μs downlink deadline, and generalizes to other GPUs including A100, GB10 and GH200. 
+
+1 Introduction 
+
+Co-locating virtualized radio access network (vRAN) work-loads and AI services on shared GPU infrastructure is be-coming an industry-wide objective with the AI-RAN vi-sion [4, 18]. NVIDIA Aerial makes GPU-based 5G layer-1 (L1) processing practical [23], motivating recent systems such as YinYangRAN [15] and RAN-LLM [43] to explore co-locating radio workloads (e.g., vRAN baseband processing) with ML workloads (e.g., LLM inference serving) on the same GPU. This sharing is inherently asymmetric : the latency-critical vRAN workload is the higher-priority tenant, whereas the AI service is a best-effort co-tenant that may use only the GPU resources that can be safely spared without violating the strict vRAN processing deadline. The central challenge is therefore to guarantee vRAN’s latency while preserving as much co-tenant throughput as possible. Fig. 1 illustrates our target setting. 5G radio units (RUs) stream uplink samples over the fronthaul into an eight-stage CUDA Graph with 8 Stages (kernels)               
+
+> Channel estimate Channel estimate filtering Noise estimate/ filtering Equalization coefficients Equalization soft demap De-rate matching LDPC decode Transport block CRC
+> S1 S2 S3 S4 S5 S6 S7 S8
+> Host Network Stack Link Layer & Above
+> Split Option 7.2 Uplink FFT bins Uplink data
+> vRAN Workload Aerial L1 processing)
+> GPU Die SM
+> Register File L1 & Shared Memory Warp Schedule CUDA Cores Tensor Cores
+> GPC TPC
+> SM SM ...
+> TPC
+> SM SM ... ...
+> HBM Off-chip DRAM 
+> Prefill
+> (parallel)
+> Decode
+> (token-by-token)
+> KV Cache Output
+> (response)
+> Input
+> (prompt)
+> ML Workload LLM inference)
+> Edge Server with GPU
+> Beaver
+> Radio Units (with FFT 
+> GPC TPC
+> SM SM ...
+> TPC
+> SM SM ...
+> Shared L2 Cache & On-chip Memory Fabric
+> Latency-critical co-tenant Best-effort co-tenant
+
+Figure 1: AI-and-RAN co-tenancy setting. Radio units deliver uplink samples to a latency-critical Aerial L1 pipeline, while a best-effort LLM service shares the same GPU, whose SMs can be partitioned, but the L2 cache and HBM fabric remain shared. Beaver coordinates both compute and memory re-sources to protect the vRAN’s strict processing deadline. 
+
+Aerial L1 pipeline. Under 5G Frequency Range 1 (FR1) nu-merology 1, each slot spans 500 μs, and its uplink processing must complete within three slots, or 1,500 μs. Simultane-ously, a vLLM service performs LLM inference—including prefill and decode—on the same GPU. The sharing oppor-tunity arises from the substantial GPU capacity left idle by the latency-oriented vRAN pipeline. Profiling the production Aerial uplink pipeline on an NVIDIA H200 GPU [19], we find that a 20-cell load uses about 60% of peak streaming multiprocessor (SM) compute throughput and less than 10% of peak high bandwidth memory (HBM) bandwidth. This under-utilization is structural . To minimize latency, the vRAN pipeline executes a multi-stage CUDA graph com-prising small, sequential kernels whose limited grid sizes and inter-stage dependencies cannot fully utilize the GPU; batching more work would improve utilization but increase latency. Fig. 2 shows the resulting SM and HBM bandwidth headroom, both within individual slots and across consec-utive slots under dynamic vRAN demand derived from a public cellular trace. The shaded regions represent capacity that a co-tenant could potentially reclaim, provided that the vRAN’s 99.9th-percentile (p99.9) uplink processing latency remains within its strict three-slot deadline. 
+
+1arXiv:2610.02522v1 [cs.DC] 1 Oct 2026 $!   "     " # " %  ##                         
+
+> 
+> Aggregated Uplink Data Rate
+> Gbps 
+> SM Split b/w vRAN and ML co-tenant
+> H200 w/ 132 SMs)
+> Slot #
+> Time-varying vRAN workload 16 cells, numerology 1, slot duration: 0.5 msec)
+> 8040 8050 8060 2.0 1.0 0.0 132 88 44 0
+> $""#    !%$ %#      $&$ %!# $(# $"   !  " &"$ 
+> 
+> Aerial L1 Kernels
+> S1 S8 
+> SM Compute Utilization %
+> (normalized to peak)
+> HBM Bandwidth Utilization %
+> (normalized to peak)
+> 300 600 900 1200 1500 3-slot deadline 0100 50 045 25 510
+> Sharing opportunities for co-tenant
+
+Beaver 
+
+> (b) (a)
+> time (usec)
+> (c)
+> Workload-aware SM Sizer (§4.1)
+> for each slot
+> Cooperative HBM Bandwidth Guard (§4.3)
+> within each slot
+> Slot-granular SM Repartitioning (§4.2)
+> across slots
+
+Figure 2: (a) Slot-varying vRAN uplink demand from a public cellular trace and the corresponding SM allocation selected by Beaver. (b) SM and HBM bandwidth utilization across the eight Aerial uplink stages (kernels) within one slot; shaded intervals indicate potential co-tenant sharing opportunities. (c) Beaver’s three modules and their operating timescale. 
+
+Despite this opportunity, existing GPU sharing systems cannot simultaneously preserve the latency-critical vRAN deadline and reclaim spare capacity efficiently. Recent GPU sharing designs for vRAN co-tenancy [15, 43] rely primarily on spatial GPU partitions through NVIDIA multi-instance GPU (MIG) [20] or multi-process service (MPS) [21] with two key limitations. First, SM partitioning isolates compute resources but not the shared L2 cache and HBM fabric (Fig. 1). Consequently, although disjoint SMs eliminate compute con-tention, a bandwidth-intensive ML co-tenant (e.g., LLM de-coding) can still contend with and delay vRAN’s memory-bound kernels. Second, existing SM partitions are mostly static and cannot be reconfigured at the radio slot timescale of 500 μs. The required SM budget varies from slot to slot (Fig. 2(a)) [6, 9], whereas reconfiguring MIG or MPS takes milliseconds to seconds (Table 1, §6.3). Achieving elastic, efficient, and safe GPU sharing between vRAN and ML workloads raises three challenges. First, the system must determine, for dynamic and heterogeneous multi-cell workloads, the minimum vRAN SM budget re-quired to meet the strict processing deadline. Second, it must repartition the SMs between the vRAN and its co-tenant at sub-slot timescales. Third, it must regulate the HBM band-width demand of opaque, compiled ML kernels without ac-cess to their source code or disrupting their synchronization. We present Beaver 1, a GPU sharing system that addresses these challenges through three mechanisms operating at complementary timescales (Fig. 2(c)). 1 For each slot, a 
+
+workload-aware SM sizer predicts the smallest SM allocation that can complete the scheduled workload before its dead-line (§4.1). 2 Across slots, slot-granular SM repartitioning 
+
+applies the selected SM allocation by switching the vRAN to the desired CUDA green context [16] within only microsec-onds (§4.2). 3 Within each slot, a cooperative HBM bandwidth guard rewrites the co-tenant’s compiled kernels at the par-allel thread execution (PTX) level, without requiring their source code, to poll a shared flag and back off whenever the vRAN workload signals a memory-critical phase. HBM access is therefore coordinated between the workloads over time rather than divided into fixed bandwidth slices (§4.3). We implement Beaver as a GPU sharing layer comprising a runtime that interfaces with Aerial to size and switch SM partitions at slot granularity, and a compile-time rewriter that instruments both tenants’ kernels at the PTX level (§5). We evaluate Beaver on an NVIDIA H200 using the Aerial uplink pipeline (§6). Co-tenants include single-axis stressors; production inference kernels such as general matrix multi-ply (GEMM), FlashAttention-3, and fused mixture of experts (MoE); and a full-stack vLLM [12] service running Llama-3.3-70B and Mistral-Small-24B. With 13 memory-heavy vRAN cells and LLM serving co-tenants, Beaver keeps vRAN’s p99.9 latency within the deadline while retaining 74% of the Llama-3.3-70B serving throughput. Under two real-world cellular traces [6, 9] capturing changes in cell configuration and traffic intensity, Beaver adapts the SM allocation every slot, incurs no deadline misses, and sustains LLM serving. Beaver also eliminates observed deadline misses with co-located production inference kernels, protects a 375 μs down-link processing deadline, and generalizes to A100, GB10 and GH200 GPUs while retaining 78%-85% of vLLM throughput. In summary, this paper makes the following contributions: 
+
+• We identify and characterize the GPU sharing opportu-nities created by the structurally under-utilized SM and HBM resources of the production NVIDIA Aerial vRAN pipeline; 
+
+• We design and implement Beaver, a GPU sharing sys-tem tailored to asymmetric co-tenancy between latency-critical vRAN and best-effort ML workloads, through a workload-aware SM sizer, slot-granular SM repartitioning, and a cooperative HBM bandwidth guard; 
+
+• We extensively evaluate Beaver using Aerial’s uplink and downlink pipelines, heterogeneous multi-cell workloads, and real-world cellular traces, covering co-tenancy ML 
+
+> 1
+
+Beavers build dams to regulate a shared water flow, mirroring how our system regulates GPU compute and memory resources to protect latency-critical vRAN while supporting ML co-tenancy. 
+
+> 2
+
+co-tenants ranging from production inference kernels to full-stack LLM serving, and across GPU architectures. 
+
+To the best of our knowledge, Beaver is the first system that enables elastic GPU sharing between latency-critical vRAN and best-effort ML workloads, and demonstrates that a full LLM serving stack can share the GPU without violating the vRAN’s strict processing deadline while preserving substantial co-tenant serving throughput. We will open-source Beaver’s codebase and benchmarking suite. 
+
+2 Background 
+
+5G vRAN baseband and GPU-accelerated L1. The physi-cal layer (L1) converts coded transport blocks into downlink radio symbols and recovers them from uplink symbols. These operations traditionally run on dedicated FPGAs or ASICs; software-defined basebands use commodity CPUs and GPUs, enabling flexible updates and compute allocation as configu-rations and load change. NVIDIA Aerial implements 5G L1 using GPU libraries and CUDA kernels [23]. A kernel com-prises thread blocks assigned to SMs [24]. Multiple blocks can share an SM when resources permit; L1 latency therefore depends on SM occupancy, memory traffic, and specialized execution units. Concurrent ML kernels can contend for these resources even across different CUDA streams. 
+
+Uplink/downlink processing and hard deadline. In 5G, the physical downlink shared channel (PDSCH) carries user data from the base station to a user equipment (UE). Its transmit pipeline performs cyclic redundancy check (CRC) attachment, low-density parity-check (LDPC) encoding, rate matching, modulation, MIMO precoding, resource mapping, and orthogonal frequency-division multiplexing (OFDM) waveform generation. Conversely, the physical uplink shared channel (PUSCH) receive pipeline transforms incoming I/Q samples, estimates channel and noise, equalizes MIMO layers, produces log-likelihood ratios (LLRs), and performs de-rate matching, LDPC decoding, and CRC checking [1]. PUSCH is generally more compute-intensive : reception compensates for a time-varying channel, and LDPC decoding may re-quire multiple iterations. We therefore use PUSCH as the representative protected vRAN workload. Fig. 1 shows the eight stages of NVIDIA’s Aerial L1 uplink processing, where missing a slot’s deadline can trigger retransmission and con-sume additional air-interface capacity; safe GPU sharing must therefore protect tail latency. Following 3GPP timing constraints [2], we target a 1.5 ms uplink deadline. 
+
+GPU resources: SM and HBM. A GPU groups execution into SMs [19] (see Fig. 1), and places kernel blocks on avail-able SMs in successive waves when they cannot all reside concurrently; a running block remains on its SM until com-pletion [7, 24], and a kernel waits when all SMs are full. Dis-joint SM partitions prevent both HOL blocking and compute 1 10 20 30 40                
+
+> number of cells
+> 025 50 75 100
+> utilization (%)
+> (a) 840 72 132
+> uplink SM budget
+> 025 50 75 100
+> utilization (%)
+> (b)
+> 025 50 75 100
+> share of peak (%)
+> Compute L1 L2 HBM Tensor
+> (c)
+> 36 22 12 40
+> 025 50
+> share of peak (%)
+> Channel est. Ch. filtering Noise est. Eq. coeff. Soft demap De-rate match LDPC CRC
+> (d)
+> 01k 2k
+> p99.9 (μs)
+> 1.5 ms
+> 1k 3k 10k
+> p99.9 (μs)
+> 1.5 ms
+> compute HBM p99.9 latency used idle compute HBM
+
+Figure 3: GPU headroom for memory-intensive uplink pro-cessing without a co-tenant; percentages are normalized to the full H200 GPU with 132 SMs. Utilization and p99.9 la-tency versus (a) cell count and (b) SM budget for 20 homoge-neous cells; 72 SMs is the smallest deadline-safe allocation. (c) Resource utilization and (d) per-kernel compute and HBM utilization of the 20-cell workload with 72 SMs. 
+
+contention but still share the L2 cache and HBM system. Be-cause HBM bandwidth is shared, LLM decoding that streams weights from HBM can delay the radio through memory bandwidth contention. NVIDIA exposes three relevant parti-tioning mechanisms. MIG [20] isolates SMs and proportional memory slices, but it takes seconds to rebuild. MPS [21] caps active thread capacity, while CUDA GC (green context) as-signs disjoint SMs within one process [16]; both leave HBM shared and cannot resize on the slot clock. Compute-only sharing of this kind is common practice in software GPU sharing systems built for ML-only workloads (Table 1). How-ever, none combines slot-granular adaptation with HBM protection. 
+
+GPU compilation pipeline. During compilation, CUDA code is first lowered to PTX, NVIDIA’s virtual instruction set, then assembled into the GPU’s architecture-specific native machine code in streaming assembly (SASS) as a cubin [24]. Libraries may bundle PTX with cubins, while runtime gen-erators expose an interceptable just-in-time (JIT) path; PTX can thus come from a fat binary or JIT. 
+
+3 Sharing Opportunities and Challenges 3.1 GPU Utilization of vRAN Workloads 
+
+We consider a set of homogeneous memory-heavy cells, each with 273 PRBs, four MIMO layers, and MCS-27 (test vector 
+
+tv-28 ), running the NVIDIA Aerial [23] L1 processing on an H200 GPU featuring 132 SMs and 141 GB of HBM3e memory 
+
+> 3
+
+Table 1: Comparison of GPU sharing systems ( ✓: provided; ✗: absent/none; SLO: service level objective). Deadline met names the timing guarantee each system makes and its scale; only Beaver enforces a hard per-slot latency deadline.                                                                         
+
+> Approach Protected tenant Co-tenant evaluated SM HBM BW Deadline met Adaptive Opaque Kernel Reconfiguration
+> Software GPU Sharing Systems Gandiva, AntMan, HiveD job scheduling [39, 40, 45] Guaranteed jobs Opportunistic jobs ✗✗✗✓✓seconds migrate
+> Salus, Orion, TGS [34, 38, 44] High priority jobs Best-effort jobs ✗✗Soft SLO 10 ms–1 s ✓✓ms per kernel/op
+> REEF kernel preemption [10] Real-time inference Best-effort DNN ✗✗Preempt AMD only ✓✗𝜇 s preempt
+> GPU Sharing for vRANs CAORA [32] 3 BS traces None ✓Fixed MIG slice ✗✗✓seconds MIG rebuild
+> RAN-LLM [43] 1 cell LLMs up to 7B ✓Fixed MIG slice ✗✗✓seconds MIG rebuild
+> YinYangRAN [15] 4 cells RNN up to 1M ✓✗Soft SLO ∼1 ms ✗✓∼564 ms MPS restart
+> Beaver (This Work) Hetero multi-cell LLM up to 70B ✓Phase-aware control Hard, 1500 μs✓✓∼1.8 μspointer swap
+
+with 4.8 TB/s memory bandwidth. For detailed experimental setup and test vectors, see §5 and Appendix A. Fig. 3(a) reports the SM compute utilization, HBM band-width utilization, and p99.9 uplink latency on an unparti-tioned H200 (i.e., using all 132 SMs) as the number of con-currently served cells increases. It can be seen that the p99.9 uplink latency reaches the 1.5 ms deadline at 32 cells even though neither resource is saturated: compute utilization rises quickly but plateaus near 60% beyond 15 cells, while HBM bandwidth utilization remains below 10% even at 40 cells. Fig. 3(b) fixes the 20-cell vRAN workload and varies the number of SMs allocated to it. Reducing the allocation in-creases tail latency, and 72 SMs is the smallest allocation that satisfies the p99.9 uplink deadline for 20 cells, leaving 60 SMs for a co-tenant. The detailed resource breakdown for this 20-cell workload with 72 SMs is shown in Fig. 3(c), normalized to the capacity of the entire GPU, where compute, L1/L2 caches, and HBM bandwidth all remain well below their respective limits, with no tensor core usage. Fig. 3(d) further shows the compute and HBM utilization of individual vRAN ker-nels: no kernel approaches peak compute throughput, and none draws more than a quarter of peak HBM bandwidth. The sequential dependencies within each cell’s processing pipeline therefore leave a substantial fraction of the GPU idle, creating headroom for a co-tenant while guaranteeing that the vRAN workload can meet its tight latency deadline. 
+
+3.2 Resource Contention in GPU Sharing 
+
+After characterizing GPU utilization when the vRAN work-load runs alone , we examine what happens when it shares the GPU with another workload. Because the vRAN must satisfy a per-slot latency deadline, we treat it as the first-class tenant and the co-located workload as a best-effort tenant. Co-tenancy introduces three distinct effects: 
+
+HOL blocking and compute contention. A running CUDA block remains on its assigned SMs until it completes (see §2). If a co-tenant occupies all SMs when a vRAN kernel is launched, the vRAN kernel must wait for some of those blocks to finish. We refer to this delay as head-of-line (HOL) 10 −1 10 0          
+
+> co-tenant kernel length (ms)
+> 10 3
+> 10 4
+> uplink p99.9 latency (μs)
+> 1.5 ms deadline
+> (a) HOL blocking
+> 125
+> uplink latency (ms)
+> 10 0
+> 10 −1
+> 10 −2
+> 10 −3
+> 10 −4
+> 10 −5
+> fraction of slots > x
+> 1.5 ms p99.9
+> (b) Compute contention
+> 1.5 22.5
+> uplink latency (ms)
+> 10 0
+> 10 −1
+> 10 −2
+> 10 −3
+> 10 −4
+> 10 −5
+> 1.5 ms p99.9
+> (c) Memory-bandwidth contention
+> fixed dynamic
+> allocation
+> contended  protected
+> HBM BW
+> (d) Design space
+> MIG-based systems
+> [MIG · CAORA · RAN–LLM]
+> Beaver
+> SM-only systems
+> [MPS CUDA GC YinYangRAN Gandiva Salus]
+> REEF
+> vRAN only Unprotected Green context FMA burn HBM flooder vLLM inference FP8 GEMM
+
+Figure 4: GPU sharing failure modes and design space. (a) HOL blocking couples tail latency to co-tenant kernel length. (b) Shared SMs cause compute contention. (c) Disjoint SMs eliminate compute contention but not HBM contention. (d) Beaver explores dynamic SM repartitioning while protect-ing the HBM bandwidth between co-tenants. 
+
+blocking . To isolate its effect, we use a compute stressor that repeatedly performs arithmetic. Fig. 4(a) plots the p99.9 up-link latency of the 20-cell workload as the compute stressor’s kernel length increases, with and without SM partitioning. Without SM partitioning ( Unprotected ), the p99.9 latency increases with the stressor’s kernel length since the vRAN workload queues behind its running blocks. A 72:60 SM par-titioning between the vRAN and stressor co-tenant keeps the uplink within its deadline by reserving dedicated SMs. Even when the vRAN workload can begin immediately, blocks from the two tenants may execute concurrently on the same SMs and compete for warp slots, execution units, registers, and other resources. We refer to this interference as compute contention ; it arises under unprotected execution (no SM par-titioning) and is eliminated when the tenants receive disjoint 
+
+> 4
+
+SM partitions, e.g., via green contexts (GC) [16]. Fig. 4(b) plots the complementary CDF of uplink latency for the 20-cell workload co-running with the same compute stressor. It compares unprotected execution, a 72:60 SM partition using GC, and the vRAN only baseline with no co-tenant. HOL blocking mainly enlarges the tail by delaying when a vRAN kernel can start, whereas compute contention slows the ker-nel after it starts and consequently affects most vRAN slots. 
+
+HBM bandwidth contention. In addition to compute inter-ference, contention in the shared memory hierarchy presents a separate limitation and requires a different mechanism, as assigning the co-tenants disjoint SMs (e.g., via CUDA GC) does not partition the GPU’s caches or HBM fabric. There-fore, a memory-intensive co-tenant can still delay the vRAN workload even when both workloads never execute on the same SM. Fig. 4(c) plots the same complementary CDF for the 20-cell workload under a 72:60 SM split across four distinct co-tenant workloads (see §5); a curve that crosses the hor-izontal p99.9 line misses the vRAN deadline. The compute stressor causes no deadline misses, confirming that the dis-joint SM allocation removes compute contention. In contrast, HBM flooder, FP8 General Matrix Multiplications (GEMM), and vLLM inference co-tenants continue to contend with vRAN for the shared HBM fabric, producing significant dead-line miss rates of up to 99.8%. 
+
+3.3 Design Challenges 
+
+Safe and efficient vRAN co-tenancy requires both dynamic SM allocation and protection from contended HBM band-width, posing the following design challenges (see Fig. 4(d)).  
+
+> C1
+
+Partitioning SMs for heterogeneous vRAN work-loads. Cell count alone cannot determine the vRAN’s com-pute demand: heterogeneous cells require different SM bud-gets. Mapping each slot’s workload to a deadline-safe SM partition is challenging because GPU performance does not scale linearly with the allocated SM count, and kernels differ in grid size, occupancy, synchronization, and memory behav-ior. On Hopper GPUs, GC exposes partitions in increments of eight SMs, and Beaver must map dynamic workloads onto these discrete choices and select the smallest SM partition that meets the vRAN deadline. Allocating too few SMs causes deadline misses, while allocating too many unnecessarily reduces the resources available to the co-tenant.  
+
+> C2
+
+Adaptive SM partition at slot granularity. vRAN workload can change substantially from one slot to the next at the sub-millisecond level, making a static partition either unsafe under peak load or wasteful under light load. Beaver must therefore resize the vRAN partition at per-slot granu-larity while ensuring that every slot meets its hard deadline. However, existing GPU partitioning mechanisms such as MIG and MPS are not designed for such rapid adaptation (see §2). GC provides SM isolation, but the SM assignments are fixed when the context is created and cannot be resized in place. Changing a partition therefore requires creating or switching contexts and waiting for work in the old parti-tion to drain before its SMs can be reclaimed, making direct reconfiguration too expensive for sub-millisecond control.  
+
+> C3
+
+Controlling opaque ML co-tenants. On the other hand, ML workloads typically invoke kernels from vendor libraries, packaged frameworks, and runtime generators (e.g., Triton). These kernels are opaque to the application and often employ asynchronous copies and warp-specialized synchro-nization, making source modification impractical and poten-tially unsafe. Since SM partitioning alone—even through the use of GC—does not isolate the shared HBM subsystem, the vRAN workload’s memory demand can vary sharply across slots, while concurrent ML kernels can saturate HBM band-width and queues during these critical phases. Once issued, these memory requests cannot be recalled, so coarse-grained or reactive throttling cannot protect vRAN’s tail latency. Beaver must therefore regulate ML co-tenant’s execution transparently at sub-slot granularity, preserve kernel seman-tics, and protect the vRAN deadline without unnecessarily reducing ML co-tenant’s throughput. 
+
+4 Beaver’s Design 
+
+Beaver addresses these challenges by combining deadline-driven vRAN resource provisioning with low-overhead SM repartitioning and cooperative control of co-tenant memory traffic. We focus on uplink processing because its iterative LDPC decoding makes it substantially more intensive than downlink processing (see §2). Beaver comprises three func-tional modules, illustrated in Fig. 2 and described below. 
+
+4.1 Workload-Aware SM Sizer 
+
+The first module models GPU-based multi-cell vRAN work-load processing latency and determines the smallest vRAN SM allocation that can complete the vRAN workload before its slot deadline. This is not a trivial task, as profiling every possible vRAN workload with multiple heterogeneous cells is prohibitively expensive: Suppose the system supports 𝑉 cell configurations, or test vectors , and may concurrently serve 𝐶 
+
+cells, there are 𝑉 𝐶 possible workload profiles for every slot. Our key idea is to profile only workloads with homogeneous 
+
+cells, in which all cells use the same configuration in a slot, and then compose fitted parameters to predict previously unseen workloads with heterogeneous cells. 
+
+Processing latency modeling for homogeneous cells. Let 
+
+𝐶 denote the cell count and 𝑀 denote the total number of SMs on the GPU. For a slot with homogeneous cells, we model the median uplink processing latency as a function of 
+
+𝐶 , the cell configuration 𝛉 (test vector), and the number of 
+
+> 5
+
+SMs allocated to the vRAN workload 𝑠 , given by 
+
+𝐿 p50 (𝐶, 𝛉 , 𝑠 ) = 𝜏 0 (𝛉 ) + 𝐶 · 𝜏 1 (𝛉 ) + 𝑀 𝑠 · 𝐶 · 𝜏 2 (𝛉 ). (1) This model consists of three interpretable coefficients: 
+
+• Setup time , 𝜏 0 (𝛉 ), represents the per-slot overhead (e.g., initiating the slot’s GPU kernel launches); 
+
+• SM-insensitive time , 𝜏 1 (𝛉 ), represents per-cell work whose latency changes little with the SM allocation because it exposes limited thread-block parallelism (e.g., small-grid kernels such as RSSI/RSRP measurement); 
+
+• SM-parallel time , 𝜏 2 (𝛉 ), represents per-cell work whose latency decreases as more SMs are allocated (e.g., LDPC decoding and rate de-matching). We fit the model offline using end-to-end measurements for every supported cell configuration 𝛉 ∈ 𝚯 , as specified by its MCS, payload size, and code block count [2] (Table 4 in Appendix A). For each supported 𝛉 , we vary the (𝐶, 𝑠 ) ∈ C ×S and record the median processing latency, e𝐿 p50 (𝐶, 𝛉 , 𝑠 ).Here, C and S denote the set of possible cell counts and SM allocations. A least-squares regression then jointly estimates 
+
+b𝜏 0 (𝛉 ), b𝜏 1 (𝛉 ), b𝜏 2 (𝛉 )
+
+= arg min Í 
+
+> 𝐶 ∈ C
+
+Í 
+
+> 𝑠 ∈ S
+
+e𝐿 p50 (𝐶, 𝛉 , 𝑠 ) − 𝜏 0 − 𝐶 · 𝜏 1 − 𝑀 𝑠 · 𝐶 · 𝜏 2
+
+2
+
+.
+
+Note that these coefficients are not obtained by separately measuring individual vRAN kernels or DSP stages. Instead, they are jointly fitted from end-to-end uplink latency mea-surements. The terminology above provides an interpreta-tion of the scaling behavior captured by each coefficient; a single kernel may affect more than one fitted coefficient. Using this method, the profiling cost is linear in 𝑉 and 𝐶 
+
+rather than exponential. Our implementation is calibrated on Aerial’s 28 uplink test vectors, which span 𝑉 = |𝚯 | = 28 distinct radio configurations; Appendix D gives the profiling grid, the fitting procedure, and the fitted coefficients. 
+
+Processing latency prediction for heterogeneous cells. Aslot may contain cells with different configurations at run-time . We compose the coefficients learned from homoge-neous cell workloads and add a safety reserve to predict its p99.9 processing latency, given by 
+
+b𝐿 p99.9 (C( 𝑡 ), 𝚯 (𝑡 ), 𝑠 ) = max    
+
+> 𝑐 ∈ C ( 𝑡 )
+
+{b𝜏 0 (𝛉 𝑐 (𝑡 ))} + Í  
+
+> 𝑐 ∈ C ( 𝑡 )
+
+b𝜏 1 (𝛉 𝑐 (𝑡 )) + 𝑀 𝑠 · Í  
+
+> 𝑐 ∈ C ( 𝑡 )
+
+b𝜏 2 (𝛉 𝑐 (𝑡 )) + 𝑅 p99.9 , (2) where C( 𝑡 ) denotes the set of heterogeneous cells to be served in slot 𝑡 , 𝛉 𝑐 (𝑡 ) denotes the configuration for cell 
+
+𝑐 ∈ C( 𝑡 ), and 𝑅 p99.9 denotes the safety reserve introduced to account for the profiled median-to-p99.9 gap as well as residual model error. One can interpret (2) as follows: When MIG/MPS Repartitioning    
+
+> Current Slot
+> Partition A
+> Current Slot
+> Green Context Pair A
+> Reconfig Latency - Slow, ~564ms for MPS, and ~1s for MIG
+> Next Slot
+> Destroy Recreate Partition B
+> Bind launches to another CUDA Context
+> with the new SM Split
+> Fast, ~1.8 μs
+> Next-slot Radio Arrives
+> Next Slot
+> Green Context Pair B time
+> Beaver
+
+Figure 5: Beaver enables slot-granular SM repartitioning (in only 1.8 μs) by rebinding launches to a pre-created GC pair. 
+
+a slot contains multiple heterogeneous cells, their setup over-heads can overlap; the model therefore conservatively takes the largest configuration-specific setup coefficient. In con-trast, every scheduled cell contributes processing work, so the model sums the SM-insensitive and SM-parallel coeffi-cients across cells. Note that the model depends only on the number of allocated SMs, 𝑠 ≤ 𝑀 , not on which physical SMs are selected. As a result, only the SM-parallel term varies with 𝑠 . Requiring the predicted p99.9 processing latency to satisfy the deadline 𝐿 0 gives 
+
+b𝐿 p99.9 (C( 𝑡 ), 𝚯 (𝑡 ), 𝑠 ) < 𝐿 0 ⇔
+
+𝑠 > 𝑀 · Í𝑐 b𝜏 2 (𝛉 𝑐 (𝑡 )) 
+
+𝐿 0 −  max 𝑐 {b𝜏 0 (𝛉 𝑐 (𝑡 ))} + Í𝑐 b𝜏 1 (𝛉 𝑐 (𝑡 )) + 𝑅 p99.9 
+
+ , (3) where 𝐿 0 = 1.5 msec is the 3-slot uplink processing deadline for numerology 1. The estimated SM count is then rounded up to the smallest supported, pre-built SM allocation. 
+
+4.2 Slot-Granular SM Repartitioning 
+
+Beaver must adapt the SM allocation at slot granularity (0.5 ms in numerology 1) without violating the processing deadline, which cannot be achieved by existing SM parti-tion mechanisms such as MIG and MPS (see §3.3 and Fig. 5). CUDA GC provides finer-grained SM isolation, but its re-sources are immutable after creation [16]; creating one on H200 takes ≈1.6 ms, already exceeding the slot duration. Beaver addresses this mismatch with a slot-granular SM repartitioning module that separates slow SM partition con-struction from fast runtime selection, as shown in Fig. 5( bot-tom ). At startup, it pre-materializes a pool of complementary GC pairs, one context for the vRAN and one for the ML co-tenant. Each GC pair represents a supported split 𝑠 :(𝑀 − 𝑠 ),where 𝑀 is the GPU’s total SM count and 𝑠 is the vRAN allocation. For example, an H200 contains 132 SMs and GC interface changes the vRAN allocation in increments of eight SMs. Beaver therefore constructs the 17 candidate partitions: 
+
+PH200 = {( 8𝑗 : 132 − 8𝑗 ); ∀𝑗 = 0, . . . , 16 } , (4) which correspond to { 0:132, 8:124, . . . , 128:4 } SM partitions across the vRAN and co-tenant workloads. Pre-materializing the complete hardware-supported action space decouples the runtime controller from context-creation latency. Before each slot, Beaver’s SM sizer computes the mini-mum vRAN SM count required to meet the deadline. Since    
+
+> 6vRAN Kernels
+> LDPC Decoder
+> wave-aware
+> Streaming DSP
+> Kernels
+> Low HBM BW
+> Kernels
+> One GPU Execution Wave
+> Read LLRs
+> B=SET B=CLEAR
+> De-rate Matching / Soft Demap Kernels...
+> B=SET
+> Run Normally
+> B=CLEAR
+> non-blocking SET/CLEAR B=SET - Protect
+> vRAN HBM Traffic
+> B=CLEAR - ML Kernels not stopped
+> Lines of Code
+> Original PTX
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> N
+> HBM Traffic Per LoC
+> 1
+> 2
+> 3
+> Lines of Code
+> 4
+> 5
+> 6
+> 7
+> N
+> HBM BW % Used
+> Belief Propagation Write Decoded Bits
+
+1 Attribute HBM Traffic B=SET → Next Wave  
+
+> Bitmap Shared State Shared Bitmap B
+> Current vRAN HBM Demand & vRAN Protection Flags
+> ML Co-tenant Loop
+> Stream One HBM Batch
+
+(a) 
+
+> Read B
+> B Clear
+> Poll
+> Bitmap B
+> B Set
+> Backoff
+> Briefly
+
+(b) PTX Injected Code 
+
+offline (once per kernel) 
+
+2 Select HBM Intensive
+Region  3 Insert Safe Polling Gate   
+
+> Basic Block 1
+> ... ...
+> Memory Batch
+> POLL
+> Basic Block 2
+> Basic Block 3
+> Shared Bitmap
+> Bitmap
+> Clear
+> run
+> ?Bitmap
+> Set
+> wait Basic Block 4
+
+load time 
+
+> Build Drop-in GPU Binary
+
+4 5 Redirect and Bind  
+
+> Rewritten PTX
+> 1
+> 2
+> Lines of Code
+> 3
+> 4
+> 5
+> N
+> Same Launch Interface
+> cubin/
+> fatbin Rewritten Kernel
+> Application
+> Kernel Launch
+> Redirect
+> (transparent)
+> App Semantics
+> Unchanged
+> Shared Bitmap
+
+Figure 6: Beaver’s cooperative HBM bandwidth guard: (a) How each kernel’s bitmap signaling schedule follows its HBM-bandwidth pattern; the ML co-tenant polls the shared bitmap and backs off while any flag is set. (b) Profile-guided PTX injection: the offline pass that finds the HBM-heavy regions and rewrites them, and the load-time redirect that binds the shared bitmap. 
+
+the requested count may not coincide with a supported split, it will be rounded up to the smallest 𝑠 represented in PH200 . It then launches the next slot’s vRAN and co-tenant workloads in their corresponding GC pair. Specifically, a switch changes the contexts used by subsequent kernel launches; it does not migrate blocks that are already executing. Beaver there-fore performs the selection at the slot boundary and directs new work to the selected pair, while previously launched work completes in its original context. Because both contexts already exist, the critical-path operation is a launch-path re-bind rather than context construction. This rebind takes only 
+
+≈1.8 μs, less than 0.5% of the 0.5 ms slot duration, and nearly 900 × less than the measured GC creation time. 
+
+4.3 Cooperative HBM Bandwidth Guard 
+
+SM partitioning does not partition the GPU’s HBM subsys-tem or bandwidth. A memory-intensive ML co-tenant can therefore delay the vRAN workload even when the two work-loads execute on disjoint SMs. Beaver addresses this inter-ference in the HBM domain with an asymmetric, cooperative HBM bandwidth guard module: the latency-critical vRAN workload announces short intervals in which its latency depends critically on HBM bandwidth, during which the 
+
+best-effort co-tenant defers new memory traffic. 
+
+Cooperative bitmap protocol. Fig. 6(a) shows the bitmap shared by the two tenants, b = [𝑏 1, . . . , 𝑏 𝑁 𝑏 ]. Each bit repre-sents one vRAN thread block, and 𝑁 𝑏 is sized for the maxi-mum number of thread blocks that can overlap in the vRAN pipeline. The profile described below determines which parts of a kernel require protection, but each executing thread block signals independently. Before entering an HBM-critical region, a thread block sets its bit; after leaving the region, it clears the same bit. Protection remains active while any bit is set, i.e., Ô𝑁 𝑏 
+
+𝑗 =1 𝑏 𝑗 . Per-block bits are necessary because thread blocks progress independently: one block may leave its HBM-critical region while another is still issuing HBM requests. A single kernel-wide bit could therefore be cleared too early, whereas the bitmap remains set until the last protected block clears its bit. The bitmap occupies only a few machine words, 010 20 30           
+
+> HBM bandwidth (% of peak)
+> no protection whole-kernel protection wave-aware protection
+> Soft demap De-rate match LDPC
+> 18324567pipeline stage wave valley
+> Channel est. (29 μs) CRC (37 μs) Noise est. (37 μs) Ch. filtering (52 μs) Eq. coeff. (49 μs)
+
+Figure 7: Measured per-kernel HBM demand across one up-link slot, normalized to the GPU’s peak HBM bandwidth; stage numbers indicate kernel order (see also Fig. 1). 
+
+and repeated ML polls normally hit in cache. Before an in-strumented co-tenant kernel begins another HBM-intensive region, it checks the bitmap: If any bit is set, the participat-ing threads briefly back off and poll again; otherwise, they proceed immediately. This guard stops new co-tenant mem-ory traffic but cannot preempt requests already in flight. We therefore place polling gates frequently enough to bound the traffic issued after a vRAN thread block requests protection. 
+
+Profile-guided bitmap signaling. Protecting every vRAN kernel for its entire execution would preserve the radio deadline but unnecessarily suppress ML progress. Because the vRAN workload follows a fixed, slot-periodic pipeline, Beaver profiles each kernel’s time-resolved HBM demand offline and assigns it one of the three signaling schedules, as illustrated in Fig. 7. First, kernels such as channel estimation, CRC, noise estimation, channel filtering, and equalization generate relatively little HBM traffic, therefore requiring 
+
+no protection and the ML co-tenant runs without interrup-tion. Second, streaming kernels such as soft demapping and rate de-matching sustain high HBM demand throughout ex-ecution. They set their bit at kernel entry and clear it at kernel exit, thereby receiving whole-kernel protection . While the bit is set, the co-tenant defers new HBM-intensive re-gions; HBM-light computation may continue. Third, LDPC decoding exhibits a bursty, wave-structured traffic pattern. As Fig. 7 shows, each execution wave contains an HBM-intensive peak followed by an HBM-light valley. A wave first reads LLRs from HBM, performs belief propagation with little HBM traffic, and then writes its decoded bits. For such a kernel, whole-kernel protection would also block the ML 
+
+7tenant during the long belief propagation valleys. Beaver instead applies wave-aware protection : it sets the bitmap dur-ing each wave’s reads and writes but clears it during belief propagation so that the co-tenant can make progress. 
+
+Injecting the guard without source. ML co-tenants com-monly invoke vendor GEMM, attention, and projection ker-nels whose CUDA source is unavailable. Beaver therefore rewrites kernels with available PTX (see §2) and substitutes the rewritten kernels at load time. Fig. 6 shows this five-stage pipeline: Stages 1–4 run once offline for each targeted ker-nel, while Stage 5 activates the rewritten kernel at load time. The vRAN workload profiling determines when protection is needed; this pipeline determines where the ML co-tenant should pause before issuing more HBM traffic. Specifically: (1) Attribute HBM traffic : PTX identifies instructions that ac-cess memory, but does not show how often they execute or how much HBM traffic they generate. Beaver profiles the unmodified kernel and attributes its measured HBM traffic to individual PTX lines, and the results identify the code that contributes most to the kernel’s HBM demand. (2) Select HBM-intensive regions : Polling before every mem-ory instruction would add excessive overhead. Beaver instead groups PTX lines into basic blocks —straight-line code regions with one entry and no internal branches [3]. It sums the traffic profiled from Stage 1 within each block and selects the smallest set of blocks that covers a con-figured fraction of the kernel’s HBM traffic. As a result, a small set of useful candidate locations is identified, at each of which Stage 3 inserts a safe gate. (3) Insert a safe polling gate : Beaver cannot use the same gate placement everywhere since GPU kernels organize their memory-producing threads differently. We call a gate safe when every thread that can issue the selected memory batch encounters it, without requiring unrelated threads to participate. Beaver classifies each selected region by its execution structure and chooses the corre-sponding gate. If the shared bitmap is clear, the gated threads issue the next memory batch; otherwise, they briefly back off and check again. (4) Build a drop-in GPU binary : Beaver reassembles the rewrit-ten PTX into a GPU binary using the original target ar-chitecture and compiler settings. The kernel retains the same arguments and launch interface. (5) Redirect and bind : At load time, a runtime shim redirects each targeted kernel to its rewritten binary and maps the shared bitmap into both tenants’ address spaces. The injected poll is thereby bound to the vRAN signal without changing the ML co-tenant’s framework or application.              
+
+> Table 2: Hardware platforms used in our experiments.
+> Setup CPU GPU Memory (bandwidth)
+> srv1 EPYC 9355 H200 141 GB HBM3e (4.8 TB/s)
+> srv2 Xeon Gold 6348 A100 40 GB HBM2 (1.6 TB/s) DGX Spark GB10 Superchip 128 GB LPDDR5X (273 GB/s) GH200 Grace Hopper Superchip 96 GB HBM3 (4.0 TB/s)
+
+5 Experimental Setup 
+
+Implementation and hardware platforms. We build Beaver on NVIDIA Aerial CUDA-accelerated RAN [23] (re-lease 25-3); our implementation adds 8.4K lines of code across Beaver’s three modules. Table 2 summarizes the hardware platforms used in our experimental evaluation. Most experi-ments are conducted on server #1 ( srv1 ) with an H200 (Hop-per) GPU, and our cross-GPU study considers server #2 ( srv2 )with an A100 (Ampere) GPU, a DGX Spark with a GB10 (Grace-Blackwell) Superchip, and a GH200 (Grace Hopper) Superchip. For a GPU with 𝑀 SMs, we use an 𝑠 :(𝑀 − 𝑠 )
+
+SM split to denote an allocation of 𝑠 SMs to vRAN and the remaining (𝑀 − 𝑠 ) SMs to the co-tenant. 
+
+vRAN test vectors and vRAN workloads. We consider a total of 28 cell configurations, or test vectors , summarized in Appendix A (Table 4), in 5G numerology 1 with 30 kHz sub-carrier spacing and 0.5 ms slot duration. To isolate compute and memory interference, we focus on a compute-heavy test vector ( tv-21 ) with the highest per-slot processing cost and a memory-heavy test vector ( tv-28 ) with the highest per-cell DRAM traffic. Both configurations use a 100 MHz channel with 273 physical resource blocks (PRBs) and four anten-nas, but differ in the MCS. Because tv-21 and tv-28 place the greatest observed pressure on the target GPU resources, they provide conservative stress tests for Beaver. 
+
+Latency profiling and modeling. We derive the latency model in §4.1 offline using homogeneous vRAN uplink work-loads, in which all cells scheduled in a slot have the same configuration. For each of the 28 test vectors, we sweep six cell counts and six vRAN SM budgets, yielding 1,008 config-urations. We run each workload for 3,000 slots and use the resulting end-to-end latency measurements to fit the latency model coefficients and calibrate the p99.9 safety reserve, as described in §4.1. At runtime, Beaver composes the fitted coefficients to predict the tail (p99.9) latency of vRAN work-loads with heterogeneous cells and selects the minimum SM allocation that satisfies the deadline. Appendix A provides further details on the profiling and calibration procedure. 
+
+Co-tenant workloads. We organize the co-tenant work-loads into three classes that provide progressively greater realism. First, the single-axis stress-test kernels isolate the two principal sources of GPU contention: FMA (fused multiply-add) Burn generates controllable compute pressure through a tunable kernel duration, whereas HBM Flooder streams 
+
+> 8
+
+data past the caches to generate sustained memory band-width pressure. Their controlled and independently tunable resource demands allow us to evaluate the effectiveness of in-dividual modules of Beaver. Second, the production inference kernels , including CUTLASS GEMM [17], FlashAttention-3 [31], Triton fused MoE [37], and FlashInfer [42], repre-sent common building blocks of modern AI inference, cover-ing dense matrix multiplication, self-attention, expert feed-forward computation, and paged attention. They expose real-istic combinations of compute and memory demand while re-maining sufficiently focused to explain kernel-level interfer-ence. Finally, the full-stack serving workloads use vLLM [12] to decode tokens with Llama-3.3-70B [14] and Mistral-Small-24B. These workloads combine compute- and bandwidth-intensive kernels with the scheduling, memory management, and runtime behavior of an end-to-end LLM serving stack. 
+
+Baseline configurations. We evaluate Beaver using both controlled mechanism-level microbenchmarks and compar-isons with prior GPU sharing systems. We focus on the fol-lowing baseline configurations: 
+
+• vRAN only , as a contention-free reference, runs the vRAN workload in its assigned GC partition without a co-tenant ;
+
+• GC only assigns the vRAN and co-tenant disjoint SM par-titions via GC but disables the Cooperative HBM Bandwidth Guard , thereby leaving HBM bandwidth shared. 
+
+• Beaver uses the same SM split enabled by GC and addi-tionally enables the cooperative HBM bandwidth guard. To microbenchmark Beaver’s protection mechanisms, we in-clude two further ablations: Unprotected co-schedules both workloads on the same SMs without either protection mech-anism, whereas HBM guard only enables the cooperative HBM bandwidth guard without GC-based SM isolation. 
+
+Performance metrics. For the vRAN workload, we mea-sure per-slot GPU execution time from device-side traces collected with NVIDIA Nsight Systems [22]. For each exper-iment, we collect per-slot processing latency measurements over 50,000 slots, from which the processing latency distri-bution, including the median (p50) and tail (p99.9), is derived. We also report the deadline miss rate , defined as the fraction of slots violating the 1.5 ms processing deadline for the uplink (3-slot in numerology 1). For production inference kernels, we report throughput as the number of completed kernel executions per second (kernels/s). For full-stack serving ap-plications using vLLM, we report the serving throughput as the number of output tokens produced per second (tok/s). 
+
+6 Evaluation Results 6.1 Microbenchmarks 
+
+Sharing with single-axis stressors. We first isolate the effectiveness of Beaver’s individual mechanisms using the 2500 3000          
+
+> 2912 2913 (100%) (100%)
+> p50 → p99.9 1500 μs deadline vRAN only
+> 1128 1248 1500 1700
+> Slot latency (μs)
+> 1260 1253 1773 1769 1608 1380 (<0.1%) (<0.1%) (55%) (55%) (96%) (<0.1%)
+> Unpro-tected BW guard only GC only Beaver Unpro-tected BW guard only GC only Beaver
+> 0
+> FMA burn HBM flooder
+
+Figure 8: Beaver’s vRAN latency protection mechanisms against single-axis stressor co-tenants: 14 compute-heavy cells with an FMA burner (104:28 SM split), and 14 memory-heavy cells with an HBM flooder (72:60 SM split). 
+
+two single-axis stressors. We pair 14 compute-intensive cells (tv-21 ) with the FMA burner under a 104:28 SM split, and 14 memory-intensive cells ( tv-28 ) with the HBM flooder under a 72:60 SM split. Fig. 8 reports the p50 and p99.9 vRAN process-ing latency, with deadline miss rates shown in parentheses. With the FMA burner, Unprotected produces a p99.9 latency of 2.912 ms and a 100% miss rate, regardless of whether the HBM bandwidth guard is enabled. GC only reduces p99.9 latency to 1.260 ms, nearly matching the 1.248 ms latency of 
+
+vRAN only without the co-tenant, showing that SM isolation is sufficient to eliminate compute contention. With the HBM flooder, however, neither mechanism alone satisfies the deadline: Unprotected and HBM guard only yield a p99.9 latency of 1.773 ms and 1.769 ms, respectively, while 
+
+GC only yields 1.608 ms. By combining SM isolation with co-operative HBM regulation, Beaver reduces p99.9 latency to 1.380 ms and the deadline miss rate to below 0.1%. These results show that SM partitioning isolates compute con-tention, whereas protecting vRAN from memory-intensive co-tenants requires coordinated SM isolation and HBM band-width control. The remaining experiments compare Beaver with only the GC only baseline; the other baselines ( Unpro-tected and HBM guard only ) already fail to protect the vRAN deadline due to non-isolated compute resources. 
+
+Sharing with production inference kernels. We next evaluate Beaver against production inference kernels that place substantial pressure on HBM: CUTLASS GEMMs, Flash-Attention-3, fused MoE, and FlashInfer. For the GEMMs, we evaluate FP8 and BF16 at two dimensions used by Llama-3.3-70B [14]. 𝐾 = 8,192 is the model’s hidden width and is used by its attention and MLP gate/up projections, whereas 𝐾 =
+
+28 ,672 is the intermediate width consumed by the MLP down projection. The vRAN workload comprises 16 memory-heavy cells ( tv-28 ) and runs under a 72:60 SM split, determined by Beaver’s workload-aware SM sizer. Fig. 9(a) shows the vRAN processing latency and co-tenant throughput under 
+
+GC only and Beaver. Without the co-tenant, the vRAN’s                                    
+
+> 91276 1500 2000
+> Uplink slot latency (μs)
+> 1678 1872 1499 1552 1626 1574 1584 1433 1429 1414 1441 1466 1411 1487 (99%) (99%) (<0.1%) (58%) (99%) (99%) (95%) (0%) (0%) (0%) (0%) (0%) (0%) (0%)
+> (a)
+> 0
+> FP8 GEMM K=8192 FP8 GEMM K=28672 BF16 GEMM K=8192 BF16 GEMM K=28672 FA3 attn Fused MoE FlashInfer
+> 1k 10k
+> Co-tenant throughput (kernels/s)
+> 14.2k 4.1k 1.5k 455 27.9k 3.5k 4.0k 8.2k 2.6k 1.2k 392 14.2k 1.9k 1.5k
+> GC only Beaver p50 → p99.9 1500 μs deadline vRAN only (x%) = deadline miss rate
+> 025 50 75 100
+> Co-tenant throughput retained (% of own unprotected co-run)
+> <0.1 110 100
+> Uplink deadline-miss (% of slots, log)
+> better
+> uniform-throttle frontier
+> GC only, 79% Beaver, 0% Naive, 98% Gandiva, 50% Orion, 28% TGS, 1.7%
+> (b)
+
+Figure 9: (a) vRAN processing latency (p50 and p99.9) with production inference kernels under GC only and Beaver, using 16 memory-heavy cells under a 72:60 SM split. (b) Deadline miss rate vs. retained co-tenant ( FP8 GEMM) throughput for 23 memory-heavy cells under a 104:28 SM split, comparing Beaver with prior GPU sharing systems and baselines. 
+
+p99.9 processing latency is 1.276 ms, as indicated by the blue dotted line ( vRAN only ). Under GC only , six of the seven co-tenant kernels push the vRAN’s median latency beyond the 1.5 ms deadline, producing deadline miss rates of 58%–99%. The higher FP8 inflation is consistent with its deeper staging pipeline, which keeps more HBM transfers in flight than 
+
+BF16 . Beaver keeps p99.9 latency within the deadline and eliminates all observed deadline misses, while the co-tenant kernels retain 38%–86% of their unthrottled throughput. 
+
+Comparison with prior GPU sharing systems. We com-pare Beaver with Orion [34], TGS [38], and Gandiva [39], prior GPU sharing systems designed for general ML work-loads rather than latency-critical vRAN workloads (see Ta-ble 1). We consider 23 memory-heavy cells with an FP8 
+
+GEMM co-tenant, with a 104:28 SM split selected by Beaver’s SM sizer. Fig. 9(b) plots each system’s deadline miss rate against the retained co-tenant throughput. The dashed curve shows a uniform-throttling frontier obtained by repeatedly running the co-tenant for a fixed interval and then idling it for a configurable interval. A system improves on this frontier only if it retains more throughput at the same dead-line miss rate, or achieves a lower miss rate at the same throughput. Sweeping the idle interval produces different throughput and deadline miss rate trade-offs. Prior systems remain constrained by this tradeoff, reflect-ing that they were not designed to protect workloads with strict per-slot latency requirements. Unprotected sharing and 
+
+GC only retain nearly all co-tenant throughput but miss 98% and 79% of the slot deadlines, respectively. Gandiva and Orion reduce the miss rate to 50% and 28% while retaining less than half of the co-tenant’s throughput, whereas TGS reaches a 1.7% miss rate only by reducing retained through-put below 10%. Even the safest uniform-throttling point re-mains above 0.1% miss rate. In contrast, Beaver is the only system that occupies the favorable bottom-right region be-yond this frontier, incurs no observed deadline misses, and retains 64.1% of the co-tenant’s unthrottled throughput. 
+
+Table 3: MPS-based GPU sharing systems (e.g., YinYan-gRAN [15]) fails to protect the vRAN latency. 
+
+Co-tenant HBM Demand Latency (p50) Latency (p99.9) Deadline Miss 
+
+RNN forecaster [15] 0.6 GB/s 1308 1340 ( ✓) 0% RNN, SM-saturating 873 GB/s 1247 1354 ( ✓) 0.02% HBM flooder 3,888 GB/s 1634 1961 ( ✗) 72.6% FP8 GEMM 3,648 GB/s 1608 1730 ( ✗) 99.98% 
+
+Comparison with YinYangRAN. YinYangRAN [15] is the closest prior system for sharing a GPU between vRAN and co-tenant workloads. We reproduce its MPS-based active-thread partitioning and vary only the co-tenant workload. As shown in Table 3, the (lightweight) RNN forecaster used in YinYangRAN consumes only 0.6 GB/s of HBM bandwidth and causes no vRAN deadline misses. Even after scaling the RNN to saturate its assigned SM capacity, the vRAN maintains a p99.9 latency of 1.354 ms, with a 0.02% dead-line miss rate. However, the same MPS partition fails under bandwidth-intensive co-tenants: an HBM flooder and an LLM decode-like FP8 GEMM increase the miss rate to 72.6% and 99.98%, respectively. The fundamental limitation is that MPS does not isolate or regulate HBM bandwidth. Moreover, MPS introduces substantially higher runtime overhead than the GC-based SM partitioning used by Beaver (see §6.3). 
+
+6.2 End-to-End Evaluations 
+
+Sharing with full-stack serving applications. For end-to-end evaluations, we first consider Beaver with LLM infer-ence co-tenants. In both experiments, the vRAN workload comprises 13 memory-heavy cells ( tv-28 ) and runs under a 56:76 SM split. Fig. 10 reports the vRAN processing latency and ML serving throughput under GC-only and Beaver. Un-der GC-only , contention from either ML serving workload pushes the vRAN’s p50 processing latency beyond the 1.5 ms deadline, resulting in deadline miss rates of 93% with Llama-3.3-70B and 84% with Mistral-Small-24B. In contrast, Beaver     
+
+> 10 1232 1500 1700
+> Slot latency (μs)  1710 (93%) 1467 (<0.1%) 1685 (84%) 1426 (<0.1%)
+> 0
+> GC only Beaver GC only Beaver
+> 0600 1200
+> Co-tenant tok/s
+> Llama-3.3-70B Mistral-Small-24B
+> GC only Beaver p50 → p99.9 1500 μs deadline vRAN only voided by missed deadline
+
+Figure 10: Uplink latency and co-tenant serving rate under a full vLLM co-tenant. Parentheses report deadline miss rates. 0 56  88  120          
+
+> vRAN SMs
+> 1000  1500
+> p99.9 latency ( μs)
+> deadline
+> Beaver: 0.0 % miss GC only: 50.7 % miss
+> 0 56  88  120
+> vRAN SMs
+> 0510 15 20 25
+> time (s)
+> 1000  1500
+> p99.9 latency ( μs)  Beaver: 0.0 % miss GC only: 36.5 % miss
+> 0 200  400  600
+> vLLM tok/s
+> 0 200  400  600
+> vLLM tok/s  Madrid TRACTOR
+> vRAN SMs vLLM tok/s, GC only vLLM tok/s, Beaver
+
+Figure 11: Beaver adapts the vRAN SM allocation under the time-varying Madrid (top) and O-RAN TRACTOR (bottom) traces while co-serving Llama3.3-70B using vLLM. 
+
+keeps p99.9 latency at 1.467 and 1.426 ms, respectively, with miss rates below 0.1%, while retaining 74% and 73% of the co-tenant’s unthrottled serving throughput. 
+
+Beaver under dynamic vRAN workloads. Next, we eval-uate whether Beaver can preserve the vRAN deadline under time-varying workloads and reclaim unused GPU capacity for a live vLLM co-tenant serving Llama3.3-70B. We replay two public traces that capture complementary sources of vari-ation. The Madrid dataset records millisecond-granularity traffic from a commercial base station [6]. We select the sin-gle base station trace and map its traffic intensity to vRAN demand, and replicate the resulting workload across 16 cells. The O-RAN TRACTOR dataset records the time-varying MCS observed by four user devices [9]. Assuming full PRB utiliza-tion, we replicate each device’s MCS trace across four cells, 0 1 2 3measured p99.9 (ms) 0123predicted p99.9 (ms)       
+
+> ±5% band median |err.| 2.4%
+> 17 pts > 3 ms
+> 050 100 share (%)
+> 610 14 18 22 26
+> cell count 123measured p99.9 (ms) 00.5 1share of cell sets  1.5 ms
+> (a) Latency prediction (b) SM sizing (c) Deadline safety
+> (a) cell set × SM split (b) minimum SM split 1 tier above min. 2 tiers above min. (c) GC only Beaver
+
+Figure 12: Beaver’s latency model and workload-aware SM sizer: (a) Predicted vs. measured p99.9 latency, (b) Selected SM allocation vs. measured minimum, and (c) p99.9 latency under an FP8 GEMM co-tenant. 
+
+yielding a 16-cell workload in which temporal variation is driven by the measured MCS changes. Fig. 11(a) shows the rapidly varying vRAN workload based on the Madrid trace, where the SM allocation determined by Beaver adapts accordingly throughout the replay. The top panel shows the vRAN’s SM allocation and the result-ing vLLM throughput, while the bottom panel compares the vRAN’s p99.9 latency under GC only and Beaver. Fig. 11(b) reveals a steadier variation under the TRACTOR workload, making the resource tradeoff between the tenants more clear: allocating more SMs to the vRAN in response to increasing vRAN workloads reduces vLLM throughput, whereas a de-crease in vRAN workload releases SMs to the co-tenant and allows its throughput to recover. Across both 30-second trace replays, Beaver incurs no deadline misses, whereas GC only 
+
+misses the deadline for 37%–51% of the slots. These results show that Beaver adapts at slot granularity to time-varying vRAN workloads and allows the vLLM co-tenant to exploit idle capacity without violating vRAN’s deadline. 
+
+6.3 Ablation Studies 
+
+Processing latency model and SM sizer. The coefficients of Beaver’s latency model in (2), {b𝜏 0 (𝛉 ), b𝜏 1 (𝛉 ), b𝜏 2 (𝛉 )} , are fitted using only vRAN workloads with homogeneous cells (see §5). To evaluate how well the model generalizes compo-sitionally, we construct vRAN workloads with 4,000 hetero-geneous configurations by randomly sampling the cell count, the test vector of each cell, and the SM allocation. Fig. 12(a) compares the predicted and measured p99.9 processing la-tency. Beaver achieves a median relative prediction error of only 2.4%, with a 95th percentile error of 9.2%. Fig. 12(b) compares the SM allocation selected by Beaver with the ground truth minimum, obtained by exhaustively searching through the supported SM allocations. It can be seen that Beaver’s SM sizer never underprovisions: across all cases, it selects either the exact minimum or budgets one or two allocation tiers above it (eight SMs per tier). Finally, Fig. 12(c) evaluates deadline safety across 100 randomly sampled het-erogeneous vRAN workloads at the selected SM allocation                 
+
+> 11 1,184 2,000 3,000 01,213 2,000 2,500 01,367 2,000 3,000
+> Compute Memory GEMM LLM serving
+> 0
+> FMA burn flooder CUTLASS vLLM
+> A100 (Ampere) 7 cells · 36/72 SM Llama3-8B: 728→566 tok/s (-22%)
+> GB10 (Blackwell) 7 cells · 24/24 SM Llama3-8B: 305→237 tok/s (-22%)
+> GH200 (Hopper) 16 cells · 64/68 SM Llama3-8B: 613→522 tok/s (-15%)
+> Uplink p99.9 tail latency (μs)
+> GC only Beaver Shared 1500 μs deadline vRAN only
+
+Figure 13: Beaver on A100, GB10 and GH200: p99.9 process-ing latency and deadline miss rates across four co-tenants. 
+
+with an FP8 GEMM co-tenant. With GC only , 62 of the 100 vRAN workloads exceed the 1.5 ms deadline while Beaver keeps all workloads within the deadline. These results show that Beaver’s latency model fitted only on homogeneous workloads can accurately size unseen heterogeneous work-loads while preserving tail latency safety under co-tenancy. 
+
+Slot-granular SM repartitioning. We also measure the latency of changing the SM allocation across 500 repeated trials. Using a pool of pre-created GC pairs, Beaver switches to a new SM partition in only 1.79 μs, less than 0.5% of a 500 μs slot. In contrast, reconfiguring the SM allocation takes on average 564 ms with MPS [21] and 1.06 s with MIG [20], exceeding the slot duration by more than 1,000 × (Fig. 15). 
+
+Beaver across GPU architectures. We run Beaver on an A100 GPU ( srv2 ), a GB10 Superchip (DGX Spark) and a Grace Hopper Superchip (GH200). The vRAN workload comprises seven cells on A100 and GB10 and 16 cells on GH200. We al-locate 36 of the A100’s 108 SMs, 24 of the GB10’s 48 SMs, and 64 of the GH200’s 132 SMs to the vRAN, leaving the remain-ing SMs to the co-tenant. Fig. 13 shows the vRAN latency when sharing the GPU with the two single-axis stressors, a GEMM kernel, and a vLLM serving Llama-3-8B-Instruct [14]. Under GC-only , every co-tenant workload pushes the p99.9 processing latency beyond the deadline. Beaver keeps the vRAN’s p99.9 latency within the deadline and reduces the deadline miss rates to below 0.1%, while retaining 78%–85% of the unthrottled vLLM serving throughput on all platforms. 
+
+Beaver for downlink processing. We also evaluate whether Beaver’s protection mechanisms carry over for downlink processing with a tighter deadline of 375 μs. Fig. 14 shows that for vRAN downlink workload, GC only suffices against the compute-intensive FMA burner, keeping p99.9 latency within deadline. However, the HBM flooder, CUTLASS GEMM, 358 375 400             
+
+> Downlink slot latency (μs)
+> 359 360 380 365 393 361 402 365 (0%) (0%) (53%) (0%) (46%) (0%) (77%) (0%)
+> Compute Memory GEMM Combined 0
+> FMA burn flooder CUTLASS GEMM + flooder GC only Beaver p50 → p99.9 375 μs deadline vRAN only
+
+Figure 14: Beaver for vRAN downlink workload with differ-ent compute- and memory-intensive co-tenants. 
+
+and their combination increase p99.9 latency above the pro-cessing deadline, producing deadline miss rates of 53%, 46%, and 77%, respectively. With HBM guard enabled, Beaver keeps p99.9 latency below the deadline in every case and eliminates all observed deadline misses, confirming that it generalizes effectively to downlink processing. 
+
+7 Related Work 
+
+Baseband processing and virtualization. Sora [35] demon-strated high-performance wireless processing on general-purpose CPUs, and BigStation [41], Agora [5, 26], and Hy-dra [8] scaled software MIMO processing within and across servers. Savannah [28, 29] and Nexus [27] explore heteroge-neous CPU–eASIC processing, while Intel FlexRAN, srsRAN, and OpenAirInterface demonstrate vRAN on commodity in-frastructure [11, 25, 33]. These systems make software L1 feasible and scalable, but do not protect a latency-critical GPU L1 pipeline from concurrent ML workloads. 
+
+GPU-accelerated L1. Prior work accelerates individual L1 operations, particularly LDPC decoding, on GPUs [13, 36, 46]. DecodeX [30] benchmarks LDPC decoding across CPU, GPU, and ASIC platforms, exposing the effects of parallelism, work-load granularity, data movement, and offload. NVIDIA Aerial instead implements complete, production-grade PDSCH and PUSCH pipelines with CUDA kernels [23]. 
+
+GPU sharing systems (see Table 1). Gandiva, AntMan, and HiveD schedule or resize training jobs [39, 40, 45]; Salus, Orion, and TGS share GPUs at iteration, operator, or kernel granularity [34, 38, 44]. REEF provides μs-scale preemption, but requires a custom AMD ROCm driver and is incompat-ible with our CUDA pipeline [10]. MIG isolates SMs and memory slices, whereas MPS and CUDA green contexts iso-late compute but leave HBM shared [16, 20, 21]. For vRAN systems, YinYangRAN shares compute through MPS, while CAORA and RAN-LLM use MIG to colocate vRAN with AI or LLM workloads [15, 32, 43] (Fig. 4(d)). 
+
+8 Conclusion 
+
+We present Beaver, a GPU sharing system that enables elas-tic co-tenancy between ML and latency-critical vRAN work-loads. Beaver combines a workload-aware SM sizer for het-erogeneous multi-cell workloads, slot-granular SM reparti-tioning across pre-created GC pairs, and a cooperative HBM 
+
+> 12
+
+bandwidth guard injected into compiled co-tenant kernels. Evaluated using NVIDIA Aerial, Beaver keeps the vRAN’s p99.9 processing latency within its deadline while co-located with full-stack vLLM serving, and extends effectively to the downlink pipeline and other GPUs. Future directions include coordinating multiple ML co-tenants, extending resource management across multi-GPU deployments, and exploring hardware support for finer-grained HBM bandwidth control. 
+
+Acknowledgments 
+
+This work was supported in part by NSF under grants CNS-2112562, CNS-2211944, ECCS-2434131, CNS-2443137, CNS-2450567, and OAC-2503010, NVIDIA Academic Grants, and the NVIDIA/Supermicro Grace Enablement Seeding Program. This work was also supported in part by the Center for Ubiq-uitous Connectivity (CUbiC), sponsored by Semiconductor Research Corporation (SRC) and Defense Advanced Research Projects Agency (DARPA) under the JUMP 2.0 program. 
+
+References 
+
+[1] 3GPP. 2023. NR; Physical channels and modulation, TS 38.211. 3rd Generation Partnership Project. [2] 3GPP. 2023. NR; Physical layer procedures for data, TS 38.214. 3rd Generation Partnership Project. [3] Alfred V. Aho, Monica S. Lam, Ravi Sethi, and Jeffrey D. Ullman. 2006. 
+
+Compilers: Principles, Techniques, and Tools (2 ed.). Addison-Wesley, Boston, MA. [4] AI-RAN Alliance. 2024. AI-RAN Alliance Vision and Mission White Paper . White Paper. AI-RAN Alliance. https://ai-ran.org/documents/ AI-RAN-Alliance-Whitepaper.pdf [5] Jian Ding, Rahman Doost-Mohammady, Anuj Kalia, and Lin Zhong. 2020. Agora: Real-time massive MIMO baseband processing in soft-ware. In Proc. ACM CoNEXT’20 .[6] Pablo Fernández Pérez, Claudio Fiandrino, and Joerg Widmer. 2023. Characterizing and Modeling Mobile Networks User Traffic at Mil-lisecond Level. In Proc. ACM WiNTECH’23 .[7] Guin Gilman, Samuel S. Ogden, Tian Guo, and Robert J. Walls. 2021. Demystifying the Placement Policies of the NVIDIA GPU Thread Block Scheduler for Concurrent Kernels. ACM SIGMETRICS Perform. Eval. Rev. 48, 3 (2021), 81–88. [8] Junzhi Gong, Anuj Kalia, and Minlan Yu. 2023. Scalable distributed massive MIMO baseband processing. In Proc. USENIX NSDI’23 .[9] Joshua Groen, Mauro Belgiovine, Utku Demir, Brian Kim, and Kaushik Chowdhury. 2024. TRACTOR: Traffic Analysis and Classification Tool for Open RAN. In IEEE ICC’24 .[10] Mingcong Han, Hanze Zhang, Rong Chen, and Haibo Chen. 2022. Microsecond-scale Preemption for Concurrent GPU-accelerated DNN Inferences. In Proc. USENIX OSDI’22 .[11] Intel Corporation. 2019. FlexRAN LTE and 5G NR FEC software development kit modules. https://www.intel.com/content/www/us/ en/developer/articles/technical/flexran-lte-and-5g-nr-fec-software-development-kit-modules.html. [12] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Sto-ica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proc. ACM SOSP’23 .[13] Jonathan Ling and Paul Cautereels. 2021. Fast LDPC GPU Decoder for Cloud RAN. IEEE Embed. Syst. Lett. 13, 4 (2021), 170–173. [14] Llama Team, AI @ Meta. 2024. The Llama 3 Herd of Models. arXiv preprint arXiv:2407.21783 (2024). [15] Leonardo Lo Schiavo, Jose A. Ayala-Romero, Andres Garcia-Saavedra, Marco Fiore, and Xavier Costa-Perez. 2024. YinYangRAN: Resource Multiplexing in GPU-Accelerated Virtualized RANs. In Proc. IEEE INFOCOM’24 .[16] NVIDIA. 2024. CUDA Driver API: Green Contexts. https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA_ _GREEN__CONTEXTS.html. Accessed 2026-09-02. [17] NVIDIA. 2024. CUTLASS: CUDA Templates for Linear Algebra Sub-routines. https://github.com/NVIDIA/cutlass. Accessed 2026-09-02. [18] NVIDIA. 2024. NVIDIA AI Aerial Launches to Optimize Wireless Networks, Deliver New Generative AI Experiences on One Plat-form. NVIDIA Blog (https://blogs.nvidia.com/blog/ai-aerial-wireless-networks/). Accessed 2026-09-02. [19] NVIDIA. 2024. NVIDIA H200 GPU. https://www.nvidia.com/en-us/data-center/h200/. Accessed 2026-09-02. [20] NVIDIA. 2024. NVIDIA Multi-Instance GPU (MIG) User Guide. https: //docs.nvidia.com/datacenter/tesla/mig-user-guide/. Accessed 2026-09-02. [21] NVIDIA. 2024. NVIDIA Multi-Process Service (MPS). https://docs. nvidia.com/deploy/mps/. Accessed 2026-09-02. [22] NVIDIA. 2024. NVIDIA Nsight Systems. https://developer.nvidia.com/ nsight-systems. Accessed 2026-09-02. [23] NVIDIA. 2026. Aerial CUDA-Accelerated RAN. https://docs.nvidia. com/aerial/cuda-accelerated-ran/latest/. Accessed 2026-08-27. [24] NVIDIA. 2026. CUDA Programming Guide, Section 3.2.2.2 (Hardware Multithreading). https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html. Version 13.3, accessed 2026-07-08. [25] OpenAirInterface. 2023. openairinterface5G. https://gitlab.eurecom. fr/oai/openairinterface5g/blob/develop/doc/FEATURE_SET.md. Ac-cessed 2026-09-02. [26] Zhenzhou Qi, Zhihui Gao, Chung-Hsuan Tung, and Tingjun Chen. 2023. Programmable millimeter-wave MIMO radios with real-time baseband processing. In Proc. ACM WiNTECH’23 .[27] Zhenzhou Qi, Chung-Hsuan Tung, Zhihui Gao, and Tingjun Chen. 2026. Nexus: Efficient and Scalable Multi-Cell mmWave Baseband Processing with Heterogeneous Compute. In Proc. ACM MobiCom’26 .[28] Zhenzhou Qi, Chung-Hsuan Tung, Anuj Kalia, and Tingjun Chen. 2024. Savannah: A Real-time Programmable mmWave Baseband Processing Framework. In Proceedings of the 30th Annual International Conference on Mobile Computing and Networking .[29] Zhenzhou Qi, Chung-Hsuan Tung, Anuj Kalia, and Tingjun Chen. 2024. Savannah: Efficient mmWave baseband processing with minimal and heterogeneous resources. In Proc. ACM MobiCom’24 .[30] Zhenzhou Qi, Yuncheng Yao, Yiming Li, Chung-Hsuan Tung, Junyao Zheng, Danyang Zhuo, and Tingjun Chen. 2026. DecodeX: Exploring and Benchmarking of LDPC Decoding Across CPU, GPU, and ASIC Platforms. In Proc. ACM HotMobile’26 .[31] Jay Shah, Ganesh Bikshandi, Ying Zhang, Vijay Thakkar, Pradeep Ramani, and Tri Dao. 2024. FlashAttention-3: Fast and Accurate At-tention with Asynchrony and Low-Precision. In Proc. NeurIPS’24 .[32] Syed Danial Ali Shah, Maryam Hafeez, Abdelaziz Salama, and Syed Ali Raza Zaidi. 2025. Proactive AI-and-RAN Workload Orchestration in O-RAN Architectures for 6G Networks. IEEE Open J. Commun. Soc. 
+
+(2025). [33] srsRAN Project. 2023. srsRAN Project Documentation - Features and Roadmap. https://docs.srsran.com/projects/project/en/latest/general/ source/2_features_and_roadmap.html. Accessed: 2026-09-02. [34] Foteini Strati, Xianzhe Ma, and Ana Klimovic. 2024. Orion: Interference-aware, Fine-grained GPU Sharing for ML Applications.                               
+
+> 13 In Proc. ACM EuroSys’24 .[35] Kun Tan, He Liu, Jiansong Zhang, Yongguang Zhang, Ji Fang, and Geoffrey M Voelker. 2011. Sora: high-performance software radio using general-purpose multi-core processors. Commun. ACM 54, 1 (2011), 99–107. [36] Chance Tarver, Matthew Tonnemacher, Hao Chen, Jianzhong Zhang, and Joseph R. Cavallaro. 2021. GPU-Based, LDPC Decoding for 5G and Beyond. IEEE Open J. Circuits Syst. 2 (2021), 278–290. [37] Philippe Tillet, H. T. Kung, and David Cox. 2019. Triton: An Intermedi-ate Language and Compiler for Tiled Neural Network Computations. In Proc. ACM SIGPLAN MAPL’19 .[38] Bingyang Wu, Zili Zhang, Zhihao Bai, Xuanzhe Liu, and Xin Jin. 2023. Transparent GPU Sharing in Container Clouds for Deep Learning Workloads. In Proc. USENIX NSDI’23 .[39] Wencong Xiao, Romil Bhardwaj, Ramachandran Ramjee, Muthian Sivathanu, Nipun Kwatra, Zhenhua Han, Pratyush Patel, Xuan Peng, Hanyu Zhao, Quanlu Zhang, Fan Yang, and Lidong Zhou. 2018. Gan-diva: Introspective Cluster Scheduling for Deep Learning. In Proc. USENIX OSDI’18 .[40] Wencong Xiao, Shiru Ren, Yong Li, Yang Zhang, Pengyang Hou, Zhi Li, Yihui Feng, Wei Lin, and Yangqing Jia. 2020. AntMan: Dynamic Scaling on GPU Clusters for Deep Learning. In Proc. USENIX OSDI’20 .[41] Qing Yang, Xiaoxiao Li, Hongyi Yao, Ji Fang, Kun Tan, Wenjun Hu, Jiansong Zhang, and Yongguang Zhang. 2013. BigStation: Enabling scalable real-time signal processing in large MU-MIMO systems. ACM SIGCOMM Comput. Commun. Rev. 43, 4 (2013), 399–410. [42] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, and Luis Ceze. 2025. FlashInfer: Efficient and Cus-tomizable Attention Engine for LLM Inference Serving. In Proc. ML-Sys’25 .[43] Hariz Yet, Thanh Tam Nguyen, Mao V. Ngo, Yi Shen Lim, Wei Lin, Jihong Park, Binbin Chen, and Tony Q. S. Quek. 2026. SLA-Aware Distributed LLM Inference Across Device-RAN-Cloud. In Proc. IEEE INFOCOM WKSHPS: 6G AI-RAN’26 .[44] Peifeng Yu and Mosharaf Chowdhury. 2020. Fine-Grained GPU Shar-ing Primitives for Deep Learning Applications. In Proc. MLSys’20 .[45] Hanyu Zhao, Zhenhua Han, Zhi Yang, Quanlu Zhang, Fan Yang, Li-dong Zhou, Mao Yang, Francis C.M. Lau, Yuqi Wang, Yifan Xiong, and Bin Wang. 2020. HiveD: Sharing a GPU Cluster for Deep Learning with Guarantees. In Proc. USENIX OSDI’20 .[46] Junyao Zheng, Chung-Hsuan Tung, Yuncheng Yao, Nishant Mehrotra, Sandesh Mattu, Zhenzhou Qi, Danyang Zhuo, Robert Calderbank, and Tingjun Chen. 2026. Real-Time and Scalable Zak-OTFS Receiver Processing on GPUs. arXiv preprint arXiv:2604.02266 (2026).
+
+A Aerial Uplink Test Vector Selection 
+
+What is a test vector? An Aerial test vector is a repro-ducible input for one execution of the radio pipeline. Each uplink vector represents one 0.5-ms slot and stores the re-ceived frequency-domain samples, the radio configuration— including its resource blocks, symbols, modulation and cod-ing scheme (MCS), code rate, MIMO layers, and reference-signal configuration—and reference outputs for checking the decoded result. The benchmark replays this slot and repli-cates it across cells. A test vector therefore defines the work for one cell in one slot; it is not a multi-slot traffic trace. 
+
+Which vectors are available? Aerial provides uplink vec-tors with different bandwidth allocations, antenna configura-tions, user and layer counts, symbol allocations, and MCS val-ues. We choose the four-receive-antenna, four-layer family because it is the only supplied family that covers every MCS value, 0–27, while also using the maximum carrier bandwidth and maximum single-user layer count. This family contains 35 vectors on a 100-MHz carrier with 273 resource blocks and one user. Each vector captures one complete 0.5-ms uplink slot. With 30-kHz subcarrier spacing and a normal cyclic prefix, one slot has 14 OFDM symbols, and these vectors assign all 14 to PUSCH. The 16-symbol configuration instead counts uplink symbols across a DDDSU pattern: 14 from the full uplink slot and two from the special slot. Because our benchmark replays only the full uplink slot, each test vector contains 14 symbols. Table 4 lists the family in MCS order, one row per MCS. The first group of columns describes each radio configuration. The remaining columns report its measured compute and HBM demand; darker shading means greater demand within that column. We profile every vector using the same 20-cell run and a fixed 72-SM uplink partition. The two highlighted rows, vectors 21 and 28, are the compute-heavy and memory-heavy vectors used in our evaluation. 
+
+Why these two vectors? We use two vectors because com-pute and HBM have different worst cases. Compute demand is the median GPU execution time per slot divided by 20 cells. By this measure, vector 21 is the suite’s most compute-intensive vector at 113.5 μs per cell. Its MCS-20, 256-QAM configuration has a relatively low code rate and creates sub-stantial LDPC parity work. Vector 28 represents the suite’s most memory-intensive MCS-27 configuration. It has the largest transport block and, in our profiling, moves 17.2 MB through HBM per cell, sus-tains 217 GB/s across the slot, and reaches 660 GB/s in its busiest kernel. We therefore use vector 21 for head-of-line blocking, com-pute contention, and SM-partitioning experiments, where the radio’s compute demand should be largest. We use vec-tor 28 for HBM-contention and bandwidth-protection exper-iments, where the radio’s memory demand should be largest. Each mechanism is tested with the vector that places the most pressure on the resource it controls. 
+
+B Aerial Downlink Test Vector Selection 
+
+For the downlink evaluation, we use Aerial PDSCH test vec-tor TVnr_3942 , shortened to 3942 in the main text. Unlike the uplink suite, whose compute- and memory-heavy configura-tions occur at different MCS values, the available downlink 
+
+> 14
+
+Table 4: Radio configuration and measured GPU demand of the uplink test-vector suite, one row per MCS (3GPP MCS Table 2 [2]). Darker shading marks higher demand within a measured column; the two highlighted rows are the vectors the evaluation uses. 
+
+Measured GPU demand 
+
+Test Vector ID ( tv-ID ) MCS Mod. Code rate Code Blocks Rate (Gbps) Compute (𝜇 s/cell) SM (% peak) HBM traffic (MB/cell) Sustained HBM (GB/s) Peak HBM (GB/s) 1 0 QPSK 0.117 11 0.080 62.4 46 8.0 128 336 2 1 0.188 17 0.129 67.1 52 8.1 121 397 3 2 0.301 13 0.205 51.0 52 8.1 159 353 4 3 0.438 18 0.295 49.3 52 8.3 167 725 5 4 0.588 24 0.402 48.3 53 8.5 176 779 6 5 16-QAM 0.369 30 0.500 77.8 55 9.5 122 493 7 6 0.424 35 0.574 71.1 63 9.7 136 509 8 7 0.479 39 0.656 72.8 61 9.8 134 527 9 8 0.540 44 0.738 74.4 59 10.0 135 532 10 9 0.602 49 0.819 69.0 63 10.2 149 566 11 10 0.643 52 0.869 71.3 60 10.4 146 575 12 11 64-QAM 0.455 56 0.934 93.5 65 11.4 122 456 13 12 0.505 62 1.033 95.6 64 11.7 122 462 14 13 0.554 69 1.147 93.4 65 12.0 128 498 15 14 0.602 74 1.246 93.4 63 12.2 130 503 16 15 0.650 80 1.344 93.8 63 12.6 134 519 17 16 0.702 86 1.442 88.3 66 12.9 146 578 18 17 0.754 92 1.541 86.7 66 13.2 152 587 19 18 0.803 98 1.639 83.1 65 13.5 162 600 20 19 0.853 104 1.737 79.1 64 13.8 175 613 
+
+21 (compute-heavy ) 20 256-QAM 0.667 107 1.803 113.5 68 14.7 130 489 
+
+22 21 0.694 113 1.902 111.0 67 15.1 136 538 23 22 0.736 119 1.999 107.3 67 15.4 143 543 24 23 0.778 125 2.098 106.4 67 15.8 148 558 25 24 0.821 133 2.230 100.9 66 16.1 160 562 26 25 0.864 141 2.360 98.9 67 16.6 168 587 27 26 0.895 144 2.426 94.1 66 16.7 178 591 
+
+28 (memory-heavy ) 27 0.926 152 2.556 79.3 64 17.2 217 660 
+
+Code blocks denotes the LDPC code-block count per cell and Rate denotes the decoded transport-block throughput, both per cell. Compute is the median GPU execution time per slot divided by the number of cells. SM is Nsight Compute’s SM-throughput percentage, time-averaged across the slot’s kernels by execution time. HBM traffic is the data read from and written to HBM by one cell in one slot, Sustained HBM that volume divided by the slot’s GPU execution time, and Peak HBM the highest bandwidth reached by any kernel in the slot. All rows are measured uplink-solo at 20 cells on the same 72-SM partition. Antenna count (4), user count (1) and transport-block count (1) are constant and omitted; every vector spans 273 PRBs. In Aerial’s own numbering, vector 21 is 8251 and vector 28 is 8214 .
+
+vectors have similar HBM bandwidth demand. We there-fore select the highest-MCS vector to represent a demanding downlink configuration. Vector 3942 represents a 0.5 ms slot on a 100 MHz FR1 car-rier with 273 physical resource blocks and 30 kHz subcarrier spacing. It contains one full-band UE, four transmit and four receive antennas, four MIMO layers, and an MCS-27, 256-QAM grant. The evaluation replicates this vector across 52 cells and assigns 72 of the H200’s 132 SMs to the downlink and the remaining 60 SMs to the co-tenant. 
+
+C SM Repartitioning Latency 
+
+We evaluate whether each partitioning mechanism can change the SM allocation within a 500 μs radio slot. The comparison 1 μs 10 μs 100 μs 1 ms 10 ms 100 ms 1 s 
+
+> time to change the SM partition (log)
+> Beaver MPS MIG
+> 500 μs slot
+> 1.79 μs 564 ms 1.06 s
+
+Figure 15: Time to change the SM allocation, on a log scale, against the 500 μs slot. 
+
+includes Beaver, MPS, and MIG and measures the complete procedure each mechanism requires before the new alloca-tion can be used. Figure 15 plots the measured repartitioning latency on a logarithmic scale. Beaver switches to a pre-created partition in 1.79 μs, whereas MPS and MIG require 564 ms and 1.06 s,                                    
+
+> 15 012345678910 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27
+> MCS
+> 1310 30 100 300
+> fitted coefficient (μs)  QPSK 16QAM 64QAM 256QAM
+> τ0setup (per slot) τ1SM-insensitive (per cell) τ2SM-parallel (per cell) Figure 16: Fitted coefficients for 28 test vectors, one for each MCS.
+
+respectively. The vertical line marks the duration of one radio slot. Only Beaver operates at the required timescale: its switch consumes less than 0.5% of a slot, while MPS and MIG exceed the slot duration by more than three orders of magnitude. This confirms that pre-materializing the candidate partitions enables Beaver to follow slot-to-slot radio demand without delaying subsequent radio processing. 
+
+D SM Sizing Model Calibration 
+
+This appendix describes how we calibrate the sizing model in §4.1. Instead of profiling the combinatorial space of heteroge-neous cell sets, we measure a structured set of homogeneous workloads, in which every cell uses the same test vector. We then compose the resulting per-vector coefficients to pre-dict slots containing different test vectors. No heterogeneous workload is used for fitting; heterogeneous cell sets are used only to evaluate the model in §6.3. 
+
+Structured homogeneous sweep. For each of the 28 test vectors, we cross six cell counts, 𝐶 ∈ { 6, 10 , 14 , 18 , 22 , 26 },with six vRAN SM budgets, 𝑠 ∈ { 40 , 56 , 72 , 88 , 104 , 120 }. At each combination, all cells use the same test vector, mak-ing the workload homogeneous. This produces 6 × 6 = 36 combinations per test vector and 28 × 36 = 1,008 combina-tions in total. We run each combination for 3,000 consecutive slots, launching one CUDA graph per slot. We discard the first 50 warm-up slots and compute the median and p99.9 latency from the remaining 2,950 slots. The complete sweep therefore executes 3.024 million slots. 
+
+Fit each test vector. For each test vector, least-squares regression fits the three coefficients 𝜏 0, 𝜏 1, and 𝜏 2 from its ho-mogeneous measurements. We fit only combinations whose measured median is at most 2.2 ms. Combinations far beyond the 1.5 ms deadline are already infeasible and cannot affect the selected partition; including them would reduce fitting accuracy near the deadline, where sizing decisions matter. 
+
+Predict heterogeneous slots. At runtime, a slot may con-tain cells using different test vectors. The controller looks up the coefficients fitted for each cell’s test vector, takes the largest per-slot setup term, and sums the two per-cell terms as described in Equation (2). Thus, the structured ho-mogeneous combinations provide the coefficients needed to predict previously unseen heterogeneous cell sets with-out profiling those combinations directly. §6.3 evaluates this composition on held-out heterogeneous workloads. 
+
+Safety reserve. The composed model predicts median la-tency, whereas partition sizing must protect the p99.9 tail. Our calibration uses a fixed 24.6 μs median-to-p99.9 offset and a fitting-error allowance of 60–190 μs, depending on the test vector. The resulting reserve 𝑅 p99.9 is therefore 85–215 μsfor a vRAN-only slot. A heterogeneous slot uses the largest reserve among its test vectors and adds it once to the com-posed latency estimate. 
+
+Fitted coefficients. Figure 16 shows the fit used for each of the 28 test vectors. The per-slot setup term 𝜏 0 is highest at QPSK on average and reaches 244 μs there. The SM-parallel term 𝜏 2 increases from a median of 21 μs per cell for QPSK to 49 μs for 256-QAM, while the SM-insensitive term 𝜏 1 remains below 11 μs per cell. Across all test vectors, the median fitting error is 31 μs, and the maximum is 76 μs, or 5% of the deadline.

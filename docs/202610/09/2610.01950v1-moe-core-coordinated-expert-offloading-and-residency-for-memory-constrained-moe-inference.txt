@@ -1,0 +1,642 @@
+Title: MoE-CORE: Coordinated Expert Offloading and Residency for Memory-Constrained MoE Inference
+
+URL Source: https://arxiv.org/pdf/2610.01950v1
+
+Published Time: Fri, 02 Oct 2026 02:21:23 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# MoE-CORE: Coordinated Expert Offloading and Residency for Memory-Constrained MoE Inference 
+
+Ke Yang 3*, Yongji Gao 1,2 *, Xushi Li 1,2 †, Kui Luo 1, Sicheng Zhang 1,2 , Tianming Zhou 1,2 ,Keyi Liu 1, Shufang Lu 1, Aoxuan Chen 1, Jie Meng 1, Jingchun Gao 1,2 , Dan Li 1,2 , Xinkai You 1,
+
+Dan Li 1, Zhixiang Xia 1,2 , Yan Shi 4, Yang Liu 1, Yanjia Zeng 1, Liangjun Feng 1,2 
+
+> 1
+
+Huawei Technologies Co. Ltd 
+
+> 2
+
+Huawei Ascend Computing Technology Development 
+
+> 3
+
+University of Chinese Academy of Sciences 
+
+> 4
+
+Shanghai Jiao Tong University 
+
+yangke@iie.ac.cn keyi.liu@h-partners.com amy_sy@sjtu.edu.cn {gaoyongji2, lixushi, luokui, zhangsicheng5, zhoutianming2, shufang.lu, chenaoxuan1, mengjie48, gaojingchun1, lidan276, youxinkai, xiazhixiang1, yang.liu8, zengyanjia, fengliangjun}@huawei.com 
+
+Abstract 
+
+Sparse expert activation reduces MoE models’ computation, yet expert weights can exceed limited device memory. Offloading makes in-ference feasible on a compact AI appliance but exposes host-to-device transfers to the in-ference path. We present MoE-CORE, a sys-tem that coordinates expert offloading and resi-dency for memory-constrained MoE inference. It stages complete expert layers in alternating buffers during prefill. During decode, it com-bines nonuniform layer-wise cache capacity, domain-informed initialization, routing-history-aware replacement, and cross-layer prefetch-ing. The main configuration executes router-selected experts exactly; an optional score-based substitution path handles eligible low-score misses. The main comparison uses 1K-and 128-token output caps for MoE-CORE and vLLM Prefetch, respectively. Across five work-loads per model, MoE-CORE records a mean time per output token (TPOT) of 38.0–44.8 ms versus 1268.9–1269.1 ms for the evaluated vLLM Prefetch configuration on DeepSeek-V4-Flash-W4A8; the corresponding values on GLM-5.2-W4A8C8 are 206.6–220.5 and 5941.5–5941.8 ms. Under an 84-GB NPU-memory cap, the best measured DeepSeek GSM8K configuration achieves a TPOT of 21.5 ms with approximate expert substitution and multi-token prediction (MTP) at depth 2. These results support coordinated expert residency and transfer scheduling under a device-memory constraint. The code is here. 
+
+> *The two authors contributed equally to this work.
+> †Corresponding author
+
+1 Introduction 
+
+Mixture-of-Experts (MoE) architectures (Shazeer et al., 2017) have become an important approach to scaling the capacity of large language mod-els (LLMs) without proportionally increasing per-token computation. By routing each token to acti-vate only a small subset of experts, MoE models offer a favorable computation-to-capacity ratio and are therefore attractive for resource-constrained lo-cal and edge inference (Yi et al., 2025). Sparse activation, however, reduces computation rather than the amount of model weights that must remain accessible. Recent model families make this dis-tinction increasingly consequential: DeepSeek-V4-Flash and DeepSeek-V4-Pro (DeepSeek-AI, 2026) contain 284B and 1.6T total parameters while acti-vating 13B and 49B parameters per token, respec-tively; GLM-5.2 (GLM-5 Team, 2026) contains 744B total parameters with 40B active; and Kimi K3 scales to 2.8T total parameters with 104B active (Kimi-Team, 2026). These models also increas-ingly target Agent workloads such as long-horizon coding, tool use, and knowledge work. Deploying them as local Agent services therefore requires at-tention not only to sparse computation, but also to the storage capacity and memory cost of the full expert set. This memory burden is particularly acute on compact, single-node AI appliances. These appli-ances integrate a host processor and memory with one or a small number of GPUs or NPUs, provid-ing enterprises with a practical on-premises plat-form for deploying AI services close to private data while retaining local control over the serving en-1arXiv:2610.01950v1 [cs.DC] 1 Oct 2026 vironment. However, the device-memory capacity of these systems is under increasing pressure from two directions: Growing MoE parameter counts increase the volume of weights, while long-context Agent tasks expand the KV cache with conversa-tion histories, retrieved documents, tool outputs, and intermediate task state. Thus, these demands can prevent the complete set of model weights from residing in device memory, even though an AI ap-pliance provides substantially more resources than a mobile or embedded edge device. Deploying LLMs on such systems therefore requires placing some of the model weights in host memory. Expert offloading makes such deployments feasi-ble by keeping some routed expert weights in host memory and transferring them to the device mem-ory (GPUs or NPUs) when needed. Because expert weights account for a large fraction of an MoE model’s parameters while each token activates only a small subset of experts, retaining inactive ex-perts in host memory can substantially increase the model size supported by a fixed device-memory budget. This technique reduces device-memory demand, but loading a selected expert after rout-ing places host-to-device (H2D) communication on the inference critical path. Existing techniques for reducing this cost can be grouped into four categories. (i) Activation-locality methods use routing traces or semantic history to identify ex-perts that are likely to be reused and retain them in a device cache, as in MoE-Infinity and FineMoE (Xue et al., 2025; Yu et al., 2025). (ii) Auxiliary-predictor methods train a separate lightweight model to predict expert activations before the origi-nal router is reached. SiDA-MoE (Du et al., 2024) uses an offline-trained hash predictor, while Pro-MoE trains predictors for individual layers (Song et al., 2025). (iii) Cross-layer and phase-aware methods obtain expert information from later gates or reorganize transfers according to layer and in-ference phase. Fate (Fang et al., 2026b) and Adap-MoE (Zhong et al., 2024a) use cross-layer gat-ing with layer-aware expert management, whereas DuoServe-MoE (Zhang et al., 2026) separates pre-fill and decode transfer pipelines. (iv) Expert-substitution methods , including SMoE and Bud-dyMoE (Zhu et al., 2026; Wang et al., 2025a), avoid selected transfers in eligible cases by executing an already resident alternative expert. Together, these systems show that offloading latency can be ad-dressed through caching, prediction, scheduling, and fallback mechanisms. However, these methods have been evaluated on short-context workloads, leaving the interaction between long contexts, ex-pert residency, and offloading latency insufficiently characterized. For memory-constrained MoE inference on a compact AI appliance, however, these mechanisms must operate as parts of a coordinated runtime rather than as isolated policies. This requirement raises three design questions: 
+
+Does equal per-layer cache allocation yield comparable expert hit rates across MoE layers? 
+
+Do expert popularity rankings differ across domain-specific workloads? 
+
+Are routing scores near the Top-k boundary close enough to motivate a resident alternative for an eligible low-score cache miss? 
+
+To address these questions, we present MoE-CORE, a coordinated expert-offloading system for memory-constrained MoE inference on compact, single-node AI appliances. MoE-CORE assigns prefill and decode to differ-ent expert-offloading paths and reserves a separate device-memory region for each phase. For prefills, it stages the complete routed-expert weights of two consecutive MoE layers in two alternating buffers, overlapping the transfer of the next layer with com-putation of the current layer. Decode is the primary optimization target because it activates a sparse ex-pert set at each iteration, yet an uncovered expert transfer can directly delay token generation. During decoding, MoE-CORE first distributes the expert cache budget across all MoE layers according to a dynamic layer-wise cache alloca-tor. Given a workload-domain hint from the serv-ing application, an offline profile initializes each layer’s cache with the corresponding hot experts. A routing-history-aware online cache then adapts this initial placement to the routing behavior ob-served during the current session. Because ex-pert residency alone cannot eliminate all misses, a cross-layer prefetcher evaluates the next layer’s router early and overlaps predicted expert transfers with useful computation. For residual misses, high-score experts remain on the exact loading path, whereas only eligible low-score experts may use resident substitutes selected by routing-score prox-imity. Relative to Load on Demand (LoD), which allo-cates static per-layer expert caches only for decode and synchronously loads non-resident selected ex-perts, MoE-CORE achieves mean time per out-put token (TPOT) speedups of up to 1.75 × on 2DeepSeek-V4-Flash-W4A8 and 1.15 × on GLM-5.2-W4A8C8. MoE-CORE also records lower TPOT than the evaluated vLLM Prefetch configu-rations. Its best measured configuration achieves 21.5 ms TPOT with multi-token prediction (MTP) at depth 2. Our contributions are as follows: • We characterize layer-wise differences in cache coverage and workload-dependent ex-pert rankings under a fixed cache configura-tion, and examine routing scores near the Top-
+
+k activation boundary. • We design phase-specific expert-offloading paths for prefill and decode within a shared device-memory budget. • We coordinate layer-aware cache allocation, domain-informed initialization, online cache adaptation, and cross-layer prefetching; op-tional score-based substitution handles eli-gible low-score residual misses while high-score misses retain exact loading. • We demonstrate MoE-CORE’s effectiveness on five workloads with DeepSeek-V4-Flash-W4A8 and GLM-5.2-W4A8C8 on their re-spective AI-appliance platforms. It records lower TPOT than both LoD and the eval-uated vLLM Prefetch configurations, while ablations isolate the effects of its cache-management and prefetching mechanisms. 
+
+2 Background and Motivation 
+
+2.1 MoE Inference 
+
+A Mixture-of-Experts (MoE) model replaces the dense feed-forward network in selected Trans-former layers with multiple expert feed-forward networks (FFNs) and a router. For token t in MoE layer l, the router scores all Nl routed experts from the hidden state hl,t and selects the top-kl:
+
+rl,t = Rl(hl,t ), Sl,t = TopK( rl,t , k l) , (1) where Rl is the router, rl,t contains the expert scores, and Sl,t is the set of selected expert indices. The routed MoE output is 
+
+mrouted  
+
+> l,t
+
+= X
+
+> e∈S l,t
+
+αl,t,e El,e (hl,t ), (2) where El,e is the FFN of expert e, and αl,t,e is its normalized routing weight. Because Sl,t depends on the hidden state, expert selection can vary across tokens and layers. Each token evaluates only kl
+
+experts, but the runtime must provide access to all 
+
+Nl expert weights (Shazeer et al., 2017). Let sl,e denote the stored size of routed expert e
+
+in layer l. The complete routed-expert footprint is 
+
+Mrouted =
+
+> L
+
+X
+
+> l=1
+> Nl
+
+X
+
+> e=1
+
+sl,e . (3) Thus, routed-expert storage is determined by the to-tal expert set rather than by the number activated for each token. Routed expert weights consequently account for a large fraction of the model state that must be stored somewhere in the serving system. 
+
+2.2 Expert Offloading on Heterogeneous Memory 
+
+Compact AI appliances provide a heterogeneous memory hierarchy. GPU or NPU device mem-ory offers high bandwidth for model execution but limited capacity, whereas host memory provides greater capacity at lower bandwidth. Expert of-floading exploits the sparsity of MoE routing by keeping only a subset of experts resident in device memory and retaining the remaining experts in host memory (Xue et al., 2025; Yi et al., 2025). When the router selects a non-resident expert, its weights must be transferred to the device before execution. For a single device, expert residency must satisfy 
+
+Mfixed + MKV (B, T ) + Mact (B, T )+Mworkspace +
+
+> L
+
+X
+
+> l=1
+> Nl
+
+X
+
+> e=1
+
+xl,e sl,e ≤ Mdevice , (4) where xl,e ∈ { 0, 1} indicates whether expert e in layer l is resident, B is the batch size, T is the con-text length, and Mfixed denotes non-routed-expert weights and other persistent state. Offloading improves memory feasibility, but a cache miss introduces host-to-device (H2D) com-munication. For an expert of size sl,e , its transfer time can be approximated as 
+
+tH2D  
+
+> l,e
+
+≈ τlaunch + sl,e 
+
+βH2D 
+
+, (5) where βH2D is the effective H2D bandwidth and 
+
+τlaunch is the fixed transfer overhead. If the transfer begins only after experts are selected and cannot overlap with computation, its time lies on the infer-ence critical path. Expert-offloading performance therefore depends on both the resident expert set and the ability to hide remaining transfers. 32.3 Inference Phases and Memory Pressure 
+
+Long-context Agent workloads illustrate the mem-ory pressure of MoE inference: multi-step tasks accumulate conversation turns, retrieved evidence, tool outputs, and intermediate task state. Agent-LongBench (Fang et al., 2026a) models such work-loads with trajectories ranging from 32K to 4M tokens, spanning long-turn interactions and high-information-density tool responses. MoE inference follows a prefill–decode work-flow. Prefill processes the input context, typically in parallel, and constructs the KV cache; its latency is a major component of time to first token (TTFT). Decode reuses the cache to generate subsequent to-kens iteratively, with time per output token (TPOT) characterizing its per-token latency (Agrawal et al., 2024; Zhong et al., 2024b). In MoE models, prefill may access a broad expert set across many context tokens, whereas each decode step routes only the newly generated token or token group. Longer trajectories expand the KV cache, leav-ing less device memory for resident experts. Con-text length and KV-cache representation therefore jointly determine the expert-residency budget. 
+
+2.4 Observation and Motivation 
+
+Memory constraints limit how many experts can remain resident on the device, while routing deter-mines which experts are needed during inference. The resulting offloading cost depends on the inter-action between expert residency and routing deci-sions, particularly when a selected expert is absent from device and its transfer cannot be hidden. 
+
+Equal Per-Layer Cache Sizes Lead to Uneven Hit Rates. Figure 1 compares five workloads with 84 resident experts per DeepSeek MoE layer, ex-cluding zero-based layers 0–2, whose routing dif-fers. Across layers 3–42, each workload’s hit-rate range spans 7.64–12.07 percentage points. Layers 4 and 7 lie in the bottom ten in all five workloads; layers 7, 9, 19, 25, 27, 31, and 37 are strict lo-cal troughs in every trace (below both neighbors). Thus, a uniform per-layer quota yields recurrent coverage deficits at specific layers across the mea-sured workloads. This motivates dynamic layer-wise allocation of a fixed expert-cache budget to im-prove coverage where additional capacity is most effective (Section 3.1). 
+
+Expert Routing May Exhibit Domain-Specific Bias. Figure 2 shows a representative compari-son of five workloads at MoE layer 20. Their top-3 10 20 30 42 MoE layer (zero-based) 80 85 90 95 100 Exact hit rate (%)       
+
+> GSM8K AIME 2026 HumanEval MMLU LongBench v2
+> 47919 25 27 31 37
+> Figure 1: Exact selected-expert hit rate on DeepSeek-V4-Flash-W4A8 with 84 cached experts per layer. The y-axis spans 80–100%. Gray bands mark layers 4 and 7, both bottom-ten in all five datasets. Triangles mark layers 7, 9, 19, 25, 27, 31, and 37, strict local troughs (below both neighbors) in all five.
+
+ranked expert IDs differ: 21 for GSM8K, 179 for AIME 2026, 1 for HumanEval, 172 for MMLU, and 235 for LongBench v2. Across the ten work-load pairs at this layer, Spearman correlations over all 256 expert scores range from 0.546 to 0.784, indicating shared ranking structure. Yet Top-6 Jac-card overlap ranges from 0 to 0.200 (mean 0.116), and Top-32 overlap ranges from 0.306 to 0.455. Across the 40 MoE layers (3–42), the top-ranked expert is not identical across workloads in 37 lay-ers, with a mean pairwise Top-6 Jaccard overlap of 0.184. This recurring divergence indicates domain-conditioned routing bias and motivates domain-informed cache initialization. 
+
+Near-Boundary Scores Motivate Resident Ex-pert Substitution. We examine normalized rout-ing scores across DeepSeek MoE layers 3–42 and zoom in on layer 20 (Figure 3). Panel (a) shows only a small group of high-scoring experts per layer; most experts occupy the low-score region. Panel (b) shows that the activation boundary can have a narrow score gap: the last activated ex-pert (rank 6, ID 195) scores 2.5010%, while the first non-activated expert (rank 7, ID 231) scores 2.4493%, a difference of 0.0517 percentage points. Thus, expert selection need not imply a large score separation at the Top-6 cutoff. This motivates sub-stituting a similar-scoring resident non-activated expert for an off-device low-score activated expert to bypass H2D transfer. 4113 16 21 63 86 93 122 139 149 172 GSM8K AIME 2026 HumanEval MMLU LongBench v2 
+
+> (a) Expert IDs 1--172
+> 179 183 184 195 207 218 224 225 235 236 GSM8K AIME 2026 HumanEval MMLU LongBench v2
+> (b) Expert IDs 179--236
+> 0.00 0.02 0.04 0.06 0.08 Score
+> Expert ID
+
+Figure 2: Normalized routing scores for DeepSeek-V4-Flash-W4A8 at layer 20. The union of the five Top-6 expert sets (21 IDs) is ordered by expert ID and split into two blocks. Black outlines mark each workload’s top expert; the cross marks an omitted zero-score ID. 
+
+Figure 3: Illustrative DeepSeek-V4-Flash-W4A8 rout-ing scores on AIME 2026. (a) Score distributions across MoE layers 3–42. (b) Scores by expert ID at layer 20, including the rank-6/rank-7 Top-6 boundary. 
+
+3 MoE-CORE 
+
+MoE-CORE is a coordinated expert-weight offload-ing system for memory-constrained MoE inference on an AI appliance. Its design follows the phase asymmetry described in Section 2.4: prefill can collectively access a broad expert set, whereas each decode iteration exposes a sparse but latency-sensitive working set. Applying one offloading policy to both phases would either transfer unneces-sary experts during decode or incur repeated expert-selection and loading overhead during long prefills. MoE-CORE therefore provides separate prefill and decode paths within a unified runtime; Figure 4 shows the process. The two paths use physically disjoint device-memory regions that remain allocated throughout inference. The prefill region contains two expert-weight buffers, each holding all routed experts from a single MoE layer. When the prefill token count reaches the cache-dependent threshold N ∗ 
+
+> l
+
+defined in Section 3.6, the buffers stage the expert weights of two consecutive layers and alternate as execution advances through the model. The decode region stores routed-expert weights across all MoE lay-ers, organizing its capacity into per-layer caches with Kl resident expert slots assigned to layer l.Both regions share the device-memory budget with the fixed model state, KV cache, activations, and runtime workspace. During decode, MoE-CORE first establishes ex-pert residency before attempting to hide communi-cation. A layer-wise allocator determines Kl. The serving application then specifies the workload do-main through a request hint, and MoE-CORE fills the allocated slots with the corresponding hot ex-perts identified by offline profiling. As decoding proceeds, a Routing-History-Aware Cache (RHAC) policy updates expert residency using recent activa-tions, longer-term routing history, router scores, and access recency. These mechanisms reduce cache misses but cannot eliminate them. MoE-CORE then adopts a cross-layer prefetcher that predicts the next layer’s routed experts and asyn-chronously transfers predicted experts during the intervening computation. If a selected expert re-mains unavailable when required, the exact path loads it from host memory. When optional approx-imate expert substitution is enabled, an eligible low-score miss may instead use a score-similar, unselected expert already resident on the device; high-score misses remain on the exact path. Thus, the decode path combines miss reduc-tion with communication overlap before consider-ing approximate execution. Layer-wise allocation, domain-profile initialization, RHAC, and cross-layer prefetching preserve the routed expert com-putation; only optional expert substitution changes the selected expert set. 
+
+3.1 Dynamic Layer-Wise Expert-Cache Allocation 
+
+The decode expert region has a fixed memory ca-pacity, but that capacity need not be divided equally among MoE layers. Let Mdec be the memory as-signed to the decode expert cache, Kl the number of expert slots allocated to layer l, and Sl the size of one expert in that layer. The allocation must 5Figure 4: MoE-CORE’s phase-specific expert-weight paths and decode-cache mechanisms. The prefill buffers stage complete MoE layers, whereas the decode region retains per-layer expert subsets and supports domain-based initialization, RHAC replacement, cross-layer prefetching, and optional substitution. 
+
+satisfy PLl=1 KlSl ≤ Mdec .A uniform design assigns the same number of slots to every layer. Section 2.4 identifies low-hit layers that recur across the measured workloads, making them candidates for additional slots. A low hit rate does not by itself establish that more capac-ity will help, so MoE-CORE profiles each layer’s response to cache-size changes before redistribut-ing the decode expert cache. The allocator first replays representative rout-ing traces and measures the layer-wise hit-rate curve bHl(k) for a small set of candidate cache sizes around the uniform allocation. The replacement and initialization policies are held constant during this profiling so that the measured difference re-flects only the number of slots. Starting from the uniform allocation, the allocator moves slots in in-crements of ∆K. For the current allocation Kl, it estimates the loss caused by removing ∆K slots and the gain obtained by adding them as 
+
+D− 
+
+> l
+
+= bHl(Kl) − bHl(Kl − ∆K),G+ 
+
+> l
+
+= bHl(Kl + ∆ K) − bHl(Kl). (6) At each allocation round, layers whose hit rates remain above the layer-wise median and whose re-moval loss is no greater than ϵdrop form the donor set. Layers whose hit rates fall at least τlow be-low the median form the receiver set. MoE-CORE selects the donor d with the smallest D− 
+
+> d
+
+and the re-ceiver r with the largest G+ 
+
+> r
+
+. If G+ 
+
+> r
+
+> D − 
+
+> d
+
+and the resulting allocation satisfies the memory constraint, it updates 
+
+Kd ← Kd − ∆K, Kr ← Kr + ∆ K. (7) The donor and receiver sets are recomputed after every transfer. Reallocation stops when no receiver remains below the low-hit threshold, no donor can release slots within the permitted drop, or no fea-sible transfer offers positive estimated gain. The resulting allocation {Kl}Ll=1 remains within the decode-cache budget while shifting capacity from locally insensitive high-hit layers to cache-sensitive low-hit layers. Profiling and allocation run outside the per-token inference path and are repeated when the model, de-ployment workload, or available decode-cache ca-pacity changes. The allocator determines only how many expert slots each layer receives. The selected workload-domain profile determines which experts initially fill those slots, and RHAC subsequently up-dates their contents during decoding. Thus, layer-wise allocation changes neither the router decisions nor the model computation. 
+
+3.2 Offline Domain Hot-Expert Profiles 
+
+Agent workloads span distinct application domains, including software engineering, mathematical rea-soning, and domain-specific tool use (Jimenez et al., 2024; Gou et al., 2024; Yao et al., 2024). The domain-dependent expert rankings observed in Section 2.4 motivate domain-conditioned cache initialization. For each supported domain, MoE-CORE constructs an offline hot-expert profile. At request admission, the serving scheduler supplies a domain identifier d, and the corresponding pro-file determines which experts initially occupy the allocated cache slots. We construct these profiles for a fixed set of commonly served domains using mathematical-reasoning, code-generation, and QA datasets. For 6domain d, let Td denote all tokens in its profiling dataset, and let El = {1, . . . , N l} be the complete expert set at layer l. For every token t ∈ T d, the profiler records the selection score rl,t,e , the e-th component of rl,t , for every expert e ∈ E l before sparse expert selection. The mean selection score of expert e is 
+
+μd,l,e = 1
+
+|T d|
+
+X
+
+> t∈T d
+
+rl,t,e . (8) The vector μd,l = ( μd,l, 1, . . . , μ d,l,N l ) summarizes the domain-conditioned selection preference over all experts in layer l. For every domain–layer pair, the profiler stores a permutation πd,l satisfying 
+
+μd,l,π d,l (1) ≥ μd,l,π d,l (2) ≥ · · · ≥ μd,l,π d,l (Nl). (9) Once the layer-wise allocator assigns Kl cache slots to layer l, MoE-CORE initializes the resident set with the Kl experts having the highest mean selection scores: 
+
+Rinit l (d) = {πd,l (1) , . . . , π d,l (Kl)} . (10) This construction separates cache capacity from cache contents: the layer-wise allocator determines how many experts layer l can retain, while the selected domain profile determines which experts initially occupy those slots. 
+
+3.3 Routing-History-Aware Expert Cache 
+
+The offline layer-wise allocation and domain pro-files cannot capture routing changes within a ses-sion. MoE-CORE therefore manages each layer’s resident experts with RHAC. Like LRU, RHAC selects eviction victims, but it bases the decision on both activation history and the router scores already produced during MoE inference. RHAC is updated per token. Let i = 1 , 2, . . . de-note the update order, let ti be the token processed at update i, and let W ∈ N+ denote the fixed history-window length in tokens. RHAC maintains four signals for every expert e at layer l: recent se-lection frequency f , long-term selection tendency 
+
+¯f , the current router score q, and age a. Before the first generated token, the recent-frequency window is empty and the two recurrent states are initialized as ¯f (0)  
+
+> l,e
+
+= a(0)  
+
+> l,e
+
+= 0 .First, the recent selection frequency counts how many of the latest W tokens select expert e:
+
+f (i) 
+
+> l,e
+
+=
+
+> i
+
+X 
+
+> j=max(1 ,i −W+1)
+
+Ie ∈ S l,t j
+
+ . (11) Thus, f (i) 
+
+> l,e
+
+ranges from zero to min( i, W ). Sec-ond, RHAC captures a longer-term selection ten-dency with an exponential moving average (EMA) (Brown, 1956), 
+
+¯f (i) 
+
+> l,e
+
+= ρsel ¯f (i−1)  
+
+> l,e
+
++ (1 − ρsel )I[e ∈ S l,t i ] . (12) Here, 0 ≤ ρsel < 1 is the selection-history decay factor. Values closer to one retain earlier selections for longer, whereas values closer to zero empha-size the current token. Third, the current router scores provide information about every expert. Let 
+
+ql,t,e = rl,t,e denote the expert-selection score as-signed to expert e for token t. RHAC uses the current value ql,t i,e directly. Finally, age records how many generated tokens have elapsed since the expert was last selected: 
+
+a(i) 
+
+> l,e
+
+=
+
+(0, e ∈ S l,t i ,a(i−1)  
+
+> l,e
+
++ 1 , e / ∈ S l,t i . (13) Because the four signals have different scales, each is normalized across all Nl experts in the same layer before combination; a tilde denotes the result-ing layer-wise normalized value. RHAC assigns expert e the residency-priority score 
+
+η(i) 
+
+> l,e
+
+= λf ef (i) 
+
+> l,e
+
++ λme¯f (i) 
+
+> l,e
+
++ λq eql,t i,e − λaea(i) 
+
+> l,e
+
+, (14) where the four nonnegative coefficients λf , λm,
+
+λq, and λa control the contributions of recent fre-quency, the selection EMA, the current router score, and age, respectively. Recent and sustained selec-tions raise the priority, a high router score protects an expert that is relevant to the present token, and increasing age lowers the priority of stale experts. When a routed miss must enter a full cache, RHAC selects the coldest evictable resident expert, 
+
+evictim  
+
+> l,i
+
+= arg min 
+
+> e∈R l\P l,i
+
+η(i) 
+
+> l,e
+
+, (15) where Rl is the current resident set and Pl,i con-tains experts that are executing, loading, or oth-erwise protected from eviction while token ti is processed. After the victim is released and the re-quested weights arrive, the new expert occupies the slot. Therefore, RHAC remains free to adapt the cache to the observed session. 
+
+3.4 Cross-Layer Expert Prefetching 
+
+Even RHAC cannot eliminate every decode expert miss. Loading the missed expert only after the true 7Figure 5: Cross-layer expert prefetching. The next layer’s router receives the current layer’s hidden state to rank candidate experts before its ordinary input becomes available; predicted experts are transferred during inter-vening computation. 
+
+router finishes places the complete H2D transfer on the critical path. MoE-CORE predicts the next layer’s expert ranking early and transfers a bounded number of likely experts while the model continues computing, as illustrated in Figure 5. Section 2.1 defines hl,t as the hidden state used for routing token t at layer l. Before the normal router input hl+1 ,t becomes available, MoE-CORE evaluates the original router of layer l + 1 on hl,t :
+
+brl+1 ,t = Rl+1 (hl,t ). (16) Here, brl+1 ,t is the predicted expert-score vector for layer l + 1 , and MoE-CORE prefetches ex-perts according to its ranking. This prediction is motivated by cross-layer routing consistency: rout-ing decisions in adjacent MoE layers can remain correlated, allowing Rl+1 (hl,t ) to approximate the ranking later produced by Rl+1 (hl+1 ,t ) = rl+1 ,t 
+
+(Fang et al., 2026b; Zhong et al., 2024a). The prefetch count is determined by the compu-tation window available for hiding communication. Let 
+
+T overlap  
+
+> l
+
+= T remaining  
+
+> l
+
++ T attn  
+
+> l+1
+
+(17) be the interval from the early prediction until the true layer-l + 1 gate completes. It contains the remaining computation of layer l and the attention computation of layer l + 1 . If the effective H2D bandwidth is βH2D , the transfer launch overhead is τH2D , and each layer-l + 1 expert occupies sl+1 
+
+bytes, an upper bound on the number of complete expert transfers hidden by this interval is 
+
+nhide  
+
+> l+1
+
+=
+
+$ max(0 , T overlap  
+
+> l
+
+− τH2D )βH2D 
+
+sl+1 
+
+%
+
+.
+
+(18) 
+
+Figure 6: Illustrative expert substitution near the Top-k
+
+boundary. Selected experts d and e are off-device, while lower-ranked unselected experts f and g are resident. Re-placement is considered only when their routing scores satisfy the proximity criterion. 
+
+Let ncand  
+
+> l+1
+
+be the number of predicted experts that are neither resident nor already loading, and let 
+
+nslot  
+
+> l+1
+
+be the number of slots the runtime can make available without evicting an in-use expert. MoE-CORE prefetches 
+
+npf  
+
+> l+1
+
+= min 
+
+
+
+nhide  
+
+> l+1
+
+, n cand  
+
+> l+1
+
+, n slot 
+
+> l+1
+
+
+
+(19) highest-ranked predicted experts. Their H2D copies are issued asynchronously. When the true router completes, an exact expert that has arrived can execute immediately; an incorrect prefetch is discarded or retained according to RHAC, and an expert that remains unavailable becomes a residual miss. This bound limits the scheduled transfers to the estimated overlap window; inaccurate pre-dictions may nevertheless consume bandwidth and cache capacity. 
+
+3.5 Approximate Expert Substitution 
+
+Cross-layer prefetching reduces exposed commu-nication but cannot guarantee that every selected expert is available. Synchronously loading every residual miss preserves exact execution but can introduce a sudden latency spike for the affected token. Thus, MoE-CORE provides an optional approximate expert substitution (AES) path based on the score distribution around the Top-k routing boundary. The mechanism uses score proximity to restrict substitution to low-score routing decisions near the selection boundary. Figure 6 illustrates an example of the substitution process. For token t at layer l, let rl,t,e denote the score of expert e in the router-score vector rl,t . Order all 
+
+Nl experts such that 
+
+rl,t, (1) ≥ rl,t, (2) ≥ · · · ≥ rl,t, (Nl). (20) 8The selected set is Sl,t = {(1) , . . . , (kl)}, and 
+
+bl,t = rl,t, (kl+1) is the score immediately below the Top-k boundary. Given a threshold hyperpa-rameter 0 ≤ α < 1, MoE-CORE partitions the selected experts into an exact-only high-score set 
+
+Ehigh  
+
+> l,t
+
+= {e ∈ S l,t : rl,t,e > (1 + α)bl,t } , (21) and a replaceable low-score set 
+
+Elow  
+
+> l,t
+
+= {e ∈ S l,t : bl,t ≤ rl,t,e ≤ (1 + α)bl,t } .
+
+(22) Every cache miss in Ehigh  
+
+> l,t
+
+follows the exact H2D path. Among the low-score selected experts, let 
+
+Ul,t = Elow  
+
+> l,t
+
+\ R l = {u1, . . . , u U } (23) be the residual misses that remain unavailable after prefetching. A substitution candidate must be uns-elected, already resident, and sufficiently close to the lower side of the routing boundary: 
+
+Cl,t = {c ∈ R l \ S l,t : (1 − α)bl,t ≤ rl,t,c ≤ bl,t }
+
+= {c1, . . . , c C }.
+
+(24) MoE-CORE sorts both sets by decreasing router score and performs a one-to-one matching: 
+
+rl,t,u 1 ≥ · · · ≥ rl,t,u U ,rl,t,c 1 ≥ · · · ≥ rl,t,c C ,up ← cp, p = 1 , . . . , min( U, C ).
+
+(25) Thus, the highest-scoring resident candidate re-places the highest-ranked eligible miss, the next candidate replaces the next miss, and no candi-date is reused. Because all candidates rank below all selected experts, this ordered matching assigns each miss the closest remaining candidate in rout-ing rank. Any high-score miss and any unmatched low-score miss remain on the exact H2D path. Let P = min( U, C ) and Usub  
+
+> l,t
+
+= {u1, . . . , u P }
+
+denote the matched misses. For each pair (up, c p),the candidate expert cp replaces only the expert function, while retaining the missed expert’s orig-inal routing coefficient αl,t,u p . The routed MoE output becomes 
+
+msub  
+
+> l,t
+
+= X
+
+> e∈S l,t \U sub
+> l,t
+
+αl,t,e El,e (hl,t )+ 
+
+> P
+
+X
+
+> p=1
+
+αl,t,u p El,c p (hl,t ).
+
+(26) The candidate’s own router score is used only for matching and does not replace the missed ex-pert’s routing coefficient. Eq. 26 changes only the matched near-boundary expert computations and removes their synchronous H2D transfers from the token’s critical path. The threshold α limits the score range eligible for substitution. Score prox-imity is a selection heuristic and does not establish equivalence between the original and substitute ex-pert outputs. 
+
+3.6 Layer-Wise Expert Staging for Prefill 
+
+Prefill processes many tokens together, so the union of their routing decisions can cover most experts in a layer. Motivated by the observation that com-plete expert loading can become preferable to se-lective loading as the token count increases (Wang et al., 2025b), MoE-CORE uses the initial per-layer resident-expert count to set the staging threshold. For layer l, let K(0)  
+
+> l
+
+denote the initially configured number of cached experts and let kl denote the routing fanout ( topk ). The threshold is computed as 
+
+N ∗ 
+
+> l
+
+=
+
+$ K(0) 
+
+> l
+
+kl
+
+%
+
+. (27) Thus, N ∗ 
+
+> l
+
+varies with the configured per-layer cache capacity and routing fanout, rather than being a fixed token count. Layers for which the prefill has at least N ∗ 
+
+> l
+
+tokens use complete layer-wise staging; smaller prefills retain selective per-layer residency. The physically reserved prefill region contains two buffers, B0 and B1, each dedicated to the routed-expert weights of one MoE layer. Each buffer is sized for the routed-expert footprint of the largest MoE layer, and the prefill region reserves twice this capacity. For the complete-staging path, MoE-CORE loads the first two MoE layers into B0 and B1 dur-ing warm-up. After layer l finishes using one buffer, that buffer becomes available for layer l + 2 . While layer l + 1 computes from the other buffer, the transfer engine loads all experts of layer l + 2 into the released buffer. The two buffers alternate until the final MoE layer. Ignoring warm-up and drain costs, the steady-state latency around layer l is approximated by 
+
+T steady  
+
+> l
+
+≈ max 
+
+
+
+T compute  
+
+> l
+
+, T H2D 
+
+> l+1
+
+
+
++ T sync  
+
+> l
+
+. (28) If the current layer’s computation is at least as long as the next layer’s transfer, the transfer can be fully 9hidden after pipeline warm-up. Otherwise, only their difference remains exposed. The initial load-ing of the first two layers, the final pipeline drain, and all synchronization costs remain part of TTFT. 
+
+4 Evaluation 
+
+We evaluate end-to-end inference performance, the contributions of the expert-cache components, and compatibility with multi-token prediction (MTP). The main comparisons and cache-component abla-tions use exact expert execution; AES and MTP are evaluated separately. Unless otherwise specified, Deepseek is the default model. 
+
+4.1 Implementation Settings Datasets and Models. We use GSM8K (Cobbe et al., 2021), AIME 2026 (Dekoninck et al., 2026), HumanEval (Chen et al., 2021), MMLU (Hendrycks et al., 2021), and LongBench v2 (Bai et al., 2025). They cover mathematical reason-ing, code generation, knowledge, and long-context tasks. The evaluated models are DeepSeek-V4-Flash-W4A8 (DeepSeek-AI, 2026) and GLM-5.2-W4A8C8 (GLM-5 Team, 2026). 
+
+Platforms. Both models are evaluated on an As-cend 950PR NPU platform with 128 GB of physi-cal NPU memory and a 150-GB host-memory limit. Inference is subject to an 84-GB NPU-memory cap. 
+
+Baselines. We compare MoE-CORE with two expert-offloading baselines: • Load on Demand (LoD). The baseline allo-cates static per-layer expert caches only dur-ing decode and synchronously loads a selected expert on a cache miss. • vLLM Prefetch. We use the layer-wise prefetch strategy in vLLM (vLLM Project, 2026). The DeepSeek configuration uses two resident layer buffers and two rotating layer buffers; the GLM configuration uses one resi-dent layer and five offloaded layers. 
+
+Request Protocol. All configurations in Table 1 use batch size 1. LoD and MoE-CORE allow up to 1K output tokens, whereas vLLM Prefetch is capped at 128 output tokens to bound the runtime of its substantially slower decoding. DeepSeek and GLM use 200 requests per dataset. 
+
+Metrics. We report time to first token (TTFT), time per output token (TPOT), end-to-end latency (E2EL), and output throughput in tokens per sec-ond (TPS). For a response containing n > 1 output tokens, TPOT is the generation time after the first token divided by n − 1. TTFT-P90 and TPOT-P90 are the reported request-level 90th percentiles. Be-cause the output caps differ, E2EL and TPS compar-isons are restricted to LoD and MoE-CORE. Exact cache-hit rate measures the availability of the origi-nally selected experts, including prefetched experts ready before execution. For AES-enabled results, effective expert availability additionally counts se-lected invocations served by resident substitutes. Means computed from the provided layer-rate ar-rays weight the recorded layers equally. 
+
+4.2 Implementation Details 
+
+MoE-CORE reserves separate expert-weight re-gions for prefill staging and decode caches. Of the 84-GB NPU-memory cap, 95% is budgeted for model inference, including model weights, ex-pert caches, KV cache, activations, and inference workspace; the remaining 5% is reserved for other necessary system allocations. The maximum con-figured prompt-plus-output length is 368K tokens. In the DeepSeek configuration, the uniform decode allocation uses 84 expert slots per layer. The evalu-ated nonuniform allocation uses 78 slots for most layers and 120 slots for layers 7, 9, 19, 31, and 37. GLM’s larger expert weights limit its single-NPU decode cache to 28 expert slots per layer. Domain profiles initialize the resident experts, and RHAC updates residency once per generated token. Cross-layer prefetching fetches one predicted ex-pert per layer by default. The substitution threshold is α = 0 .1. AES is disabled in the main compari-son and for the cache-component ablations. 
+
+4.3 Effectiveness Evaluation 
+
+Table 1 reports the measurements on each model. The MoE-CORE runs use exact expert execution. On DeepSeek, MoE-CORE reduces mean TPOT from 62.1–70.6 ms to 38.0–44.8 ms. Relative to LoD, the reductions are 42.9% on GSM8K, 33.1% on AIME 2026, 27.9% on HumanEval, 35.3% on MMLU, and 42.9% on LongBench v2, correspond-ing to 1.39 –1.75 × speedups. E2EL improves by 
+
+1.36 –1.79 × across the five workloads. TTFT in-creases by 1.4–4.1% on the first four workloads; on LongBench v2 it falls from 14.06 to 11.88 s, while E2EL falls from 74.08 to 47.08 s. On GLM, MoE-CORE records lower mean TPOT than LoD on all five workloads, at 206.6– 220.5 versus 229.1–244.8 ms. On LongBench v2, its TPOT is 210.6 versus 242.7 ms and its E2EL 10 Table 1: Inference performance at batch size 1 with output caps of 1K tokens for LoD and MoE-CORE and 128 tokens for vLLM Prefetch. Both models run on Ascend 950PR. LoD uses num_device_layers=1 . AES is disabled in both MoE-CORE configurations, and MTP is disabled in the DeepSeek configuration. Lower latency and higher TPS are better; the best measured value for each dataset, model, and metric is underlined.                                                                                                                                                   
+
+> Dataset System DeepSeek-V4-Flash-W4A8 GLM-5.2-W4A8C8 TTFT (ms) TPOT (ms) E2EL (s) TPS TTFT (ms) TPOT (ms) E2EL (s) TPS Mean P90 Mean P90 Mean P90 Mean P90
+> GSM8K LoD 3038.4 3094.8 66.5 71.9 37.84 13.57 8760.3 8920.8 233.9 239.2 180.84 4.07 vLLM Prefetch 1175.1 1177.7 1268.9 1268.9 162.00 0.78 5662.7 5664.3 5941.5 5941.6 760.24 0.17 MoE-CORE 3082.4 3124.4 38.0 39.2 21.10 22.35 8950.0 9087.0 210.3 217.1 152.94 4.47 AIME 2026 LoD 2948.4 2984.5 62.9 64.2 67.34 15.21 8860.2 8713.3 244.8 249.1 259.27 3.95 vLLM Prefetch 1177.6 1179.3 1268.9 1269.1 162.00 0.79 5662.1 5664.5 5941.5 5941.6 760.24 0.17 MoE-CORE 3026.2 3069.2 42.1 46.5 46.09 22.22 9028.6 8843.4 220.5 226.8 234.65 4.36 HumanEval LoD 2988.4 3025.2 62.1 63.4 36.38 14.78 8408.8 8910.0 235.6 241.4 182.05 4.05 vLLM Prefetch 1178.6 1181.6 1269.0 1269.0 162.00 0.79 5663.2 5664.7 5941.7 5941.7 760.25 0.17 MoE-CORE 3112.2 3153.0 44.8 50.0 26.79 19.17 8515.2 9035.5 212.9 219.5 175.80 4.50 MMLU LoD 2959.7 3019.2 64.1 65.4 61.20 14.81 8889.3 8910.8 229.1 234.9 86.19 3.93 vLLM Prefetch 1180.7 1184.5 1269.0 1269.0 162.00 0.79 5932.3 5935.2 5941.8 5941.8 760.54 0.17 MoE-CORE 3044.4 3106.4 41.5 42.4 43.90 22.39 9032.5 9118.5 206.6 209.6 91.43 4.38 LongBench v2 LoD 14056.4 31351.1 70.6 75.4 74.08 11.40 158894.0 290566.0 242.7 249.2 377.77 2.39 vLLM Prefetch 9749.7 19006.3 1269.1 1269.8 89.00 0.71 110850.0 202840.2 5941.8 5942.0 865.46 0.15 MoE-CORE 11879.0 24029.0 40.3 45.0 47.08 18.77 101463.4 195094.5 210.6 217.2 278.90 3.01
+
+is 278.90 versus 377.77 s. E2EL is lower on four of the five workloads; MMLU is the exception, increasing from 86.19 to 91.43 s. Across both mod-els, MoE-CORE records lower TPOT than LoD on all ten model–workload pairs and lower E2EL on nine, demonstrating consistent decode-latency gains and favorable end-to-end performance across the evaluated workloads. Under the stated output caps, the proposed method achieves lower TPOT than vLLM Prefetch on every dataset: 38.0–44.8 versus 1268.9–1269.1 ms on DeepSeek, and 206.6–220.5 versus 5941.5– 5941.8 ms on GLM. vLLM Prefetch, in turn, records lower TTFT on all DeepSeek datasets and four GLM datasets. This trade-off reflects the different expert-staging choices. vLLM Prefetch stages complete expert layers and uses four layer buffers in the DeepSeek configuration, favoring prefill relative to MoE-CORE’s two alternating full-layer buffers. During decode, however, the com-putation of an individual layer cannot fully hide a complete-layer transfer. MoE-CORE instead re-tains and prefetches selected experts, avoiding most of these transfers and yielding lower TPOT. 
+
+4.4 MTP Compatibility and Best Performance 
+
+Table 2 reports the MTP depth sweep for DeepSeek-V4-Flash-W4A8 on GSM8K at batch size 2 with AES enabled. Depth 2 achieves the lowest ob-served TPOT, 21.5 ms. As MTP depth increases 
+
+Table 2: MTP depth sweep on DeepSeek-V4-Flash-W4A8 with GSM8K, batch size 2, and AES enabled. Availability is the unweighted mean of 40 layer-wise effective expert-availability rates. Changes are in per-centage points (pp) relative to the MTP-off mean of 99.972%. 
+
+MTP TPOT Accept. Avail. ∆
+
+depth (ms) (%) (%) (pp) 
+
+1 23.1 95.21 99.785 −0.186 
+
+2 21.5 78.33 99.607 −0.365 
+
+3 22.3 60.78 99.439 −0.532 
+
+from 1 to 3, the acceptance rate decreases from 95.21% to 78.33% and 60.78%, while speculative H2D transfers increase. At depth 3, lower accep-tance and additional transfer overhead offset the benefit of longer predictions, raising TPOT from 21.5 to 22.3 ms. Thus, depth 2 provides the best measured balance between prediction acceptance and transfer overhead on this platform. Across MTP depths 1–3, effective expert avail-ability exceeds 99.4%; the largest decrease from the MTP-off reference is 0.532 percentage points. These measurements demonstrate compatibility with MTP and identify depth 2 as the best measured setting. Effective availability includes invocations served by resident substitutes rather than only exact hits of the originally selected experts. 11 12 24 36 48 60 72 84 96 108 120     
+
+> Cached experts per layer
+> 310 20 30 42
+> MoE layer (zero-based index)
+> (a)
+> 12 36 60 84 108 120
+> Cached experts per layer
+> 40 60 80 100
+> Mean exact hit rate (%)
+> (b)
+> 025 50 75 100
+> Exact hit rate (%)
+
+Figure 7: Effect of uniform expert-cache capacity on DeepSeek-V4-Flash-W4A8 with GSM8K. (a) Exact hit rate on each comparable layer (zero-based indices 3–42) for capacities of 12–120 experts per layer. (b) Unweighted mean exact hit rate over those 40 layers. 
+
+4.5 Ablation 
+
+Unless otherwise stated, the ablations use GSM8K and DeepSeek-V4-Flash. Each experiment changes one component while staying within the same expert-memory budget and retaining the inference configuration. 
+
+4.5.1 Effect of Expert-Cache Capacity 
+
+Figure 7 evaluates the relationship between cache capacity and exact expert hit rate on the 40 com-parable DeepSeek MoE layers (zero-based indices 3–42). Increasing the number of cached experts per layer from 12 to 120 raises the unweighted mean hit rate from 47.47% to 96.43%. Expand-ing from 12 to 24 experts gains 21.01 percentage points, whereas expanding from 84 to 120 gains only 5.13 points. Thus, the benefit of uniformly in-creasing cache capacity diminishes as more experts are resident. 
+
+4.5.2 Effect of Decode-Cache Components 
+
+Figure 8 compares the full configuration with three ablations: removing RHAC, removing domain-conditioned initialization, and replacing the nonuni-form allocation with a uniform per-layer allocation. The full configuration’s nonuniform capacity as-signment was selected through repeated offline tri-als. Disabling RHAC increases TPOT from 36.0 to 46.8 ms, corresponding to a 30.0% degradation. The exact expert hit rate simultaneously decreases from above 90% in most layers to approximately 60–82%. Because this reduction occurs through-out the model, RHAC is the principal mechanism for maintaining an effective resident working set during decode. Removing the domain hot-expert profile in-creases TPOT to 36.5 ms (1.4%), while replacing 
+
+Figure 8: Ablation of the decode expert cache. (a) TPOT for the full system and each ablated configuration. (b) Per-layer exact cache hit rate under the same configura-tions. The “w/o Dynamic Cache” variant uses uniform per-layer capacity. 
+
+Figure 9: Effect of cross-layer prefetch depth. (a) TPOT for zero to three prefetched experts. (b) Per-layer exact cache hit rate at each depth. 
+
+the nonuniform allocation with a uniform per-layer cache increases TPOT to 36.4 ms (1.1%). Their layer-wise curves remain close to that of the full system, but exhibit localized reductions in hit rate. Domain profiles initialize cache contents, the se-lected nonuniform allocation gives low-hit layers more capacity, and RHAC adapts the resident set during decoding. The complete system combines these mechanisms and achieves the lowest TPOT. 
+
+4.5.3 Effect of Cross-Layer Prefetch Depth 
+
+Figure 9 compares cross-layer prefetch depths from zero to three experts. Without prefetching, TPOT reaches 42.6 ms. Prefetching one expert reduces TPOT to 36.0 ms, an improvement of 15.5%. In-creasing the depth to two experts produces the min-imum TPOT of 35.9 ms, only 0.1 ms below the one-expert configuration, whereas a depth of three increases TPOT to 36.5 ms. Mean exact hit rate rises from 89.05% without prefetching to 92.43%, 93.81%, and 94.05% at depths one, two, and three, respectively. Beyond depth one, the additional hit-rate gains are small. At depth three, the H2D time for three predicted experts cannot be fully hidden by the limited per-layer computation during decode, so the additional transfers outweigh the marginal hit-rate gain and increase TPOT. The first predicted expert thus cap-tures nearly all of the latency benefit. MoE-CORE uses a depth of one by default because it remains within 0.3% of the minimum TPOT while issuing fewer speculative transfers. 12 Figure 10: Expert availability with and without AES. The disabled curve measures availability of the original selected experts; the enabled curve additionally counts invocations served by resident substitutes. Table 3: Recorded AES latency under different decode configurations.             
+
+> AES Batch size MTP depth TPOT (ms)
+> Disabled 1Off 36.0 Enabled 1Off 37.7 Enabled 2222.0
+
+4.5.4 Effect of Approximate Expert Substitution 
+
+Approximate expert substitution (AES) resolves an eligible residual miss with an unselected ex-pert that is already resident on the NPU. We de-fine effective expert availability as the fraction of selected expert invocations that can proceed with-out a demand-triggered H2D transfer. With AES disabled, it reflects availability from caching and completed prefetches; with AES enabled, it also counts invocations served by resident substitutes. The recorded mean over 40 layer rates rises from 92.43% without AES to 99.972% with AES. Fig-ure 10 visualizes this near-complete effective avail-ability. This near-unity layer mean shows that, on average across the evaluated layers, MoE-CORE serves nearly all selected expert invocations with-out a demand-triggered H2D transfer. At batch size 1 with MTP disabled, enabling AES increases TPOT from 36.0 to 37.7 ms, a 4.7% overhead, due to the CPU-side computation re-quired for expert substitution. 
+
+5 Related Work 
+
+Expert offloading and heterogeneous execution. 
+
+MoE-Infinity exploits activation traces to guide ex-pert caching and prefetching, while FineMoE uses fine-grained routing patterns and prompt-derived hints for expert management (Xue et al., 2025; Yu et al., 2025). Fiddler and KTransformers use host computation as well as device execution to ac-commodate experts under limited device memory (Kamahori et al., 2025; Chen et al., 2025). HOB-BIT uses lower-precision versions of less critical missed experts to reduce transfer cost (Tang et al., 2024). MoE-CORE instead focuses on exact-expert residency and transfer scheduling within a single-NPU memory budget. 
+
+Transfer scheduling and routing-guided resi-dency. MoE-Lightning pipelines host, device, and I/O work with paged weights, whereas Klot-ski uses an expert-aware multi-batch pipeline to increase computation–transfer overlap (Cao et al., 2024; Fang et al., 2025). DuoServe-MoE explic-itly separates prefill and decode scheduling and applies phase-specific expert prefetching (Zhang et al., 2026). SiDA-MoE and ProMoE train auxil-iary predictors for proactive expert loading; Fate and AdapMoE exploit cross-layer routing informa-tion (Du et al., 2024; Song et al., 2025; Fang et al., 2026b; Zhong et al., 2024a). DoMoE additionally uses domain-specific routing tables to constrain semantic expert prediction (Mu et al., 2026). In contrast to predictor-centered designs, MoE-CORE uses a workload-domain profile to initialize cache contents, updates residency from observed routing history, and evaluates the original next-layer router early for prefetching. 
+
+Approximate execution and speculative decod-ing. SMoE and BuddyMoE examine expert sub-stitution when selected experts are unavailable, while SpecMoEOff uses speculative decoding to en-large expert workloads and hide offloading latency (Zhu et al., 2026; Wang et al., 2025a,b). MoE-CORE’s optional substitution is restricted to res-ident, unselected experts close to the selected ex-pert’s routing score at the Top-k boundary; it does not assert functional equivalence from score prox-imity. Our MTP experiment assesses the compati-bility of the expert-offloading path with multi-token prediction rather than introducing a new specula-tion algorithm. More broadly, long-context serving systems such as Sarathi-Serve and DistServe sched-ule prefill and decode to improve serving efficiency (Agrawal et al., 2024; Zhong et al., 2024b); our fo-cus is expert-weight residency and transfer within a single appliance. 
+
+6 Conclusion 
+
+MoE-CORE addresses expert-weight offloading for memory-constrained MoE inference on compact, 13 single-NPU AI appliances. Measurements across five workloads reveal recurrent low-hit layers un-der uniform per-layer cache sizes and workload-dependent expert rankings; the examined routing-score distribution also illustrates a narrow gap near the Top-k boundary. These observations moti-vate a runtime that separates prefill staging from decode-time expert management and coordinates nonuniform cache capacity, domain-informed ini-tialization, routing-history-aware replacement, and cross-layer prefetching. Across five workloads per model and under the stated output caps, the main exact-execution configuration records mean TPOT of 38.0–44.8 ms on DeepSeek and 206.6–220.5 ms on GLM, versus 1268.9–1269.1 and 5941.5– 5941.8 ms, respectively, for the evaluated vLLM Prefetch configurations. Under an 84-GB NPU-memory cap, a separate DeepSeek experiment with optional approximate substitution reaches the best measured TPOT of 21.5 ms at MTP depth 2. The results support coordinated residency and transfer scheduling as a practical means of reducing decode latency when the full MoE expert set cannot remain on the device. 
+
+Limitations 
+
+MoE-CORE does not jointly optimize expert-weight offloading and KV-cache management, and its evaluation is limited to a single NPU; multi-NPU expert-weight placement remains future work. Further study of longer MTP depths may clarify when their additional H2D transfers can be offset by accepted predictions. We also plan to coordi-nate the currently separate prefill and decode ex-pert caches across consecutive sessions. Experts retained by RHAC after one session may be reused in the next session’s prefill, allowing layer-wise staging to transfer only experts that are not already resident. Finally, RHAC’s CPU-side updates add latency; reducing this computation is another direc-tion for optimization. 
+
+References 
+
+Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency tradeoff in LLM inference with Sarathi-Serve. In 18th USENIX Symposium on Op-erating Systems Design and Implementation (OSDI 24) , pages 117–134, Santa Clara, CA. USENIX As-sociation. Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xiaozhi Wang, Xin Lv, Shulin Cao, Jiazheng Xu, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2025. Longbench v2: Towards deeper understanding and reasoning on realistic long-context multitasks. 
+
+Preprint , arXiv:2412.15204. Robert G. Brown. 1956. Exponential smoothing for predicting demand. Presented at the Tenth National Meeting of the Operations Research Society of Amer-ica. Also issued as a monograph by Arthur D. Little, Inc. Shiyi Cao, Shu Liu, Tyler Griggs, Peter Schafhalter, Xi-aoxuan Liu, Ying Sheng, Joseph E. Gonzalez, Matei Zaharia, and Ion Stoica. 2024. Moe-lightning: High-throughput moe inference on memory-constrained gpus. Preprint , arXiv:2411.11217. Hongtao Chen, Weiyu Xie, Boxin Zhang, Jingqi Tang, Jiahao Wang, Jianwei Dong, Shaoyuan Chen, Zi-wei Yuan, Chen Lin, Chengyu Qiu, Yuening Zhu, Qingliang Ou, Jiaqi Liao, Xianglin Chen, Zhiyuan Ai, Yongwei Wu, and Mingxing Zhang. 2025. Ktrans-formers: Unleashing the full potential of cpu/gpu hybrid inference for moe models. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles , SOSP ’25, page 1014–1029, New York, NY, USA. Association for Computing Machin-ery. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. Preprint , arXiv:2107.03374. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John Schulman. 2021. Training verifiers to solve math word prob-lems. Preprint , arXiv:2110.14168. DeepSeek-AI. 2026. Deepseek-v4: Towards highly efficient million-token context intelligence. Preprint ,arXiv:2606.19348. Jasper Dekoninck, Nikola Jovanovi´ c, Tim Gehrunger, Kári Rögnvaldsson, Ivo Petrov, Chenhao Sun, and Martin Vechev. 2026. Beyond benchmarks: Math-arena as an evaluation platform for mathematics with llms. Preprint , arXiv:2605.00674. Zhixu Du, Shiyu Li, Yuhao Wu, Xiangyu Jiang, Jingwei Sun, Qilin Zheng, Yongkai Wu, Ang Li, Hai Helen Li, and Yiran Chen. 2024. Sida: Sparsity-inspired data-aware serving for efficient and scalable large mixture-of-experts models. In Proceedings of Ma-chine Learning and Systems , volume 6, pages 224– 238. 
+
+14 Shicheng Fang, Yuxin Wang, Xiaoran Liu, Jiahao Lu, Chuanyuan Tan, Xinchi Chen, Yining Zheng, Xuan-jing Huang, and Xipeng Qiu. 2026a. Agentlong-bench: A controllable long benchmark for long-contexts agents via environment rollouts. Preprint ,arXiv:2601.20730. Zhiyuan Fang, Yuegui Huang, Zicong Hong, Yufeng Lyu, Wuhui Chen, Yue Yu, Fan Yu, and Zibin Zheng. 2025. Klotski: Efficient mixture-of-expert infer-ence via expert-aware multi-batch pipeline. Preprint ,arXiv:2502.06888. Zhiyuan Fang, Xingfan Yu, Yuegui Huang, Zicong Hong, Yufeng Lyu, Wuhui Chen, Yue Yu, and Fan Yu. 2026b. Fate: Fast edge inference of mixture-of-experts models via cross-layer gate. In Proceedings of the ACM Web Conference 2026 , WWW ’26, page 5537–5546, New York, NY, USA. Association for Computing Machinery. GLM-5 Team. 2026. Glm-5: from vibe coding to agen-tic engineering. Preprint , arXiv:2602.15763. Zhibin Gou, Zhihong Shao, Yeyun Gong, yelong shen, Yujiu Yang, Minlie Huang, Nan Duan, and Weizhu Chen. 2024. Tora: A tool-integrated reasoning agent for mathematical problem solving. In International Conference on Learning Representations , volume 2024, pages 48362–48395. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring massive multitask language under-standing. Preprint , arXiv:2009.03300. Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. 2024. Swe-bench: Can language mod-els resolve real-world github issues? In International Conference on Learning Representations , volume 2024, pages 54107–54157. Keisuke Kamahori, Tian Tang, Yile Gu, Kan Zhu, and Baris Kasikci. 2025. Fiddler: Cpu-gpu orchestration for fast inference of mixture-of-experts models. In 
+
+International Conference on Learning Representa-tions .Kimi-Team. 2026. Kimi k3: Open frontier intelligence. Yao Mu, Fahao Chen, Wenbin Zhu, Mengying Zhao, Zhaoyan Shen, and Dongxiao Yu. 2026. Domoe: Domain-aware semantic expert prediction for effi-cient moe inference under expert offloading. In Pro-ceedings of the Thirty-Fifth International Joint Con-ference on Artificial Intelligence , pages 5901–5909. Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large neural net-works: The sparsely-gated mixture-of-experts layer. 
+
+Preprint , arXiv:1701.06538. Xiaoniu Song, Zihang Zhong, Rong Chen, and Haibo Chen. 2025. Promoe: Fast moe-based llm serving us-ing proactive caching. Preprint , arXiv:2410.22134. Peng Tang, Jiacheng Liu, Xiaofeng Hou, Yifei Pu, Jing Wang, Pheng-Ann Heng, Chao Li, and Minyi Guo. 2024. Hobbit: A mixed precision expert of-floading system for fast moe inference. Preprint ,arXiv:2411.01433. vLLM Project. 2026. Prefetch-based cpu offloading in vllm. Source code in the vLLM repository. Accessed 2026-09-30. Yun Wang, Lingyun Yang, Senhao Yu, Yixiao Wang, Ruixing Li, Zhixiang Wei, James Yen, and Zhengwei Qi. 2025a. Buddymoe: Exploiting expert redundancy to accelerate memory-constrained mixture-of-experts inference. Preprint , arXiv:2511.10054. Zhibin Wang, Zhonghui Zhang, Yuhang Zhou, Zibo Wang, Mo Zhou, Peng Jiang, Weilin Cai, Chengy-ing Huan, Rong Gu, Sheng Zhong, and Chen Tian. 2025b. Accelerating mixture-of-experts inference by hiding offloading latency with speculative decoding. 
+
+Preprint , arXiv:2508.21706. Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, and Mahesh Marina. 2025. Moe-infinity: Efficient moe infer-ence on personal machines with sparsity-aware ex-pert cache. Preprint , arXiv:2401.14361. Shunyu Yao, Noah Shinn, Pedram Razavi, and Karthik Narasimhan. 2024. tau-bench: A benchmark for tool-agent-user interaction in real-world domains. arXiv preprint arXiv:2406.12045 .Rongjie Yi, Liwei Guo, Shiyun Wei, Ao Zhou, Shang-guang Wang, and Mengwei Xu. 2025. Edgemoe: Empowering sparse large language models on mo-bile devices. Preprint , arXiv:2308.14352. Hanfei Yu, Xingqi Cui, Hong Zhang, Hao Wang, and Hao Wang. 2025. Taming latency-memory trade-off in moe-based llm serving via fine-grained expert offloading. Preprint , arXiv:2502.05370. Yuning Zhang, Grant Pinkert, Nan Yang, Yanli Li, and Dong Yuan. 2026. Duoserve-moe: Dual-phase expert prefetch and caching for llm inference qos assurance. 
+
+Preprint , arXiv:2509.07379. Shuzhang Zhong, Ling Liang, Yuan Wang, Runsheng Wang, Ru Huang, and Meng Li. 2024a. Adapmoe: Adaptive sensitivity-based expert gating and man-agement for efficient moe inference. In Proceed-ings of the 43rd IEEE/ACM International Conference on Computer-Aided Design , ICCAD ’24, page 1–9. ACM. Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 2024b. Distserve: Disaggregating prefill and de-coding for goodput-optimized large language model serving. Preprint , arXiv:2401.09670. Guoying Zhu, Meng Li, Haipeng Dai, Xuechen Liu, Weijun Wang, Keran Li, Jun xiao, Ligeng Chen, and Wei Wang. 2026. Smoe: An algorithm-system co-design for pushing moe to the edge via expert substi-tution. Preprint , arXiv:2508.18983. 
+
+15
