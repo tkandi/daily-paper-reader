@@ -1,0 +1,273 @@
+Title: SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation for Memory-Efficient DNN Training
+
+URL Source: https://arxiv.org/pdf/2610.13003v1
+
+Published Time: Mon, 12 Oct 2026 00:37:41 GMT
+
+Number of Pages: 6
+
+Markdown Content:
+# SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation for Memory-Efficient DNN Training 
+
+# Hui Feng 
+
+University of California Merced Merced, California, USA 
+
+# Xun Zhou 
+
+University of Texas at Austin Austin, Texas, USA 
+
+# Yuxin Wang 
+
+Independent Researcher San Francisco, California, USA 
+
+## Abstract 
+
+Swapping saved activations to host memory let GPUs train models larger than their memory when compute and the host link were roughly balanced: on a 2015 Titan X, PCIe could copy every VGG-16 activation out while the forward pass ran. That balance is gone. From the Titan X to the H100, peak training FLOP/s grew 141 ×
+
+while the host link grew 3.9 ×, and on an A100 the link can hide only 11–38% of the activations of the transformers we study. Swap policies such as vDNN, SuperNeurons and SwapAdvisor still push whatever the memory budget demands through the link and stall; block checkpointing leaves the link idle. We present SlackSwap, which treats link time as a budget. From one profiled iteration, SlackSwap spends the forward-pass link budget on the tensors that are most expensive to recompute, covers the remaining deficit by recomputing the cheapest ones, and runs FIFO offloads and earliest-deadline-first prefetches with no per-layer barriers. In a trace-driven simulation of BERT-Large, GPT-2 XL and a Llama-7B-style model on an A100, SlackSwap keeps 96–100% of the throughput of an unlimited-memory GPU at half the activation memory, 1.10–1.11 ×
+
+the best baseline, stays within 0.5% of a genetic search over 6,600– 14,000 plans, and plans in under 0.4 s. 
+
+## CCS Concepts 
+
+• Computer systems organization → Heterogeneous (hybrid) systems ; • Software and its engineering → Memory manage-ment ; • Computing methodologies → Machine learning .
+
+## Keywords 
+
+GPU memory management, tensor swapping, rematerialization, DNN training, PCIe 
+
+## 1 Introduction 
+
+A GPT-2 XL training step over 8K tokens saves 22 GB of activations for the backward pass, almost as much as the 25 GB of weights, gra-dients and Adam states of its 1.5B parameters. When saved activa-tions exceed device memory, a system must free them between their last forward use and their first backward use, in one of two ways. 
+
+Swapping copies a tensor to host memory over the CPU–GPU link and copies it back before it is read [1–3]; unified memory does this on demand, through page faults [4]. Recomputation drops the ten-sor and re-runs the operator that produced it [5–7]; ZeRO-Offload takes this route for activations while it offloads model states [8], and POET combines both for edge devices [9]. Swapping is attractive because a copy that overlaps computation is free. vDNN made this case in 2016: on a Titan X with 12.8 GB/s of PCIe 3.0, the link could move every feature map of VGG-16 while the forward pass ran, and swapping cost 1–18% [1]. The balance has since moved. From the Titan X (FP32) to the H100 (BF16), peak training FLOP/s grew 141 × while the host link grew 3.9 ×, from PCIe 3.0 to PCIe 5.0 [10]. Figure 1 shows the result: the share of saved activations that the link can copy out during the forward pass fell from 100% to 9–27%. Most swap policies still treat the link as able to absorb whatever the memory budget demands. They choose tensors by layer type [1, 2] or by reuse distance [3], and none caps the swapped bytes at what the link can hide. In our simulation of an A100 at half the activation memory, vDNN, SuperNeurons and SwapAdvisor run GPT-2 XL at 36%, 66% and 43% of the throughput of a GPU with unlimited memory, because their copies sit on the critical path. Block checkpointing avoids stalls but leaves the link idle and re-runs 13% of the step. Two quantities decide what to do with each saved tensor. The link budget is the number of bytes the link can copy while computation runs; copies inside it are free. The recompute cost per byte is the critical-path time spent rebuilding a tensor, divided by its size. On an A100, rebuilding costs 1–11 ps per byte, while an exposed PCIe 4.0 copy costs 40 ps per byte (Figure 2). Every byte beyond the link budget should therefore be recomputed, and the budget should go to the bytes that are most expensive to recompute. We build this into SlackSwap, a planner and runtime policy for activation swapping. From one profiled iteration, Pass 1 fills the forward-pass link budget with the tensors that cost most to recompute, admitting a tensor only if FIFO offloads and earliest-deadline-first (EDF) prefetches still meet their deadlines under the memory budget. Pass 2 walks the resulting memory profile and covers every over-budget point with the cheapest recomputation. At run time, two DMA queues move data without per-layer barriers, so computation waits only for a missing input or for memory. This paper makes three contributions: 
+
+• A link-budget model: the fraction of activations a link can hide is min (1, 𝐼 /𝛽 ), a workload’s forward FLOPs per saved byte over a machine’s FLOP/s per link byte/s. On an A100 it is 11–38% for the transformers we study. 
+
+• SlackSwap’s two-pass planner, which runs in under 0.4 s, and its barrier-free runtime policy. 
+
+• A trace-driven evaluation against vDNN, SuperNeurons, SwapAdvisor and block checkpointing. At half the activa-tion memory SlackSwap keeps 96–100% of ideal throughput, 1.10–1.11 × the best baseline; it stays within 0.5% of a ge-netic search over 6,600–14,000 plans; and it trains at 10% of the peak, where no checkpointing plan fits. arXiv:2610.13003v1 [cs.DC] 9 Oct 2026 Anonymous Titan X 2015, FP32 0.4K FLOP/B V100 2017 7.5K FLOP/B A100 2020 9.4K FLOP/B H100 2022 13.8K FLOP/B 
+
+> 025 50 75 100
+> Hideable activations (%)
+> Llama-7B VGG-16 GPT-2 XL BERT-L
+
+Figure 1: Share of saved activations the host link can copy out during the forward pass (Eq. 1). The last line under each GPU gives its GEMM FLOP/s per link byte/s. 
+
+## 2 Background and Motivation 2.1 Two ways to free a saved activation 
+
+Training saves, for every operator, the tensors its backward pass reads. With FlashAttention [11], a GPT-style layer saves 34 bytes per token per hidden unit in BF16 [12]: the inputs of the four GEMMs (one of them the attention output), Q/K/V, the GeLU input, two LayerNorm inputs and two dropout masks. A saved tensor 𝑡 is produced at time 𝑟 𝑡 in the forward pass and next read at 𝑑 𝑡 in the backward pass. In between, it can be kept ; swapped , copied device-to-host (D2H) after 𝑟 𝑡 and host-to-device (H2D) before 𝑑 𝑡 on DMA engines that run beside the compute stream; or recomputed , dropped after its last forward reader and rebuilt before 𝑑 𝑡 by re-running its producer on the compute stream. vDNN [1] offloads the inputs of every layer (vDNN 𝑎𝑙𝑙 ) or of convolutions (vDNN 𝑐𝑜𝑛𝑣 ), overlapping each copy with the layer that reads it and holding the next layer until the copy ends; in the backward pass it prefetches the closest preceding offloaded layer. SuperNeurons [2] recomputes cheap layers, offloads convolution outputs through an LRU tensor cache when memory runs out, and prefetches one checkpoint ahead. SwapAdvisor [3] evicts the tensor whose next use is furthest away [13], issues copies as early as possible, and searches operator orders and memory-pool layouts with a genetic algorithm. 
+
+## 2.2 How much can the link hide? 
+
+A swap-out frees memory only when it completes, and the activa-tion footprint peaks when the forward pass ends. Before the peak, the D2H direction can therefore free at most 𝑊𝑇 𝐹 bytes, where 𝑊 
+
+is the link bandwidth and 𝑇 𝐹 the forward time. With 𝐴 saved bytes and 𝐹 forward FLOPs, the hideable fraction is 
+
+𝑓 = min 
+
+
+
+1, 𝑊 𝑇 𝐹 
+
+𝐴 
+
+
+
+= min 
+
+
+
+1, 𝐼 𝛽 
+
+
+
+, 𝐼 = 𝐹 𝐴 , 𝛽 = 𝐹 /𝑇 𝐹 
+
+𝑊 . (1) 
+
+𝐼 belongs to the workload: forward FLOPs per saved byte. 𝛽 belongs to the machine: sustained FLOP/s per byte/s of host link. On the Titan X, 𝛽 ≈ 400 and every workload in Figure 1 has 𝐼 ≥ 403, so the link hides everything; this is the regime vDNN was built for. Tensor cores raised 𝛽 to 4,700–6,900 on the V100 and 5,900–8,800 on the A100, while moving activations from FP32 to 16 bits only doubled 𝐼 .10 0 10 1 10 2 
+
+> Critical-path cost per byte freed (ps/B, log)
+> dropout mask (13 MB) GeLU output (105 MB) LayerNorm output (26 MB) attention output (27 MB) Q, K, V (79 MB) FC1 output (105 MB) residual (mid) (26 MB)
+> 1.0 1.2 1.3 5.3 6.9 6.9 10.6 PCIe 5.0 (20) PCIe 4.0 (40) PCIe 3.0 (83)
+
+Figure 2: Critical-path time per byte to free each saved tensor of a GPT-2 XL layer on an A100 by recomputation (bars) or by an exposed copy (lines). 
+
+GPT-2 XL has 𝐼 = 1,200, so an A100 can hide 15% of its 22 GB, and even a perfect swap-only policy stalls once the budget drops below 85% of the peak. The H2D direction has the whole backward pass, about 2 𝑇 𝐹 , so the D2H direction binds. 
+
+## 2.3 What should happen to the rest? 
+
+A byte that does not fit the link budget can still be copied, with the copy exposed, or it can be recomputed. Figure 2 compares the two costs for one GPT-2 XL layer on an A100. Rebuilding costs 1.0– 1.3 ps per byte for elementwise outputs and 5.3–10.6 ps for GEMM, attention and residual tensors; an exposed copy costs 1 /𝑊 : 83, 40 and 20 ps per byte on PCIe 3.0, 4.0 and 5.0. Recomputation wins for every tensor, by 1.9–87 ×. Swapping pays only inside the link budget, and there each swapped byte saves that byte’s recompute cost, so the budget is best spent on tensors that are expensive or impossible to rebuild: block inputs, the residual stream and GEMM outputs. The swap policies above neither cap swapped bytes at the link budget nor rank tensors by recompute cost: they pick tensors by layer type or reuse distance and swap as many bytes as the memory budget requires. Block checkpointing [5] re-runs whole blocks, paying GEMM time to rebuild elementwise bytes that cost 4–11 × less to recompute alone, and never uses the link. 
+
+## 3 SlackSwap 3.1 Problem 
+
+SlackSwap takes one profiled iteration, which framework hooks or GPU analysis tools such as DrGPUM [14] can collect: the operator sequence (forward, then backward), operator times, and for each saved tensor 𝑡 its size 𝑠 𝑡 , production time 𝑟 𝑡 , first backward use 
+
+𝑑 𝑡 , and recompute cost 𝑐 𝑡 , the time to re-run its producer from resident inputs ( 𝑐 𝑡 = ∞ for tensors such as block inputs that no single operator rebuilds). Given a device-memory budget 𝑀 for activations and transient buffers, it assigns every tensor keep, swap or recomp so that memory never exceeds 𝑀 and the iteration is as short as possible. We write 𝜌 𝑡 = 𝑐 𝑡 /𝑠 𝑡 for the recompute cost per byte and 𝑃 for the peak when every tensor is kept. 
+
+## 3.2 Pass 1: spend the link budget 
+
+Pass 1 (Algorithm 1, lines 2–6) considers tensors produced in the forward pass and read in the backward pass in decreasing 𝜌 𝑡 : block inputs ( 𝜌 = ∞) first, then the residual stream and GEMM and attention outputs, then elementwise outputs. It adds 𝑡 to the swap SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation 
+
+Algorithm 1 SlackSwap planner                                                                                                                          
+
+> Require: profile {𝑠 𝑡 , 𝑟 𝑡 , 𝑑 𝑡 , 𝑐 𝑡 }, budget 𝑀 , link bandwidth 𝑊 , guard 𝑔
+> 1: 𝑥 𝑡 ←keep for all 𝑡 ;𝐷 ←𝑃 −𝑀 ;if 𝐷 ≤0return 𝑥
+> 2: 𝑆 ← ∅ ⊲Pass 1: spend the link budget
+> 3: for 𝑡 with 𝑟 𝑡 <𝑇 𝐹 <𝑑 𝑡 , by decreasing 𝜌 𝑡 do
+> 4: if Í𝑢 ∈𝑆 𝑠 𝑢 ≥𝐷 break
+> 5: if FifoD2H (𝑆 ∪ { 𝑡 } ) ends before (1−𝑔 )𝑇 𝐹 and EdfH2D (𝑆 ∪ { 𝑡 } )
+> meets every 𝑑 𝑢 then
+> 6: 𝑆 ←𝑆 ∪ { 𝑡 };𝑥 𝑡 ←swap
+> 7: loop ⊲Pass 2: cover the rest with recomputation
+> 8: 𝑚 ←MemoryProfile (𝑥 );𝑖 ←first op with 𝑚 (𝑖 )>𝑀
+> 9: if no such 𝑖 return 𝑥
+> 10: 𝐸 ←max 𝑚 −𝑀 ;𝐶 ← { 𝑡 : resident at 𝑖 , unused until after 𝑖 ,
+> 𝑐 𝑡 <∞}
+> 11: if 𝐶 =∅then convert the earliest remaining block to full recompu-tation
+> 12: else 𝑥 𝑡 ∗←recomp for 𝑡 ∗=arg min 𝑡 ∈𝐶 𝑐 𝑡 /min (𝑠 𝑡 , 𝐸 )
+
+set 𝑆 only if two schedules stay feasible. Offload : D2H copies run in production order, each starting no earlier than its 𝑟 𝑡 , and all end before (1 − 𝑔 )𝑇 𝐹 , with a 2% guard 𝑔 . Prefetch : H2D copies start at 𝑇 𝐹 
+
+and run in deadline order, which minimizes the maximum lateness on one channel [15]. A copy may start only once the backward pass has released enough memory for it: we assume memory is full at 
+
+𝑇 𝐹 and credit the bytes of each kept tensor when its last backward reader ends. Every copy must end before its 𝑑 𝑢 . Pass 1 stops when 
+
+𝑆 covers the deficit 𝐷 = 𝑃 − 𝑀 or no candidate passes; each check takes 𝑂 (| 𝑆 | log |𝑆 |) time. 
+
+## 3.3 Pass 2: recompute the cheapest bytes 
+
+Pass 2 (lines 7–12) computes the memory profile 𝑚 (𝑖 ) over the oper-ator sequence. A keep tensor occupies memory from production to its last use; a swap tensor until its offload ends (and its last forward reader is done) and again from its first backward use; a recomp ten-sor until its last forward reader and again once rebuilt. At the first operator 𝑖 where 𝑚 (𝑖 ) > 𝑀 , Pass 2 looks at tensors that are resident at 𝑖 but unused until after it, and marks recomp the one with the lowest cost per byte of the excess it can cover, 𝑐 𝑡 /min (𝑠 𝑡 , 𝐸 ), where 
+
+𝐸 is the largest remaining excess. When tensors are small relative to 
+
+𝐸 this is the fractional-knapsack rule, lowest 𝜌 𝑡 first; when they are not, it avoids rebuilding a large tensor where a small one suffices. Rebuilds may chain: if a recomp tensor’s input is also recomp, the input is rebuilt first. If no candidate is left, Pass 2 converts the earli-est remaining block to full recomputation, i.e., block checkpointing as a fallback. Because swapped block inputs also leave memory, SlackSwap can go below the floor of checkpointing alone. Figure 3 shows the resulting plan for GPT-2 XL at 30% of its peak. Block inputs, mid-block residual tensors and the Q/K/V of the first nine layers fill the 3.3 GB link budget; every elementwise output, 46 of 48 attention outputs and the FC1 outputs of the first 27 layers are recomputed; the remaining GEMM outputs stay resident. 0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0   
+
+> Saved activations, sorted by recompute cost (GB)
+> 1310 ∞
+> Recompute cost (ps/B)  swap 3.3 GB keep 6.1 GB recompute 12.9 GB
+
+Figure 3: SlackSwap’s plan for GPT-2 XL at 30% of the peak on an A100. Each bar is a group of saved tensors: width is size, height is recompute cost per byte. 
+
+## 3.4 Validation, repair and runtime 
+
+Validation and repair. The memory profile ignores second-order effects: prefetches that wait for memory, rebuild chains, and tran-sient buffers at the forward/backward boundary. SlackSwap there-fore replays the plan once in an event model of the iteration (in deployment, one dry-run step traced with a tool such as PASTA [16]) and repairs what it observes. A tensor whose prefetch held up the compute stream is recomputed if that is cheaper than the wait, or else removed from 𝑆 before re-planning; lagging offloads raise 𝑔 ;a plan that does not fit is re-planned for a budget 1%, 2%, 4%, . . . smaller. SlackSwap keeps the fastest plan seen in at most six rounds, including the plan with no swaps. 
+
+Runtime. The runtime uses two copy streams. A D2H copy starts as soon as its tensor is produced; saved tensors are read-only, so the copy overlaps the operators that still read it, and the device buffer is released once both the copy and the last forward reader are done. When the backward pass starts, H2D copies are queued in deadline order, and each is admitted when used memory, its size and the allocations of the next three operators fit in 𝑀 . No operator waits on a copy it does not need: there is no per-layer barrier. If the compute stream lacks memory while no copy is in flight, the runtime frees device copies of swapped tensors that already have a host copy, furthest next use first, and queues them again. Rebuild operators run immediately before their first backward reader. In PyTorch, these mechanisms map onto saved-tensor pack/unpack hooks, pinned host buffers and two CUDA streams; this paper evaluates the policy in simulation. 
+
+## 4 Evaluation 4.1 Methodology 
+
+Simulator. A discrete-event simulator models one training iter-ation on one GPU: a compute stream, a D2H and an H2D DMA engine (each at the link bandwidth, 85% of it when both are busy, plus 10 𝜇 s per copy), and a memory budget covering saved activa-tions, rebuilt tensors, prefetch buffers, gradient buffers and tempo-raries. Operator times follow a roofline with datasheet peaks [10, 17] and sustained efficiencies: 75% of 312 TFLOPS for A100 GEMMs, 62%/48% for FlashAttention forward/backward, 85% of 2.0 TB/s for memory-bound kernels, and 5 𝜇 s per launch. The link is PCIe 4.0 at Anonymous 
+
+Table 1: Workloads on the A100: saved activations 𝐴 , ideal step time, intensity 𝐼 and hideable fraction 𝑓 (Eq. 1).                                     
+
+> Model Configuration 𝐴 (GB) Step (ms) 𝐼 (F/B) 𝑓
+> BERT-Large 24L, ℎ=1024, 𝑠 =512, 𝑏 =32 13.9 173 782 11% GPT-2 XL 48L, ℎ=1600, 𝑠 =1024, 𝑏 =8 22.3 399 1,200 15% Llama-7B 32L, ℎ=4096, 𝑠 =4096, 𝑏 =2 35.2 1,635 3,326 38% VGG-16 𝑏 =128, 224 ×224 3.9 82 1,015 17%
+
+25 GB/s per direction. Model states stay on the GPU, and budgets are fractions of each workload’s no-swap peak 𝑃 . The simulator assumes a fragmentation-free allocator and ignores the 1.2% of HBM bandwidth that copies take. As a check, with vDNN’s Titan X parameters (7 TFLOPS FP32, 12.8 GB/s) it predicts 3.4% overhead for vDNN 𝑐𝑜𝑛𝑣 and 22% for vDNN 𝑎𝑙𝑙 on VGG-16; vDNN reports 1–18% for its dynamic policy [1], which uses vDNN 𝑐𝑜𝑛𝑣 when it fits. 
+
+Workloads. Table 1 lists BERT-Large [18], GPT-2 XL [19], a Llama-2-7B-style model (RMSNorm, SwiGLU, no dropout) [20] and VGG-16 [21], all in BF16 with FlashAttention for the transformers. 
+
+Baselines. All run in the same simulator. vDNN : the dynamic pol-icy (no offload if it fits, else vDNN 𝑐𝑜𝑛𝑣 , else vDNN 𝑎𝑙𝑙 ) with per-layer barriers and one-layer-ahead prefetch. SuperNeurons : recomputes LayerNorm, GeLU and dropout outputs, evicts GEMM and attention outputs on demand in LRU order, and prefetches for the next heavy operator. SwapAdvisor : Belady eviction on the planned schedule with as-early-as-possible swaps; we omit its genetic search over operator order and memory pools, which has little room on these near-linear graphs with our allocator, as its authors observe for WResNet. Checkpoint : the fewest blocks recomputed from their inputs that fit, as in ZeRO-Offload and Megatron-LM [22]. 
+
+## 4.2 Throughput across memory budgets 
+
+Figure 4 reports throughput relative to the ideal. SlackSwap is the top curve, or tied for it, at every budget. Down to 90% of the peak (70% for Llama-7B), the deficit fits in the link budget, and SlackSwap and SwapAdvisor both match the ideal. Below that, SwapAdvisor pushes more bytes than the link moves: at 50% it copies 11.6 GB out for GPT-2 XL during a 136 ms forward pass and falls to 43%. Recomputing cheap layers carries SuperNeurons down to 60–70% of the peak at 96–99%, after which on-demand eviction puts every copy on the critical path. vDNN’s barriers expose its copies even when only a few are needed; it drops to 26–74% as soon as any offload starts. Checkpointing degrades smoothly to 80–82% at 15% of the peak and cannot go lower. At 50% of the peak, SlackSwap keeps 96.3%, 97.6% and 99.6% of the ideal for BERT-Large, GPT-2 XL and Llama-7B, 1.10–1.11 ×
+
+the best baseline; at 30% it keeps 89.7–97.0%, 1.07–1.16 ×. Llama-7B gains most because its link budget is the largest (38%). At 10%, where no checkpointing plan fits, SlackSwap still runs at 79.7–87.3% by swapping block inputs. VGG-16 keeps 42% of its activations in its first two convolutions, so its feasible range is narrow; Slack-Swap stays at 95–100% down to 65% of the peak, while vDNN and checkpointing stop fitting at 70%. 
+
+Table 2: Where the time goes at 40% of the peak: step time, recomputation and stalls as multiples of the ideal step, and GB copied out.                                                        
+
+> Policy Step Recomp. Fwd stall Bwd stall D2H GB GPT-2 XL vDNN 4.52 0.000 1.85 1.67 22.3 SuperNeurons 1.90 0.027 0.43 0.44 5.1 SwapAdvisor 2.82 0.000 0.99 0.83 14.0 Checkpoint 1.16 0.163 0.00 0.00 0.0
+> SlackSwap 1.05 0.053 0.00 0.00 3.3 Llama-7B vDNN 2.14 0.000 0.62 0.52 35.2 SuperNeurons 1.43 0.009 0.27 0.15 11.3 SwapAdvisor 1.20 0.000 0.19 0.01 21.6 Checkpoint 1.18 0.176 0.00 0.00 0.0
+> SlackSwap 1.01 0.008 0.00 0.00 13.0
+
+Table 3: Throughput (% of ideal) of SlackSwap, its ablations and a 45 s genetic search (GA), and SlackSwap’s planning time.                                                              
+
+> Swap-Recomp. Bar-GA GA Plan Model 𝑀 SlackSwap first only riers seeded random ms BERT-Large 50% 96.3 94.7 93.1 59.1 96.4 94.5 67 BERT-Large 20% 87.2 85.4 84.2 55.5 87.3 none 83 GPT-2 XL 50% 97.6 96.6 93.5 62.2 97.6 95.1 119 GPT-2 XL 20% 88.1 85.7 84.1 56.3 88.3 none 168 Llama-7B 50% 99.6 99.5 91.5 66.9 99.6 99.6 78 Llama-7B 20% 93.4 85.5 82.7 61.7 93.8 none 95
+
+## 4.3 Where the time goes 
+
+Table 2 splits the step at 40% of the peak. Swap policies lose time to exposed copies: SwapAdvisor’s GPT-2 XL step spends 0.99 and 0.83 ideal steps stalled in the forward and backward passes. Checkpoint-ing loses 16–18% to recomputation. SlackSwap copies out 3.3 GB for GPT-2 XL and 13.0 GB for Llama-7B, the whole forward link budget, recomputes 5.3% and 0.8% of the step, and stalls for less than 0.1%. Figure 5 shows the GPT-2 XL step at 50%: vDNN’s barriers stretch it to 1,105 ms, while SlackSwap’s D2H queue is busy for the whole forward pass, its H2D queue for the first part of the backward pass, and the step takes 409 ms against 399 ms ideal. 
+
+## 4.4 Ablation and optimality 
+
+Table 3 removes one idea at a time. Swap-first ranks swap candidates by production time, the Belady-like order, instead of recompute cost: it spends part of the link budget on cheap elementwise bytes and then pays for GEMM recomputation, losing 0.1–7.9 points. 
+
+Recompute-only drops Pass 1 and loses 3.0–10.7 points, the value of the link. Barriers runs SlackSwap’s plan with vDNN’s per-layer synchronization and loses 32–37 points: the plan pays off only with a barrier-free runtime. To bound the remaining gap, we run a genetic search over per-tensor keep/swap/recomp decisions, POET’s search space with SwapAdvisor’s search method, using the simulator as fitness for 45 s (6,600–14,000 plans). Seeded with SlackSwap and the baselines, it improves on SlackSwap by at most 0.45%. Started from random plans, as SwapAdvisor’s search is, it finds no feasible plan at 20% within 45 s and trails SlackSwap at 50%. SlackSwap plans in 67– 168 ms here and in at most 376 ms across all of Figure 4, in Python. SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation 100 75 50 25 10 0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Throughput / ideal
+
+BERT-Large     
+
+> 100 75 50 25 10
+
+GPT-2 XL     
+
+> 100 75 50 25 10
+
+Llama-7B    
+
+> 100 90 80 70
+
+VGG-16 
+
+Activation memory budget (% of the no-swap peak)     
+
+> SlackSwap Checkpoint SwapAdvisor SuperNeurons vDNN
+
+Figure 4: Throughput relative to a GPU with unlimited memory as the activation budget shrinks (A100, PCIe 4.0). A missing point means the policy cannot fit the budget. compute D2H copy H2D copy      
+
+> vDNN: 1,105 ms per step (ideal 399 ms)
+> 0200 400 600 800 1000
+> Time (ms); busy intervals, gaps under 0.25 ms merged
+> compute D2H copy H2D copy
+> SlackSwap: 409 ms per step (ideal 399 ms)
+
+Figure 5: One GPT-2 XL step at 50% of the peak on an A100. The vertical line ends the forward pass; white gaps in the compute lane are stalls. 
+
+## 4.5 Sensitivity 
+
+Link bandwidth. Figure 6a sweeps the link for GPT-2 XL at 30% of the peak. SlackSwap moves from 1.6 GB swapped and 14.6 GB recomputed at 12 GB/s to 16.7 GB swapped and nothing recomputed at 200 GB/s, staying 0–12 points above the best baseline. Swap-centric policies need 100–450 GB/s per direction, 4–18 × PCIe 4.0, before they beat checkpointing. 
+
+Sequence length. Attention FLOPs grow with sequence length while saved bytes per token do not, so 𝐼 and 𝑓 grow: for the Llama-7B model, 𝑓 rises from 36% at 2K tokens to 60% at 32K (Figure 6b, 16K tokens per batch, 32K at the last point). SlackSwap approaches the ideal (96.9% to 99.8%) while checkpointing stays at 83–84%. 
+
+GPU generation. At 30% of the peak, SlackSwap’s lead over the best baseline is 1.10 ×, 1.08 × and 1.07 × for GPT-2 XL on the V100, A100 and H100, and 1.15 ×, 1.16 × and 1.11 × for Llama-7B. The H100’s smaller link budget shifts SlackSwap toward recomputation instead of stalls. 
+
+Limitations. All results are simulated. The simulator does not model allocator fragmentation, HBM contention from copies, or GPUs that share a PCIe switch or host memory bandwidth; sharing 12 25 50 100 200 450         
+
+> Host link (GB/s per direction)
+> 0.00 0.25 0.50 0.75 1.00
+> Throughput / ideal
+> (a) GPT-2 XL, 30% budget
+> 2K 4K 8K 16K 32K
+> Sequence length
+> 0.7 0.8 0.9 1.0
+> (b) Llama-7B, 30% budget
+> SlackSwap Checkpoint SwapAdvisor SuperNeurons vDNN
+
+Figure 6: Sensitivity at 30% of the peak: (a) host-link band-width, (b) sequence length (note the y-axis starts at 0.7). 
+
+shrinks each GPU’s link budget, which SlackSwap absorbs if the profile measures the shared bandwidth. We evaluate one GPU with resident model states; combining SlackSwap with ZeRO-Offload’s gradient traffic, which uses D2H during the backward pass while activation swapping uses it during the forward pass, is future work, as is applying the link budget to unified-memory prefetching [23]. 
+
+## 5 Related Work 
+
+Swapping. vDNN [1], TFLMS [24], SuperNeurons [2] and Swa-pAdvisor [3] offload activations (and, for SwapAdvisor, parame-ters) to host memory; FlashNeuron [25] offloads to SSDs and Sen-tinel [26] places tensors across heterogeneous memory. Demand paging through unified memory is slower than explicit copies [1, 27]; recent work characterizes oversubscribed memory manage-ment for deep learning training [4] and improves UVM management and prefetching [23, 28]. ZeRO-Offload and ZeRO-Infinity [8, 29] of-fload model states, and HybridGen [30] splits LLM inference across the CPU and GPU. The swapping systems above size swaps by memory pressure; SlackSwap sizes them by link time. 
+
+Recomputation. Chen et al. [5] checkpoint every √𝑛 layers; Check-mate [6] finds optimal schedules with integer programming; DTR [7] Anonymous 
+
+evicts greedily at run time; Megatron-LM recomputes selected at-tention operators [12]. 
+
+Hybrids. Capuchin [31] chooses between swapping and recom-putation per tensor from access patterns observed at run time; POFO [32] combines them optimally for chains with dynamic pro-gramming; POET [9] solves a mixed-integer program for energy on edge devices. SlackSwap is a closed-form, millisecond planner built around one observation: on compute-rich GPUs the link budget is small and explicit, and it belongs to the tensors that are most expensive to rebuild. 
+
+## 6 Conclusion 
+
+GPU compute has outgrown the host link by more than an order of magnitude since swapping was proposed, and an A100 can now hide only 11–38% of a transformer’s saved activations. SlackSwap plans for this directly: it spends the link budget on the tensors that are most expensive to recompute and recomputes the rest, and its runtime keeps every copy off the critical path. In simulation it holds 96–100% of ideal throughput at half the activation memory and reaches budgets that block checkpointing cannot. The same analysis says when swapping becomes the main tool again: with coherent links of hundreds of GB/s or with long sequences, SlackSwap shifts on its own from recomputation to swapping. 
+
+## References 
+
+[1] Minsoo Rhu, Natalia Gimelshein, Jason Clemons, Arslan Zulfiqar, and Stephen W. Keckler. 2016. vDNN: Virtualized Deep Neural Networks for Scalable, Memory-Efficient Neural Network Design. In Proceedings of the 49th Annual IEEE/ACM International Symposium on Microarchitecture (MICRO) . 1–13. [2] Linnan Wang, Jinmian Ye, Yiyang Zhao, Wei Wu, Ang Li, Shuaiwen Leon Song, Zenglin Xu, and Tim Kraska. 2018. SuperNeurons: Dynamic GPU Memory Management for Training Deep Neural Networks. In Proceedings of the 23rd ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming (PPoPP) .41–53. https://doi.org/10.1145/3178487.3178491 [3] Chien-Chin Huang, Gu Jin, and Jinyang Li. 2020. SwapAdvisor: Pushing Deep Learning Beyond the GPU Memory Limit via Smart Swapping. In Proceed-ings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) . 1341–1355. https: //doi.org/10.1145/3373376.3378530 [4] Mao Lin and Hyeran Jeon. 2025. Understanding Oversubscribed Memory Man-agement for Deep Learning Training. In Proceedings of the 5th Workshop on Machine Learning and Systems . 46–55. [5] Tianqi Chen, Bing Xu, Chiyuan Zhang, and Carlos Guestrin. 2016. Training Deep Nets with Sublinear Memory Cost. arXiv preprint arXiv:1604.06174 (2016). [6] Paras Jain, Ajay Jain, Aniruddha Nrusimha, Amir Gholami, Pieter Abbeel, Kurt Keutzer, Ion Stoica, and Joseph E. Gonzalez. 2020. Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization. In Proceedings of Machine Learning and Systems (MLSys) .[7] Marisa Kirisame, Steven Lyubomirsky, Altan Haan, Jennifer Brennan, Mike He, Jared Roesch, Tianqi Chen, and Zachary Tatlock. 2021. Dynamic Tensor Rematerialization. In International Conference on Learning Representations (ICLR) .[8] Jie Ren, Samyam Rajbhandari, Reza Yazdani Aminabadi, Olatunji Ruwase, Shuangyan Yang, Minjia Zhang, Dong Li, and Yuxiong He. 2021. ZeRO-Offload: Democratizing Billion-Scale Model Training. In Proceedings of the 2021 USENIX Annual Technical Conference (ATC) . 551–564. [9] Shishir G. Patil, Paras Jain, Prabal Dutta, Ion Stoica, and Joseph E. Gonzalez. 2022. POET: Training Neural Networks on Tiny Devices with Integrated Rema-terialization and Paging. In Proceedings of the 39th International Conference on Machine Learning (ICML) (PMLR, Vol. 162) .[10] NVIDIA. 2023. NVIDIA H100 Tensor Core GPU . Datasheet. NVIDIA Corpora-tion. https://resources.nvidia.com/en-us-hopper-architecture/nvidia-tensor-core-gpu-datasheet [11] Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. In Advances in Neural Information Processing Systems (NeurIPS) .[12] Vijay Anand Korthikanti, Jared Casper, Sangkug Lym, Lawrence McAfee, Michael Andersch, Mohammad Shoeybi, and Bryan Catanzaro. 2023. Reducing Activation Recomputation in Large Transformer Models. In Proceedings of Machine Learning and Systems (MLSys) .[13] L. A. Belady. 1966. A Study of Replacement Algorithms for a Virtual-Storage Computer. IBM Systems Journal 5, 2 (1966), 78–101. [14] Mao Lin, Keren Zhou, and Pengfei Su. 2023. DrGPUM: Guiding Memory Optimization for GPU-Accelerated Applications. In Proceedings of the 28th ACM International Conference on Architectural Support for Programming Lan-guages and Operating Systems, Volume 3 (Vancouver, BC, Canada) (ASPLOS 2023) . Association for Computing Machinery, New York, NY, USA, 164–178. https://doi.org/10.1145/3582016.3582044 [15] J. R. Jackson. 1955. Scheduling a Production Line to Minimize Maximum Tardi-ness . Research Report 43. Management Science Research Project, University of California, Los Angeles. [16] Mao Lin, Hyeran Jeon, and Keren Zhou. 2026. PASTA: A Modular Program Analy-sis Tool Framework for Accelerators. In 2026 IEEE/ACM International Symposium on Code Generation and Optimization (CGO) . IEEE, 520–534. [17] NVIDIA. 2021. NVIDIA A100 Tensor Core GPU . Datasheet. NVIDIA Corpora-tion. https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/ pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf [18] Jacob Devlin, Ming-Wei Chang, Kenton Lee, and Kristina Toutanova. 2019. BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding. In Proceedings of NAACL-HLT .[19] Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario Amodei, and Ilya Sutskever. 2019. Language Models are Unsupervised Multitask Learners . Technical Report. OpenAI. [20] Hugo Touvron, Louis Martin, Kevin Stone, et al. 2023. Llama 2: Open Foundation and Fine-Tuned Chat Models. arXiv preprint arXiv:2307.09288 (2023). [21] Karen Simonyan and Andrew Zisserman. 2015. Very Deep Convolutional Net-works for Large-Scale Image Recognition. In International Conference on Learning Representations (ICLR) .[22] Mohammad Shoeybi, Mostofa Patwary, Raul Puri, Patrick LeGresley, Jared Casper, and Bryan Catanzaro. 2019. Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism. arXiv preprint arXiv:1909.08053 
+
+(2019). [23] Mao Lin, Hui Feng, Xianzhong Ding, Guilherme Cox, Qian Wang, and Hyeran Jeon. 2026. AutoUVM: Automated Prefetching Framework for LLMs under UVM Oversubscription. arXiv preprint arXiv:2609.06172 (2026). [24] Tung D. Le, Haruki Imai, Yasushi Negishi, and Kiyokuni Kawachiya. 2018. TFLMS: Large Model Support in TensorFlow by Graph Rewriting. arXiv preprint arXiv:1807.02037 (2018). [25] Jonghyun Bae, Jongsung Lee, Yunho Jin, Sam Son, Shine Kim, Hakbeom Jang, Tae Jun Ham, and Jae W. Lee. 2021. FlashNeuron: SSD-Enabled Large-Batch Training of Very Deep Neural Networks. In 19th USENIX Conference on File and Storage Technologies (FAST) .[26] Jie Ren, Jiaolin Luo, Kai Wu, Minjia Zhang, Hyeran Jeon, and Dong Li. 2021. Sentinel: Efficient Tensor Migration and Allocation on Heterogeneous Memory Systems for Deep Learning. In IEEE International Symposium on High-Performance Computer Architecture (HPCA) .[27] Tianhao Zheng, David Nellans, Arslan Zulfiqar, Mark Stephenson, and Stephen W. Keckler. 2016. Towards High Performance Paged Memory for GPUs. In IEEE International Symposium on High Performance Computer Architecture (HPCA) .[28] Mao Lin, Yuan Feng, Guilherme Cox, and Hyeran Jeon. 2025. Forest: Access-aware GPU UVM Management. In Proceedings of the 52nd Annual International Symposium on Computer Architecture (Tokyo, Japan) (ISCA ’25) . Association for Computing Machinery, New York, NY, USA, 137–152. https://doi.org/10.1145/ 3695053.3731047 [29] Samyam Rajbhandari, Olatunji Ruwase, Jeff Rasley, Shaden Smith, and Yuxiong He. 2021. ZeRO-Infinity: Breaking the GPU Memory Wall for Extreme Scale Deep Learning. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis (SC) .[30] Mao Lin, Xi Wang, Guilherme Cox, Dong Li, and Hyeran Jeon. 2026. HybridGen: Efficient LLM Generative Inference via CPU-GPU Hybrid Computing. arXiv preprint arXiv:2604.18529 (2026). [31] Xuan Peng, Xuanhua Shi, Hulin Dai, Hai Jin, Weiliang Ma, Qian Xiong, Fan Yang, and Xuehai Qian. 2020. Capuchin: Tensor-based GPU Memory Management for Deep Learning. In Proceedings of the Twenty-Fifth International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) . 891–905. [32] Olivier Beaumont, Lionel Eyraud-Dubois, and Alena Shilova. 2021. Efficient Combination of Rematerialization and Offloading for Training DNNs. In Advances in Neural Information Processing Systems (NeurIPS) .

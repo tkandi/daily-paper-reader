@@ -1,0 +1,730 @@
+Title: Ember: Making Unified Virtual Memory Practical for Discrete-Memory GPUs
+
+URL Source: https://arxiv.org/pdf/2610.13408v1
+
+Published Time: Mon, 12 Oct 2026 01:24:01 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# Ember: Making Unified Virtual Memory Practical for Discrete-Memory GPUs 
+
+## Senad-Leandro Lemes Galera ∗
+
+Technical University of Munich Munich, Germany 
+
+senad.lemes@tum.de 
+
+## Michail Georgoulakis Misegiannis ∗
+
+Technical University of Munich Munich, Germany 
+
+geom@in.tum.de 
+
+## Ferdinand Gruber 
+
+Technical University of Munich Munich, Germany 
+
+gruberfe@in.tum.de 
+
+## Jana Giceva 
+
+Technical University of Munich Munich, Germany 
+
+jana.giceva@in.tum.de 
+
+## Dimitrios Stavrakakis 
+
+Technical University of Munich Munich, Germany 
+
+dimitrios.stavrakakis@tum.de 
+
+## Abstract 
+
+GPU working sets have outgrown GPU memory, so applica-tions must oversubscribe it, keeping only hot data on the GPU. NVIDIA’s Unified Virtual Memory (UVM) supports oversub-scription , but its performance degrades once data exceeds the GPU’s memory. This stems from its fault-driven data place-ment, wasting interconnect bandwidth, and underutilizing the GPU. This raises the question: can UVM oversubscrip-tion become practical on stock GPUs, exploiting GPU memory speed and minimizing wasted interconnect bandwidth, without placement hints, profiling runs, or application changes? 
+
+To this end, we present Ember, a UVM management frame-work for oversubscribed workloads. Ember introduces a 
+
+hybrid address space ; allocations start as mapped into host memory, omitting data migration. Ember’s counter-driven region promotion uses GPU’s hardware counters to fetch hot regions to the GPU, its decay-based eager reclamation proac-tively evicts cold regions in batches, while via online region re-placement , Ember tracks the hot set at runtime. We implement Ember within NVIDIA’s open-source UVM driver for unmodified applications and as a userspace variant on stock CUDA. At 1 .5× oversubscription, it is 6 .8–10 .6×
+
+faster than UVM on six applications across three PCIe GPUs, and generates LLM tokens 4 .7–16 × faster at sizes where manual placement cannot run at all. Without a profiling run, it beats a profile-guided alternative by 2 .1× on kernel time. 
+
+## 1 Introduction 
+
+GPUs have become the primary platform for data-intensive workloads [3, 11, 22, 24, 62]. Their working sets are increas-ingly outgrowing GPU memory at a fast pace [6, 29, 54]. For instance, over the last few years, the largest models grew by 
+
+∼1000 × while GPU memory only by ∼5× [49]. Provisioning larger GPUs, or scaling out across more of them [31], raises monetary cost [12] without removing this ceiling, and in shared clusters each tenant receives only a fraction of one   
+
+> ∗Both authors contributed equally to this research. 816 24
+
+Working set [GiB] 
+
+> 0.1 110 100 1000
+> Runtime [s]
+> oversubscribed VRAM capacity
+
+CUDA UVM EMBER 226 ×
+
+## 1
+
+Figure 1. UVM performance collapse past the VRAM line (H200 capped to 16 GiB, GPU sort over scattered data). GPU’s memory [15, 50, 61]. Therefore, applications must 
+
+oversubscribe GPU memory, keeping a subset of their data on the GPU and serving the rest from host memory over the interconnect, since otherwise they cannot run at all once their data exceeds device memory [43]. To simplify GPU memory management, NVIDIA intro-duced Unified Virtual Memory (UVM) [41], which places CPU and GPU memory in a single virtual address space and implicitly transfers data between them. Since UVM pages data into the GPU on demand, an allocation may also exceed the device memory, allowing applications to oversubscribe the GPU. Unlike manual data placement, which couples an application to a specific memory layout and requires rewrit-ing per application and GPU generation [6, 39, 53], UVM lets host and GPU share pointer-based structures [42, 55]. By default, a GPU access to a non-resident page raises a page fault and the driver must migrate the page into GPU memory before the access can complete, with later accesses served at device-memory bandwidth. UVM also allows developers to 
+
+prefetch a range into the device, or map it so the GPU reads host memory directly at interconnect speed. Despite the benefits, UVM sees little adoption for working sets exceeding GPU memory, as performance collapses once the GPU capacity line is crossed. Figure 1 shows a GPU sort whose runtime grows from 4 .1 s to 1150 s at 1 .5× oversub-scription. Thus, production systems either manually orches-trate the placement policies [6] or disable UVM [47], with vendors recommending steering placement by hand [19, 55]. Making UVM practical beyond device memory has four obstacles (§3). First, UVM suffers from reclamation-induced arXiv:2610.13408v1 [cs.OS] 9 Oct 2026 execution stalls (C1 ). Once the device memory is full, a page fault must also reclaim a device-resident page before the driver migrates the new one, and the reclaimed pages may become the next faults. This cycle runs on the critical path, stalling computation. Architectural proposals shorten this path [7, 17, 33, 40, 67, 69, 71], but they rely largely on simu-lations or on features absent from commodity GPUs. Second, to reduce page faults, developers can map a mem-ory range so that the GPU accesses host memory directly. However, memory requests are then served over the intercon-nect, leading interconnect-bound mapped access (C2 ). Thus, mapping alone cannot resolve UVM’s performance issues. Third, to leverage GPU memory performance, UVM al-lows the programmer to selectively prefetch data. However, beyond the VRAM capacity, every transfer must first evict pages to free up space on the device. Prefetching moves up to 
+
+∼1.5× the amount of data that the default UVM does, trading faults for prefetch-amplified reclamation traffic (C3 ). Hence, prefetching only defers UVM’s performance collapse. Fourth, while mapping and prefetching can be combined through placement hints, there is no principled rule speci-fying which to apply where, and a wrong hint can degrade performance [2, 14, 28]. A hint also applies to a whole man-aged allocation and must be given before launch. However, access patterns shift during runtime [64, 65], leading to stale, allocation-granular placements (C4 ). Prior work either fixes placement before the run and per allocation [25, 49, 53], or decides at runtime but still migrates by default, mapping only as a fallback, so reclamation stays on the critical path [60]. 
+
+Research question: Can UVM oversubscription become practical on stock GPUs, exploiting GPU memory speed, minimizing wasted interconnect bandwidth, without place-ment hints, profiling runs, or application changes? 
+
+To answer this question, we present Ember, a GPU mem-ory management framework designed for oversubscribed workloads. Our key insight is that mapping should be the default, not a fallback. Concretely, Ember decides which regions leave device memory and when, reclaiming cold re-gions in batches before memory fills, avoiding computation stalls ( C1 ). Underneath, it builds a mapped-by-default hybrid address space , in which every allocation starts as mapped and is reachable from the GPU without migration ( C2 ). Only hot regions are promoted to GPU memory, either as advised by the developer in userspace or as reported by the GPU’s hardware access counters in the kernel ( C3 ). The split is also re-evaluated at runtime, demoting regions whose demand has decayed and promoting those that become hot ( C4 ). We implement two variants of Ember: Ember-static , a userspace variant on stock CUDA that fixes the data split at allocation time, and Ember-adaptive , a patch to NVIDIA’s open-source UVM kernel module that decides the split on-line and transparently supports unmodified applications. We 0 1 2 32/2 0/2 2/4             
+
+> ① ② faults on leaves 0 and 1
+> root at 2/4: nothing happens
+> 01232/2 1/2 3/4
+> ③fault on leaf 2
+> root at 3/4>50%
+> ④
+> prefetch
+> brought in by a fault prefetched not resident
+
+Figure 2. Default TBN prefetching mechanism [17]. evaluate Ember on four GPUs, covering three common de-ployment settings, across three workload classes. At 1 .5×
+
+oversubscription, it reaches a geometric-mean speedup of 6.8–10 .6× over naive UVM across six applications, sustains LLM generation at 4 .7–16 × the throughput of UVM at model sizes exceeding the GPU memory capacity, and outperforms profile-guided placement by 2 .1× without a profiling run. 
+
+Contributions. This paper makes four contributions: 
+
+• UVM performance analysis. We show the page recla-mation effect behind UVM performance issues, and that mapping or prefetching alone is not enough (§3). 
+
+• Hybrid data placement. We design a mapped-by-default hybrid address space that assigns residency per region in-stead of per allocation, turning eviction from a permanent cost of oversubscription into a policy decision (§4, §5). 
+
+• Counter-driven runtime data placement. We derive the data split from the GPU’s hardware access counters, and revise it while kernels run, demoting and promoting regions with no application changes (§5, §6). 
+
+• Implementation & evaluation. We implement Ember’s variants, and evaluate them using four discrete GPUs (§7). 
+
+## 2 Background 
+
+2.1 Unified Virtual Memory (UVM) 
+
+NVIDIA implements UVM in the nvidia-uvm kernel module, which manages the unified address space. The driver divides each allocation into fixed-size 2 MiB VA blocks and tracks, per block, which of its pages (e.g., 64 KiB pages on aarch64) are on the GPU. This is the unit at which placement is decided, and we call it a region . Physical GPU memory is allocated and reclaimed in chunks of up to 2 MiB. When the GPU accesses a page that is not resident, it faults into the driver and stalls for thousands of cycles until the page is migrated [63]. 
+
+2.2 Data Placement 
+
+There are three ways to place a page in UVM memory model. 
+
+Migrate. Migration through page faults is UVM’s default strategy. To amortize fault costs, CUDA prefetches specu-latively with a tree-based neighborhood (TBN) policy [17]. Each 2 MiB VA block forms a tree whose leaves are its pages, and each internal node tracks how much of its subtree is GPU resident (Figure 2). A page fault makes its leaf resident, which raises a resident count at every node above it. When more than half of a node’s subtree is resident, the driver     
+
+> 20.5 ×1×1.5 ×2×2.5 ×
+> Working set (multiple of VRAM)
+> 050 100
+> Runtime [s]  oversubscribed
+> 10
+
+×
+
+> UVM (migrate) UVM-mapped
+
+## 1Figure 3. Runtime of UVM and UVM-mapped (A40, ran-dom access, 8 B elements). 0 20 40 60    
+
+> Kernel time [s]
+> 050 100
+> Warps [%]
+> memory full
+> 0100 200
+> Evicted [GiB] warps evicted random sequential
+
+## 1
+
+Figure 4. Warps in flight and cumulative eviction (right axis) under oversubscription (RTX 5080, 10 ms samples). migrates the rest of it. Thus, faults progressively migrate larger ranges, up to 2 MiB, betting on spatial locality [68]. Under oversubscription, migrating a page requires free-ing GPU memory. UVM reclaims space with an age-based, approximately LRU policy that evicts chunks back to host memory over the same interconnect used for migration [17]. 
+
+Prefetch. A developer can move a range into the GPU ahead of use with cudaMemPrefetchAsync [14, 42], avoiding many faults with one transfer. Prefetching is still migration, how-ever, so past capacity it must first free GPU memory. 
+
+Map. A developer can place a range in host memory, directly accessed by the GPU. cudaMemAdvise attaches a placement policy to a range; SetPreferredLocation hints where it should live; and SetAccessedBy adds it to the GPU page table. By combining these calls, the range can be preserved in the host (i.e., never migrated) and be available to the GPU without a fault. Such mapped access only fetches the cache lines a kernel requests via the interconnect on every access. Outside UVM, pinned explicit movement stages data into pinned host buffers and copies it using cudaMemcpy , achiev-ing high bandwidth but ruling out oversubscription, since the working set must fit in GPU memory. 
+
+2.3 GPU Hardware Access Counters 
+
+NVIDIA GPUs expose roughly 256 hardware access counters ,which count the GPU’s accesses to host-resident memory at a configurable granularity [10, 42]. Once a counter crosses its threshold, the GPU writes an entry into a buffer and keeps running, so unlike a fault it does not stall. The driver reads these entries off the access path to see which range was accessed and how often, and we call each entry a notification .The counters are too few to cover a large mapped dataset, and the driver does not migrate based on them by default [10]. The driver also discards notifications when the operating system’s page size is 4 KiB, the default on x86 Linux, because the migration path they would drive is unsupported at that size [45]. The counters therefore go unused on most systems. 0.5 × 1× 1.5 × 2×        
+
+> 110 100
+> Runtime [s]  (a) random access
+> 0.5 ×1×1.5 ×
+> 048
+> Runtime [s]  (b) k-means
+> 0.5 ×1×1.5 ×
+> 075 150
+> Page faults [k]  (c) faults, sequential
+> 0.5 ×1×1.5 ×
+> 0816
+> Evicted [GiB]  (d) eviction, sequential Working set (multiple of VRAM)
+> UVM (migrate) Prefetch UVM-mapped
+
+## 1
+
+Figure 5. Allocation strategies across the VRAM line (A40): (a) random access; (b) arithmetic-intensive k-means; (c) fault rate and (d) evicted volume under prefetching. 
+
+2.4 Coherent Interconnects 
+
+Recent systems connect the CPU and GPU over a cache-coherent interconnect (e.g., NVLink-C2C on Grace Hop-per [44, 56]), where they share one page table. The GPU accesses host memory directly, and the gap between device-memory and interconnect bandwidth is lower compared to PCIe (Table 2). However, GPU memory remains a separate, finite pool, and a resident set must still be chosen. Finally, physically unified memory promises to remove the distinc-tion between host and device memory altogether [5]. 
+
+## 3 Technical Challenges and Key Ideas 
+
+UVM enables GPU memory oversubscription without data-movement code. However, under oversubscription, its three placement mechanisms and their combinations fail. 
+
+C1: Reclamation-induced execution stalls. Hiding data movement is a core benefit of UVM, but its TBN prefetcher and age-based eviction thrash once the working set exceeds VRAM (§2.2). Past the VRAM line, UVM runs up to 10 ×
+
+slower than mapping the same data from the host ( UVM-mapped ), which stays flat even though it is interconnect-bound (Figure 3). UVM-mapped never incurs a page fault and never migrates data, so nothing is ever reclaimed, which helps locate UVM’s cost. A UVM kernel with random ac-cesses runs 7 × longer than one with sequential accesses, even though it incurs 5 × fewer page faults, because it evicts 26 ×
+
+more data. TBN explains the difference, since it prefetches a neighborhood for each fault, which a sequential kernel consumes and never needs again, whereas a random kernel uses little of it and evicts pages before it accesses them again. Figure 4 shows what that costs. Once memory is full, evic-tion never stops, and because each eviction interleaves with execution and stalls the warps whose pages it takes, warp occupancy falls and never recovers. 
+
+Key idea #1: To avoid reclamation traffic and page faults, Ember maps allocations in host memory by default (§5.1).                       
+
+> 3User space Kernel space Hardware Ember-static — userspace, stock driver
+> cudaMemAdvise(p,...,CPU); cudaMemAdvise(p,...,dev); cudaMemPrefetchAsync(p,hot,dev);
+> Ember — in-driver, unmodified application
+> p=cudaMallocManaged(n); kernel<<<g,b>>>(p);
+> Ember — modified UVM kernel module ①
+> per-VA-block state: mapped or resident from the driver’s own residency masks; Ember adds access count and migration history Migration Engine
+> maps, promotes, reclaims
+> Placement Policy
+> chooses the resident set
+> Access Monitor
+> host-resident accesses only
+> ⑥
+> Host
+> CPU cores
+> DRAM: mapped set GPU VRAM: hot set SMs page table
+> access counters
+> interconnect
+> ②managed allocation
+> ③map host-resident
+> ④⑤notification
+> ⑦⑧
+> access in place promotion reclamation control mapped region resident region
+
+Figure 6. Ember architecture and allocation workflow. Top left: Ember-static, the userspace stand-in on the stock driver. 
+
+C2: Interconnect-bound mapped access. While UVM-mapped does not reclaim any data and can even improve performance in some scenarios (Figure 5a), it leaves device-memory bandwidth unused. Every access is bounded by the interconnect, which has 15–150 × lower bandwidth than device memory over PCIe and still ∼9× lower over NVLink-C2C (Table 2). Compute-intensive kernels are affected most, since every reuse of their data crosses the interconnect. For instance, a GPU-accelerated k-means application runs up to 6.5× slower when served purely from the host (Figure 5b), and LLM workloads are bounded in a similar fashion (§7.4). 
+
+Key idea #2: To recover device-memory bandwidth, Em-ber splits each allocation, serving selected regions from device memory and leaving the rest mapped on the host (mapped-by-default hybrid address space , §5.1). 
+
+C3: Prefetch-amplified reclamation traffic. Prefetching large data ranges ahead of use ( Prefetch ) fills the GPU, leav-ing no room for subsequent data fetches, once the VRAM capacity is reached. On random accesses, Prefetch collapses similarly to stock UVM (Figure 5a). It falls back to on-demand faulting at UVM-like fault rates (Figure 5c), but evicts up to 
+
+∼1.5× the data of stock UVM (Figure 5d). Thus, prefetching replaces faults with bulk transfers but increases the eviction volume and, as a consequence, the reclamation traffic [1]. 
+
+Key idea #3: To avoid reintroducing eviction thrashing, Ember promotes only the regions the GPU’s access coun-ters show as hot, and stops promoting before device mem-ory fills ( access-counter-driven region promotion , §5.2). 
+
+C4: Stale, allocation-granular placement. Combining mapping and selective prefetching can help, but it is not enough, because the split between them must be both fine-grained and adjustable at runtime. Specifically, an allocation mixes hot and cold data [68]. A decision at the allocation granularity can lead either to promoting cold data to VRAM, occupying useful space, or to leaving hot data in host mem-ory. Which data is hot also changes as an application moves 0 5 10 15 20 25  
+
+> Time [s]
+> 0400 800
+> Throughput [GiB/s]
+> phase shift EMBER-static: array B over PCIe, 9 ×lower EMBER-adaptive: B promoted, full rate
+
+## 1
+
+Figure 7. Throughput across a phase shift, split fixed or re-derived online (RTX 5080, array A then array B; §7.7). between phases. With a split fixed before launch, a kernel that reads array A and then array B on a footprint larger than GPU memory loses ∼9× of its throughput at the switch, from 750 to 80 GiB/s, because device memory still holds A. A split re-derived online recovers instead (Figure 7). 
+
+Key idea #4: To keep the split current as the hot set moves, Ember reclaims regions whose demand has de-cayed, in batches before GPU memory fills, and promotes those that turn hot again ( decay-based eager reclamation 
+
+and online region replacement , §5.3). 
+
+## 4 Overview 
+
+Ember is a GPU memory management framework tailored for oversubscribed workloads. It aims to (i) benefit from GPU memory performance while the working set fits, (ii) avoid the collapse on oversubscription, and (iii) require no changes to hardware, GPU kernels, or applications. 
+
+4.1 System Architecture 
+
+We build two variants of Ember: (i) Ember-static establishes the hybrid address space from user space with placement hints and fixes the data split between host and device before kernel launch, for hot sets known up front and for machines without bare-metal access (e.g., cloud instances). (ii) Ember-adaptive executes inside the UVM driver and adjusts this split at runtime from the GPU’s hardware access counters, for hot sets that are unknown or change during the run (§7.8). Figure 6 shows Ember’s architecture for both variants. Its core consists of three components: a migration engine ,         
+
+> 41// EMBER-static: userspace, stock driver
+> 2cudaMallocManaged(&ptr, n);
+> 3cudaMemAdvise(ptr, n, SetPreferredLocation, CpuDeviceId);
+> 4cudaMemAdvise(ptr, n, SetAccessedBy, dev);
+> 5cudaMemPrefetchAsync(ptr, hot_size, dev); // split is fixed
+> 6kernel<<<g,b>>>(ptr);
+> 78// EMBER-adaptive: in-driver, unchanged application
+> 9cudaMallocManaged(&ptr,n);
+> 10 kernel<<<g,b>>>(ptr);
+
+Listing 1. Ember-static needs three calls per allocation on the stock driver; Ember-adaptive lifts this requirement. an access monitor , and a placement policy engine . The mi-gration engine owns the mapped-by-default hybrid address space , in which mapped and device-resident regions coex-ist within one allocation, and carries out every change of placement (§5.1). The access monitor turns access-counter notifications into per-region demand without consuming GPU cycles, thereby enabling counter-driven region promo-tion (§5.2). Ember needs little state of its own, since UVM’s per-VA-block state already records where a region resides and Ember tracks only how often it has moved and how much demand the counters last reported (Figure 5.1). The 
+
+placement policy engine consumes that demand and decides what moves, through decay-based eager reclamation and on-line region replacement (§5.3). 
+
+4.2 Life of an Allocation 
+
+Figure 6 presents a managed allocation in Ember. Each region is either mapped or device-resident .
+
+Deployment phase. To deploy Ember-static, a developer adds three placement calls after each cudaMallocManaged 
+
+(Listing 1), which establish the hybrid address space and fix the split at launch. Ember-adaptive needs only the kernel module to be loaded ( ①) and leaves the application intact. 
+
+Allocation phase. Every managed allocation reaches Ember without an API call ( ②), and the migration engine maps it, with the host memory as its preferred location ( ③). As in stock UVM, pages are populated lazily. A page first accessed by the host is created in host memory and mapped; one first touched by the GPU has no copy to move yet, so Ember reads the fault as demand and creates the page in device memory at no transfer cost (§5.2). A kernel can therefore start without waiting for any data to move, even when the allocation is many times larger than the device memory ( ④). 
+
+Promotion phase. Under Ember-adaptive, every region starts mapped, so the GPU reads it over the interconnect while the hardware access counters record its accesses. The access monitor collects notifications from the access counters and connects each to their VA block. The counting happens in hardware, without costing GPU time. When an access count crosses a threshold ( ⑤), the placement policy engine marks it to be promoted ( ⑥), and the migration engine locks the VA block, migrates its host-resident pages and updates the page table ( ⑦). After this point, the region is device-resident , and since the counters capture only host memory, its recorded demand only decays from here on (§5.3). 
+
+Reclamation phase. Before the GPU memory fills, the pol-icy ranks resident regions by their migration history and by their recorded demand before promotion, and writes the coldest back in batches ( ⑧) to provide space for upcoming promotions without evicting in the critical path. A reclaimed region returns to host memory, where the access counters see it again, so a region evicted by mistake is promoted back as soon as the GPU keeps accessing it. 
+
+4.3 System Model Deployment model. Ember targets discrete GPUs, whose device memory is oversubscribed. Ember-static runs on the stock driver without requiring elevated privileges or bare-metal access on the host. A developer deploys it using place-ment hints (Listing 1). It preserves the UVM memory se-mantics but fixes the split before launch, preventing it from following the access patterns of long-running applications. Ember-adaptive lifts this restriction by making placement de-cisions at runtime via a kernel module that extends NVIDIA’s UVM module. It requires hardware access counters, standard in most GPUs, and a machine on which an administrator can load a module (§8). Ember handles all managed alloca-tions, so unmodified binaries can seamlessly adopt it, with the policy parameters (Table 1) set at module load time. 
+
+Programming model. Ember requires no change to the UVM programming model. An application allocates man-aged memory and dereferences the returned pointer in both host and device code, as before. Managed memory keeps its semantics, the coherence guarantees of stock UVM, and allocations may exceed device memory. Ember only transpar-ently determines where each page resides during execution. Currently, allocations outside the Ember-managed path, such as GPU-only buffers and buffers created within third-party libraries, retain their existing semantics and remain outside Ember’s control (§8). An application that issues its own place-ment hints on a managed range overrides Ember for that range, so application-specific optimizations are preserved. 
+
+## 5 Design 
+
+Ember realizes its key ideas (§3) via three core components: the migration engine provides the hybrid address space and carries out data movement (§5.1), the access monitor produces the placement hints (§5.2), and the placement policy engine 
+
+consumes them to make placement decisions (§5.3). 
+
+5.1 Migration Engine 
+
+The migration engine owns the address space and manages physical data placement, realizing the mapped-by-default hy-brid address space and Ember’s block promotion mechanism. 
+
+Hybrid address space. Ember divides each managed allo-cation into more granular units (regions), which, in a steady     
+
+> 5one managed allocation
+> GPU kernel GPU memory interconnect region = one VA block ( 2MiB) device-resident mapped
+
+Figure 8. Ember’s hybrid address space layout. state, are either mapped or device-resident (§4). Mapped re-gions indicate the performance floor as they are immediately available once mapped, never faulted in and evicted again, and bounded, in the worst case, by interconnect bandwidth. On the other hand, device-resident regions provide a per-formance ceiling , since a resident region is served at GPU memory bandwidth for as much data as the GPU can hold. Ember allows regions in both states to coexist within a single allocation (Figure 8). A region is mapped as soon as its pages exist and remains mapped until it earns promotion, inverting the stock UVM arrangement, where fetching data on the GPU is the default and mapping is the exception. This inversion makes any allocation immediately usable, starts kernel execution without data movement, and defers reclamation until the policy engine initiates it. 
+
+Region state. Ember defines a region to be exactly one VA block, and extends the driver’s per-VA-block state with a migration history, and attaches a decayed demand [32] to each physical chunk backing a resident region (§ 5.3). As an alternative, Ember could group several VA blocks into a larger region to reduce the number of migration operations. However, since each block carries a lock, a single placement change would need to acquire multiple locks and force the migration path to reason about lock ordering and re-entrancy. Instead, inheriting the driver’s granularity preserves every invariant it maintains over a VA block, at the cost of a unit of state fixed by the driver, and a larger region would have to be re-established against each new driver release (§8). Ember recovers the batching benefit that a larger region would have given by promoting a configurable span of con-secutive blocks at once (§5.2). Reclamation works in physical chunks rather than blocks because chunks are the unit in which the driver hands back device memory. 
+
+Region promotion/demotion. When Ember initiates a region promotion, the migration engine locks its VA block, moves every host-resident page into GPU memory in one operation, and updates the GPU page table. Thus, each pro-moted block costs only one bandwidth-saturating transfer. Demotion is the inverse operation. When Ember performs a region demotion, the migration engine gathers a set of physical chunks and writes them back to host memory as a bounded batch. Ember preserves this operation off the criti-cal path to avoid interleaving with computation, removing the observed stalls under the stock UVM reclamation policy (Figure 4). The reclaimed region itself stays mapped and ac-cessible over the interconnect, and the freed capacity returns ❶ Mapped      
+
+> host-resident
+> room in device memory?
+> Resident
+> not observed access in place, count ++
+> ❷
+> count
+> > θ
+> ❸yes lock, prefetch, remap no room
+> ❹
+> threshold promotion :stays mapped, set frozen ❺adaptive reclamation
+> ❼lowest demand first evicted early, in batches
+> ❻promotion proceeds ❼❽
+> batched write-back to host
+
+Figure 9. A region’s lifecycle under Ember’s policies. to the driver’s GPU memory allocator, where other clients can use it. Coalescing a batch into a single device-to-host transfer and finer-grained triggers (e.g., idle-interconnect windows) are orthogonal and remain future work. 
+
+Synchronization. The migration engine holds at most one VA-block lock at a time. A promotion locks only the block it moves, and a demotion runs as a separate pass. In this way, threads do not wait on a second lock, thereby avoiding deadlocks. Within a migration, Ember calls the driver’s own routine and holds that lock for its whole duration, including the page table update, as the routine requires. The recorded residency of a block therefore never disagrees with where its pages are, and other threads see the new state only once the move has finished. Access counter updates require no locks, since they serve only as hints. A lost or stale count delays a promotion by one interval without compromising correctness, with the block state staying valid. 
+
+5.2 Access Monitor 
+
+The access monitor translates GPU memory traffic into data-placement signals, enabling counter-driven region promotion .Using the GPU’s hardware access counters, it decides when a mapped region should be moved into GPU memory. 
+
+Hardware access counters. The UVM driver exposes hard-ware access counters that report how often a GPU reaches a host-resident range. While UVM does not use them and migrates on faults, Ember infers data placement hints based on them, attributing each one to the VA block whose pages were accessed. This costs no GPU time and never blocks the kernel. However, GPU counters have limitations. 
+
+Limited counter view. The access counters monitor only host memory [10]. They cannot report the access frequency of GPU-resident regions or identify cold data suitable for evic-tion. Ember infers coldness in its policy engine instead, from the demand each region showed before promotion (§5.3). 
+
+Limited counter number. A GPU has ≈ 256 counters [10], that cannot cover a mapped set of hundreds of GiB at the VA-block granularity. Ember compensates for this limitation by widening the scope of the action each counter notifica-tion triggers. A notification is tied to one VA block, but a promotion covers a configurable span of consecutive blocks around it, as a sequence of independent per-block promo-tions (§5.1). Thus, in Ember, one observed block stands in for its neighborhood, and a few hundred counters can drive placement decisions across a mapped set that is much larger. 
+
+> 6
+
+Promotion threshold. Ember’s decisions are based on a threshold that determines when a region earns promotion. It encodes a break-even point, reached once a region has been frequently accessed, where serving further accesses from GPU memory outweighs the migration cost. This threshold is crucial; if set too low, Ember may promote regions that are not reused, while high values might leave hot data on the host, repeatedly paying for access over the interconnect. Therefore, Ember exposes it as a tunable parameter. 
+
+Fault-driven promotion. A region can also be promoted without a counter notification. A mapped region never faults, so a fault occurs only on a page that has not yet been popu-lated: the host has not accessed it, and there is no copy to map. Ember handles it by creating a page in GPU memory at no transfer cost. Thus, data a kernel produces starts resident while data the host produced starts mapped (§4). 
+
+5.3 Placement Policy Engine 
+
+The access monitor provides placement hints, while the pol-icy engine contains the rules for enforcing them. Different policies can be applied without changes to the migration path or the application. Ember implements two policies (Figure 9), 
+
+threshold promotion and decay-based eager reclamation .
+
+Threshold promotion. Under this policy, a mapped region is served from host memory while its counter accumulates (❶); crossing a threshold 𝜃 makes it a promotion candidate (❷), and Ember migrates it to GPU, if there exists avail-able memory ( ❸). Note that eviction is disabled . Once the GPU memory fills, Ember freezes the resident set and leaves remaining regions in the host ( ❹). Thus, Ember benefits from GPU memory bandwidth for the initially accessed data, incurs no reclamation traffic, and resorts to interconnect-bound accesses for data beyond the GPU memory capacity. 
+
+Decay-based eager reclamation. Despite the potential ben-efits of the static threshold promotion , a frozen GPU-resident dataset can become stale as the hot dataset shifts. For this reason, Ember also includes a decay-based eager reclamation 
+
+policy. Inspired by prior work [36], Ember applies eager recla-mation and orders potential eviction candidates by decayed demand. It frees space before demand arrives ( ❺), removing eviction from the hot path. Thus, it allows upcoming pro-motions to proceed ( ❻), with victims inferred from decayed demand ( ❼) and written back in batches ( ❽). Above a GPU occupancy threshold, Ember reclaims until it falls back to a lower one. In this way, space for the next promotion becomes available before its notification arrives, and the computation can avoid the memory reclamation and eviction stalls on the hot path. Below the upper threshold, it replaces GPU-resident regions that are colder than the hottest one by a configurable ratio. The gap between the two thresholds prevents promotion and reclamation from clashing, as reclaiming down to the lower threshold leaves room for several promotions before the upper one is reached again. A promotion that finds no free space fails and retries on the region’s next notification, leaving reclamation as the only path to evict GPU-resident data (§6). 
+
+Demand decay. Choosing eviction candidates requires know-ing which GPU-resident regions have gone cold, which the hardware counters cannot report (§ 5.2). Ember therefore records the demand before it disappears, adding the access count of every serviced notification to the physical chunk backing a region. Thus, a region arrives in GPU memory al-ready carrying a measure of its past access frequency, which, then, halves at fixed time intervals. This means that a moved region sinks to the coldest position on its own over time. 
+
+Online region replacement. Demotion returns a region to the mapped state. A region reclaimed while it was still hot re-earns promotion within one notification interval, at the cost of an interconnect round trip. A region undergoing migration is excluded from placement decisions until its migration completes. The policy engine skips the regions the driver marks as in-flight and handles each promotion atomically; two service threads cannot start the same promotion twice. 
+
+Migration-aware protection. Ember’s decay mechanism might eventually cool a region that is still genuinely hot. To address this, a region that returns to the GPU shortly after being reclaimed has its migration score increased, granting its underlying physical chunks a bounded residency grace period proportional to that score. The score decays more slowly than the demand, keeping a contested region pro-tected across several reclamation passes. Reclamation never evicts a protected region while an unprotected one exists. If all regions are protected, Ember selects the first to expire, ensuring that its protection can delay reclamation but never stalls an allocation. Victims are ordered lexicographically, unprotected before protected, ranked by lowest migration score, oldest residency, and lowest decayed demand. 
+
+Capacity accounting. Capacity accounting is conservative, as promotion stops at the upper occupancy threshold that triggers reclamation. The margin below full memory shows the accounted headroom. It also keeps GPU memory from filling, so the stock fault-and-evict path never runs, neither under Ember-adaptive nor with Ember-static’s prefix ( C1 ). That headroom is important as it covers what Ember cannot observe. For instance, a GPU’s free-memory figure can over-state what is usable, and allocations outside the managed path consume GPU memory invisibly to Ember (§8). 
+
+## 6 Implementation 
+
+Ember-static is a userspace component that runs on stock CUDA with an unmodified UVM driver. Ember-adaptive, following prior work [10, 13, 60, 70], is a patch to the UVM module of NVIDIA’s open-source kernel modules ( 595.71.05 ), built on CUDA 12.4 and Linux 6.17 , adding 1194 and remov-ing 31 lines across 11 files. Table 1 lists the module param-eters and their default values, used in our Ember-adaptive prototype along with cpu_preferred_blocks_enable .
+
+> 7
+
+Table 1. Ember module parameters; new ones in blue.                                         
+
+> Parameter Governs Default
+> Promotion
+> cpu_preferred_blocks_enable master switch 0
+> cpu_preferred_block_promotion_enable whole-block promotion 1
+> cpu_preferred_prefetch_chunk_mb span promoted, MiB 64
+> perf_access_counter_threshold accesses before notifying 256
+> Reclamation (prefix: perf_eager_eviction_ )
+> enable master switch 1
+> high_watermark usage forcing eviction, % 90
+> low_watermark usage targeted, % 85
+> interval_ms aging period, ms 25
+> batch_count chunks evicted per pass 16
+> heat_ratio hot:cold ratio to replace 2
+> stale_intervals silent periods until cold 5
+> Migration-aware protection (prefix: perf_migration_ )
+> aware_eviction_enable master switch 1
+> eviction_base_grace_ms grace after arrival, ms 100
+> eviction_return_window_ms window counting returns, ms 500
+> eviction_score_grace_ms grace per score point, ms 250
+> eviction_max_grace_ms grace cap, ms 2000
+> eviction_decay_ms score halving period, ms 1000
+
+6.1 Ember-adaptive Memory allocation. On a cudaMallocManaged call, Ember creates the VA range, sets its preferred location to the CPU, and adds every GPU to its accessed-by mask. Pages are still populated lazily, as in stock UVM. The call itself moves no data, and Ember decides only where each page lands when it is first touched, without any input from the application. A GPU fault can still occur on a page with no host copy (e.g., kernel’s output). Ember places that page in GPU mem-ory with no recorded demand, making it a prime eviction candidate. After a potential reclamation, it remains mapped and is promoted if it proves to be hot, per Ember’s policies. 
+
+Monitoring. Ember employs access counters for managed ranges and handles their notifications via the driver’s exist-ing path. Each notification is associated with a VA block. The block’s counter value is added to the decayed demand of the physical root chunk holding the block’s pages, under a short lock on the chunk list of the driver’s GPU memory allocator. Thus, demand lives on physical chunks, while the VA block carries only its migration history and a flag marking an in-flight promotion. Ember also lifts the 4 KiB-page restriction of GPU counters (§2.3) for ranges under its own policy. 
+
+Promotion. When a counter notification arrives, Ember locks the block and promotes it as a whole, swapping the notification’s accessed-page mask with the block’s host-resident mask and forcing the destination to the GPU. Ember reuses the driver’s migration routine, moving the block’s host-resident pages to GPU memory and updating the GPU page table in a single operation. Ember extends the promo-tion range to a span around the block, 64 MiB by default, centered on it except near an allocation boundary, where it shifts to accommodate the span size. A span promotion skips the pages the driver protects and stops at the reclamation threshold, so it never displaces data. A promotion halted for lack of space resumes at the region’s next notification. Em-ber records these events and the bytes moved, so the policy 
+
+Table 2. Evaluation platforms. The Gap column indicates the device-memory-to-interconnect bandwidth ratio.                        
+
+> GPU GPU memory Interconnect CPU DRAM Gap RTX 5080 16 GiB GDDR7 PCIe 5.0 ×16 Ryzen 7 9700X 32 GB ∼15 ×
+> A40 48 GiB GDDR6 PCIe 4.0 ×16 Xeon Gold 6326 337 GB ∼22 ×
+> H200 141 GiB HBM3e PCIe 5.0 ×8Xeon 6980P 1 TB ∼150 ×
+> GH200 96 GiB HBM3 NVLink-C2C Grace 480 GB ∼9×
+
+can be tuned without a profiler. 
+
+Reclamation. Ember reclaims memory through a periodic background worker in the driver’s GPU memory allocator. Every 25 ms it halves each root chunk’s demand and then selects victims. Above 90% occupancy it evicts until usage falls to 85%. Below that point it evicts only when the hottest resident chunk carries at least twice the demand of the cold-est. A resident chunk whose demand has stayed at zero for five intervals is also treated as cold. Each pass evicts at most 16 chunks and returns them to the driver’s allocator. 
+
+Migration-aware protection. To prevent regions from bouncing between host and GPU memory, Ember records the migration events in the VA block’s migration history. A block that returns to the GPU within 500 ms of an eviction has its migration score increased by 1 for each 2 MiB returned. This score halves every second. On arrival, the score sets a grace period on the chunks backing the block, 100 ms plus 250 ms per score point, capped at 2 s. The eviction candidate search then proceeds, respecting the region state ordering (§5.3). 
+
+6.2 Ember-static 
+
+Ember-static requests the initial placement from userspace and freezes the split. At each allocation site, the developer issues two cudaMemAdvise calls, naming the host as the pre-ferred location and adding the GPU to the accessed-by mask, followed by one cudaMemPrefetchAsync (Listing 1). The prefetch migrates the leading prefix of the allocation, or a region equal to what cudaMemGetInfo reports free, to GPU memory, leaving the rest in host memory. Ember-static is beneficial for applications that lay out their hot data contiguously and whose data split does not need to be revised at runtime. Since Ember-static does not perform reclamation, it does not require counters. It makes only three calls per managed allocation (Listing 1) and preserves the kernel, launch code, and associated algorithms. We quantify the porting effort in Lines of Code (LoC) in Appendix B. 
+
+Table 3. Evaluation variants.                      
+
+> Variant Data Placement APIs UVM default with TBN [17] MPrefetch bulk migration at boot M+P UVM-mapped mapped from host DRAM M+A HELM [25] per-allocation choice after profiling -Ember-static hot (GPU)/cold (DRAM) fixed split M+A+P Ember-adaptive decided online based on access counters M
+> M:cudaMallocManaged ;P:cudaMemPrefetchAsync ;A:cudaMemAdvise
+> 80.1 ×
+> 1×
+> 10 ×
+> 0.5×
+> VRAM  sequential strided random
+
+RTX 5080       
+
+> 1.2 ×1.6 ×9.2 ×
+> 1.0 ×1.2 ×3.9 ×
+> sequential strided random
+
+A40        
+
+> 2.2 ×2.1 ×5.6 ×1.0 ×1.2 ×4.5 ×
+> sequential strided random
+
+H200                      
+
+> 2.9 ×2.2 ×5.2 ×1.0 ×1.6 ×
+> 16 ×
+> pathfinder kmeans cnn bitonic radix bfs 1×
+> 10 ×
+> 1.5×
+> VRAM
+> 1.8 ×3.8 ×10 ×†
+> 7.3 ×225 ×†
+> 11 ×
+> pathfinder kmeans cnn bitonic radix bfs
+> 2.2 ×2.6 ×5.1 ×†6.8 ×41 ×12 ×
+> pathfinder kmeans cnn bitonic radix bfs
+> 3.0 ×3.6 ×6.4 ×†6.5 ×226 ×16 ×
+> Speedup vs UVM
+> UVM Prefetch UVM-mapped EMBER-static EMBER-adaptive
+
+## 1Figure 10. Applications at 0 .5× (top) and ∼1.5× (bottom) device memory, speedup over stock UVM (log scale). Labels give the faster Ember variant, colored by variant. Dagger: stock-UVM baseline hit the 1800 s cap. 0 25 50 100 0.1 s 1 s 10 s       
+
+> Kernel time Kernel time
+> 025 50 100
+> Placement, once Hot set replaced per phase [%]
+> UVM Prefetch UVM-mapped EMBER-static
+
+## 1
+
+Figure 11. Runtime with a hot set that moves between phases (GH200, 14 GiB window of 142 GiB, eight phases). 
+
+## 7 Evaluation 
+
+We evaluate Ember along five dimensions: its hybrid address space benefits (§7.2), its performance on three distinct use-cases (§7.3–§7.5), its behavior across GPUs and interconnects (§7.6), the value of runtime decisions against profiled static ones (§7.7), and the trade-off between its two variants (§7.8). 
+
+7.1 Experimental Setup Testbed. We conduct our experiments on four machines with different GPUs that exemplify three deployment setups (Table 2): a consumer card, two datacenter GPUs, and a su-perchip. Their device-memory-to-interconnect bandwidth ratio ranges from ∼9× to ∼150 ×. We set the working set sizes to multiples of GPU memory; for GPUs with more memory, we reserve the surplus ( cudaMalloc ) before our runs. 
+
+Variants. Table 3 lists the four baselines available on stock CUDA (§2.2) and the two variants of Ember. We additionally compare against HELM [25], which profiles an application and selects a placement policy for each allocation. 
+
+Workloads. We exercise Ember in a variety of workloads: six 
+
+data-intensive applications (from UVM-Bench [23], radix sort from Thrust, BFS from EMOGI [37], and our bitonic sort), 
+
+LLM inference with llama-bench , and database analytics 
+
+running SSB queries on Crystal [57]. We also run HELM [25] on five of its seven benchmarks ( stream and fdtd-2d run out of memory) and a microbenchmark with a varying hot set. 
+
+Metrics. We measure total application runtime from a cold al-location. Benchmark runs are capped at 1800 s, and a speedup over a capped run is a lower bound, marked with †. 
+
+7.2 Hybrid Address Space 
+
+First, we evaluate the effect of Ember’s hybrid address space. 
+
+Methodology. On GH200, a kernel reads a 14 GiB window of a 142 GiB managed buffer in eight phases, once per phase. After each one, the window slides forward by a fixed share of its size, from 0%, where the hot set never moves, to 100%, where it is replaced between phases. We compare the static variants to isolate the effect of the hybrid address space. 
+
+Results. Figure 11 shows the results. The Prefetch variant is fastest when the hot set does not change (0 .15 s), but slows down considerably once it shifts, since each prefetch is stale by the next phase. UVM-mapped’s runtime remains stable (≈ 1.33 s), incurring the interconnect cost on every access. Stock UVM, regardless of the data shift, remains the slowest. Ember-static matches the Prefetch when the hot set is static and degrades at full drift, but still outperforms all baselines. Its advice and prefetch add 1 .33 s once (Figure 11, right), a cost that gets amortized over time via repeated reads. 
+
+Takeaway #1: Ember combines the benefits of prefetch-ing, when the hot set does not change, with the robustness of mapping once it moves, at only a one-time setup cost. 
+
+7.3 Use Case #1: Data-Intensive Applications 
+
+We examine how Ember behaves in data-intensive applica-tions with large working sets and diverse access patterns. 
+
+Methodology. We run the six applications on the RTX 5080, the A40, and the H200 at 0 .5× and ∼1.5× GPU memory, and report speedups over stock UVM; absolute runtimes are reported in Appendix A. The applications are grouped by access pattern, sequential (pathfinder, k-means, CNN), strided (bitonic sort), and random (radix sort, BFS). 
+
+Results. Figure 10 shows the results for normal and oversub-scribed scenarios. While the data fits, Ember-static achieves a mean speedup of 1 .9–3 .0× over stock UVM, with Prefetch at 1 .3–2 .3×; UVM-mapped remains below stock UVM at 0 .3– 0.5×. Ember-adaptive reaches 1 .6–1 .7×, as it starts mapped and promotes only based on measured demand. Under oversubscription, Ember-static achieves a mean speedup over stock UVM of 9 .12 × on the RTX 5080, 6 .83 ×
+
+on the A40, and 10 .62 × on the H200, and Ember-adaptive 
+
+> 900.5
+> 0.5×
+
+RTX 5080 
+
+> 01
+
+A40 
+
+> 01
+
+H200                                  
+
+> 13 21 22 23 31 32 33 34 41 42 43 00.5 1
+> 1.5×
+> 13 21 22 23 31 32 33 34 41 42 43 01213 21 22 23 31 32 33 34 41 42 43 012
+> Query runtime [s]
+> UVM UVM-mapped EMBER-static EMBER-adaptive
+
+## 1Figure 12. Runtime of SSB queries [46] on Crystal. ×: query exceeds the RTX 5080 host’s memory. 0.56 × 1.41 ×      
+
+> 0.1 ×
+> 1×
+> 10 ×
+> RTX 5080
+> 1.0 ×
+> 4.7 ×
+> 0.56 ×1.41 ×
+> A40
+> 1.0 ×
+> 13 ×
+> 0.56 ×1.41 ×
+> H200
+> 1.0 ×
+> 7.8 ×
+> Generation speedup vs UVM
+> Model size (multiple of VRAM)
+> UVM Prefetch UVM-mapped EMBER-static EMBER-adaptive
+
+1
+
+Figure 13. LLM token generation at 0 .56 × and 1 .41 × de-vice memory, speedup over UVM (log scale), with every GPU capped to 16 GB. Labels show the faster variant. 8.83 ×, 5 .52 ×, and 8 .01 ×. UVM-mapped reaches 3 .1–4 .7× and remains 2 .2–2 .5× behind Ember-static, since every access crosses the interconnect. Prefetch falls below UVM on the RTX 5080 (0 .95 ×), as each prefetch evicts data that is needed again once the footprint exceeds GPU memory. Ember’s performance improvement grows with the irregularity of the access pattern; from 1 .8–10 × on the sequential applications to 11–225 × on the random ones, since UVM’s prefetcher (§2.2) performs well on sequential access but mostly migrates unread pages on random access. Further, applications with sequential and strided access patterns often re-read their data resulting in an up to 10 × speedup for Ember. 
+
+Takeaway #2: On data-intensive applications, Ember’s variants outperform stock UVM on every GPU class, re-gardless of whether the data fits or not. 
+
+7.4 Use Case #2: LLM Inference 
+
+Next, we verify whether Ember enables an LLM inference workload to function even under oversubscription. 
+
+Methodology. On the three discrete GPUs, llama-bench 
+
+runs chatbot-style generation, a 512-token prompt followed by 128 generated tokens, for two models, Qwen2.5 14B and Qwen3 32B. We cap every GPU at 16 GB, so the same model occupies the same footprint on each, and we report token generation alone, since it re-reads every weight per token, whereas prefill reads them once and behaves like a scan. Explicit staging cannot load a model beyond GPU memory. 
+
+Results. While the model fits (Figure 13), Ember-static per-forms similarly to UVM and prefetching (within 2%), while mapping the weights is 2 × slower on the RTX 5080 and 23– 48 × on the A40 and H200, due to the slower interconnect. In the case of GPU oversubscription (1 .41 ×), stock UVM and prefetching fall to 0 .2–0 .5 tokens/s, turning a 128-token re-ply into minutes. In contrast, Ember-static allows for a 4 .7×
+
+faster token generation on the RTX 5080 and 8–13 × on the A40 and H200. Ember-adaptive’s respective rates are 3–10 ×.UVM-mapped bounces back (2 .5–4 .8× over UVM), but still below Ember, as expected for a strategy bounded by the interconnect. No strategy exceeds 3 tokens/s, as Ember is bounded by the interconnect and stock UVM by page faults. 
+
+Takeaway #3: Ember executes inference on large models 3-13 × faster than UVM and up to 3 × than UVM-mapped, at footprints where explicit staging cannot load the model. 
+
+7.5 Use Case #3: Database Analytics 
+
+We evaluate Ember on analytical queries whose hot sets vary over time to quantify its adaptability benefits. 
+
+Methodology. We run the SSB queries on Crystal on the RTX 5080, the A40, and the H200, at 0 .5× and 1 .5× GPU memory; q11 and q12 emitted no runtime summary. For a fair comparison, we cap the A40 and the H200 to the RTX 5080’s 16 GiB by manually reserving the remaining capacity. 
+
+Results. As observed in Figure 12, all baselines outper-form stock UVM on every query and GPU, by 1 .2–2 .8×.Ember-adaptive is the fastest in 51 of the 60 measured query– GPU–size combinations, and in all 22 on the H200. Its mean speedup over UVM is 1 .50–1 .66 × on the RTX 5080, 1 .75– 1.92 × on the A40, and 2 .26–2 .36 × on the H200, where the respective values for UVM-mapped are at most 1 .40, 1 .72, and 1 .75 ×. Ember-static stays within about 10% of the perfor-mance of UVM-mapped. This difference is attributable to the interconnect. Precisely, the slower it is relative to GPU mem-ory, the more a promoted column can save (Table 2). A single scan reads each column once, so Ember-static preserves the loaded hot set based on the first allocation, and does not adjust to the application’s requirements. Ember-adaptive instead promotes the columns a query actually reads. 
+
+Takeaway #4: On analytical queries, Ember-adaptive proves to be the fastest; it has 1 .50–2 .36 × speedup over UVM, since it promotes only the columns a query needs.    
+
+> 10 110 100 1000
+> 0.5×
+> VRAM
+> pathfinder kmeans cnn bitonic radix bfs LLM gen. 110 100 1000
+> 1.5×
+> VRAM
+> timeout
+> Runtime [s]
+> UVM Prefetch UVM-mapped EMBER-static
+
+## 1Figure 14. Runtime on the GH200 (log scale). cg sgemm tealeaf bfs-worst GRAMSCHM 00.5 1Share of HELM total     
+
+> 45 s 588 s2381 s480 s2863 s
+> cg sgemm tealeaf bfs-worst GRAMSCHM 110 100 1000 Kernel time [s]
+> 1.4 ×
+> 28.0 ×4.4 ×
+> 0.3 ×
+> 0.8 ×
+> run profiling metrics selection EMBER-adaptive
+
+## 1
+
+Figure 15. Comparison of HELM and Ember (RTX 5080). 
+
+7.6 GPU Classes & Coherent Interconnects 
+
+We execute applications on the GH200 to determine if a faster, coherent interconnect eliminates the benefits of Ember. 
+
+Methodology. We repeat the six applications and LLM gen-eration on the GH200 at 0 .5× and 1 .5× GPU memory, report-ing absolute runtime, and for the LLM the time to generate 128 tokens. We report Ember-static alone, since we had no bare-metal access and could not run Ember-adaptive (§8). 
+
+Results. Figure 14 presents the results. UVM falls behind the baselines in almost all cases, but does not collapse past the VRAM line: Ember-static’s geometric-mean gain over it holds near 3 .5× at both footprints, where on PCIe it reaches 6.8–10 .6×. Over a coherent link, the GPU reads a non-resident page in place (§2.4), so the fault-and-evict loop largely disap-pears. UVM-mapped remains costly when data is reused (i.e., 4.7× slower than Ember on k-means, 21 × on LLM genera-tion). Past the VRAM capacity, UVM-mapped beats Ember on the workloads that read data once (pathfinder, radix sort), since a single pass never amortizes the migration. However, on k-means and LLM generation, which read the same data multiple times, Ember executes in 3 .1 s and generates the 128 tokens in 62 s, compared to 14 .2 s and 211 s for UVM-mapped. This performance gain stems from the data placement and reuse frequency, as, according to our measurements, the workloads, even on the mapped case, do not saturate the interconnect bandwidth (i.e., 10 GiB/s on k-means). 
+
+Takeaway #5: A fast, coherent link makes reading from host memory competitive for data that is read once, but reused data still benefits from GPU memory, highlighting the need for Ember’s data placement strategies. 0 10 25 50 75 100 32 64 128 256 512 1024               
+
+> Accesses per page  (a) within a pass
+> 010 25 50 75 100 32 64 128 256 512 1024
+> (b) across passes
+> 32 64 128 256 512 1024
+> 010 20
+> Data moved [GB]  (c) within a pass
+> 32 64 128 256 512 1024
+> 025 50
+> (d) across passes
+> Share of randomly accessed data [%] Accesses per page
+> EMBER-static EMBER-adaptive
+
+## 1
+
+Figure 16. Dominant variant (a, b) and data moved at 0% randomness (c, d), by reuse per page (RTX 5080, 1 .3× GPU memory). Shading marks where Ember-static is faster. 
+
+7.7 Comparison with Profiled Placement 
+
+Next, we evaluate Ember-adaptive to quantify the benefits of its dynamic data placement and reclamation policy. 
+
+Methodology. We compare Ember with HELM [25], which profiles an application and assigns each allocation a policy (e.g., migrate , pin to host , pin to device ). We measure both the profiling time to decide on data placement and the actual ker-nel time of the application. We also tried ARIADNE [60], the closest in-driver system, but could not run it, since it builds against driver release 535 .86 and relies on legacy interfaces. 
+
+Results. Ember-adaptive outperforms HELM on all five benchmarks (Figure 15, left), by a mean of 7 .9×, even though HELM profiles each application first. Profiling, metric pro-cessing, and selection take 39 to 1449 s, account for 18% to 95% of HELM’s end-to-end runtime, and heavily depend on the problem size. The choice is also unstable, as repeating the profiling run can tag the same allocation differently. Remov-ing that cost and comparing kernel time alone (Figure 15, right), Ember-adaptive remains faster on three of five bench-marks, by up to 28 .0× with a mean of 2 .1×. It is slower on bfs and gramschm, where HELM’s choice fits the workload. For the rest, Ember’s benefits mainly come from the place-ment granularity, since HELM’s policy-per-allocation cannot adjust when hot and cold data are interleaved within one. 
+
+Takeaway #6: Ember’s adaptive data placement matches or exceeds profiled per-allocation policies without a pro-filing run and without application changes. 
+
+7.8 Ember-adaptive vs Ember-static 
+
+Finally, we aim to identify when each Ember variant is the right choice for an application. 
+
+Methodology. On the RTX 5080, a kernel reads a 20 GB managed buffer, at 1 .3× GPU memory, with a configurable share accessed in random order and the rest in a linear sweep, and each page accessed 32 to 1024 times. We sweep two reuse 
+
+> 11
+
+patterns. In the first, all accesses to a page occur in a single pass. In the second, each pass accesses every page once, and reuse comes from repeated passes. We report runtime over the whole grid and, at 0% randomness, the data movement. 
+
+Results. Ember-static incurs a one-time 0 .74 s for advis-ing the buffer and prefetching a 16 GB prefix, whereas Em-ber-adaptive incurs one migration per promotion. Ember-adaptive is faster at low reuse (32 accesses), by 1 .3–4 ×, where the prefetch is not amortized, and at both ends of the random-ness axis, where a pure sweep is a sliding window, tracked by Ember’s counters, while a purely random pattern implies that there is no hot set worth pinning. Ember-static is faster in between, by up to 3 .2× once a page is reused 128 times or more, due to its pinned hot set. Static pays its overhead once and adaptive on every promotion, so which variant wins follows reuse (Figure 16a,b). In terms of data movement (Fig-ure 16c,d), Ember-static migrates its 16 GB prefix once, while Ember-adaptive moves 6 .8 to 24 .4 GB inside a pass and 17 .7to 65 .2 GB when accesses span different passes, since every pass demotes regions that the next one promotes again. Overall, when the data fits in GPU memory, Ember-adaptive runs 1 .2–1 .8× slower than Ember-static. However, Ember mainly targets oversubscribed workloads, where the hot set typically exceeds GPU memory and must be adjusted at runtime, thereby favoring Ember’s adaptive variant. On inte-gration cost , Ember-adaptive requires no application changes, only a module load, while Ember-static adds 8–28 lines per application, under 5% in every case, none of them in a GPU kernel, in launch code, or in an algorithm (Appendix B). 
+
+Takeaway #7: Ember-static is the better choice when a stable hot set is frequently re-read, and Ember-adaptive otherwise, when reuse is low, confined to a single pass, or spread too uniformly to leave a hot set worth pinning. 
+
+## 8 Limitations and Future Work 
+
+Library buffers. Ember places only memory allocated via 
+
+cudaMallocManaged . Buffers a library allocates internally, such as Thrust’s temporaries in radix sort, take device mem-ory that neither variant can see or place. Ember-static suffers more, since it sizes its prefix from one free-memory query before launch, which a later library allocation invalidates. Ember-adaptive sizes its headroom at runtime, so it stops promoting when a library takes the memory (§5.3). 
+
+Device-access observability. Ember cannot observe that a resident region has gone cold; it infers this from the de-mand the region showed before promotion, decayed over time (§5.3). A region that is still hot can thus be reclaimed by mistake and moved twice. The open driver contains an undocumented vidmem access-bit buffer that reports access and dirty bits over device memory [45], reachable only from kernel space and limited to eight address ranges at a time. It is disabled by default on Blackwell, where it is reported to cause undefined behaviour on some parts, so we do not use it. Feeding it into reclamation would replace inference with measurement for those ranges; this and other policy refine-ments are orthogonal to Ember and left for future work. 
+
+Deployment. Ember-adaptive needs bare-metal access to load a kernel module. Our GH200 instance is a cloud VM without that access, which is why §7.6 reports Ember-static alone. The module also builds against the internal interfaces of an open-source driver release and must be rebased for each new one. The rebase is usually mechanical, but a release that changes those interfaces can make a mechanism harder to implement or unavailable, as it did for ARIADNE (§7.7). Nothing in the design is specific to CUDA: the hybrid address space needs only driver-controlled migration and host map-ping, which other stacks also provide (e.g., AMD ROCm [4]). Ember-adaptive additionally needs a non-faulting signal of remote access frequency. 
+
+Multi-GPU. Ember places data between one GPU and host memory. On a multi-GPU node, peer memory forms a third tier between the two, so a region has three homes rather than two, and each notification has to be attributed to the GPU that raised it. We aim to explore it as future work. 
+
+## 9 Related Work 
+
+UVM optimizations. Prior work analyzes the cost of UVM’s faults, prefetching, and eviction [1, 2, 14, 17, 28, 30, 38, 63] and addresses its weaknesses with hardware changes [7, 40, 69, 71] as well as eviction and throttling policies [33, 67]. Adaptive runtimes retune prefetching and eviction behav-ior [16, 21, 27, 59, 66, 70], and other works decide on data mi-gration based on heuristics, such as hardware counters [35], fault history [26], or profiling [34]. All of them keep accesses on the migration path, preserving the reclamation traffic. In contrast, Ember leaves the cold set mapped in host memory, removing that traffic while adjusting the GPU-resident set. 
+
+Data movement and placement. Several systems combine mapped access with migration. Some take data placement decisions ahead of time based on compile-time analysis or of-fline profiling runs [9, 25]. Others decide at runtime based on page access count threshold [18], compiler instrumentation that identifies sparsely used pages [13], or the number of GPU cores faulting on a block concurrently [59, 60]. Another work aims to restore the visibility of GPU counters by keep-ing one page of each region mapped in host memory, at the cost of one sampled page per region, and makes placement decisions based on those [10]. Ember decides at runtime and chooses mapping as the default, with regions migrated only once the demand based on the GPU counters instructs it, requiring no offline profiling, additional faults, or sampling. 
+
+Application-level placement. Other systems encode data placement within the application, for out-of-memory graph processing [20, 37, 54], DNN training, and LLM inference, with a dataflow known in advance [8, 49, 53, 58]. Ember keeps the application intact and requires no such knowledge. 
+
+> 12
+
+Multi-GPU placement and memory pooling [15, 31, 64, 65] is orthogonal, as the GPUs together can fit the working set. 
+
+Tiered memory. CPU tiering classifies pages from hint faults or sampled events and migrates them between DRAM and a slower memory [32, 48, 51, 52]. TPP demotes proac-tively to keep headroom [36], an idea Ember adopts. These designs cannot be directly applied to GPU tiering, as the GPU’s ∼256 counters observe only host memory, and its slow tier sits 15–150 × below GPU memory. Therefore, Em-ber aggregates counter notifications into per-region demand that decays over time, and infers when resident data turns cold. 
+
+## 10 Conclusion 
+
+UVM enables applications to oversubscribe GPU memory, but performance collapses once the working set exceeds the GPU’s memory capacity. Its placement decisions are reactive (i.e., per-fault) and do not consider access patterns, leading to increased reclamation traffic under memory pressure and execution pipeline stalls. To tackle this, we present Ember, a GPU memory management framework tailored for over-subscribed workloads, that preserves the UVM memory and programming model. Ember splits allocations into smaller regions and initially maps them into host memory, which is directly reachable by the GPU, migrating a region only after the GPU hardware counters report it as hot. Ember adjusts its placement decisions at runtime and proactively re-claims memory, keeping eviction off the critical path. Across various workload classes, GPUs, and interconnects, Ember outperforms existing UVM placement strategies under over-subscription as well as optimized profile-guided frameworks without requiring a profiling run. 
+
+Artifact and appendix. Ember will be publicly available. Its artifact covers detailed experimental results (Appendix A) and highlights Ember’s integration costs (Appendix B). 
+
+## Acknowledgments 
+
+Funded by the European Union (ERC, FDS, 101164556). Views and opinions expressed are however those of the au-thors only and do not necessarily reflect those of the Eu-ropean Union or the European Research Council Executive Agency. Neither the European Union nor the granting au-thority can be held responsible for them. 
+
+## References 
+
+[1] Tyler N. Allen and Rong Ge. 2021. Demystifying GPU UVM Cost with Deep Runtime and Workload Analysis. In IPDPS . IEEE, 141–150. [2] Tyler N. Allen and Rong Ge. 2021. In-depth analyses of unified virtual memory system for GPU accelerated computing. In SC . ACM, 64. [3] Amazon Web Services. 2026. Accelerated computing Amazon EC2 instance types. https://aws.amazon.com/ec2/instance-types/ accelerated-computing/ . Accessed: 2026-09-25. [4] AMD. 2026. Unified Memory Management — HIP Documenta-tion. https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_ runtime_api/memory_management/unified_memory.html . HIP 7.15.0. Accessed: 2026-09-25. [5] Apple Inc. 2020. Apple Unleashes M1. https://www.apple.com/ newsroom/2020/11/apple-unleashes-m1/ . Apple Newsroom, Novem-ber 10, 2020. Accessed: 2026-09-25. [6] Felipe Aramburú, William Malpica, Kaouther Abrougui, Amin Aramoon, Romulo Auccapuclla, Claude Brisson, Matthijs Brobbel, Colby Farrell, Pradeep Garigipati, Joost Hoozemans, Supun Kambu-rugamuve, Akhil Nair, Alexander Ocsa, Johan Peltenburg, Rubén Que-sada López, Deepak Sihag, Ahmet Uyar, Dhruv Vats, Michael Wendt, Jignesh M. Patel, and Rodrigo Aramburú. 2025. Theseus: A Distributed and Scalable GPU-Accelerated Query Processing Platform Optimized for Efficient Data Movement. CoRR abs/2508.05029 (2025). [7] Rachata Ausavarungnirun, Joshua Landgraf, Vance Miller, Saugata Ghose, Jayneel Gandhi, Christopher J. Rossbach, and Onur Mutlu. 2017. Mosaic: a GPU memory manager with application-transparent support for multiple page sizes. In MICRO . ACM, 136–150. [8] Ammar Ahmad Awan, Ching-Hsiang Chu, Hari Subramoni, Xiaoyi Lu, and Dhabaleswar K. Panda. 2018. OC-DNN: Exploiting Advanced Unified Memory Capabilities in CUDA 9 and Volta GPUs for Out-of-Core DNN Training. In HiPC . IEEE, 143–152. [9] Pratheek B, Guilherme Cox, Ján Veselý, and Arkaprava Basu. 2024. SUV: Static Analysis Guided Unified Virtual Memory. In MICRO . IEEE, 293–308. [10] Pratheek B, Khushit Shah, and Arkaprava Basu. 2026. Observability-Aided Gpu Memory Oversubscription. In ISCA . IEEE, 1–17. [11] Alexis Bjorlin. 2022. OCP Summit 2022: Open Hardware for AI In-frastructure. https://engineering.fb.com/2022/10/18/open-source/ocp-summit-2022-grand-teton/ . Engineering at Meta. Accessed: 2026-09-25. [12] Lyne Carolyne. 2026. Cloud GPU Pricing Comparison 2026: Every Provider’s Real Rates. https://www.cloudzero.com/blog/cloud-gpu-pricing-comparison/ . CloudZero blog. Published 2026-04-17, updated 2026-09-04. Accessed: 2026-09-25. [13] Chia-Hao Chang, Adithya Kumar, and Anand Sivasubramaniam. 2021. To move or not to move?: page migration for irregular applications in over-subscribed GPU memory systems with DynaMap. In SYSTOR .ACM, 1:1–1:12. [14] Steven Wei Der Chien, Ivy Bo Peng, and Stefano Markidis. 2019. Per-formance Evaluation of Advanced Features in CUDA Unified Memory. In MCHPC@SC . IEEE, 50–57. [15] Sangjin Choi, Taeksoo Kim, Jinwoo Jeong, Rachata Ausavarungnirun, Myeongjae Jeon, Youngjin Kwon, and Jeongseob Ahn. 2022. Memory Harvesting in Multi-GPU Systems with Hierarchical Unified Virtual Memory. In USENIX ATC . USENIX Association, 625–638. [16] Debashis Ganguly, Rami G. Melhem, and Jun Yang. 2021. An Adaptive Framework for Oversubscription Management in CPU-GPU Unified Memory. In DATE . IEEE, 1212–1217. [17] Debashis Ganguly, Ziyu Zhang, Jun Yang, and Rami G. Melhem. 2019. Interplay between hardware prefetcher and page eviction policy in CPU-GPU unified virtual memory. In ISCA . ACM, 224–235. [18] Debashis Ganguly, Ziyu Zhang, Jun Yang, and Rami G. Melhem. 2020. Adaptive Page Migration for Irregular Data-intensive Applications under GPU Memory Oversubscription. In IPDPS . IEEE, 451–461. [19] Chirayu Garg and Nikolay Sakharnykh. 2021. Improving GPU Memory Oversubscription Performance. https://developer.nvidia.com/blog/ improving-gpu-memory-oversubscription-performance/ . Accessed: 2026-03-02. [20] Prasun Gera, Hyojong Kim, Piyush Sao, Hyesoon Kim, and David A. Bader. 2020. Traversing Large Graphs on GPUs with Unified Memory. 
+
+Proc. VLDB Endow. 13, 7 (2020), 1119–1133. [21] Seokjin Go, Hyunwuk Lee, Junsung Kim, Jiwon Lee, Myung Kuk Yoon, and Won Woo Ro. 2023. Early-Adaptor: An Adaptive Framework forProactive UVM Memory Management. In ISPASS . IEEE, 248–258. 
+
+> 13
+
+[22] Google Cloud. 2026. About GPU Instances. https://cloud.google.com/ compute/docs/gpus/about-gpus . Accessed: 2026-04-01. [23] Yongbin Gu, Wenxuan Wu, Yunfan Li, and Lizhong Chen. 2020. UVM-Bench: A Comprehensive Benchmark Suite for Researching Unified Virtual Memory in GPUs. CoRR abs/2007.09822 (2020). [24] Matteo Interlandi, Nicolas Bruno, Brandon Haynes, Carlo Curino, Rathijit Sen, Yinan Li, Kaushik Rajan, Bailu Ding, Lukas M. Maas, Wei Cui, Kevin Gaffney, Mingsheng Hong, Brian Kroth, Sampath Ra-jendra, Peng Cheng, Surajit Chaudhuri, Johannes Gehrke, Raghu Ra-makrishnan, Lidong Zhou, Momin Al-Ghosien, Craig Peeper, Mar-ius Dumitru, Conor Cunningham, Kevin Bocksrocker, Prasanna Sun-dar, Ron Boskovic, YongChul Kwon, Marko Zivanovic, Runbin Shi, Krystian Sakowski, Denis Lamtsov, Josep Aguilar-Saborit, Krish Srini-vasan, Adarsh Kapil, Andrew Putnam, Anudeep Kambapu, Aparna Konduri, Aaron Landy, Aaron Moore, Aaron Pitman, Artem Oks, Ashit Gosalia, Babu Kandimalla, Blake Pelton, Bogdan Crivat, César A. Galindo-Legaria, Chidamber Kulkarni, Jesús Camacho-Rodríguez, Evgeny Babin, Hans Lehnert Marino, Igor Konev, Israel Arroyo, Luis Peñaranda, Mandar Datar, Morten Borup Petersen, Nicholas Simmons, Parminder Poonian, Pravija Danda, Rob Rydberg, Esteban Calvo Var-gas, Ronak Bajaj, Sai Sumanth Kammal Shetty, Sharanya Bhat, and Zach Iracheta. 2026. CoddSpeed: Hardware Accelerated Query Pro-cessing in Microsoft Fabric. In SIGMOD Companion . ACM, 359–372. [25] Nathan Jones, Tyler N. Allen, and Rong Ge. 2025. HELM: Character-izing Unified Memory Accesses to Improve GPU Performance under Memory Oversubscription. In SC . ACM, 490–504. [26] Jaehoon Jung, Jinpyo Kim, and Jaejin Lee. 2023. DeepUM: Tensor Migration and Prefetching in Unified Memory. In ASPLOS (2) . ACM, 207–221. [27] Hyojong Kim, Jaewoong Sim, Prasun Gera, Ramyad Hadidi, and Hye-soon Kim. 2020. Batch-Aware Unified Memory Management in GPUs for Irregular Workloads. In ASPLOS . ACM, 1357–1370. [28] Marcin Knap and Pawel Czarnul. 2019. Performance evaluation of Unified Memory with prefetching and oversubscription for selected parallel CUDA applications on NVIDIA Pascal and Volta GPUs. J. Supercomput. 75, 11 (2019), 7625–7645. [29] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serv-ing with PagedAttention. In SOSP . ACM, 611–626. [30] Raphael Landaverde, Tiansheng Zhang, Ayse K. Coskun, and Mar-tin C. Herbordt. 2014. An investigation of Unified Memory Access performance in CUDA. In HPEC . IEEE, 1–6. [31] Ian Di Dio Lavore, Davide Maffi, Marco Arnaboldi, Arnaud Delamare, Daniele Bonetta, and Marco D. Santambrogio. 2024. GrOUT: Trans-parent Scale-Out to Overcome UVM’s Oversubscription Slowdowns. In IPDPS (Workshops) . IEEE, 696–705. [32] Taehyung Lee, Sumit Kumar Monga, Changwoo Min, and Young Ik Eom. 2023. MEMTIS: Efficient Memory Tiering with Dynamic Page Classification and Page Size Determination. In SOSP . ACM, 17–34. [33] Chen Li, Rachata Ausavarungnirun, Christopher J. Rossbach, Youtao Zhang, Onur Mutlu, Yang Guo, and Jun Yang. 2019. A Framework for Memory Oversubscription Management in Graphics Processing Units. In ASPLOS . ACM, 49–63. [34] Mao Lin, Hui Feng, Xianzhong Ding, Guilherme Cox, Qian Wang, and Hyeran Jeon. 2026. AutoUVM: Automated Prefetching Framework for LLMs under UVM Oversubscription. arXiv:2609.06172. [35] Mao Lin, Yuan Feng, Guilherme Cox, and Hyeran Jeon. 2025. Forest: Access-aware GPU UVM Management. In ISCA . ACM, 137–152. [36] Hasan Al Maruf, Hao Wang, Abhishek Dhanotia, Johannes Weiner, Niket Agarwal, Pallab Bhattacharya, Chris Petersen, Mosharaf Chowd-hury, Shobhit O. Kanaujia, and Prakash Chauhan. 2023. TPP: Trans-parent Page Placement for CXL-Enabled Tiered-Memory. In ASPLOS (3) . ACM, 742–755. [37] Seungwon Min, Vikram Sharma Mailthody, Zaid Qureshi, Jinjun Xiong, Eiman Ebrahimi, and Wen-Mei Hwu. 2020. EMOGI: Efficient Memory-access for Out-of-memory Graph-traversal In GPUs. Proc. VLDB Endow. 
+
+14, 2 (2020), 114–127. [38] Alok Mishra, Lingda Li, Martin Kong, Hal Finkel, and Barbara M. Chapman. 2017. Benchmarking and Evaluating Unified Memory for OpenMP GPU Offloading. In LLVM-HPC@SC . ACM, 6:1–6:10. [39] Jose M. Nadal-Serrano and Marisa López-Vallejo. 2016. A Performance Study of CUDA UVM versus Manual Optimizations in a Real-World Setup: Application to a Monte Carlo Wave-Particle Event-Based In-teraction Model. IEEE Trans. Parallel Distributed Syst. 27, 6 (2016), 1579–1588. [40] Nurlan Nazaraliyev, Elaheh Sadredini, and Nael B. Abu-Ghazaleh. 2024. GPUVM: GPU-driven Unified Virtual Memory. CoRR abs/2411.05309 (2024). [41] NVIDIA. 2016. NVIDIA Tesla P100: The Most Advanced Datacenter Accelerator Ever Built, Featuring Pascal GP100 . Whitepaper WP-08019-001_v01.1. NVIDIA Corporation. https://images.nvidia.com/content/ pdf/tesla/whitepaper/pascal-architecture-whitepaper.pdf 
+
+[42] NVIDIA. 2024. CUDA Runtime API: Memory Management. 
+
+https://docs.nvidia.com/cuda/archive/12.4.0/cuda-runtime-api/group__CUDART__MEMORY.html . CUDA Toolkit v12.4.0, last updated March 5, 2024. Accessed: 2026-09-25. [43] NVIDIA. 2026. CUDA Programming Guide: Unified Mem-ory. https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/unified-memory.html . CUDA Programming Guide v13.4.2, §4.1. Accessed: 2026-09-17. [44] NVIDIA. 2026. NVIDIA GH200 Grace Hopper Superchip. https://www. nvidia.com/en-us/data-center/grace-hopper-superchip/ . Accessed: 2026-09-11. [45] NVIDIA. 2026. open-gpu-kernel-modules. https: //github.com/NVIDIA/open-gpu-kernel-modules .
+
+src/common/sdk/nvidia/inc/ctrl/ctrlc763.h , accessed 2026-09-11. [46] Patrick E. O’Neil, Elizabeth J. O’Neil, Xuedong Chen, and Stephen Revilak. 2009. The Star Schema Benchmark and Augmented Fact Table Indexing. In TPCTC (Lecture Notes in Computer Science) , Vol. 5895. Springer, 237–252. [47] PyTorch Contributors. 2025. [RFC] A Distributed CUDA Unified Mem-ory Backend for PyTorch. https://github.com/pytorch/pytorch/issues/ 158122 . GitHub issue #158122, opened July 2025, closed as not planned. Accessed: 2026-09-25. [48] Zhenlin Qi, Shengan Zheng, Ying Huang, Yifeng Hui, Bowen Zhang, Linpeng Huang, and Hong Mei. 2025. Chrono: Meticulous Hotness Measurement and Flexible Page Migration for Memory Tiering. In 
+
+EuroSys . ACM, 835–853. [49] Samyam Rajbhandari, Olatunji Ruwase, Jeff Rasley, Shaden Smith, and Yuxiong He. 2021. ZeRO-infinity: breaking the GPU memory wall for extreme scale deep learning. In SC . ACM, 59. [50] John Ravi, Tri Nguyen, Huiyang Zhou, and Michela Becchi. 2021. PI-LOT: a Runtime System to Manage Multi-tenant GPU Unified Memory Footprint. In HiPC . IEEE, 442–447. [51] Amanda Raybuck, Tim Stamler, Wei Zhang, Mattan Erez, and Simon Peter. 2021. HeMem: Scalable Tiered Memory Management for Big Data Applications and Real NVM. In SOSP . ACM, 392–407. [52] Jie Ren, Dong Xu, Junhee Ryu, Kwangsik Shin, Daewoo Kim, and Dong Li. 2024. MTM: Rethinking Memory Profiling and Migration for Multi-Tiered Large Memory. In EuroSys . ACM, 803–817. [53] Minsoo Rhu, Natalia Gimelshein, Jason Clemons, Arslan Zulfiqar, and Stephen W. Keckler. 2016. vDNN: Virtualized deep neural networks for scalable, memory-efficient neural network design. In MICRO . IEEE Computer Society, 18:1–18:13. [54] Amir Hossein Nodehi Sabet, Zhijia Zhao, and Rajiv Gupta. 2020. Sub-way: minimizing data transfer during out-of-GPU-memory graph pro-cessing. In EuroSys . ACM, 12:1–12:16. 
+
+> 14
+
+[55] Nikolay Sakharnykh. 2017. Maximizing Unified Memory Performance in CUDA. https://developer.nvidia.com/blog/maximizing-unified-memory-performance-cuda/ . Accessed: 2026-03-02. [56] Gabin Schieffer, Jacob Wahlgren, Jie Ren, Jennifer Faj, and Ivy Peng. 2024. Harnessing Integrated CPU-GPU System Memory for HPC: a first look into Grace Hopper. In ICPP . ACM, 199–209. [57] Anil Shanbhag, Samuel Madden, and Xiangyao Yu. 2020. A Study of the Fundamental Performance Characteristics of GPUs and CPUs for Database Analytics. In SIGMOD Conference . ACM, 1617–1632. [58] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. 2023. FlexGen: High-Throughput Generative Inference of Large Lan-guage Models with a Single GPU. In ICML (Proceedings of Machine Learning Research) , Vol. 202. PMLR, 31094–31116. [59] Hyunkyun Shin, Seongtae Bang, Hyungwon Park, and Daehoon Kim. 2025. SAFE: Sharing-Aware Prefetching for Efficient GPU Memory Management With Unified Virtual Memory. IEEE Comput. Archit. Lett. 
+
+24, 1 (2025), 117–120. [60] Hyunkyun Shin, Seongtae Bang, Hyungwon Park, and Daehoon Kim. 2026. ARIADNE: Adaptive UVM Management for Efficient GPU Mem-ory Oversubscription. In HPCA . IEEE, 1–15. [61] Foteini Strati, Xianzhe Ma, and Ana Klimovic. 2024. Orion: Interference-aware, Fine-grained GPU Sharing for ML Applications. In EuroSys . ACM, 1075–1092. [62] TOP500. 2025. Highlights – November 2025. https://top500.org/lists/ top500/2025/11/highs/ . Accessed: 2026-04-01. [63] Ján Veselý, Arkaprava Basu, Mark Oskin, Gabriel H. Loh, and Abhishek Bhattacharjee. 2016. Observations and opportunities in architecting shared virtual memory for heterogeneous systems. In ISPASS . IEEE Computer Society, 161–171. [64] Yueqi Wang, Bingyao Li, Aamer Jaleel, Jun Yang, and Xulong Tang. 2024. GRIT: Enhancing Multi-GPU Performance with Fine-Grained Dynamic Page Placement. In HPCA . IEEE, 1080–1094. [65] Yueqi Wang, Bingyao Li, Mohamed Tarek Ibn Ziad, Lieven Eeckhout, Jun Yang, Aamer Jaleel, and Xulong Tang. 2025. OASIS: Object-Aware Page Management for Multi-GPU Systems. In HPCA . IEEE, 1678–1692. [66] Qi Yu, Bruce R. Childers, Libo Huang, Cheng Qian, Hui Guo, and Zhiying Wang. 2020. Coordinated Page Prefetch and Eviction for Memory Oversubscription Management in GPUs. In IPDPS . IEEE, 472– 482. [67] Qi Yu, Bruce R. Childers, Libo Huang, Cheng Qian, and Zhiying Wang. 2020. HPE: Hierarchical Page Eviction Policy for Unified Memory in GPUs. IEEE Trans. Comput. Aided Des. Integr. Circuits Syst. 39, 10 (2020), 2461–2474. [68] Jiajian Zhang, Fangyu Wu, Hai Jiang, Qiufeng Wang, Genlang Chen, Guangliang Cheng, Eng Gee Lim, and Keqin Li. 2025. AlignMalloc: Warp-Aware Memory Rearrangement Aligned With UVM Prefetch-ing for Large-Scale GPU Dynamic Allocations. IEEE Trans. Parallel Distributed Syst. 36, 7 (2025), 1444–1459. [69] Tianhao Zheng, David W. Nellans, Arslan Zulfiqar, Mark Stephenson, and Stephen W. Keckler. 2016. Towards high performance paged memory for GPUs. In HPCA . IEEE Computer Society, 345–357. [70] Weixi Zhu, Guilherme Cox, Ján Veselý, Mark Hairgrove, Alan L. Cox, and Scott Rixner. 2022. UVM Discard: Eliminating Redundant Memory Transfers for Accelerators. In IISWC . IEEE, 27–38. [71] Amir Kavyan Ziabari, Yifan Sun, Yenai Ma, Dana Schaa, José L. Abellán, Rafael Ubal, John Kim, Ajay Joshi, and David R. Kaeli. 2016. UMH: A Hardware-Based Unified Memory Hierarchy for Systems with Multiple Discrete GPUs. ACM Trans. Archit. Code Optim. 13, 4 (2016), 35:1–35:25. 
+
+> 15
+
+## A Detailed Experimental Results 
+
+The tables in this appendix give the absolute numbers behind every figure in §7, generated from the same measurement files the figures are drawn from. Runtimes are in seconds unless otherwise stated; >1800 marks a run that hit its cap, and a dash marks a combination that was not run. Table 4 covers the applications on the PCIe GPUs (Figure 10), Table 5 the GH200 (Figure 14), Table 6 LLM generation (Figure 13), Table 7 and Table 8 the SSB queries (Figure 12), Table 9 the HELM comparison (Figure 15), and Table 10 the moving-hot-set microbenchmark (Figure 11). 
+
+Table 4. Application runtime in seconds on the three PCIe GPUs (Figure 10). The 0 .5× inputs are 8 GiB; the ∼1.5× inputs are 22 GiB (RTX 5080), 24 GiB (A40), and 16 GiB (H200) at 16 GiB device memory. Columns per GPU: UVM, Prefetch, UVM-mapped, Ember-static, Ember-adaptive. >1800: hit the cap. 
+
+Application Footprint RTX 5080 A40 H200 UVM Prefetch UVM-mapped static adaptive UVM Prefetch UVM-mapped static adaptive UVM Prefetch UVM-mapped static adaptive pathfinder 0.5× 0.52 0.64 0.99 0.56 0.43 0.84 0.38 0.43 0.38 0.44 0.95 0.34 0.42 0.33 0.44 k-means 0.5× 0.62 0.38 2.72 0.38 0.45 1.04 0.49 3.87 0.49 0.63 1.13 0.54 2.95 0.60 0.52 cnn 0.5× 596 557 >1800 84.8 64.9 671 240 >1800 120 123 731 793 >1800 142 254 bitonic sort 0.5× 4.78 4.84 69.0 4.97 4.64 6.87 6.67 72.5 6.97 9.11 2.72 2.46 71.3 2.68 3.60 radix sort 0.5× 0.68 0.62 2.40 0.58 0.74 1.33 1.09 4.71 1.08 1.64 1.29 0.85 2.53 0.79 1.22 bfs 0.5× 0.56 0.15 0.39 0.15 0.44 0.95 0.21 0.41 0.21 0.58 0.85 0.05 0.40 0.05 0.43 pathfinder ∼1.5× 2.85 4.88 2.80 2.38 1.61 2.69 2.83 1.28 1.20 1.30 2.27 2.16 0.84 0.76 0.91 k-means ∼1.5× 4.34 3.22 7.59 1.13 1.29 6.03 6.94 13.3 2.28 2.88 4.36 5.72 7.18 1.39 1.20 cnn ∼1.5× >1800 >1800 >1800 234 177 >1800 >1800 >1800 357 350 >1800 >1800 >1800 282 492 bitonic sort ∼1.5× 552 553 209 75.6 99.9 715 718 239 106 134 550 546 157 84.6 110 radix sort ∼1.5× >1800 >1800 7.98 9.11 8.01 487 504 14.3 11.9 15.3 1150 1124 5.32 5.09 5.87 bfs ∼1.5× 8.15 8.61 1.08 0.72 1.29 10.9 11.0 1.24 0.89 1.46 10.2 10.4 1.21 0.62 1.27 
+
+Table 5. GH200 runtime in seconds (Figure 14): applications at 48 and 142 GiB, and generating 128 tokens with models at 0.41 × and 1 .37 × of the 96 GiB. cnn was capped at 3600 s. 
+
+Workload Footprint UVM Prefetch UVM-mapped Ember-static pathfinder 0.5× 6.38 1.04 0.75 0.72 k-means 0.5× 6.44 0.89 4.15 0.88 cnn 0.5× 874 847 >3600 805 bitonic sort 0.5× 15.7 14.3 23.3 14.7 radix sort 0.5× 1.66 0.45 1.71 0.50 bfs 0.5× 3.30 0.33 0.76 0.33 LLM, 128 tokens 0.5× 3.49 3.49 74.2 3.50 pathfinder 1.5× 17.8 9.03 2.21 4.82 k-means 1.5× 19.7 14.1 14.2 3.13 cnn 1.5× 2594 >1800 >3600 >3600 bitonic sort 1.5× 717 709 861 868 radix sort 1.5× 5.17 3.38 2.04 3.31 bfs 1.5× 23.1 9.74 2.21 1.49 LLM, 128 tokens 1.5× 328 327 211 61.4 
+
+Table 6. LLM token generation in tokens per second (Figure 13), 128 tokens after a 512-token prompt, every GPU capped to 16 GB. 
+
+GPU Size Model UVM Prefetch UVM-mapped Ember-static Ember-adaptive RTX 5080 0.56 × Qwen2.5-14B-Q4_K_M 84.8 84.8 45.2 84.8 85.0 RTX 5080 1.41 × Qwen3-32B-Q5_K_S 0.45 0.45 1.37 2.10 1.46 A40 0.56 × Qwen2.5-14B-Q4_K_M 54.7 54.7 2.41 55.0 32.7 A40 1.41 × Qwen3-32B-Q5_K_S 0.21 0.40 1.00 2.71 2.07 H200 0.56 × Qwen2.5-14B-Q4_K_M 113 113 2.36 113 66.5 H200 1.41 × Qwen3-32B-Q5_K_S 0.38 0.38 0.96 2.94 1.73 Table 7. SSB query runtime in seconds on Crystal at 0 .5× device memory (Figure 12), every GPU capped to 16 GiB. Columns per GPU: UVM, UVM-mapped, Ember-static, Ember-adaptive. q41–q43 exceed the RTX 5080 host’s memory. 
+
+Query RTX 5080 A40 H200 UVM UVM-mapped static adaptive UVM UVM-mapped static adaptive UVM UVM-mapped static adaptive 13 0.71 0.45 0.43 0.38 1.08 0.57 0.59 0.80 1.05 0.54 0.50 0.38 21 0.61 0.45 0.44 0.43 0.96 0.56 0.60 0.77 0.79 0.55 0.50 0.38 22 0.61 0.45 0.44 0.40 0.97 0.56 0.60 0.45 0.85 0.55 0.50 0.38 23 0.61 0.45 0.44 0.38 1.00 0.55 0.60 0.79 0.84 0.54 0.51 0.38 31 0.61 0.45 0.44 0.46 0.96 0.56 0.61 0.45 0.83 0.54 0.51 0.38 32 0.61 0.45 0.44 0.46 0.96 0.57 0.60 0.46 0.79 0.54 0.52 0.39 33 0.63 0.45 0.44 0.46 0.98 0.56 0.60 0.46 0.88 0.55 0.50 0.39 34 0.63 0.45 0.43 0.40 0.94 0.56 0.59 0.79 0.89 0.55 0.51 0.39 41 – – – – 1.38 0.85 0.90 0.67 1.30 0.82 0.76 0.57 42 – – – – 1.42 0.84 0.91 0.67 1.43 0.81 0.74 0.57 43 – – – – 1.36 0.86 0.91 0.68 1.31 0.84 0.77 0.59 
+
+Table 8. SSB query runtime in seconds on Crystal at 1 .5× device memory (Figure 12), every GPU capped to 16 GiB. Columns per GPU: UVM, UVM-mapped, Ember-static, Ember-adaptive. q41–q43 exceed the RTX 5080 host’s memory. 
+
+Query RTX 5080 A40 H200 UVM UVM-mapped static adaptive UVM UVM-mapped static adaptive UVM UVM-mapped static adaptive 13 1.11 0.71 0.79 0.59 1.50 0.84 0.89 1.06 1.61 0.78 0.75 0.57 21 0.95 0.71 0.67 0.57 1.40 0.84 0.90 0.67 1.28 0.78 0.76 0.57 22 0.96 0.70 0.67 0.57 1.41 0.85 0.91 1.13 1.25 0.78 0.76 0.57 23 0.94 0.72 0.67 0.57 1.37 0.83 0.90 0.67 1.26 0.78 0.76 0.57 31 0.97 0.70 0.68 0.64 1.42 0.83 0.91 0.67 1.32 0.77 0.77 0.57 32 0.95 0.70 0.67 0.67 1.38 0.85 0.89 0.68 1.28 0.78 0.77 0.58 33 0.99 0.72 0.75 0.57 1.35 0.85 0.90 0.68 1.30 0.78 0.76 0.58 34 1.01 0.72 0.71 0.57 1.35 0.85 0.90 0.68 1.31 0.78 0.76 0.58 41 – – – – 2.17 1.26 1.34 1.00 2.13 1.16 1.25 0.86 42 – – – – 2.20 1.25 1.34 1.00 2.23 1.17 1.25 0.86 43 – – – – 2.18 1.25 1.34 1.02 2.19 1.18 1.28 0.88 
+
+Table 9. HELM against Ember-adaptive on the RTX 5080 (Figure 15), seconds. Kernel: run time of the policy HELM selects; Total adds profiling, metrics, and selection. Single runs; Ember-adaptive is the mean of its runs. 
+
+Benchmark Profiling Metrics Selection Kernel Total Ember-adaptive sgemm 94.4 14.3 0.16 480 588 17.1 bfs-worst 310 153 0.16 17.3 480 57.7 tealeaf 444 2.26 136 >1800 >2381 413 cg 32.2 6.60 0.23 5.44 44.5 3.78 GRAMSCHM 1448 1.71 0.16 1413 2863 1800 
+
+Table 10. Moving hot set on the GH200 (Figure 11): kernel time over eight phases and one-time placement cost, seconds, by the share of the 14 GiB window replaced per phase. 
+
+Drift [%] UVM Prefetch UVM-mapped Ember-static Pref. cost Advise cost Ember-static cost 0 3.40 0.15 1.33 0.15 0.20 0.92 1.33 10 4.61 1.00 1.71 0.44 0.20 0.91 1.34 25 8.84 4.94 1.33 0.84 0.24 0.92 1.34 50 15.3 11.6 1.33 1.05 0.21 0.92 1.34 100 25.4 20.6 1.33 1.16 0.23 0.92 1.35 
+
+## B Integration Cost 
+
+Table 11 lists the lines added to each application to run it under Ember-static (§7.8). 
+
+Table 11. Integration cost of Ember-static. 
+
+Application Original LOC Added Increase pathfinder 358 12 <4% kmeans 423 12 <3% gramschm 274 13 <5% cnn 742 22 <4% bitonic-sort 707 8 <1.2% radix-sort >3000 8 <0.3% bfs 657 28 <5%

@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-11</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-13</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 16 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-11 19:52:11 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-13 19:52:23 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日筛选 16 篇 AI 系统与模型优化论文，完成 5 篇精读、11 篇速读。</p>
-<p>最值得关注的是具身 AI 的视觉—语言—动作工作负载设计，以及利用矩阵引擎提升 CPU 上 MoE 推理性能。</p>
-<p>普通读者可优先从具身智能应用与高效推理两条线入门，再关注强化学习加速和稀疏微调进展。</p>
+<p>今日完成 16 篇 AI 论文筛选，聚焦大模型训练显存优化、稀疏注意力与可靠 AI 系统。</p>
+<p>最值得精读的是 SlackSwap 的带宽感知激活交换/重计算，以及 PageWeaver 以 KV 引导查询合并提升稀疏注意力效率。</p>
+<p>建议普通读者优先关注“如何让模型更省显存、更高效”，再按需延伸到联邦学习隐私与硬件抗攻击方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Beyond LLM Serving: Characterizing Vision-Language-Action Workloads for Embodied AI System Design">Beyond LLM Serving: Characterizing Vision-Language-Action Workloads for Embodied AI System Design</span></li><li><span class="dpr-home-dashboard-paper-title" title="HiNa-MoE: High-Performance, Non-Intrusive MoE Inference on CPUs with Matrix Engines">HiNa-MoE: High-Performance, Non-Intrusive MoE Inference on CPUs with Matrix Engines</span></li><li><span class="dpr-home-dashboard-paper-title" title="Distributed Subliminal Learning: Replacing Model Updates with Random-Carrier Outputs">Distributed Subliminal Learning: Replacing Model Updates with Random-Carrier Outputs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation for Memory-Efficient DNN Training">SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation for Memory-Efficient DNN Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="PageWeaver: KV-Guided Query Unions for Sparse Attention">PageWeaver: KV-Guided Query Unions for Sparse Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Byzantine-Resilient Federated Large Language Model via Hypergraph Message Passing">Byzantine-Resilient Federated Large Language Model via Hypergraph Message Passing</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ThunderSyncRL: Lossless Acceleration of Agentic Reinforcement Learning">ThunderSyncRL: Lossless Acceleration of Agentic Reinforcement Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Co-Optimizing Graph Sparsification and Approximate Computing for Energy-Efficient FPGA-Based GCN Inference">Co-Optimizing Graph Sparsification and Approximate Computing for Energy-Efficient FPGA-Based GCN Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="RoSA: Rotational Sparse Adaptation for Memory-Efficient Fine-Tuning">RoSA: Rotational Sparse Adaptation for Memory-Efficient Fine-Tuning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FlexiFlow: Bandit-based Model Switching in ML Workflows">FlexiFlow: Bandit-based Model Switching in ML Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="Fed-BRDECS: Privacy-Preserving and Heterogeneity-Aware Federated Deep Embedded Clustering">Fed-BRDECS: Privacy-Preserving and Heterogeneity-Aware Federated Deep Embedded Clustering</span></li><li><span class="dpr-home-dashboard-paper-title" title="BARE-AI: Bit-Flip Attack Resilience in AI Hardware through Built-in Performance Monitors">BARE-AI: Bit-Flip Attack Resilience in AI Hardware through Built-in Performance Monitors</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

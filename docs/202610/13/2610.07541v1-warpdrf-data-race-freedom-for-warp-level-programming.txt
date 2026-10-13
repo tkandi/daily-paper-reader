@@ -1,0 +1,454 @@
+Title: WarpDRF: Data-Race Freedom for Warp-Level Programming
+
+URL Source: https://arxiv.org/pdf/2610.07541v1
+
+Published Time: Wed, 07 Oct 2026 00:35:28 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+## Zheyuan Chen 
+
+University of California at Santa Cruz zchen406@ucsc.edu 
+
+## Simon Kagle 
+
+University of California at Santa Cruz skagle@ucsc.edu 
+
+## Tiago Cogumbreiro 
+
+University of Massachusetts Boston Tiago.Cogumbreiro@umb.edu 
+
+## Tyler Sorensen 
+
+University of California at Santa Cruz Microsoft Research tsorensen@microsoft.com 
+
+## Abstract 
+
+Warp primitives such as tensor core operations, shuffles, re-ductions, and barriers are critical to high-performance GPU kernels, and every major GPU language supports some set of them. The threads that participate in a primitive, and therefore synchronize, are determined dynamically by how threads diverge and reconverge, and by intra-warp schedul-ing such as independent thread scheduling. In practice, many high-performance kernels use these primitives and behave as expected, following an intuitive but unwritten data-race-freedom contract that has never been stated precisely or empirically tested. We present WarpDRF, the first abstract warp program-ming model to make this contract precise, with participation rules parameterized by reconvergence guarantees and per-primitive requirements so that instantiations match different GPU languages. We prove (formalized in Rocq) that a kernel satisfying WarpDRF executes every warp primitive with the participants the reference semantics assigns and produces the same results, so a programmer can reason in the ref-erence semantics alone. We implement the model in MLIR with a reference interpreter and fuzz 10K conformance tests for each of three configurations across CUDA, HIP, HLSL, Metal, and SPIR-V on 16 device and backend pairs; at least one WarpDRF configuration describes each, with CUDA hon-oring the strictly weakest configuration. Finally, we extend Faial, a static data-race analyzer for CUDA, into the first DRF checker for an empirically validated warp model, and apply it to llama.cpp, where most kernels that use warp primitives already satisfy the contract, but three contain previously unknown data races, showing the need for tools that check it. 
+
+## 1 Introduction 
+
+To achieve high performance on GPUs, developers need to program the lowest unit of parallelism available, called a 
+
+warp 1, which defines a group of threads that the hardware schedules as a single unit, usually 32. GPU programming 
+
+> 1The term warp originates from CUDA [39] and is also known as wavefront in AMD’s HIP [2], and as subgroup in Khronos specifications [24].
+
+models therefore offer low-level concurrency control, called 
+
+warp primitives , that define data communication and syn-chronization between the threads in a warp, such as par-allel matrix operations, register exchanges among threads, parallel reductions, and all-to-all synchronization. General Matrix-Matrix Multiplications (GEMMs) and Attention (a neural-network operation) [46] dominate the runtime of modern AI workloads, and these operations leverage warp primitives to achieve high performance [18]. For instance, we found warp primitives in a fifth of the functions of a pop-ular linear-algebra library that powers AI workloads, that is, 6,061 of 27,383 disassembled function bodies of NVIDIA’s cuBLAS use warp primitives. A warp primitive is a collective operation, executed jointly by a subset of a warp’s threads (the participants ), and com-pletes only once every participant has reached the primitive. The set of participants is not fixed by the primitive but by con-trol flow, since branching determines which threads reach the primitive. The participant set in turn determines both the value the primitive returns and which threads the primitive orders. Because the returned value may decide subsequent control flow, and hence subsequent participant sets, the func-tional behavior of a primitive and the orderings the primitive establishes cannot be treated separately. Crucially, languages differ in what a programmer may as-sume about the participant set. SPIR-V provides an optional execution mode that requires maximal reconvergence for entry points [22], so that the participant set follows from the structure of control flow, whereas CUDA offers no recon-vergence guarantee and instead requires the programmer to name the intended participants in a mask [39]. The par-ticipant set moreover depends on scheduling, not only on control flow. NVIDIA documents independent thread sched-uling, under which threads of a warp may interleave at fine granularity rather than execute in lockstep as programmers long assumed [10, 39], so that threads on the same control-flow path need not reach a primitive together. Data-race freedom solved an analogous problem for mem-ory ordering. Rather than reason about every schedule and arXiv:2610.07541v1 [cs.PL] 6 Oct 2026 Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen                                  
+
+> 1// executed by
+> 2// one warp per block
+> 34// warp divergent branch
+> 5if ( cond )
+> 6// write
+> 7shared [i] =...;
+> 89shfl_sync (...);
+> 10 11 // read
+> 12 ... =shared [j ];
+> (a)
+> if (cond)
+> 𝑃 =all
+> write shared
+> 𝑃 =𝑆
+> shuffle
+> 𝑃 =?
+> read shared
+> 𝑃 =?
+> conflict?
+> (b)
+
+Figure 1. Warp participation and synchronization in a pat-tern abstracted from llama.cpp’s mm_ids_helper . In (b), 𝑃 
+
+denotes the threads that execute each dynamic basic block. A divergent subset 𝑆 writes shared memory before a warp shuffle, after which the warp reads the array. The shuffle does not order shared memory, so the write and read conflict. In CUDA, the shuffle’s bitmask names the required participants; WarpDRF-Faial checks both the participation requirement and the missing memory ordering. every relaxation the hardware permits, programmers or-der conflicting accesses through high-level synchronization constructs and, in return, may reason as if execution were sequentially consistent [3]. That discipline has been carried onto GPUs, but the memory models and analyzers built there treat synchronization as occurring among every thread at a fixed level of the hierarchy, whether a block reaching a barrier or a scope reaching an atomic, and have no notion of an execution-determined subset of a warp synchroniz-ing [8, 11, 19, 33]. A separate line defines participation and identifies where primitives can execute [10, 28], but offers no rule for a pro-grammer to follow. The two have developed independently, and the intuition that keeps deployed kernels correct has never been stated as a data-race-freedom contract, nor has the code that relies on it been checked against one. 
+
+1.1 WarpDRF: Contract, Conformance, Code 
+
+We present WarpDRF, a data-race-freedom contract for warp programming. WarpDRF is a simplified execution model that hides low-level detail such as lockstep execution and inde-pendent thread scheduling, replacing it with two dependent conditions on memory ordering and warp primitive partici-pation. We do not capture any one language in full, but target a pragmatic subset that maps straightforwardly onto CUDA, HIP, HLSL, Metal, and SPIR-V. We build an executable model in MLIR and test 16 device and backend pairs against it, with CUDA honoring the weakest configuration. We then pro-duce the first static checker for an empirically validated warp programming model and apply it to the performance-critical CUDA kernels of llama.cpp, a widely used open-source LLM inference engine, where most kernels already satisfy the contract and three contain previously unknown data race. 
+
+Defining the contract. We define WarpDRF over a delib-erately small language: threads grouped into warps, ordinary memory accesses, warp primitives, and control flow whose conditions may differ across threads. Warp primitives oper-ate over participants, the threads that execute them together, and optionally order their memory accesses. A kernel satisfies WarpDRF when two conditions hold in its reference execution for every input. First, conflicting memory accesses must be ordered, and warp primitives can optionally be set to provide that ordering. Second, every dynamic execution of a warp primitive, which we call an instance, has an unambiguous set of participants, ranging from all threads in the warp to any valid subset. The condi-tions are dependent, since a primitive orders memory only for its participants. Figure 1 highlights a real llama.cpp ker-nel in which insufficient synchronization causes a bug, and participation assumptions are non-portable. Each language instantiates its own configuration of Warp-DRF by specifying when threads reconverge and what else it requires of a primitive’s participants. From those choices we derive when a kernel satisfies the contract. We prove a guarantee for the contract: on any conforming system, a kernel that satisfies WarpDRF forms the same participant set at every primitive and computes the same results as the reference execution, so a programmer can reason in the ref-erence semantics alone. We formalize the proof in Rocq over SIMT-Step’s synchronous subgroup operations ( SSO ) [10], in which threads advance independently and a primitive waits for every thread that may still reach it. 
+
+Testing implementations against the contract. Speci-fications say little about warp execution, so we test whether implementations respect the contract. WarpDRF gives each test one expected result, allowing its reference interpreter to serve as the oracle. Across 10K tests for each of three configurations on 16 de-vice and backend pairs, every language conforms to at least one of them. Empirically, CUDA honors the strictly weakest configuration, and thus that configuration is portable across every system we tested. In it, warp primitives are valid only when every thread in the warp executes them, ruling out non-uniform participation. Some languages additionally de-fine partial-participation behavior, but those guarantees are specific to the language and execution mode. 
+
+Checking kernels against the contract. We build a checker for the CUDA configuration by extending Faial, a static data-race analyzer that previously had no support for warp prim-itives [11]. We run it over llama.cpp and check the 95 ker-nels that use warp primitives. After checking every reported alarm against the kernel source and the current callers and WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+launch configurations, we find that 77 of the 95 analyzed ker-nels (81.1%) have no unordered conflicting memory accesses and execute every warp primitive with the full warp. The remaining 18 kernels map to four broader source patterns containing confirmed or input-conditional alarms (§5.2). 
+
+Contributions. In summary: 1. WarpDRF (§3): a data-race-freedom contract in which every instance of a warp primitive has a single unam-biguous set of participants and every memory conflict is ordered, with configurations for languages that re-converge differently, and a guarantee, formalized in Rocq, that satisfying kernels match the reference se-mantics. 2. An executable model (§4): an MLIR dialect and inter-preter to fuzz 10K tests for each of three configurations over five languages and 16 device and backend pairs (§4.3), where CUDA honors the weakest configura-tion. 3. A warp-aware race checker (§5.1): the first built on an empirically validated model, applied to 95 llama.cpp kernels (§5.2). After source and caller validation, 77 (81.1%) satisfy both conditions; the other 18 (18.9%) are buggy, with confirmed or input-conditional alarms across four source patterns. 
+
+## 2 Background 
+
+2.1 Execution Hierarchy and Synchronization Scopes 
+
+A GPU kernel executes a grid of logical threads organized into hierarchical groups. CUDA and HIP call the larger group a thread block , Metal calls it a threadgroup , and SPIR-V calls it a workgroup . Implementations partition each group into tightly coupled execution groups: CUDA uses warps , AMD hardware uses wavefronts , Metal uses SIMD-groups , and SPIR-V uses subgroups [2, 6, 24, 39]. We use block and warp for these concepts. We use warp primitive as an umbrella term for two categories. A warp collective , such as a shuffle, ballot, reduction, or cooperative matrix instruction, exchanges or combines values across threads. A warp barrier waits for participating threads and may provide warp-scoped memory ordering. The execution hierarchy determines the scope of com-munication and synchronization. Registers are private to a thread, shared or workgroup memory is addressable within a block, and global memory is addressable device-wide. A block barrier such as __syncthreads() coordinates the threads in one block and orders their relevant memory accesses. A memory-ordering warp barrier such as __syncwarp() has narrower scope: it coordinates and orders accesses only among threads of one warp. It cannot establish ordering between different warps, even when they belong to the same block [24, 39]. Collective participation and memory ordering are separate effects. Shuffles, ballots, and reductions in CUDA and HIP, their Metal SIMD-group counterparts, and SPIR-V group-nonuniform operations exchange or aggregate register val-ues but do not by themselves order accesses to shared or workgroup memory. In particular, the _sync suffix on CUDA and HIP collectives identifies participating threads; it does not turn the collective into a memory barrier [1, 5, 24, 39]. Memory ordering instead requires an explicit barrier carry-ing the appropriate scope and memory semantics. SPIR-V makes this separation syntactic. Group-nonuniform opera-tions carry only an execution scope, while control barriers also carry a memory scope and memory semantics. Simi-larly, Metal uses flags to select the memory classes ordered by a SIMD-group barrier. WarpDRF therefore treats these warp collectives as participation events rather than mem-ory boundaries. Only barriers with documented memory semantics provide scoped memory ordering. 
+
+2.2 Divergence and Collective Participation 
+
+Threads diverge when a thread-dependent branch or loop sends them along different dynamic control-flow paths. An implementation may serialize those paths, predicate instruc-tions, allow threads to progress independently, or combine these techniques. Reconvergence describes when the threads resume joint execution, but GPU languages provide different guarantees about where this occurs. SPIR-V identifies struc-tured merge points, and a shader that declares the Maximally ReconvergesKHR execution mode requires threads to rejoin at them as early as the program structure allows, whereas general CUDA does not promise an analogous rejoining at arbitrary source-level joins [24, 39]. SIMT-Step formalizes these alternatives using dynamic blocks [10]. Table 1 summarizes how each API determines the partici-pants of a warp primitive under divergent control flow. All four APIs support complete-group execution but differ on partial participation. Section 3.4 represents these differ-ences as target configurations. One source-level warp primitive may execute multiple times, for example when it appears in a loop or a repeated function call. We call each execution a primitive instance .Each instance has its own participant set, and a collective’s result depends on both those participants and the values they supply. Threads reaching the same source location through different loop iterations or calls therefore need not belong to the same instance. Section 3.2 formalizes these instances and their participant sets. Cooperative matrix operations make the full-group re-quirement explicit: CUDA WMMA requires all threads in a warp to execute each operation, while SPIR-V requires all invocations in the cooperative-matrix scope to be active or none [24, 39]. Neither specification assigns portable se-mantics to execution by a proper subset, which motivates WarpDRF’s fully convergent contract. Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen 
+
+Table 1. Selected specification-level participation rules for warp-scoped primitives [1, 5, 22, 24, 39]. An explicit mask selects participants for one primitive; it does not provide a general reconvergence guarantee.                   
+
+> Model Primitive class Participants Divergent-control guarantee CUDA Masked collectives Calling threads named by one consistent mask Disjoint masks may execute divergently; every non-exited named thread must reach the same intrinsic with the same mask HIP Cross-thread _sync collectives Active calling threads named by one consistent 64-bit mask Every active named thread must execute the same collective with the same mask Metal SIMD-group collectives Active threads Results range over the active threads at the dynamic call SPIR-V Group-nonuniform operations Invocations in the same scope-restricted dynamic instance Structured merges can restore uniform flow;
+> MaximallyReconvergesKHR further constrains dynamic grouping CUDA, Metal, SPIR-V Cooperative matrix Complete warp, SIMD-group, or matrix scope Uniform execution is required
+
+2.3 Why Memory DRF Is Insufficient 
+
+Two ordinary memory accesses conflict when they touch the same location and at least one is a write. A conflicting pair is a data race unless one access happens before the other. To construct this relation, a DRF model begins with the synchronization operations in an execution and the ordering that each one provides. For example, a block barrier is a block-scoped synchronization operation by definition, so it can order accesses by threads in that block. GPU DRF models account for the hierarchy by restricting such ordering to scopes such as a workgroup or device [11, 19]. Warp primitives complicate this starting point. Unlike a block barrier, a warp primitive may execute under divergent control flow, and any coordination or memory ordering ap-plies only to threads that execute it together. A memory-race analysis must therefore determine the group before using a warp primitive to order accesses. Figure 2 illustrates how divergence and reconvergence determine that group, and which memory accesses the re-sulting barrier orders. It uses a warp of exactly two threads, 0 and 1. The array g is shared, while local and local2 are local variables of each thread. Here warp_sync orders mem-ory among its participants. Assume barriers permit partial participation and the threads rejoin after the conditional. A therefore contains only thread 0, whereas B contains both threads. Reconvergence determines the group at B; it does not itself provide B’s memory ordering. Thread 1’s write g[1] = 2 and thread 0’s branch read 
+
+local = g[1] access the same location. A supplies no mem-ory ordering between these threads, because thread 1 does not participate. Both accesses precede B, so B does not or-der them either: the write and read race. In contrast, B or-ders each initial write before the other thread’s final read into local2 . Removing A leaves the memory ordering un-changed; removing B also leaves those final reads unordered with the other thread’s writes. Removing A and moving B immediately after the initial writes, before the conditional, orders every conflicting write– read pair. The branch can remain divergent, and no barrier 
+
+Initial: g[0] = g[1] = 0;                                
+
+> 1g[ tid ] =tid +1;
+> 2if ( tid == 0) {
+> 3warp_sync (); // A: thread 0.
+> 4local =g [1];
+> 5}
+> 6warp_sync (); // B: threads 0and 1.
+> 7local2 =g [1 -tid ];
+
+Figure 2. Barrier placement in a two-thread warp, assuming barriers permit partial participation and the threads rejoin after the conditional. A synchronizes only thread 0. B orders the initial writes before the final reads, but neither barrier orders thread 1’s write before the branch read. is needed afterward because only reads remain. The moved B also runs in warp-uniform control, so its group no longer depends on reconvergence. The original A runs with only part of the warp, which is invalid if the primitive requires full-warp participation. The participant set also matters for primitives that do not order memory: a collective reached by only part of a warp can be memory-race-free while producing a register value that depends on how the threads are grouped. WarpDRF establishes a portable fully convergent domain by requiring every executed warp primitive to include the complete warp. This rule captures a common kernel idiom rather than requiring the whole kernel to be uniform: threads may compute different operands and take different paths between primitives, but invoke each warp primitive in warp-uniform control. The moved B in Figure 2 follows this rule; A does not. This fixes the participants to which a warp prim-itive applies, without relying on API-specific rules for recon-verging divergent threads. WarpDRF then checks that con-flicting memory accesses are ordered at an appropriate scope. Section 3 formalizes this full-warp contract and separately describes how to reason about programs that intentionally rely on partial participation. WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+## 3 The WarpDRF Contract 
+
+WarpDRF retains the classic data-race-freedom argument: programmers use high-level synchronization to order con-flicting memory accesses rather than reason about low-level execution schedules [3]. What this work adds is a definition of that synchronization. Classic models take their synchro-nization operations as given: a lock or a block barrier is a named operation whose ordering rules are stated in advance. For a warp primitive, which calls make up a single operation is in question, because any coordination or memory ordering applies only to threads that execute it together. WarpDRF therefore fixes that grouping before using it. Its reference semantics identifies the threads that execute each primitive together, which makes participation predictable under divergent control flow. Each language then instanti-ates the contract: from its specification, such as SPIR-V’s maximal reconvergence, we derive which participant groups that language defines. Once those groups are fixed, order-ing conflicting accesses is the classic argument. Language specifications are often informal, so these derivations are best-effort. In Section 4 we design a conformance testing methodology and show that some variant of them holds across every language and device we tested. 
+
+3.1 The WarpDRF Language 
+
+Figure 3 defines the small language over which WarpDRF is stated. It retains the three features relevant to the con-tract: memory accesses, warp primitives, and structured con-trol flow whose conditions may evaluate differently across threads. Scalar values are integers, and any other pure thread-local computation is an uninterpreted function 𝑓 : calls to the same 𝑓 with equal arguments produce equal results, and the semantics assumes no other property. This represents op-erations such as floating-point arithmetic without defining their numerical behavior, keeping the formalization focused on participation, memory ordering, and control flow. A call to 𝑝 denotes a warp primitive and optionally returns a value. Given a set of participants, which the reference semantics defines, its result is an uninterpreted function over the values those participants provide. Languages and devices differ, so our formalism is param-eterized by a configuration 𝐶 that aims to capture those differences. A configuration supplies: 
+
+• the warp width, which is 32 on many systems, fa-mously NVIDIA, but can be any number; some devices are as large as 128; 
+
+• ord (𝑝 ), whether a primitive 𝑝 orders memory among its participants; 
+
+• req (𝑝 ), which participant sets are legal for 𝑝 ; and 
+
+• how participation is defined under divergence. In CUDA, __shfl_sync only exchanges values and has 
+
+ord (𝑝 ) = nosync , whereas __syncwarp has ord (𝑝 ) = sync .Tensor core operations have req (𝑝 ) = full , requiring every                                                                                          
+
+> 𝑛 ∈Int 𝑥 ∈Var 𝑎 ∈Arr 𝑓 ∈Fun 𝑝 ∈Prim
+> ord :Prim → { sync ,nosync }orders memory?
+> req :Prim → { full ,any }participant constraint
+> 𝑒 :: =𝑛 |𝑥 |tid |𝑒 ⊕𝑒 |𝑓 (𝑒, . . . , 𝑒 )
+> 𝑠 :: =𝑥 :=𝑒 local assignment
+> |𝑥 :=𝑎 [𝑒 ] | 𝑎 [𝑒 ]:=𝑒 memory access
+> |[𝑥 :=]𝑝 (𝑒, . . . , 𝑒 )warp primitive
+> |if 𝑒 then 𝑠 else 𝑠 conditional
+> |switch 𝑒 {𝑛 ⇒𝑠, . . . }multiway branch
+> |while 𝑒 do 𝑠 loop
+> |𝑠 ;𝑠 |skip |break |return sequencing, exit
+
+Figure 3. The WarpDRF language. Here tid is the linearized thread identifier, ⊕ ranges over integer arithmetic and com-parisons, and a primitive’s result binding is optional. thread in the warp, while shuffles and votes may be called with a partial group. The last item is the least settled: SPIR-V’s optional MaximallyReconvergesKHR mode requires recon-vergence according to its structured rules, whereas CUDA provides no analogous general guarantee, which we investi-gate empirically in Section 4.3. Following SIMT-Step, the language assumes structured control flow with explicit merge points [10]; unstructured control flow is outside this formalization. None of the 64 CUDA source files contributing the 479 kernels in our study uses goto , so this restriction excludes no source-level control flow encountered in that evaluation. Atomics, asynchronous copies, and cross-block synchronization are also outside the language. These features occur in only six of the 479 kernels, none of which uses a warp primitive, so they exclude no kernel from the 95-kernel evaluation set. Prior work shows how relaxed GPU atomics can be incorporated into a data-race-freedom model [42]; we leave that extension to future work. 
+
+Correspondence to real languages. Our language is in-tentionally small and general. Given the subtle differences between real GPU languages, we do not present it as a com-plete formalization of any one of them, but it covers the constructs used by many impactful kernels (Section 5.2). The mapping is most direct for SPIR-V, Metal, and HLSL: array accesses become loads and stores, a warp corresponds to a subgroup or SIMD-group, and primitive calls become the corresponding subgroup operations. CUDA and HIP further allow a call to name its participants with a bitmask. We do not model bitmasks, since no other language supports them; in practice the value passed is frequently __activemask() ,which reports whichever threads control flow has already brought to the call rather than requiring a particular set. Section 3.4 examines what CUDA guarantees about that set, and Section 4.1 implements these mappings. Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen 
+
+Reference semantics. We adopt the bulk-synchronous, block-level semantics used by earlier GPU analysis tools [8, 12, 32]: one thread runs until it reaches a barrier, then another runs until it reaches a barrier, and the barrier is released once every thread has arrived. There is no interleaving, only a sequentialized execution of barrier intervals. WarpDRF derives participation from control flow rather than from a declaration and extends this semantics to warps by replacing block barriers with the participants of a warp primitive. The difficulty is that, unlike a block barrier, a warp primi-tive admits partial participation. Prior work describes cor-rect use of block barriers with notions such as textual align-ment [21], which asks that every thread reach the same bar-rier in the same loop iteration. To extend that idea to warps we borrow dynamic basic blocks [10], which lift SPIR-V’s no-tion of a dynamic instruction instance [23] to a basic block: each execution of a basic block creates a new dynamic block, and a dynamic block is executed by a group of threads rather than by one. The entry point of the program is a dynamic block executed by all threads, and a branch creates dynamic blocks executed by the threads that take the same path. Dynamic blocks give us the machinery to define participa-tion. If a warp primitive occurs in a dynamic block executed by the thread set 𝑇 , and 𝐶 permits that primitive to occur there, then its participants are 𝑇 . Distinct loop iterations and repeated calls produce distinct dynamic blocks, so threads that reach the same source location by different paths are not grouped automatically. Section 4.4 tests this behavior. This extends the bulk-synchronous semantics of earlier GPU analyses [8, 32]: SIMT-Step’s dynamic blocks [10] de-termine each warp primitive’s group instead of assuming that every synchronization operation has a fixed group. The reference semantics therefore picks threads in turn and runs each until it reaches a warp primitive, updating the set of dynamic blocks as it goes. A primitive is released once all of its participants have arrived, which the semantics cannot determine until the paths of the remaining threads are resolved. Threads are picked in a fixed order, so a kernel has exactly one reference execution for a given input. 
+
+3.2 The Contract 
+
+WarpDRF states its conditions over the reference semantics rather than over the executions a target system may produce. Classic DRF is stated the same way: a program is data-race-free if no sequentially consistent execution has a race, and a guarantee then transfers that reasoning to real implemen-tations. Both conditions are properties of the kernel. First, conflicting memory accesses must be ordered. Second, every warp primitive must run with a group that the configuration 
+
+𝐶 guarantees. The second condition is new. Without it a kernel could rely on a grouping that 𝐶 leaves open, and a target system free to group threads differently would change either the memory ordering or the result of a primitive. Write 𝐸 for the reference execution of a kernel on a given input, and let 𝑀 𝐸 be the memory events in 𝐸 . Every array read or write produces an event recording its thread, location, and access mode, either read or write. Every executed warp primitive has the participant set determined by its dynamic block, as defined in Section 3.1. The happens-before relation hb 𝐸 is transitive, and contains each thread’s program order and the ordering added by warp primitives with ord (𝑝 ) = sync , which applies only among that primitive’s participants. 
+
+Condition 1: memory DRF. Two events in 𝑀 𝐸 conflict when they come from different threads, access the same location, and at least one is a write. An execution is memory-data-race-free when every conflicting pair is ordered: 
+
+MemDRF (𝐸 ) ≜ ∀𝑒, 𝑓 ∈ 𝑀 𝐸 . conflict (𝑒, 𝑓 ) ⇒ 
+
+𝑒 hb 𝐸 𝑓 ∨ 𝑓 hb 𝐸 𝑒. 
+
+This is the standard DRF condition. WarpDRF changes nei-ther the definition of a conflict nor the requirement that conflicts be ordered. Its effect on this condition is that order-ing from a warp primitive applies exactly to that primitive’s participants. 
+
+Condition 2: unambiguous participation. Participa-tion is unambiguous when every warp primitive in the refer-ence execution has a participant group that 𝐶 guarantees, and that group satisfies the primitive’s constraint req (𝑝 ). Which groups those are depends on the configuration; Section 3.4 defines a portable complete-warp case and language-specific cases that admit partial participation. 
+
+Combining the conditions. A kernel satisfies WarpDRF for configuration 𝐶 when its reference execution is memory-data-race-free and its participation is unambiguous. The two conditions are dependent: hb 𝐸 is built from warp primitives, so the memory condition cannot be evaluated until partic-ipation is settled. Even for a primitive that does not order memory, participation still matters, because changing the group can change the primitive’s result. Figure 1 shows the two conditions interacting in a real kernel. 
+
+3.3 The Guarantee 
+
+The guarantee is the classic DRF one [3]: a kernel that satis-fies WarpDRF produces the same reads and the same final memory on a target system as it does in the reference seman-tics, so a programmer can reason in the reference semantics alone. Earlier GPU semantics establish analogous agreement between lockstep and interleaving executions for race-free kernels [12, 27]. The novel component of WarpDRF is that participation must be settled before the memory argument can run. A target system is conforming when it behaves as its config-uration 𝐶 describes, does not let a primitive instance take effect until every thread that may still reach it has arrived or WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+taken a path that excludes it, provides the ordinary DRF guar-antee with warp primitives supplying the synchronization edges among their participants, and preserves the specified behavior of operations under compilation. The last two are standard. 
+
+Theorem 3.1 (WarpDRF guarantee) . If a kernel satisfies WarpDRF for configuration 𝐶 , then on a conforming target system it executes each warp primitive with the participants that the reference semantics assigns, and produces the same reads and the same final memory as the reference execution. 
+
+The theorem does not require every participant group to be a complete warp. If 𝐶 enables maximal reconvergence in SPIR-V, the theorem covers the partial groups guaranteed by that mode, provided the reference semantics determines those groups. 
+
+Instantiating conformance. Theorem 3.1 is stated against conformance, a property we require of a target, not one we establish. Before outlining a proof we therefore fix a base semantics, instantiating conformance with a concrete warp execution model. SIMT-Step provides a family of such mod-els for a single warp, totally ordered by strength, where a stronger model restricts when a primitive may execute and therefore admits fewer executions [10]. We examine two members of this family. The first is too weak to support WarpDRF, and the next strongest is sufficient. Both use the same memory model, which we deliberately make weak. Following GPUVerify, a write stays private to its thread un-til that thread participates in a memory-ordering primitive, and an execution aborts as soon as it races [8]. We call this 
+
+delayed visibility .
+
+Speculative execution is too weak. The weaker of the two is speculative subgroup operations ( Spec ), which exe-cutes a primitive with the threads currently known to par-ticipate, speculating that no additional threads will join. Fig-ure 4 shows that this freedom is enough to break the guar-antee. Threads 0 and 1 form the warp and 𝑔 [0] starts at 0. Each thread reads 𝑔 [0] and executes a memory-ordering 
+
+warp_sync if it read 0, after which thread 0 writes 1. Write 
+
+𝑅 𝑡 (𝑣 ) and 𝑊 𝑡 (𝑣 ) for a read and a write of 𝑔 [0] by thread 𝑡 ,and 𝑆 (𝑃 ) for the primitive with participants 𝑃 .The reference execution is 𝑅 0 (0), 𝑅 1 (0), 𝑆 ({ 0, 1}) ,𝑊 0 (1).Thread 0 waits until thread 1 has decided whether to join, so both read 0 and both participate. The only cross-thread con-flict is thread 1’s read against thread 0’s write, and the prim-itive orders it. The kernel satisfies both conditions in either configuration. Spec also permits 𝑅 0 (0), 𝑆 ({ 0}) ,𝑊 0 (1), 𝑅 1 (0).Here thread 0 executes the primitive alone while thread 1 has not yet decided, then writes 1. That write is still private, so thread 1 reads 0, and the primitive did not include thread 1, so nothing orders the write before the read. The two race and the execution aborts. Thread 1 never reaches the primitive, 
+
+Initial: g[0] = 0;                   
+
+> 1int r=g [0];
+> 2if (r == 0) {
+> 3warp_sync ();
+> 4if ( tid == 0)
+> 5g [0] =1;
+> 6}
+
+Figure 4. Speculative execution can violate the WarpDRF guarantee. This adaptation of SIMT-Step’s Figure 10 [10] uses ordinary memory accesses and one writer. Threads 0 and 1 form the complete warp; warp_sync orders memory among its participants. so Spec ’s assumption that it would not join is never contra-dicted, and the execution is legal. A kernel that satisfies both conditions can have a Spec execution that races and forms a group the reference never assigns. Therefore Spec does not provide a sound base semantics for WarpDRF. 
+
+Synchronous subgroup operations. The next strongest model is synchronous subgroup operations ( SSO ). An in-stance executes only when every thread that may still reach it is already waiting there. Deciding which threads those are is the delicate part of the semantics: the test inspects both arms of an unresolved branch and the relevant loop iterations, and it does not predict the result of a future read. The rule constrains only the moment at which a primitive ex-ecutes. Between primitives, threads advance independently and in any order, so SSO is far weaker than lockstep and admits the fine-grained interleaving that independent thread scheduling exposes. SSO is nonetheless strong enough to support WarpDRF, and it remains strong enough under de-layed visibility. 
+
+Theorem 3.2 (SSO supports WarpDRF) . Fix an input to a single-warp kernel whose reference execution terminates and satisfies both WarpDRF conditions, for either the fully conver-gent or the partially convergent configuration. Then no SSO 
+
+execution with delayed visibility races, and every terminating one assigns the same participants to each instance, returns the same reads to each thread, and produces the same final memory as the reference. 
+
+We mechanize the theorem in Rocq, covering structured loops, early exits, primitive arguments and results, and both choices of ord (𝑝 ).
+
+Proof outline. Fix a finished reference execution for the in-put, which condition 1 makes memory-data-race-free. The argument matches any SSO execution with delayed visibility against it, in two parts. The first part rearranges reference steps, which is needed because SSO lets threads advance in any order while the ref-erence fixes one. An action enabled in a state remains enabled after a different action runs, because a thread excluded from an instance cannot become one of its participants later. Two Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen 
+
+adjacent independent actions can then be exchanged without changing any recorded event, where reference memory DRF rules out the case that would otherwise block the exchange, a conflicting pair of accesses with nothing between them to order it. Together these move any action enabled at the start to the front, so any finite target prefix can be matched by a permutation of the reference execution. The second part relates delayed visibility to the reference memory, in which a write takes effect at once. Let logical memory be the result of applying every pending write to shared memory in issue order. We induct over target steps, maintaining that the two executions agree on thread code and local values, that logical memory agrees with reference memory at every address, and that all pending writes to one address belong to a single thread. The key fact is that a pend-ing write cannot conflict with another thread’s access before its author participates in a memory-ordering primitive, and this follows from reference DRF alone. Read agreement there-fore follows from the reference being race-free, and we never assume that the target is race-free. Primitive readiness, par-ticipants, and arguments depend only on thread code and local values, so they agree as well, and the joint step returns the same result to each participant. The two parts combine as follows. No target execution races, because its events match those of a prefix of a memory-DRF reference execution, so none aborts. The waiting rule gives each instance the participants the reference assigns, which condition 2 places among the groups 𝐶 guarantees. Publishing the remaining pending writes at termination makes the final memories agree. Every terminating SSO 
+
+execution therefore agrees with the reference on the partici-pants of each instance, the reads of each thread, and the final memory, which establishes the theorem. 
+
+3.4 Instantiating Configurations 
+
+The contract does not change from one target system to another; the configuration does. Two choices dominate an instantiation. One is per primitive: which operations or-der memory among their participants, and which require the complete warp. The other is reconvergence: which join points bring threads back together, and therefore which divergent regions may contain a primitive that runs with a partial group. Table 1 summarizes these choices for the APIs studied here, and Section 2.1 describes their memory-ordering rules. 
+
+SPIR-V. Our partially convergent SPIR-V configuration requires an entry point to declare the optional Maximally ReconvergesKHR execution mode. For such an entry point, SPIR-V requires invocations to reconverge according to the extension’s structured rules [22]. These rules fix selection and loop merges as well as loop continue targets. OpSwitch 
+
+retains additional freedom: invocations with the same selec-tor remain together, while invocations with different selec-tors that reach the same case may or may not be grouped together. Figure 3 therefore represents switch directly rather than translating it into nested conditionals. Among primitives, SPIR-V’s cooperative matrix operations are the ones with req (𝑝 ) = full : they require every invocation in the matrix scope, which for the physical warps WarpDRF considers is the complete warp. 
+
+CUDA and HIP. As Section 3.1 notes, we do not model bitmasks. Our tests pass __activemask() , which queries the participants dynamically and so corresponds more closely to the SPIR-V mapping. In pilot experiments we could not find any reconvergence rule that reliably gave unambiguous participation for primitives with partial groups. We regard this as a serious problem with __activemask() . Code that uses it to group a partial warp may work today, but we did not observe any rule that says it will keep working. Despite these surprisingly unconstrained behaviors around 
+
+__activemask() , one rule did hold empirically, even if we could not find it stated in the CUDA specification. At a join point where every thread of the warp reconverges, all reli-ably participate in a subsequent primitive. This configuration is weaker than the SPIR-V one and is therefore portable: re-quiring every primitive to run with the complete warp leaves nothing for a reconvergence policy to disagree about. SPIR-V and CUDA therefore give two configurations worth testing broadly, which Section 4 does. Section 5.1 then im-plements the portable one, which that testing shows to be empirically valid for CUDA, in the Faial race checker. 
+
+## 4 Testing Implementations 
+
+WarpDRF’s guarantee requires a conforming target system. We ask if a system conforms, focusing on participation, the novel component of WarpDRF and the property languages document the least. The contract specifies the reference se-mantics, which can serve as an oracle. The oracle is efficient to compute because WarpDRF has a single output for a given input; there is no need to enumerate interleavings. We build this executable model in MLIR and test 16 device and back-end pairs against it. We check the systems of Table 3 against the three configurations of Section 3.4. Checking every con-figuration establishes whether a system conforms to any instantiation of WarpDRF, and the cases where they disagree provide interesting insights into how systems implement warp executions. The conformance campaign generates kernels with non-obvious participation, translates each to the target languages, and compares target results with the interpreter under dif-ferent participation rules. This separates expected behavior from the compiler and hardware paths being tested. WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+4.1 Conformance Tests and Oracle 
+
+To test conformance, we implement the language of Sec-tion 3.1 as the WarpDRF MLIR dialect. Its operations are the memory accesses, warp primitives, and structured control flow of Figure 3. This dialect could be used as the foundation for more analysis, but for now we use it for conformance testing. To provide an oracle, we implement an interpreter for the WarpDRF dialect. Computing the expected result follows the schedule of the model itself: execute each thread in turn, switching at a warp primitive and releasing it once all its par-ticipants arrive. The interpreter creates a dynamic execution graph that tracks dynamic blocks, similar to SIMT-Step [10], and updates each block’s participation list as threads branch. To provide concrete tests, we implement raisers to the different GPU languages of Table 3. Control flow and ex-pressions map naturally to each language. The GLSL path emits a shader embedded in an Amber script, which Amber compiles to SPIR-V and executes through Vulkan. We note that HLSL does not have a mapping to synchronizing warp primitives; however, our tests only deal with participation, so it does not impact this investigation. 
+
+A WarpDRF conformance test. A test is a WarpDRF di-alect module and a launch configuration giving the number of threads and the warp width. It initializes arrays that con-tain values for the test. For each target, we launch exactly one complete warp: if the target warp width is 𝑊 , the launch contains 𝑊 threads. As in SIMT-Step, we obtain 𝑊 from the target rather than fixing one width for every device [10]. Participation is observed through wave_count_bits , a warp primitive of the WarpDRF language that returns the number of threads participating in it; the artifact gives its mapping to each target language. Every thread calls it and stores the result at an array index no other thread writes. The resulting array of counts is what we compare: the inter-preter produces one count per thread, and a target system that groups threads differently produces different counts. Such a mismatch is a difference in participation, the second condition of WarpDRF, and thus would violate WarpDRF under the instantiated configuration. 
+
+4.2 Configurations and Test Generation 
+
+We instantiate three configurations. Two are derived in Sec-tion 3.4. The third, FMR, is stronger than any language guar-antees, and we include it to observe whether modern deploy-ments fail it. Each configuration names the dynamic blocks in which a primitive has a guaranteed participant set. 
+
+• FMR (full maximal reconvergence). Every dynamic block, so a primitive inside a divergent region runs with exactly the threads that branched into it. 
+
+• SMR (SPIR-V maximal reconvergence). Every dynamic block except at switch , where invocations that reach 
+
+Table 2. Generator parameters used in the conformance study.                        
+
+> Parameter group Setting Test campaign 10,000 tests per configuration; seeds 0–9,999 Launch One complete warp, 𝑊 ×1×1;𝑊 ∈ { 16 ,32 ,64 }is queried from the target Control-flow bounds Nesting depth ≤3; loop trips 1–4; switch cases 2–4 Helper bounds Control nesting ≤3; call nesting ≤2; at least 3 control operations Generation probabilities 0.3 each for break/continue, post-switch primitive, di-vergent helper call, switch-before-helper, and nested-helper loop Conditions Thread-ID expressions or uniform-random input arrays
+
+a common case through different selectors need not be grouped. 
+
+• CUDA . Only the dynamic blocks executed by the complete warp. FMR is strictly stronger than SMR, which is strictly stronger than CUDA, so CUDA represents the most portable seman-tics, but also the least flexible, allowing no calls to non-uniform warp primitives. The oracle interpreter implements FMR, the strongest con-figuration. However, conformance does not test if participa-tion is stronger than required, only if it is not weaker. Thus, we do not need to implement ambiguous warp primitive semantics. Instead, conformance testing can be instantiated over FMR by constraining where warp primitives are allowed. For example, FMR allows warp primitives anywhere in the program, as they would be unambiguous. SMR allows them in all cases except for join nodes in switch statements. CUDA allows them only in nodes with full warp participation. Fur-thermore, because our configurations are totally ordered, the conformance tests are simply subsets of each other. A seeded generator produces a set of “fuzzed” confor-mance tests. It emits conditionals, loops, switch statements, function calls, and early exits. Some conditional expressions are intentionally statically obvious, so that the compiler would attempt to flatten loops. Other conditionals cannot be known by the compiler, since they depend on input arrays that are set to specific values. Branches are set to be uniform or divergent at random. The generator at all times tracks the dynamic execution graph and places warp primitives (along with their logging functionality described above) at random places allowed by configuration 𝐶 . The available parameters for the fuzzer are shown in Table 2, along with the values we used in our study. 
+
+4.3 Conformance Across 16 Systems 
+
+Table 3 shows the devices we test and the backends we test them under, as several devices support multiple languages and thus different compilers. We start with conformance to CUDA, the weakest model. In our study, all GPUs and their corresponding stacks honor this instantiation of WarpDRF, thus providing a real portable Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen 
+
+programming interface. However, this comes at the cost of functionality, as non-uniform warp primitives are not allowed at all. Conformance implies three properties of warp execution that we could not find stated in the CUDA documentation: 
+
+• warps begin converged; 
+
+• there is no spurious divergence, so a path through the control-flow graph on which the warp is fully converged remains fully converged; and 
+
+• full reconvergence holds, so a warp that diverges is converged at the join where all of its threads meet. Each is an exceptionally weak guarantee, but without them we cannot claim this variant of WarpDRF is vendor sup-ported in any way, even through informal prose. It remains an empirically tested model. Moving up to SMR, the two NVIDIA CUDA pairs fall out, which is not surprising. The interesting point is that we ex-pected a possible model between CUDA and SMR, but in ex-amining the failures we could not determine any reliable pat-tern that CUDA devices support. Because our non-uniform warp primitives are implemented using __activemask() in CUDA, this means that __activemask() cannot be relied on to provide a deterministic set of threads in any divergent code, an assumption that kernels might make. It is interest-ing to note that Metal and HLSL also support the SMR model. Both define a collective’s result over the threads active when the operation executes, but neither states a general rule for when threads from divergent paths must rejoin, so their agreement with SMR is an empirical property of the tested implementations. It is typical for systems to implement stronger models than they document, and ten of the sixteen provide FMR. The six that do not are every NVIDIA pair, the PowerVR device, and the Adreno under GLSL. For four of them the only failures are in switch statements; the two CUDA pairs already fell out at SMR. Programmers targeting SPIR-V must therefore watch out for this construct: it is documented, but it may still be surprising. Metal provides FMR on both devices, and HLSL provides it everywhere except the NVIDIA laptop GPU. The stronger model has the fewest surprises, but it also leaves an implementation the least freedom, and investigating the performance implications of that would be interesting future work. The mechanism is visible in the tests: when threads with different selector values reach the same case through fallthrough, the reference semantics groups them at that common case, while on the RTX 4070 GLSL path the observed operation keeps them in separate groups. 
+
+4.4 WarpDRF: All or Nothing 
+
+The CUDA configuration appears strong, and one might be tempted to assume that its components hold on their own: that a non-uniform primitive might not behave well, but that it would not affect uniform primitives. This is similar to                                
+
+> // Launch : one 32 - thread warp . int bound =tid <16 ?2:4; for ( int outer =0; outer <bound ; ++ outer ) for ( int inner =0; inner <bound ; ++ inner ) result [ outer ][ inner ][ tid ] =warp_count ( true );
+> same CUDA source
+> compute_75
+> 6 PTX ballot sites 8 SASS sync pairs
+> 128 mismatches
+> compute_110
+> 1 PTX ballot site 1 SASS sync pair
+> 0 mismatches
+
+Figure 5. A CUDA participant-count test launched with one 32-thread warp. Compiling the same source for two virtual targets produces different PTX control-flow bodies and differ-ent participant counts on Thor. Each thread writes a distinct location, so the mismatches do not arise from conflicting ordinary memory accesses. assuming that benign data races will not impact data-race-free accesses, which prior work has shown to be false [9]. We show a similar situation here. A non-uniform primitive causes a fully uniform primitive to have its participants split; the example is given in Figure 5. To make the problem even more nefarious, we find that our observations change under different compiler configurations. The kernel launches one warp of 32 threads and runs nested loops whose trip counts depend on the thread: threads 0–15 run two iterations of each, threads 16–31 run four. All 32 reach the primitive at the four shared coordinates (0, 0),
+
+(0, 1), (1, 0) and (1, 1), where the reference semantics gives 32 participants. On a Jetson AGX Thor the compute_75 build returns 16 at all four, so 128 of the 320 counts the kernel records disagree with the reference. The compute_110 build returns 32 everywhere, as does a compute_75 variant that makes the inner induction variable volatile .The failure lands on full-warp coordinates. At every other coordinate only threads 16–31 arrive, and those are inter-leaved with the shared ones, so the kernel is outside the CUDA configuration and this is not a conformance failure. It is worse: calling a primitive non-uniformly in the kernel changed the result where the whole warp was present. Thus WarpDRF should seek to get buy-in from implemen-tors, as they are responsible for maintaining this behavior across both hardware and compilers. We believe our CUDA conditions are permissive, have conformance across a large fuzzed data set, and could hopefully be incorporated into the specification. Until then, our WarpDRF contract remains an empirical model, but we do not see any more permissive semantics to provide. Compiling the same source for compute_75 produces six PTX active-mask and ballot sites and eight SASS BSSY –BSYNC WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+Table 3. Mismatches out of 10,000 tests for each configuration. A column places warp primitives only where that configuration guarantees a participant set, so a system conforms to a configuration when that cell and every cell to its left are green. Green cells contain no mismatches, while yellow cells contain one or more. The -O0 row is an additional compiler configuration; the other rows cover 16 device/backend pairs.                                                                          
+
+> Device Backend CUDA SMR FMR Intel Arc A770 GLSL/Amber 0/10,000 0/10,000 0/10,000 Intel UHD 770 GLSL/Amber 0/10,000 0/10,000 0/10,000 Mali G710 GLSL/Amber 0/10,000 0/10,000 0/10,000 NVIDIA RTX 4070 GLSL/Amber 0/10,000 0/10,000 4,810/10,000 NVIDIA RTX 4070 CUDA 0/10,000 747/10,000 1,431/10,000 NVIDIA RTX 4070 CUDA, -Xcicc=-O0 0/10,000 0/10,000 470/10,000 AMD RX 7900 XT GLSL/Amber 0/10,000 0/10,000 0/10,000 AMD RX 7900 XT HIP 0/10,000 0/10,000 0/10,000 Jetson T5000 (Thor) CUDA 0/10,000 747/10,000 1,438/10,000 PowerVR DXT-48-1536 GLSL/Amber 0/10,000 0/10,000 24/10,000 Apple M4 Metal 0/10,000 0/10,000 0/10,000 Apple M1 Metal 0/10,000 0/10,000 0/10,000 Samsung Xclipse 940 GLSL/Amber 0/10,000 0/10,000 0/10,000 NVIDIA RTX 4070 Laptop HLSL/DirectX 0/10,000 0/10,000 870/10,000 Intel Raptor Lake-S Mobile HLSL/DirectX 0/10,000 0/10,000 0/10,000 Qualcomm Adreno X1-85 GLSL/Amber 0/10,000 0/10,000 1,370/10,000 Qualcomm Adreno X1-85 HLSL/DirectX 0/10,000 0/10,000 0/10,000
+
+pairs, whereas compute_110 produces one of each. We exe-cuted each PTX body through three compilation paths: di-rect Driver API loading, driver-link JIT compilation, and standalone ptxas . Across 100 repetitions, every path pre-serves the result of its input PTX: the compute_75 body produces 128 mismatches, while the compute_110 body pro-duces none. Changing only the PTX .target declaration does not change either result. The resulting machine code is not identical across all paths, so this experiment does not identify one particular machine instruction as the cause. It does show that the observed participant grouping follows the PTX control-flow structure selected by the CUDA com-piler, rather than the target declaration or the subsequent compilation path. 
+
+## 5 Checking Kernels Against the Contract 
+
+Section 4 found a stable full-warp boundary across the tested implementations. We now ask whether deployed kernels fol-low that rule. We produce the first static checker for an empirically validated warp programming model by extend-ing Faial for the portable CUDA configuration. WarpDRF-Faial checks memory ordering and full-warp participation separately. We apply it to the performance-critical CUDA kernels of llama.cpp, a widely used open-source LLM infer-ence engine. Most analyzed warp-using kernels satisfy both conditions after source and caller validation; the remaining kernels reduce to four source-level patterns. 
+
+5.1 WarpDRF-Faial: a WarpDRF checker for CUDA 
+
+WarpDRF-Faial checks CUDA kernels for the two conditions of Section 3.2, reporting each condition separately and re-porting a kernel as WarpDRF only when both conditions succeed. Our analysis builds on the GPU verification frame-work Faial [11, 33]. 
+
+Verifying Condition 1 (memory DRF). Our analysis as-signs a block phase and a warp phase to each memory access. Two instructions alter the phases: a block-level barrier syn-chronization ( __syncthreads ) increments the block phase for every thread in the block, and a warp barrier synchroniza-tion ( __syncwarp ) increments warp phase for the threads in that warp. To check the DRF condition we apply the two-thread reduction technique [31], where a conflict happens when the block phases are equal and either the threads are in different warps, or the two accesses are in the same warp and have equal warp phases. Alarm: the counterexample (a program state) of the two accesses that may race. 
+
+Verifying Condition 2 (unambiguous participation). 
+
+The analysis checks that: 1) each warp primitive has a full-warp mask, 2) each branch guarding a warp primitive has a warp-uniform condition, and 3) each loop containing a warp primitive has warp-uniform bounds. In short, the code that controls warp primitives must be warp-uniform, while the re-maining code can be warp-divergent. The thread-dependent load in block_reduce does not control its subsequent warp reduction, so the checker accepts it. Alarm: the warp primi-tive that may execute with only part of its warp. 
+
+5.2 WarpDRF-Faial on llama.cpp 
+
+Data selection. At commit 42fc243 , llama.cpp contains 479 CUDA kernels across 64 source files. In this experiment we only consider the 95 kernels (out of 479) that use at least one warp primitive. In this experiment, we run WarpDRF-Faial once per kernel with a timeout of 60 seconds. WarpDRF-Faial may report several alarms for one kernel. We manually Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen 
+
+Table 4. Kernels checked per condition, with Condition 1 (memory) in rows and Condition 2 (participation) in columns. Pass means no alarms were found; Fail means one or more.              
+
+> Memory Participation Pass Fail Total Pass 65 (68.4%) 0 (0.0%) 65 (68.4%) Fail 29 (30.5%) 1 (1.1%) 30 (31.6%) Total 94 (98.9%) 1 (1.1%) 95 (100%)
+
+Table 5. llama.cpp alarms grouped by source-level cause.                                         
+
+> Cause category Condition Alarms Outcome Vector-attention indexing Memory 10 False positive Tiled-attention ownership Memory 2False positive ID output indexing Memory 3False positive Vector-attention participation Participation 3False positive MXFP4 scatter ownership Memory 2Caller-discharged Q8 scatter ownership Memory 27 Caller-discharged SSM output layout Memory 2Caller-discharged MoE post-bias NaN Memory 12 Input-conditional Duplicate-ID collision Memory 1Input-conditional MMVF shared-slot writes Memory 6Confirmed Shared reduction-buffer reuse Memory 1Confirmed ID shared-memory handoff Memory 1Confirmed
+> Total 70
+
+validate each alarm reported. To validate the alarms, we group them by source location and reported cause, inspect a representative specialization, and inspect caller constraints when they can exclude the reported path. 
+
+Findings. Table 4 reports which kernels pass Conditions 1 and 2. We found that 65 of the 95 kernels are automatically deemed WarpDRF. We manually validated the remaining 30 kernels and found 18 buggy kernels ; the other 12 have only false-positive or caller-discharged alarms. This means that 77 kernels (65 + 12, or 81.1%) satisfy both conditions. The 18 buggy kernels group as MoE selection (12), MMVF partial accumulation (4), ID compaction (1), and shared reduction-buffer reuse (1). 
+
+Alarm validation. Across all kernels, WarpDRF-Faial found 67 memory alarms and 3 participation alarms, sum-marized in Table 5. We classify an alarm as confirmed when the defect can be reproduced, input-conditional when the alarm requires values such as NaNs or duplicate identifiers, 
+
+caller-discharged when current callers exclude it, and false positive otherwise. The artifact provides the mapping from alarms to locations and cause categories. 
+
+False positives. The 18 false-positive alarms have four causes. Ten vector-attention memory alarms and two tiled-attention memory alarms arise because the checker cannot prove that the kernels’ template-dependent index calcula-tions assign distinct buffer slices or output elements to dif-ferent threads. Inspecting those index calculations shows that the reported accesses cannot refer to the same loca-tion. Three ID-compaction memory alarms arise because the checker treats a full-warp reduction result as potentially different in each thread. In the kernel, every thread receives the same reduction result and then uses its thread identifier to access a different output element. The remaining three alarms concern participation: the checker cannot prove that block-uniform bounds and warp-aligned thread ranges select complete warps. The supported template and launch config-urations make those bounds multiples of the warp width, so each affected warp executes the primitive with either all of its threads or none of them. 
+
+Caller-discharged alarms. The 31 caller-discharged alarms arise because the checker analyzes a kernel under a weaker input contract than its current callers provide. For the MXFP4 and Q8 scatter kernels, it therefore allows two thread groups to map to the same compact output row and report conflict-ing writes. The callers construct an inverse map in which each compact row has a unique owner; within that row, thread guards assign each packed field to one thread. These properties make the reported destinations distinct. For the SSM kernel, the checker similarly allows the result and state pointers to overlap. The caller’s tensor layout places the state region after the result region, so the reported accesses lie in separate regions. These conclusions apply to the cur-rent callers rather than to arbitrary calls satisfying only the kernel’s local parameter types. 
+
+Input-conditional alarms. A post-bias NaN can make MoE-selection threads choose different experts and write the same output. Duplicate IDs can make two threads write different values to one shared entry in the ID-compaction kernel. 
+
+Confirmed alarms. In MMVF, every thread of a warp writes one shared slot without ordering. The shared reduction-buffer alarm arises when a later reduction overwrites the buffer while another warp is still reading it. The ID shared-memory handoff is unordered as its intervening shuffle co-ordinates register values but does not order shared memory. We reported this bug in issue #28376 and proposed a warp memory barrier before the shared-array reads. Merged up-stream PR #28475 subsequently fixed the handoff by adding that barrier. 
+
+## 6 Related Work 
+
+Scoped memory models and data-race freedom. Weak ordering established the DRF style of reasoning: program-mers use synchronization to order conflicting accesses and then reason in a simpler reference model [3]. Heterogeneous race-free models adapt that argument to hierarchical ma-chines by attaching scopes to synchronization and memory operations [19, 42], and formal work has characterized the guarantees that heterogeneous systems, PTX, and Vulkan actually provide [4, 34, 45]. All of this begins with synchro-nization operations whose participants are already fixed. WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+WarpDRF keeps the DRF argument but not that premise: a warp primitive orders only the threads that execute it together, so its participants must be established before its memory ordering can be used. 
+
+GPU verification and race detection. Earlier work com-pares interleaving and lockstep GPU semantics and estab-lishes their agreement for race-free programs [12, 27]. GPU-Verify was extended to reason about implicit, coarse-grained synchronization within fixed warps and about atomics [7]. Dynamic tools including BARRACUDA, CURD, and HiRace detect races in GPU executions, while Simulee targets CUDA synchronization bugs through memory-access modeling [15, 20, 40, 47]. These approaches do not define the participant group of an explicit warp primitive under divergent control flow; WarpDRF makes that group part of the contract. 
+
+Testing implementations against specifications. A spec-ification is only useful if implementations follow it, and a line of work establishes that empirically. Stress testing has exposed weak and undocumented memory behavior in de-ployed GPU applications and devices [25, 43], mutating lit-mus tests measures how well a suite discriminates between candidate models [30], and large campaigns survey confor-mance across many devices at once [29]. Related work has found shader compiler defects with generated programs [14] and characterized forward-progress guarantees that no spec-ification states [44]. These campaigns target memory consis-tency and progress, where a reference model already fixes the expected result. Section 4 applies the method to partici-pation, which first required a contract to supply one. 
+
+Warp execution and participation. Warp-level coop-eration is a standard performance idiom, with libraries pro-viding warp-wide reductions, scans, and data exchange [37] and irregular kernels built directly on warp behavior [36]. What those operations group is less settled. NVIDIA’s inde-pendent thread scheduling weakens the assumption that a warp executes in lockstep [38], and hardware and compiler work treats grouping as an optimization variable, regrouping threads after divergence or delaying execution to increase convergence [13, 16, 17]. This line studies grouping as a performance question. A separate line makes participation precise. SIMT-Step determines the threads that execute a subgroup operation to-gether from dynamic basic blocks [10], SPIR-V control-flow work and maximal reconvergence expose the structured joins such reasoning needs [22, 26], and uniformity and barrier-divergence analyses identify where a collective may execute safely [8, 21, 28]. Verification tools cover fixed-warp syn-chronization, producer-consumer patterns, and source-level correctness requirements [7, 35, 41]. These describe how participants form. WarpDRF makes participation a condi-tion of a data-race-freedom guarantee, then checks whether implementations and deployed kernels satisfy it. 
+
+## 7 Conclusion 
+
+This paper introduced WarpDRF, a data-race-freedom con-tract for GPU warp programming. WarpDRF combines scoped memory ordering with predictable participation in each warp primitive. It provides a portable model for full-warp pro-grams and a separate model for languages that define partial-warp reconvergence. We implemented WarpDRF through an MLIR interpreter, a cross-platform conformance suite, and a warp-aware extension to Faial. Across the tested systems, full-warp programs behaved consistently, whereas partial participation varied across languages, compilers, and targets. Applying WarpDRF-Faial to llama.cpp exposed complemen-tary memory and participation problems. Together, these re-sults provide a rigorous foundation for specifying, reasoning about, and checking warp programs across GPU languages and implementations. 
+
+## Acknowledgments 
+
+We disclose the use of generative AI in this work. AI aided in tool development, evaluation, and data analysis. Humans rigorously evaluated the integrity of all artifacts reported here. Humans organized the presentation of the work, and agents helped with drafting and polishing. Text polishing used the Copilot IDE set to Claude Opus 5, and the authors used other coding assistants running GPT-5.6 and Claude Opus 5. 
+
+## References                            
+
+> [1] Advanced Micro Devices, Inc. 2026. HIP C++ Language Exten-sions .https://rocm.docs.amd.com/projects/HIP/en/docs-7.1.1/how-to/hip_cpp_language_extensions.html
+> [2] Advanced Micro Devices, Inc. 2026. Introduction to the HIP Pro-gramming Model .https://rocm.docs.amd.com/projects/HIP/en/latest/ understand/programming_model.html
+> [3] Sarita V. Adve and Mark D. Hill. 1990. Weak Ordering—A New Defi-nition. In Proceedings of the 17th Annual International Symposium on Computer Architecture (ISCA ’90) . Association for Computing Machin-ery, 2–14. doi: 10.1145/325164.325100
+> [4] Jade Alglave, Mark Batty, Alastair F. Donaldson, Ganesh Gopalakrish-nan, Jeroen Ketema, Daniel Poetzl, Tyler Sorensen, and John Wick-erson. 2015. GPU Concurrency: Weak Behaviours and Programming Assumptions. In Proceedings of the Twentieth International Confer-ence on Architectural Support for Programming Languages and Op-erating Systems . Association for Computing Machinery, 577–591. doi: 10.1145/2694344.2694391
+> [5] Apple Inc. 2025. Metal Shading Language Specification .
+> https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf
+> [6] Apple Inc. 2026. Creating Threads and Threadgroups .
+> https://developer.apple.com/documentation/metal/creating-threads-and-threadgroups
+> [7] Ethel Bardsley and Alastair F. Donaldson. 2014. Warps and Atomics: Beyond Barrier Synchronization in the Verification of GPU Kernels. In
+> NASA Formal Methods (Lecture Notes in Computer Science, Vol. 8430) .Springer, 230–245. doi: 10.1007/978-3-319-06200-6_18
+> [8] Adam Betts, Nathan Chong, Alastair F. Donaldson, Shaz Qadeer, and Paul Thomson. 2012. GPUVerify: A Verifier for GPU Kernels. In
+> Proceedings of the ACM International Conference on Object Oriented
+
+Zheyuan Chen, Simon Kagle, Tiago Cogumbreiro, and Tyler Sorensen 
+
+Programming Systems Languages and Applications . Association for Computing Machinery, 113–132. doi: 10.1145/2384616.2384625 
+
+[9] Hans-J. Boehm. 2011. How to Miscompile Programs with “Benign” Data Races. In Proceedings of the 3rd USENIX Conference on Hot Topics in Parallelism (HotPar ’11) . USENIX Association. https://www.usenix. org/legacy/events/hotpar11/tech/final_files/Boehm.pdf 
+
+[10] Zheyuan Chen, Naomi Rehman, Guido Martínez, and Tyler Sorensen. 2026. SIMT-Step Execution: A Flexible Operational Semantics for GPU Subgroup Behavior. Proceedings of the ACM on Programming Languages 10, PLDI, Article 219 (June 2026), 25 pages. doi: 10.1145/ 3808297 
+
+[11] Tiago Cogumbreiro, Julien Lange, Dennis Liew, and Hannah Zicarelli. 2024. Memory Access Protocols: Certified Data-Race Freedom for GPU Kernels. Formal Methods in System Design 63, 1 (2024), 134–171. doi: 10.1007/s10703-023-00415-0 
+
+[12] Peter Collingbourne, Alastair F. Donaldson, Jeroen Ketema, and Shaz Qadeer. 2013. Interleaving and Lock-Step Semantics for Analysis and Verification of GPU Kernels. In Programming Languages and Systems (Lecture Notes in Computer Science, Vol. 7792) . Springer, 270–289. doi: 10. 1007/978-3-642-37036-6_16 
+
+[13] Sana Damani, Daniel R. Johnson, Mark Stephenson, Stephen W. Keck-ler, Eddie Yan, Michael McKeown, and Olivier Giroux. 2020. Specu-lative Reconvergence for Improved SIMT Efficiency. In Proceedings of the 18th ACM/IEEE International Symposium on Code Generation and Optimization . Association for Computing Machinery, 121–132. doi: 10.1145/3368826.3377911 
+
+[14] Alastair F. Donaldson, Hugues Evrard, Andrei Lascu, and Paul Thom-son. 2017. Automated Testing of Graphics Shader Compilers. Proceed-ings of the ACM on Programming Languages 1, OOPSLA, Article 93 (2017), 29 pages. doi: 10.1145/3133917 
+
+[15] Ariel Eizenberg, Yuanfeng Peng, Toma Pigli, William Mansky, and Joseph Devietti. 2017. BARRACUDA: Binary-Level Analysis of Run-time Races in CUDA Programs. In Proceedings of the 38th ACM SIG-PLAN Conference on Programming Language Design and Implemen-tation . Association for Computing Machinery, 126–140. doi: 10.1145/ 3062341.3062342 
+
+[16] Ahmed ElTantawy and Tor M. Aamodt. 2018. Warp Scheduling for Fine-Grained Synchronization. In 2018 IEEE International Symposium on High Performance Computer Architecture . IEEE Computer Society, 375–388. doi: 10.1109/HPCA.2018.00040 
+
+[17] Wilson W. L. Fung, Ivan Sham, George Yuan, and Tor M. Aamodt. 2007. Dynamic Warp Formation and Scheduling for Efficient GPU Control Flow. In 40th Annual IEEE/ACM International Symposium on Microarchitecture . IEEE Computer Society, 407–420. doi: 10.1109/ MICRO.2007.30 
+
+[18] Bagus Hanindhito and Lizy K. John. 2024. Accelerating ML Work-loads using GPU Tensor Cores: The Good, the Bad, and the Ugly. In 
+
+Proceedings of the 15th ACM/SPEC International Conference on Perfor-mance Engineering (ICPE ’24) . Association for Computing Machinery, 178–189. doi: 10.1145/3629526.3653835 
+
+[19] Derek R. Hower, Blake A. Hechtman, Bradford M. Beckmann, Bene-dict R. Gaster, Mark D. Hill, Steven K. Reinhardt, and David A. Wood. 2014. Heterogeneous-Race-Free Memory Models. In Proceedings of the 19th International Conference on Architectural Support for Program-ming Languages and Operating Systems . Association for Computing Machinery, 427–440. doi: 10.1145/2541940.2541981 
+
+[20] John Jacobson, Martin Burtscher, and Ganesh Gopalakrishnan. 2024. HiRace: Accurate and Fast Data Race Checking for GPU Programs. In SC24: International Conference for High Performance Computing, Networking, Storage and Analysis . IEEE. doi: 10.1109/SC41406.2024. 00042 
+
+[21] Amir Kamil and Katherine Yelick. 2006. Concurrency Analysis for Parallel Programs with Textually Aligned Barriers. In Languages and Compilers for Parallel Computing (Lecture Notes in Computer Science, Vol. 4339) . Springer, 185–199. doi: 10.1007/978-3-540-69330-7_13 
+
+[22] Khronos Group. 2024. SPV_KHR_maximal_reconvergence .
+
+https://github.khronos.org/SPIRV-Registry/extensions/KHR/ SPV_KHR_maximal_reconvergence.html 
+
+[23] Khronos Group. 2025. SPIR-V Specification, Section “Dynamic Instance” .Version 1.6, Revision 6. https://registry.khronos.org/SPIR-V/specs/ unified1/SPIRV.html#DynamicInstance 
+
+[24] Khronos Group. 2026. SPIR-V Specification . https://registry.khronos. org/SPIR-V/specs/unified1/SPIRV.html 
+
+[25] Jake Kirkham, Tyler Sorensen, Esin Tureci, and Margaret Martonosi. 2020. Foundations of Empirical Memory Consistency Testing. Pro-ceedings of the ACM on Programming Languages 4, OOPSLA, Article 226 (2020), 29 pages. doi: 10.1145/3428294 
+
+[26] Vasileios Klimis, Jack Clark, Alan Baker, David Neto, John Wickerson, and Alastair F. Donaldson. 2023. Taking Back Control in an Interme-diate Representation for GPU Computing. Proceedings of the ACM on Programming Languages 7, POPL, Article 60 (Jan. 2023), 30 pages. doi: 10.1145/3571253 
+
+[27] Kensuke Kojima and Atsushi Igarashi. 2017. A Hoare Logic for GPU Kernels. ACM Transactions on Computational Logic 18, 1, Article 3 (2017), 43 pages. doi: 10.1145/3001834 
+
+[28] James Lee-Jones, John Wickerson, and Alastair F. Donaldson. 2026. Uniformity Analysis in the WebGPU Shading Language. In Proceedings of the 47th ACM SIGPLAN Conference on Programming Language Design and Implementation . Association for Computing Machinery. doi: 10. 1145/3808331 
+
+[29] Reese Levine, Mingun Cho, Devon McKee, Andrew Quinn, and Tyler Sorensen. 2023. GPUHarbor: Testing GPU Memory Consistency at Large. In Proceedings of the 32nd ACM SIGSOFT International Sym-posium on Software Testing and Analysis . Association for Computing Machinery, 779–791. doi: 10.1145/3597926.3598095 
+
+[30] Reese Levine, Tianhao Guo, Mingun Cho, Alan Baker, Raph Levien, David Neto, Andrew Quinn, and Tyler Sorensen. 2023. MC Mu-tants: Evaluating and Improving Testing for Memory Consistency Specifications. In Proceedings of the 28th ACM International Confer-ence on Architectural Support for Programming Languages and Op-erating Systems . Association for Computing Machinery, 473–488. doi: 10.1145/3575693.3575750 
+
+[31] Guodong Li and Ganesh Gopalakrishnan. 2010. Scalable SMT-Based Verification of GPU Kernel Functions. In Proceedings of the 18th ACM SIGSOFT International Symposium on Foundations of Soft-ware Engineering . Association for Computing Machinery, 187–196. doi: 10.1145/1882291.1882320 
+
+[32] Guodong Li, Peng Li, Geoffrey Sawaya, Ganesh Gopalakrishnan, In-dradeep Ghosh, and Sreeranga P. Rajan. 2012. GKLEE: Concolic Veri-fication and Test Generation for GPUs. In Proceedings of the 17th ACM SIGPLAN Symposium on Principles and Practice of Parallel Program-ming (PPoPP ’12) . Association for Computing Machinery, 215–224. doi: 10.1145/2145816.2145844 
+
+[33] Dennis Liew, Tiago Cogumbreiro, and Julien Lange. 2024. Sound and Partially-Complete Static Analysis of Data-Races in GPU Programs. 
+
+Proceedings of the ACM on Programming Languages 8, OOPSLA2, Arti-cle 357 (Oct. 2024), 28 pages. doi: 10.1145/3689797 
+
+[34] Daniel Lustig, Sameer Sahasrabuddhe, and Olivier Giroux. 2019. A For-mal Analysis of the NVIDIA PTX Memory Consistency Model. In Pro-ceedings of the Twenty-Fourth International Conference on Architectural Support for Programming Languages and Operating Systems . Associa-tion for Computing Machinery, 257–270. doi: 10.1145/3297858.3304043 
+
+[35] Guido Martínez, Bastian Köpcke, Jonáš Fiala, Gabriel Ebner, Tahina Ramanandro, Michel Steuwer, Tyler Sorensen, and Nikhil Swamy. 2026. Kuiper: Correct and Efficient GPU Programming with Dependent Types and Separation Logic. In Proceedings of the 47th ACM SIGPLAN Conference on Programming Language Design and Implementation .Association for Computing Machinery. doi: 10.1145/3808280 WarpDRF: The Unwritten Contract of GPU Warp Programming 
+
+[36] Duane Merrill, Michael Garland, and Andrew Grimshaw. 2012. Scal-able GPU Graph Traversal. In Proceedings of the 17th ACM SIGPLAN Symposium on Principles and Practice of Parallel Programming . Associa-tion for Computing Machinery, 117–128. doi: 10.1145/2145816.2145832 
+
+[37] NVIDIA Corporation. 2024. CUB 1.16.0: Warp-, Block-, and Device-Wide Collective Primitives. https://nvlabs.github.io/cub/ 
+
+[38] NVIDIA Corporation. 2025. CUDA Volta Tuning Guide (12.9 ed.). https: //docs.nvidia.com/cuda/volta-tuning-guide/index.html 
+
+[39] NVIDIA Corporation. 2026. CUDA C++ Programming Guide . https: //docs.nvidia.com/cuda/cuda-programming-guide/ 
+
+[40] Yuanfeng Peng, Vinod Grover, and Joseph Devietti. 2018. CURD: A Dy-namic CUDA Race Detector. In Proceedings of the 39th ACM SIGPLAN Conference on Programming Language Design and Implementation . As-sociation for Computing Machinery, 390–403. doi: 10.1145/3192366. 3192368 
+
+[41] Rahul Sharma, Michael Bauer, and Alex Aiken. 2015. Verification of Producer-Consumer Synchronization in GPU Programs. In Proceedings of the 36th ACM SIGPLAN Conference on Programming Language Design and Implementation . Association for Computing Machinery, 88–98. doi: 10.1145/2737924.2737962 
+
+[42] Matthew D. Sinclair, Johnathan Alsop, and Sarita V. Adve. 2017. Chas-ing Away RAts: Semantics and Evaluation for Relaxed Atomics on Heterogeneous Systems. In Proceedings of the 44th Annual International Symposium on Computer Architecture . Association for Computing Ma-chinery, 161–174. doi: 10.1145/3079856.3080206 
+
+[43] Tyler Sorensen and Alastair F. Donaldson. 2016. Exposing Errors Related to Weak Memory in GPU Applications. In Proceedings of the 37th ACM SIGPLAN Conference on Programming Language Design and Implementation . Association for Computing Machinery, 100–113. doi: 10.1145/2908080.2908114 
+
+[44] Tyler Sorensen, Lucas F. Salvador, Harmit Raval, Hugues Evrard, John Wickerson, Margaret Martonosi, and Alastair F. Donaldson. 2021. Spec-ifying and Testing GPU Workgroup Progress Models. Proceedings of the ACM on Programming Languages 5, OOPSLA, Article 131 (2021), 30 pages. doi: 10.1145/3485508 
+
+[45] Haining Tong, Natalia Gavrilenko, Hernan Ponce de Leon, and Keijo Heljanko. 2024. Towards Unified Analysis of GPU Consistency. In 
+
+Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems . Associa-tion for Computing Machinery, 329–344. doi: 10.1145/3622781.3674174 
+
+[46] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Ł ukasz Kaiser, and Illia Polosukhin. 2017. Attention is All you Need. In Advances in Neural Information Pro-cessing Systems , I. Guyon, U. Von Luxburg, S. Bengio, H. Wallach, R. Fergus, S. Vishwanathan, and R. Garnett (Eds.), Vol. 30. Curran As-sociates, Inc. https://proceedings.neurips.cc/paper_files/paper/2017/ file/3f5ee243547dee91fbd053c1c4a845aa-Paper.pdf 
+
+[47] Mingyuan Wu, Yicheng Ouyang, Husheng Zhou, Lingming Zhang, Cong Liu, and Yuqun Zhang. 2020. Simulee: Detecting CUDA Syn-chronization Bugs via Memory-Access Modeling. In Proceedings of the ACM/IEEE 42nd International Conference on Software Engineering .Association for Computing Machinery, 937–948. doi: 10.1145/3377811. 3380358
