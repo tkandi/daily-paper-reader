@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-13</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-14</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 25 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>14</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-13 19:52:23 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-14 21:05:57 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成 16 篇 AI 论文筛选，聚焦大模型训练显存优化、稀疏注意力与可靠 AI 系统。</p>
-<p>最值得精读的是 SlackSwap 的带宽感知激活交换/重计算，以及 PageWeaver 以 KV 引导查询合并提升稀疏注意力效率。</p>
-<p>建议普通读者优先关注“如何让模型更省显存、更高效”，再按需延伸到联邦学习隐私与硬件抗攻击方向。</p>
+<p>规模化 AI 系统成为今日焦点：完成 25 篇论文筛选，其中精读 14 篇、速读 11 篇。</p>
+<p>最值得关注 RDMA 支撑大规模分布式训练与推理、以及通过专家放置和副本协同加速 MoE 训练，两篇均获 10/10。</p>
+<p>建议普通读者优先理解“网络通信如何决定大模型效率”，再延伸阅读联邦学习同步、跨模型注意力复用与分布式 Agent 服务。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">14 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation for Memory-Efficient DNN Training">SlackSwap: Bandwidth-Aware Activation Swapping and Recomputation for Memory-Efficient DNN Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="PageWeaver: KV-Guided Query Unions for Sparse Attention">PageWeaver: KV-Guided Query Unions for Sparse Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Byzantine-Resilient Federated Large Language Model via Hypergraph Message Passing">Byzantine-Resilient Federated Large Language Model via Hypergraph Message Passing</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Deploying RDMA for Distributed Inference and Training At Scale">Deploying RDMA for Distributed Inference and Training At Scale</span></li><li><span class="dpr-home-dashboard-paper-title" title="Accelerating MoE Training through Expert Placement and Replica Coordination">Accelerating MoE Training through Expert Placement and Replica Coordination</span></li><li><span class="dpr-home-dashboard-paper-title" title="BSIPipe: Bidirectional Sequence-Level Interleaved Pipeline Parallelism for Long-Sequence Large Language Model Training">BSIPipe: Bidirectional Sequence-Level Interleaved Pipeline Parallelism for Long-Sequence Large Language Model Training</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>14</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FlexiFlow: Bandit-based Model Switching in ML Workflows">FlexiFlow: Bandit-based Model Switching in ML Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="Fed-BRDECS: Privacy-Preserving and Heterogeneity-Aware Federated Deep Embedded Clustering">Fed-BRDECS: Privacy-Preserving and Heterogeneity-Aware Federated Deep Embedded Clustering</span></li><li><span class="dpr-home-dashboard-paper-title" title="BARE-AI: Bit-Flip Attack Resilience in AI Hardware through Built-in Performance Monitors">BARE-AI: Bit-Flip Attack Resilience in AI Hardware through Built-in Performance Monitors</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Learning to Sync at the Edge: Client-Side Adaptive Synchronization for Federated Learning">Learning to Sync at the Edge: Client-Side Adaptive Synchronization for Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Accelerating Cross-Model LLM Inference via Attention Map Reuse">Accelerating Cross-Model LLM Inference via Attention Map Reuse</span></li><li><span class="dpr-home-dashboard-paper-title" title="AgentWeave: Efficient Distributed Agent Serving via Flow Decomposition">AgentWeave: Efficient Distributed Agent Serving via Flow Decomposition</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

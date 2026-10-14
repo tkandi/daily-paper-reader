@@ -1,0 +1,1324 @@
+Title: Efficient Resource-Shiftable RL Post-training with Generative Rewards
+
+URL Source: https://arxiv.org/pdf/2610.16866v1
+
+Published Time: Wed, 14 Oct 2026 03:21:25 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# Efficient Resource-Shiftable RL Post-training with Generative Rewards 
+
+## Yanfeng Zhao ∗§ , Haoyang Li ∗† , Sheng Lin †, Yuming Zhou †, Jiawei Jiang ‡, Bin Cui †, Fangcheng Fu §§Shanghai Jiao Tong University, †Peking University, ‡Central China Normal University 
+
+∗Equal Contribution 
+
+## Abstract 
+
+Reinforcement learning (RL) post-training with generative reward models (GenRM) has become a central recipe for improving large language models (LLMs), and it is also in-creasingly resource-intensive: policy rollout, GenRM-based reward evaluation, and policy training all compete for GPU resources. However, existing colocated and disaggregated systems rely on static resource allocation for these roles. Such allocation cannot adapt as each role’s workload changes dur-ing RL and therefore leaves a role’s resources underutilized. We present PivotRL , an RL post-training system that dy-namically shifts resources among different roles according to their runtime demands. PivotRL introduces a resource-shiftable runtime built on a Global Parameter Storage, to-gether with a unified mechanism that efficiently shifts role-specific context. A shift-aware scheduler enables sequence migration upon a shift, while a planner considers the aggre-gate throughput benefit and the shift overhead to determine when and how to shift. We evaluate PivotRL on a 128-GPU cluster using four model groups spanning dense and mixture-of-experts models. PivotRL enables resource shifting within seconds and improves end-to-end throughput by 1.81–2.05 ×
+
+over colocated deployment and 1.50–1.95 × over disaggre-gated deployment, while preserving RL convergence. 
+
+## 1 Introduction 
+
+Reinforcement learning (RL) has become an essential step in post-training large language models (LLMs), driving re-cent advances in their reasoning capabilities [17, 42, 61]. As shown in Figure 1(a), a typical RL step consists of three stages: the policy model (i.e., the LLM) generates responses to a batch of prompts (policy rollout), the responses are scored to produce reward signals (reward evaluation), and the signals are used to update the policy (policy training). An increasingly prominent trend in this pipeline is the shift in how rewards are produced. Early RL recipes rely on rule-based verifiable rewards, which compare a response against a ground-truth answer and emit a binary correctness signal [50, 60]. While effective for tasks with well-defined answers, such rewards are unavailable for open-ended tasks such as long-form question answering, creative writing, and mathematical reasoning without golden answers. Recent                
+
+> Contacts: Yanfeng Zhao (victor_yfzhao@sjtu.edu.cn), Haoyang Li (lihaoyang@stu.pku.edu.cn), and Fangcheng Fu (ccchengff@sjtu.edu.cn). Policy
+> Model
+> Reward
+> Model
+> Policy Rollout Reward Evaluation
+> Prompt -> Response Prompt + Response -> Score
+> Policy Training
+> Generative
+> Reward Model
+> Prompt + Response ->Reasoning + Fine -grained Score
+> 1
+> 0
+> 011
+> (a) RL Post -training Workflow
+> (b) Generative Reward Model ( GenRM )
+> Policy
+> Model
+> Policy
+> Model
+> Optimize
+
+Figure 1. (a) Three stages of a typical RL post-training step. (b) Generative reward models (GenRMs) provide more fine-grained feedback by reasoning over the responses of the policy model. 
+
+work therefore complements verifiable rewards with genera-tive rewards [1, 14, 18, 27, 49, 62]. As shown in Figure 1(b), a generative reward model (GenRM), itself an LLM, reasons over the response before producing a reward. Compared with 0/1 correctness signals or other outcome-based rewards, Gen-RMs can provide more fine-grained feedback through soft re-wards, such as probabilistic or continuous scores that capture the degree of correctness or preference, thereby providing richer training signals [19, 25]. Consequently, GenRMs are increasingly adopted in the post-training of frontier LLMs, including DeepSeek-R1 [2], GLM-5 [9], and Kimi-K3 [44]. This trend makes RL post-training substantially more resource-intensive. With GenRMs, reward evaluation is no longer a lightweight scalar computation, but a full LLM infer-ence workload. As a result, all three RL stages now require substantial GPU resources. How to deploy these stages on a given cluster therefore becomes a critical systems question. Existing RL systems answer this question with one of two deployment paradigms: (1) Colocated deployment [15, 39, 46, 67] (Figure 2(a)), in which the three stages share the whole cluster and run sequentially, swapping models in and out of GPU memory at stage boundaries. (2) Disaggregated deployment [5, 12, 13, 23, 26, 29, 38, 52, 65] (Figure 2(b)), in which the cluster is partitioned into disjoint GPU groups, one per stage. These stages then execute asynchronously. However, as Figure 2 illustrates, the workload of each stage varies continuously within a step. For rollout and reward evaluation, the number of active sequences 1 decreases as the step progresses, while training cannot proceed until a full batch of rewards has accumulated. Under colocation, rollout       
+
+> 1A sequence refers to a generation of the policy model or the GenRM. arXiv:2610.16866v1 [cs.LG] 12 Oct 2026 Reward Rollout
+> Rollout
+> Reward
+> Rollout
+> Time
+> Load & GPUs
+> Training
+> Time
+> Load & GPUs
+> Training Training
+> Sync Sync
+> 8GPUs
+> 2GPUs
+> 2GPUs
+> 4GPUs
+> Time
+> Load & GPUs
+> Training
+> Sync
+> Rollout Reward
+> 4GPUs
+> Shift
+> Shift
+> 3GPUs 4GPUs 2GPUs
+> 2GPUs
+> Shift
+> (a) Colocated Deployment (b) Disaggregated Deployment (c) Resource-Shiftable Deployment
+> 8GPUs
+> 2GPUs
+> 6GPUs
+> Shift
+
+Figure 2. Comparison of deployment paradigms. Both (a) colocated and (b) disaggregated deployments statically allocate resources, while (c) resource-shiftable deployment dynamically reallocates GPUs to match workload demand. Different colors indicate instantaneous stage load, and shaded regions indicate throughput headroom, where workload is substantially below the processing capacity of allocated GPUs. 
+
+and reward evaluation therefore have substantial throughput headroom in the tail of every batch. Under disaggregation, rollout suffers from the same tail effect, reward evaluation fluctuates with rollout’s instantaneous production rate, and training GPUs remain idle while waiting for the next batch. As a result, both colocated and disaggregated deployments yield suboptimal end-to-end throughput. The root cause is static resource allocation: regardless of whether colocation or disaggregation is used, each stage remains bound to a fixed set of GPUs throughout RL post-training. This static allocation cannot adapt to the dynamic workload demands across stages. When one stage has sub-stantial throughput headroom, its spare resources cannot be used by another stage experiencing higher demand. We therefore argue, as illustrated in Figure 2(c), that re-solving this mismatch calls for a more flexible deployment paradigm in which resources can shift across stages at run-time, a paradigm we refer to as resource-shiftable deployment .Under this paradigm, GPUs are dynamically reallocated ac-cording to instantaneous workload. For example, as rollout’s load decreases, its spare GPUs can shift to reward, and when rollout becomes the bottleneck, GPUs can shift back. Like-wise, once training completes, GPUs that would otherwise remain idle can be immediately reallocated to rollout or reward. By dynamically matching resource capacity with workload demand, resource-shiftable deployment can better utilize the resources and improve end-to-end throughput. To realize this paradigm, we introduce PivotRL , a system that accelerates LLM RL with generative rewards through resource shifting. It entails three key innovations. (1) Support-ing resource shifting. Each resource (i.e., a GPU) holds a set of model parameters (policy model or GenRM) and is bound to a role (i.e., an RL stage), so shifting a resource means shifting both the parameters and the execution context of the role. 
+
+PivotRL addresses this with a Global Parameter Storage that lets any GPU fetch the parameters of any model on demand, together with a unified role-shifting mechanism, enabling smooth resource shifting between any models and any roles. (2) Rescheduling workload after a shift. A shift changes the resources a role owns, so the role’s workload must be resched-uled under its new resource allocation. PivotRL designs a shift-aware scheduler that supports shift-time sequence mi-gration across replicas, maximizing the role’s throughput under the new allocation. (3) Deciding when and how to shift. 
+
+PivotRL introduces a planner to determine when to trigger a shift, which role should donate resources to another, and exactly which resources to shift. It evaluates candidate shift plans based on their expected throughput benefit and shift-ing overhead, and executes the most profitable plan. In summary, this paper makes the following contributions: 
+
+• To the best of our knowledge, we are the first to systemat-ically study LLM RL with generative rewards and identify static resource allocation as a key system bottleneck. 
+
+• We propose resource-shiftable deployment and realize it in PivotRL through three innovations: a resource-shiftable runtime built on a Global Parameter Storage with a uni-fied role-shifting mechanism, a shift-aware scheduler that reschedules workload across a role’s replicas, and a plan-ner that decides when and how to shift. 
+
+• We evaluate PivotRL on a 128-GPU cluster across four model groups spanning dense and mixture-of-experts mod-els. PivotRL completes a resource shift within seconds and improves end-to-end throughput by 1 .81–2 .05 × over colocated deployment and 1 .50–1 .95 × over disaggregated deployment, while preserving RL convergence. 
+
+## 2 Preliminaries 
+
+2.1 RL Post-training with Generative Reward Models 
+
+As shown in Figure 1(a), an RL post-training pipeline [36, 37, 59] consists of three major stages: policy rollout, reward eval-uation, and policy training. During rollout, the policy model (i.e., the model being post-trained) generates responses to a set of prompts. The generated responses are then evaluated by a reward model (RM) to produce reward signals, which are subsequently used to update the policy model. The up-dated model parameters are then synchronized back to the rollout stage, completing one step of the RL loop. Recently, generative reward models (GenRMs) have been increasingly used to provide richer reward signals [1, 14, 18, 27, 49, 62]. As shown in Figure 1(b), a GenRM itself is an LLM that reasons over the rollout response before producing its reward. This makes RL increasingly resource-intensive, as all three RL stages require substantial GPU resources. A fundamental system’s question is therefore how to efficiently deploy these stages on a given GPU cluster. 
+
+> 2Training
+> Rollout Reward Training
+> Colocated Disaggregated Resource-Shiftable Colocated Disaggregated Resource-Shiftable Colocated Disaggregated Resource-Shiftable
+> Low per-GPU Throughput Normalized Stage Time
+
+Figure 3. The per-GPU throughput under different deployment paradigms on 32 GPUs, using Qwen2.5-7B as the policy model and Qwen3-30B-A3B as the GenRM. Shaded regions indicate the fraction of execution time spent at low per-GPU throughput. 
+
+2.2 Different Deployment Paradigms 
+
+Existing systems mainly adopt colocated [15, 39, 46, 67] or disaggregated [5, 12, 13, 23, 26, 29, 38, 52, 65] deployment. 
+
+Colocated deployment. As illustrated in Figure 2(a), colo-cated deployment shares the entire GPU cluster across all three stages, which execute sequentially. When transition-ing between stages, the current model is offloaded to CPU memory and the next model is loaded onto the GPUs. 
+
+Disaggregated deployment. As illustrated in Figure 2(b), disaggregated deployment statically partitions the GPU clus-ter among the three stages, which execute concurrently and asynchronously. Once a rollout sequence finishes, the re-ward stage consumes it immediately to produce a reward, while the training stage performs a policy update only after sufficient rewards accumulate to form a training batch. However, both paradigms statically allocate GPUs across stages, causing resource allocation to mismatch dynamic workload demands and leaving substantial throughput head-room. We therefore introduce resource-shiftable deployment, as illustrated in Figure 2(c), which dynamically shifts re-sources across stages to match changing workload demands. In Figure 3, we quantify the throughput headroom of differ-ent deployment paradigms using real RL workloads. Specif-ically, we measure the fraction of time each stage spends at a low per-GPU throughput, defined as throughput below 20% of its peak. We find that both colocated and disaggre-gated deployments leave substantial throughput headroom in the rollout stage. While disaggregated deployment can significantly reduce the throughput headroom of the reward stage, it comes at the cost of training idleness. In contrast, resource-shiftable deployment (implemented in PivotRL ) re-duces throughput headroom across all three stages, resulting in higher end-to-end performance. 
+
+## 3 Challenges 
+
+Realizing resource-shiftable deployment, and turning it into actual end-to-end throughput gains, however, is far from straightforward. It involves three core challenges. 
+
+C1: How to support resource-shiftable deployment. 
+
+Consider a single resource (i.e., a GPU). At any moment, it holds a set of model parameters and carries a role , defined as the RL stage to which it is currently assigned. Beyond the parameters, a role also requires its own execution context on the device, such as the CUDA Graphs captured for rollout or the optimizer states and NCCL communication groups es-tablished for training. Shifting a resource from one RL stage to another therefore includes shifting both its parameters and the additional context tied to its role. This is particularly challenging in RL post-training, where a single run spans two models (the policy model and the GenRM) and three roles (rollout, reward, and training), yielding a wide variety of shift cases that are impractical to handle in an ad hoc manner. Supporting flexible resource shifting therefore calls for a unified system infrastructure and shifting mechanism. 
+
+C2: How to redesign the scheduler under resource shift-ing. Every shift carries an immediate side effect: the affected roles gain or lose resources. Newly acquired resources are useful only if part of the workload is rescheduled onto them, while removed resources require rescheduling the affected workload elsewhere. This rescheduling directly determines the role’s attainable throughput under the new allocation. Existing schedulers in RL systems [5, 39, 47, 67], however, typically support only dispatch (i.e., assigning sequences to replicas), not rescheduling. The scheduler must therefore be redesigned under resource shifting. 
+
+C3: How to make shift decisions. While rescheduling is a consequence of resource shifting, deciding how to shift resources is a first-class problem. A single shift decision must determine when to trigger the shift, which role do-nates resources, which role receives them, and exactly which resources to move. These choices are tightly coupled, and shifting is not free: parameter movement and role context reconstruction both incur overhead. The benefit of a shift therefore depends on its timing, its plan, and its associated overhead, making it a complex joint optimization problem. Formulating this optimization and solving it with an efficient algorithm is the final challenge we must address. 
+
+## 4 The Designs and Overview of PivotRL 
+
+We introduce PivotRL , an LLM RL system that dynamically shifts resources across RL stages so that resource capacity tracks workload demand, thereby improving throughput. As shown in Figure 4, beyond the resources (i.e., GPUs) serving the three RL stages, PivotRL introduces a set of additional components, each addressing one of the challenges identi-fied in §3. ❶ A system runtime makes resource-shiftable deployment possible (§5), which consists of a Global Param-eter Storage (GPS) infrastructure (§5.1) and a role-shifting mechanism (§5.2). ❷ A shift-aware scheduler migrates work-load after a resource shift (§6), which is adopted for both the rollout and reward evaluation stages. ❸ A planner produces the best shift plan (§7), paired with a monitor that tracks workload state and a shift executor that carries the plan out. We now walk through the core design of each component.    
+
+> 3Shift-Aware
+> Scheduler ( §6)
+> Shift-Aware
+> Scheduler ( §6)
+> Global Parameter Storage ( §5.1 )
+> Role-shifting Mechanism ( §5.2 )
+> Rollout Reward Training
+> Replica
+> Workload State
+> Shift Up Shift Down
+> Planner ( §7)
+> Determine the
+> Shift-Up Role
+> Construct a Candidate Set
+> Evaluate Candidates
+> Select the
+> Best Plan
+> ...
+> ...
+> Replica
+> Workload Monitor
+> Shift Executor
+> Latest
+> Model Prepare
+> Shift Pairs
+
+Figure 4. Overview of PivotRL , which dynamically shifts re-sources across RL stages via a resource-shiftable runtime, shift-aware schedulers, and a planner with monitor and executor. 
+
+Resource-Shiftable runtime (§5). To enable resource-shiftable deployment ( C1 ), the system runtime needs to address two fundamental requirements: shifting model parameters and shifting the additional role context. For the former, PivotRL 
+
+adopts a Global Parameter Storage (GPS), which pools the CPU memory of the entire GPU cluster into a distributed store holding the parameters of all models (i.e., the policy model and the GenRM). Any GPU can then fetch whatever parameters it requires, making a shift possible in the first place (§5.1). For the latter, PivotRL employs a unified role-shifting mechanism that distinguishes stateless from stateful data and decomposes a shift into two steps: a shift down of the old role followed by a shift up of the new one, while allowing each role to shift at its own granularity (§5.2). 
+
+Shift-Aware scheduler (§6). To redesign the scheduler under resource shifting ( C2 ), we build on the existing abilities of the rollout and reward schedulers to continuously dispatch sequences, and augment it with shift-time handling so that rescheduling is naturally absorbed by the scheduler itself. 2
+
+The scheduler maintains a shared waiting queue and models per-replica throughput to continuously dispatch sequences using a throughput-maximizing mechanism (§6.1). A shift down or shift up is then straightforward: the scheduler aborts the sequences needing migration and returns them to the shared queue, which re-dispatches them through the same throughput-maximizing mechanism (§6.2). 
+
+Planner (§7). To determine when and how to shift resources (C3 ), PivotRL employs a planner with a five-step procedure that constructs a shift plan based on the current workload state (§7.1). The procedure first determines the shift-up role and prepares shift pairs. It then constructs candidate shift plans from these pairs using a dynamic programming algo-rithm (§7.2), and selects the most beneficial candidate by jointly considering its throughput gain and penalty (§7.3). 
+
+> 2Training has no scheduler: it operates on the entire workload and requires no sequence-level scheduling.
+
+Workflow. Putting these components together, PivotRL op-erates as follows. The monitor continuously collects the workload state of different roles and reports it to the planner. The planner makes a shift plan, and the shift executor real-izes it by invoking shift down and shift up , in cooperation with GPS. Once a shift completes, the shift-aware scheduler of the affected role reschedules workload across its replicas. 
+
+## 5 Resource-Shiftable Runtime 
+
+In this section, we present our system runtime that supports resource-shiftable deployment. We begin by introducing the Global Parameter Storage (GPS), which offers an interface for accessing model parameters (§5.1). Leveraging this foun-dation, we propose a unified role-shifting mechanism (§5.2). 
+
+5.1 Global Parameter Storage Design rationale. To realize unified parameter shifting, the most straightforward approach is to transfer the required parameters directly from peer GPUs. However, this presup-poses that the target parameters already reside somewhere in the cluster, an assumption that breaks once a role is shifted down entirely, leaving no replica on any GPU. An alterna-tive is to reload the parameters from disk, which guarantees availability but incurs prohibitive I/O overhead. We therefore mediate parameter transfer through CPU memory. Specifically, we maintain additional copies of the parameters for all models (e.g., the policy model and GenRM) in CPU memory across the cluster, forming the Global Param-eter Storage (GPS). GPS leverages idle CPU memory already available in the cluster, without introducing external storage. It attains both availability and efficiency: parameters remain accessible regardless of the current GPU allocation, while the high I/O cost of a disk-based approach is avoided. 
+
+Unified interface. GPS exposes exactly two parameter op-erations, Read and Write :
+
+Read (M , G , P) # Model , GPUs , Parallelism Write (M , G , P) # Model , GPUs , Parallelism 
+
+𝑀 denotes the target model, 𝐺 the set of GPUs that receives or sources its parameters, and 𝑃 the parallelism strategy under which 𝑀 is laid out on 𝐺 .These two operations suffice for all parameter movements induced by resource shifts in RL. As shown in Figure 5(a), whenever resources are shifted, the newly assigned GPUs simply Read the model they are about to serve: rollout re-sources Read the policy model, reward resources Read GenRM, and training resources Read the policy model. All three cases invoke the same Read operation, independent of the role (i.e., RL stage) and of how resources are shifted, rendering GPS fully general to arbitrary resource shifts. Meanwhile, Write is invoked only when the contents of GPS need to be updated. During RL post-training, GenRM remains frozen, so Write (𝑀 =GenRM , ∗) is never invoked. The policy model, however, is updated after each RL training            
+
+> 4Rollout
+> Replica
+> GPS
+> Rollout
+> Replica
+> Reward
+> Replica
+> Shift 2GPUs
+> GenRM PM
+> Read (M=GenRM,
+> G={GPU 0, GPU 1},
+> P=<DP= 1, TP= 2>)
+> Reward
+> Replica
+> GPS
+> Read (M=PM,
+> G={GPU 0, …, GPU 7},
+> P=<DP= 2, PP= 2, TP= 2>)
+> GenRM PM
+> Reward
+> Replica
+> GPS
+> Rollout
+> Replica
+> GenRM PM
+> Shift 2GPUs
+> Read (M=PM,
+> G={GPU 0, GPU 1},
+> P=<DP= 2, TP= 1>)
+> Training
+> ...
+> Shift 8GPUs
+> GPS
+> Write (M=PM,
+> G={GPU 0, …, GPU 7},
+> P=<DP= 2, PP= 2, TP= 2>)
+> GenRM PM
+> Training
+> ...
+> After Each RL Step
+> (a) GPS Read (b) GPS Write
+> GPS
+> ... ...
+> ...
+> : PCIe : RDMA Fabric
+> Node Node
+> Local GPUs Local GPUs
+> (c) All-to-All Collective
+
+Figure 5. The GPS interface. PM: policy model. DP/PP/TP: data/pipeline/tensor parallelism. (a) Read : after a resource shift, newly added resources fetch the required model parameters from GPS and partition them according to the parallelism strategy. (b) Write : after each RL step, training GPUs update GPS with the latest policy model parameters. (c) Both Read and Write leverage all-to-all collectives. 
+
+stage. As illustrated in Figure 5(b), the training stage com-mits the updated weights to GPS with a single Write , so all subsequent Read s can observe the latest policy. 
+
+Implementation. Because different choices of 𝑃 induce different parameter partitionings across GPUs, while GPS stores parameters using its own fixed partitioning across CPUs, Read and Write are fundamentally a re-partitioning between CPUs and a set of GPUs. As shown in Figure 5(c), fol-lowing prior work [8, 21, 22], we realize this re-partitioning with an all-to-all collective. For engineering details of the parameter partitioning in GPS and the all-to-all implementa-tion, we refer interested readers to Appendix B for details. 
+
+Overhead and scalability. In terms of overhead, as shown in Figure 5(c), both Read and Write primarily rely on two network paths: PCIe for local CPU–GPU communication and an RDMA fabric, typically InfiniBand, for remote CPU–GPU communication. Modern clusters provide sufficient band-width for parameter transfers over both paths. For instance, in a Hopper-architecture GPU cluster, PCIe and the RDMA fabric provide up to 63 GB/s and 50 GB/s, respectively, al-lowing GPS to complete parameter shifts within seconds, as evaluated in §8.5. Moreover, since Write is only required during training, we optimize the training backend to over-lap Write with training in the subsequent RL step, further hiding its overhead from the critical path. In terms of scalability, as the cluster grows, the numbers of GPUs and CPUs increase proportionally. Consequently, the number of role replicas, which consume GPUs, and the number of replicas managed by GPS, which consume CPUs, also increase proportionally. The deployment and commu-nication patterns at a larger scale are therefore replicated across more replicas, rather than accumulating on existing replicas. Thus, the overall overhead does not increase with cluster size. We evaluate this scalability in §8.5. 
+
+5.2 Role-Shifting Mechanism 
+
+Building on GPS, we can shift model parameters across roles through a unified interface. However, the shifting must also handle role-specific context beyond model parameters, such as optimizer states in training and CUDA Graphs in rollout. GPS  
+
+> DRAM
+> Discard Offload Preserve Reload Read Re-allocate
+> GPU Memory
+> Temporary Data
+> Model Parameter
+> Stateless Data
+> Preserved Data
+> Offloadable Data
+> Stateful Data
+> GPU Memory
+> Temporary Data
+> Model Parameter
+> Stateless Data
+> Preserved Data
+> Offloadable Data
+> Stateful Data
+> Shift Down Shift Up
+
+Figure 6. The role-shifting mechanism. Role context is categorized into different types and handled accordingly. 
+
+Simply discarding such context can cause the shifted re-source to suffer from cold starts, such as rebuilding CUDA Graphs, or even affect RL correctness, such as reinitializing optimizer states. At the other extreme, preserving the con-text of all possible roles avoids cold starts but substantially increases GPU memory consumption. For example, GPUs would need to retain both optimizer states and CUDA Graphs even when the corresponding roles are not active, reducing the resources available for RL execution. To avoid the limitations of these two extremes, we design a role-shifting mechanism that manages role-specific context based on its data type. Specifically, we classify role context into different categories and apply the most appropriate ac-tion to each, such as discard, offload, or preserve. By tailoring these actions to each category, we minimize GPU memory consumption while reducing cold-start overhead. 
+
+Categorizing role context. As shown in Figure 6 (left), role context falls into two types: stateless and stateful. Stateless data can be simply discarded when a role releases its GPUs. It consists of two types: (1) Temporary data , such as KV Cache, activations, and temporary buffers. These data are only useful to the current role. When shifting roles, they can be directly discarded and rebuilt through recomputa-tion. (2) Model parameters , which can be treated as stateless data because all model weights are stored in GPS. They can therefore be discarded and Read from GPS at any time. In contrast, stateful data must be retained rather than dis-carded to ensure correct RL execution and fast recovery after a resource shift. We further categorize stateful data into two 
+
+> 5
+
+types: (1) Offloadable data , such as optimizer states, gradients, persistent training states, and CUDA Graphs. These data are required to preserve RL progress, but do not need to remain in GPU memory while another role is running. They can therefore be offloaded to DRAM (i.e., the local CPU memory of the GPU), and reloaded when needed. (2) Preserved data ,such as the CUDA context, NCCL communication groups, and several descriptions or definitions. These data are small enough (they remain less than 3.37 GB per GPU in all our experiments), so we preserve them on the GPU. 
+
+Shift down and shift up . Given this categorization, we split the shift into two standalone procedures: shift down for the original role and shift up for the new role. As shown in Figure 6 (left), during shift down , stateless data, including temporary data and model parameters, are discarded. Stateful data are either offloaded to DRAM or preserved on the GPU. During shift up , as shown in Figure 6 (right), temporary data are lazily reconstructed at runtime, so the system only needs to reallocate the required GPU memory for them, such as the memory for KV Cache. Model parameters are obtained directly from GPS through the Read 
+
+operation. For stateful data, data previously offloaded to DRAM are reloaded to the GPU, while data already preserved on the GPU require no further action. 
+
+Shifting granularity. In principle, GPS supports resource shifting at arbitrary granularities, as Read can retrieve model parameters for any set of GPUs under any parallelism strat-egy. In practice, however, we impose a restriction: rollout and reward are shifted at the granularity of individual replicas, while training is shifted as a whole. This choice is motivated by two considerations: restricting the shifting granularity (1) reduces the search space during planning, and (2) avoids ad-ditional overhead that finer-grained shifting may introduce. For rollout and reward, shifting at the replica granularity corresponds to scaling along the data parallelism dimen-sion. Thus, shifting only requires rescheduling sequences without modifying model partitioning. For training, treat-ing it as a monolithic unit avoids searching over training parallelism strategies and eliminates overheads such as re-partitioning optimizer states and establishing new commu-nication groups when parallelism strategies change. Overall, this design strikes a practical balance between shifting flex-ibility and system overhead, while finer-grained shifting remains an interesting direction for future exploration. 
+
+## 6 Shift-Aware Scheduler 
+
+PivotRL ’s runtime can shift resources across roles, but do-ing so raises an immediate question: once a role’s resource allocation changes, how should work be rescheduled within the role? Rollout and reward shift at replica granularity, so a 
+
+shift-up replica may initially have no sequences, while a shift-down replica may have remaining sequences that must be rescheduled to others. This requires migrating the sequences across replicas to maximize the role’s aggregate throughput. To support such rescheduling under resource shifting, we redesign the scheduler instead of treating each shift as an external, one-shot event. Our goal is to reduce rescheduling to the scheduler’s native scheduling problem: the scheduler already has a basic dispatch capability, we can keep this capability as the core while adding shift-time handling. We realize this redesign in two steps. We first develop a throughput-optimal scheduling mechanism, which con-sists of a shared waiting queue that continuously dispatches sequences across replicas and a model that estimates each replica’s generation throughput, thereby maximizing aggre-gate throughput (§6.1). This mechanism naturally incorpo-rates rescheduling: sequences that need to migrate due to a shift can simply be returned to the queue and dispatched through the same throughput-maximizing mechanism, al-lowing the workload to be seamlessly rescheduled (§6.2). 
+
+6.1 Throughput-optimal Scheduling Mechanism 
+
+Within the scheduler, we maintain a shared waiting queue. 3
+
+The scheduler continuously selects the first sequence in the queue and dispatches it to a replica. To maximize the throughput, the scheduler estimates the throughput before and after dispatching the sequence. Fol-lowing prior work [64], we build a throughput model to estimate the generation throughput 𝑇 𝑖 of replica 𝑖 based on its number of tokens 𝑁 Token  
+
+> 𝑖
+
+and number of sequences 𝑁 Seq  
+
+> 𝑖
+
+:
+
+𝑇 𝑖 = 𝑁 Seq  
+
+> 𝑖
+
+/( 𝐴 × 𝑁 Token  
+
+> 𝑖
+
++ max (𝐵, 𝐶 × 𝑁 Seq  
+
+> 𝑖
+
+) + 𝐷 ).
+
+Here, 𝐴 , 𝐵 , 𝐶 , and 𝐷 are constants profiled and fitted offline in advance. The detailed derivation is provided in Appendix A. For a sequence of length 𝑙 , the scheduler uses this through-put model to estimate the throughput gain of dispatching it to each replica 𝑖 with sufficient KV Cache capacity: 
+
+Δ𝑇 𝑖 = 𝑁 Seq  
+
+> 𝑖
+
++ 1
+
+𝐴 × ( 𝑁 Token  
+
+> 𝑖
+
++ 𝑙 ) + max (𝐵, 𝐶 × ( 𝑁 Seq  
+
+> 𝑖
+
++ 1)) + 𝐷 − 𝑇 𝑖 .
+
+The scheduler then dispatches the sequence to the eligible replica with the highest Δ𝑇 𝑖 . If no replica has sufficient KV Cache capacity, the sequence remains in the shared queue until capacity becomes available. 
+
+6.2 Shift-Time Sequence Migration 
+
+As shown in Figure 7, by leveraging the shared waiting queue, sequence migration during the shift can be straightforwardly decomposed into two operations: (1) Abort , which selects sequences to abort from a replica and returns them to the shared waiting queue, and (2) Dispatch , which leverages the aforementioned throughput-maximizing dispatch mech-anism to assign sequences to new replicas. We next detail             
+
+> 3The queue can be implemented as a priority queue with customizable pri-orities. By default, sequences are prioritized in ascending order of sequence ID, consistent with veRL [39].
+> 6Replica
+> Running Sequence Aborted Sequence Migrated Sequence
+> Waiting Sequence Shift Down Shift Up
+> ①Abort ②Dispatch
+> Shift Down Shift Up
+> Waiting
+> Queue Waiting
+> Queue
+> ①①①
+> ①①
+> ②②
+> ②
+> ②
+
+Figure 7. Leveraging the shared waiting queue, sequence migra-tion for both shift down (left) and shift up (right) requires only two operations: Abort and Dispatch .
+
+how shift down and shift up perform sequence migration to reschedule the workload and improve throughput. 
+
+Shift down . As shown in Figure 7 (left), the scheduler sim-ply performs Abort on all sequences from the shift-down 
+
+replicas, returning them to the shared waiting queue. The scheduler then automatically performs Dispatch to assign these sequences to eligible replicas. 
+
+Shift up . As shown in Figure 7 (right), a shift-up replica starts with full capacity. We therefore first attempt to perform 
+
+Dispatch for all sequences already waiting in the shared queue. If all waiting sequences can be dispatched, the re-maining capacity indicates that the aggregate throughput may still benefit from migrating sequences from existing replicas. We then perform each migration as follows. 
+
+• We select the shortest sequence from the replica with the 
+
+highest estimated throughput and perform Abort on it. This selection follows two considerations: (1) Throughput 
+
+𝑇 𝑖 exhibits diminishing marginal gains as the number of sequences 𝑁 Seq  
+
+> 𝑖
+
+increases. Therefore, migrating a sequence from a high-throughput replica to a low-throughput replica can better improve aggregate throughput. (2) Shorter se-quences incur lower migration costs because they require less KV Cache to be recomputed. 
+
+• After each Abort , the sequence is immediately returned to the shared waiting queue, which then performs Dispatch 
+
+to assign it to the most suitable replica. We repeat this process until no further migration can im-prove the aggregate throughput across all replicas. A detailed pseudocode can be found in Appendix C.1. 
+
+Complexity. The upper-bound complexity of the migration procedure is 𝑂  𝐼 · 𝑁 Seq + 𝐼 log 𝐼 , where 𝑁 Seq stands for the total number of sequences among all replicas and 𝐼 stands for the number of replicas. Detailed analysis can be found in Appendix C.2. In practice, the migration does not need to traverse all sequences, and its overhead is negligible, as evaluated by our experiments in §8.5. 
+
+## 7 Planner 
+
+In this section, we introduce the planner that makes resource-shifting decisions. We first walk through our overall proce-dure (§7.1). Then, we detail its two main steps, candidate set construction (§7.2) and candidate evaluation (§7.3), to further illustrate how we make the best shift plan. 
+
+7.1 Five-step Procedure 
+
+As illustrated in Figure 8, the planner follows five steps. 
+
+Determine the shift-up role. Given each role’s workload state, including replica counts, running sequences 𝑁 Seq Role ,throughput 𝑇 Role , training activity, and batch readiness, the planner first selects the role to shift up . Specifically, if the next training batch is ready, training is selected. Otherwise, the planner selects between rollout and reward evaluation: the role with a larger generation latency 𝜏 Role = 𝑁 Seq Role /𝑇 Role 
+
+is selected, as it has greater resource demand. In the example depicted in Figure 8, the next training batch is not ready, and 
+
+𝜏 Reward ≈ 0.08 > 𝜏 Rollout ≈ 0.03, so reward is selected. 
+
+Prepare shift pairs. Given the target role 𝑟 ↑ to shift up , the planner identifies what to shift down to release resources for 
+
+𝑟 ↑. This forms a set of shift pairs, each involving an exclusive set of GPUs. However, shifting is not free: once a replica starts to shift down , the sequences running on it are stalled until the migration completes. We therefore assign each shift pair a penalty 𝜙 , which captures the opportunity cost (i.e., the tokens that fail to be generated) during this shift period. Let 
+
+𝜏 shift denote the shift duration, which we treat as a constant, and let 𝑚 be the number of replicas that shift down in the pair. Replica 𝑖 runs at a throughput of 𝑇 𝑖 , and thus forgoes 
+
+𝜏 shift · 𝑇 𝑖 tokens. Summing over all gives 𝜙 = Í𝑚 𝑖 =1 𝜏 shift · 𝑇 𝑖 .The planner evaluates 𝜙 for every shift pair and sorts the pairs in ascending order, so that cheaper pairs are considered first. In the example, we have one 8-GPU training-to-reward shift pair and two 4-GPU rollout-to-reward shift pairs, listed in ascending order of penalty. 
+
+Construct a candidate set (§7.2). Using the ordered shift pairs, the planner constructs a set C of feasible shift plans by combining one or more shift pairs with a dynamic program-ming algorithm. In the example, it produces three candidates. 
+
+Evaluate candidates (§7.3). The planner estimates the bene-fit of each candidate through sequence migration simulation. In the example, the three candidates yield estimated benefits of 3774, 4183, and −3359. 
+
+Select the best plan. Finally, the planner selects the can-didate with the largest positive estimated benefit. If no can-didate provides a positive benefit, the planner leaves the current resource allocation unchanged. In the example, the second candidate is selected, which will trigger a shift.                      
+
+> 7Rollout
+> Determine the
+> Shift -Up Role
+> Construct a
+> Candidate Set ( §7.2 )
+> Evaluate
+> Candidates (§7.3 )
+> Select the
+> Best Plan
+> Rollout
+> Reward
+> Training
+> ×16
+> ×8
+> Rollout Reward Training
+> ×8×24 ×0
+> ×4×28 ×0
+> ×0×32 ×0
+> ×8
+> Candidate Shift Plans
+> Sorted  by  𝜙
+> Estimated Benefit
+> Rollout
+> ×8×4
+> Reward
+> ×16 ×28
+> Training
+> ×8×0
+> Shift Down
+> Shift Down
+> Shift Down Shift Up
+> ×8
+> ×4Rollout Reward
+> Training
+> ×4Reward
+> Shift Pairs
+> Sequence
+> Migration
+> Simulation
+> Penalty: 𝜙
+> Construct
+> 𝑁 Rollout Seq = 59, 𝑇 Rollout = 2077
+> 𝑁 Reward Seq = 385, 𝑇 Reward = 4752
+> Next Batch: Not Ready
+> Need to Shift Up !
+> 3774
+> 4183
+> -3359
+> Shift up
+> 1843
+> 706
+> 0Reward
+> Rollout Rollout
+> Prepare Shift Pairs
+
+Figure 8. The five-step procedure of the planner. In this example, each rollout replica holds 1 GPU, while each reward replica holds 4 GPUs. 
+
+𝑁 Seq Role denotes the total number of sequences processed by the role, 𝑇 Role denotes its current throughput, and 𝜙 denotes the penalty. 
+
+Algorithm 1 Candidate set construction 
+
+Require: Ordered shift pairs P and maximum shift-up count 𝐾 
+
+Ensure: Shift plan candidate set C
+
+1: 𝐷 [0] ← 0; 𝐷 [1 . . . 𝐾 ] ← +∞ 
+
+2: C [ 0 . . . 𝐾 ] ← ∅ ;
+
+3: for all 𝑃 𝑖 ∈ P do 
+
+4: b𝐷 ← 𝐷 ; bC ← C 
+
+5: for all 𝑗 such that 𝐷 [ 𝑗 ] < +∞ do 
+
+6: for 𝑒 = 1, . . . , min (𝑟 𝑖 , 𝐾 − 𝑗 ) do 
+
+7: 𝑑 ← 𝐷 [ 𝑗 ] + 𝜙 𝑖 ; 𝑐 ← C [ 𝑗 ] ∪ 𝑃 (𝑒 )
+
+> 𝑖
+
+8: b𝐷 [ 𝑗 + 𝑒 ] ← min {b𝐷 [ 𝑗 + 𝑒 ], 𝑑 }
+
+9: if 𝑑 = b𝐷 [ 𝑗 + 𝑒 ] then 
+
+10: Update shift plan bC [ 𝑗 + 𝑒 ] with 𝑐 
+
+11: 𝐷 ← b𝐷 ; C ← bC
+
+12: return {C [ 𝑘 ] | 1 ≤ 𝑘 ≤ 𝐾, 𝐷 [𝑘 ] < +∞} 
+
+7.2 Candidate Set Construction 
+
+Since training performs shift up as a whole, it does not intro-duce multiple candidates. We therefore focus on cases where rollout or reward need to shift up .
+
+Design rationale. Suppose the shift-up role 𝑟 ↑ owns 𝐼 repli-cas in total, of which 𝑛 are currently active. The planner must decide which of the remaining 𝐾 = 𝐼 − 𝑛 replicas to 
+
+shift up , so a naive enumeration over all subsets yields 2 𝐾 
+
+candidate plans, which is clearly impractical. We prune this space using two intuitions. First, given a fixed workload, shift-time migration is deterministic (§6.2), so 𝑟 ↑’s throughput after the shift depends only on how many replicas shift up (denoted by 𝑘 , 𝑘 ∈ [ 1, 𝐾 ]), not on which ones. It therefore suffices to retain one candidate per 𝑘 .Second, given the shift-up count 𝑘 , selecting different repli-cas amounts to combining different shift pairs, and these pairs differ only in their penalty 𝜙 . We therefore aim to se-lect a set of shift pairs that provides exactly 𝑘 shift-up repli-cas at the lowest total penalty (meaning achieving the same throughput at the lowest shift cost). This can be formulated as a dynamic programming (DP) problem. 
+
+Dynamic programming. As shown in Algorithm 1, given the set of shift pairs P, each pair 𝑃 𝑖 ∈ P contains 𝑟 𝑖 ordered replicas of 𝑟 ↑. For each pair, we consider shifting up the first 
+
+𝑒 replicas, where 𝑒 ∈ [ 0, 𝑟 𝑖 ].The DP state 𝐷 [ 𝑗 ] stores the minimum penalty for shifting up exactly 𝑗 replicas, while C [ 𝑗 ] stores the corresponding shift plan. Initially, 𝐷 [0] = 0 and all other entries in 𝐷 are set to ∞, while all entries in C are set to ∅. For each shift pair 𝑃 𝑖 , the algorithm constructs a new DP table b𝐷 and bC. It then considers each reachable state 𝑗 and enumerates 𝑒 ≤
+
+min (𝑟 𝑖 , 𝐾 − 𝑗 ) to extend C [ 𝑗 ] by shifting up the first 𝑒 replicas of 𝑃 𝑖 , denoted as 𝑃 (𝑒 ) 
+
+> 𝑖
+
+. The DP status only transfers when penalty 𝐷 [ 𝑗 ] + 𝜙 𝑖 is lower than the current penalty b𝐷 [ 𝑗 + 𝑒 ],in which case bC [ 𝑗 + 𝑒 ] is updated accordingly. The DP performs 𝑂 (𝐾𝐼 ) state transitions, yielding 𝑂 (𝐼 2)
+
+time complexity since 𝐾 ≤ 𝐼 . We evaluate the overhead of candidate set construction in §8.5, and refer interested readers to Appendix D for more implementation details. 
+
+7.3 Candidate Benefit Evaluation 
+
+After the candidate set is constructed, we need to evaluate the benefit of each candidate to choose the best one. 
+
+Overall throughput. Let 𝑇 Rollout and 𝑇 Reward denote the total throughput of all replicas in rollout and reward. We use their 
+
+weighted harmonic mean as the overall throughput: 
+
+T =
+
+
+
+𝑁 Seq Rollout + 𝑁 Seq Reward 
+
+ ,©«
+
+𝑁 Seq Rollout 
+
+𝑇 Rollout 
+
++ 𝑁 Seq Reward 
+
+𝑇 Reward 
+
+ª®¬
+
+, (1) 
+
+where 𝑁 Seq Rollout and 𝑁 Seq Reward denote the total number of se-quences for each role, including both sequences running on replicas and those waiting in the scheduler’s queue (§6.1). 
+
+Simulation for estimated throughput. To obtain T for a candidate plan, we need the precise workload state after shift-time sequence migration (§6.2), so that we can use the throughput model in §6.1 to estimate 𝑇 Rollout and 𝑇 Reward . We therefore develop a simulator that replays the migration process using the algorithm in §6.2. The simulator runs in-dependently for each role of each candidate plan, allowing these simulations to execute in parallel with low overhead. 
+
+Final benefit. Let H be the time window over which the throughput improvement brought by a shift is expected to last (default as 60 seconds). A candidate that raises the system throughput from the current Tcurrent to Tcandidate therefore yields an expected token gain of G = H · (T candidate − T current ).Offsetting this gain by the penalty 𝜙 paid during the shift gives the final benefit of the candidate: B = G − 𝜙 .   
+
+> 815K 30K 45K 60K
+> Throughput
+> 27184
+> ±59.02
+> (x1.84) 31176
+> ±150.27
+> (x1.61) 25405
+> ±62.51
+> (x1.97) 50077
+> ±170.84
+> Qwen2.5-1.5B & GLM-Z1-9B
+> 7K 14K 21K 28K 11545
+> ±6.17
+> (x1.98) 11711
+> ±51.07
+> (x1.95) 14189
+> ±36.37
+> (x1.61) 22822
+> ±112.28
+> Qwen2.5-7B & Qwen3-30B-A3B
+> 6K 12K 18K 24K 9998
+> ±3.71
+> (x2.05) 13681
+> ±40.11
+> (x1.50) 11343
+> ±29.27
+> (x1.81) 20503
+> ±58.32
+> Qwen2.5-32B & Qwen3-30B-A3B
+> 4K 8K 12K 16K 6915
+> ±0.54
+> (x1.81) 7954
+> ±7.65
+> (x1.57) 7530
+> ±8.72
+> (x1.66) 12503
+> ±15.05
+> Qwen2.5-72B & Qwen3.5-122B-A10B
+> Colocated Disaggregated Rollout-Reward Colocated PivotRL
+
+Figure 9. The end-to-end throughput of each deployment baseline and PivotRL for different model groups. The values in parentheses indicate the speedup of PivotRL over the corresponding baseline, while ± indicates the variation. 
+
+## 8 Evaluation 
+
+In this section, we evaluate PivotRL with a focus on resource shifting. Our evaluation is guided by the following questions: 
+
+• Does resource-shiftable deployment in PivotRL consis-tently provide throughput benefits over other deployment paradigms across different settings, and what is the mag-nitude of these benefits (§8.2)? 
+
+• How does PivotRL shift resources among rollout, reward, and training to improve overall throughput (§8.3)? 
+
+• How do different shift strategies and system components affect the overall throughput of PivotRL (§8.4)? 
+
+• How significant is the resource shifting overhead, and how does it scale with cluster size and model size (§8.5)? 
+
+• How do the hyperparameters introduced by resource shift-ing affect PivotRL ’s performance (§8.6)? 
+
+• Does resource shifting affect RL convergence (§8.7)? 
+
+8.1 Experiment Settings Environment. We conduct all experiments on a cluster of 16 GPU nodes, each equipped with 8 NVIDIA H20 (96 GB) GPUs (128 GPUs in total). Intra-node GPUs are connected via NVLink with 900 GB/s bandwidth, and inter-node com-munication is over InfiniBand with 50 GB/s bandwidth. 
+
+Datasets and rewards. Following prior work [23, 26, 38], we use DAPO-Math-17k [4] as the training dataset and AIME-24 [3] as the validation dataset, both of which are represen-tative math reasoning datasets. During training, we use the sum of the verifiable reward and the GenRM reward as the re-ward for each trajectory, formulated as 𝑅 = 𝑅 DAPO + 𝑅 GenRM .The prompt, policy response, and GenRM response are lim-ited to 2K, 15K, and 20K tokens, respectively. 
+
+Models and metrics. To comprehensively evaluate PivotRL 
+
+across different policy models and GenRMs, we consider four groups of models, as shown in Table 1. These models cover different model families (Qwen [34, 57] and GLM [9]), gen-erations (Qwen2.5, Qwen3, and Qwen3.5), and architectures (dense and mixture-of-experts). 
+
+Baselines. We select three baselines that represent the most common deployment paradigms in practice. (1) Colocated ,where rollout, reward, and training share the same GPUs across the entire cluster. (2) Disaggregated , where rollout, reward, and training use separate GPUs. (3) Rollout-Reward colocated , where rollout and reward share the same GPUs, while training uses isolated GPUs. PivotRL and all baselines 
+
+Table 1. The settings of each model group. TP: tensor parallelism, EP: expert parallelism. Policy Model GenRM Qwen2.5-1.5B (TP=1) GLM-Z1-9B (TP=1) Qwen2.5-7B (TP=1) Qwen3-30B-A3B (TP, EP=4) Qwen2.5-32B (TP=4) Qwen3-30B-A3B (TP, EP=4) Qwen2.5-72B (TP=8) Qwen3.5-122B-A10B (TP, EP=8) 
+
+are implemented on top of veRL [39], a state-of-the-art RL post-training system. We tune each baseline to its optimal configuration. Detailed GPU allocations for different roles in each baseline are provided in Appendix E. We evaluate system performance by end-to-end through-put, defined as the total tokens processed over several steps divided by the total time. Each experiment is repeated three times, and we report the mean and standard deviation. 
+
+8.2 End-to-End Throughput 
+
+We first compare the end-to-end throughput with differ-ent model groups. As shown in Figure 9, PivotRL achieves the highest throughput among all deployment paradigms. (1) Compared to colocated deployment, PivotRL pushes the throughput to 1.81–2.05 ×. (2) Compared to disaggregated deployment, PivotRL reaches a 1.5–1.95 × throughput. (3) Compared to rollout-reward colocated deployment, PivotRL 
+
+also achieves 1.66–1.97 × throughput. The results can be explained as follows. (1) Colocated deployment suffers from severe throughput headroom at the end of each stage due to long-tail sequences, and since stages are not allowed to overlap, this headroom cannot be filled, making it the weakest among all settings. (2) Disag-gregated deployment improves performance by introducing asynchrony that allows different stages to overlap. However, the load of the three stages fluctuates, so resources are fre-quently mismatched with the actual demand and throughput headroom still appears. (3) Colocating rollout and reward partially inherits the advantages of the first two designs, and achieves higher throughput under the Qwen2.5-7B & Qwen3-30B-A3B setting, but their drawbacks can also become more pronounced, as rollout-reward colocation amplifies the long-tail effect of rollout and reward. Compared with the baselines, 
+
+PivotRL performs the best by introducing resource shifting, which keeps the resource allocation aligned with the actual load and thus delivers the highest throughput.                           
+
+> 90K 50K
+> Rollout
+> RO=32 RM=0 TR=0 RO=12 RM=20 TR=0 RO=8 RM=24 TR=0 RO=16 RM=16 TR=0 RO=12 RM=20 TR=0 RO=4 RM=28 TR=0 RO=0 RM=32 TR=0 RO=0 RM=24 TR=8 RO=4 RM=20 TR=0 RO=16 RM=16 TR=0 RO=12 RM=20 TR=0 RO=4 RM=28 TR=0 RO=0 RM=32 TR=0 RO=0 RM=24 TR=8 RO=4 RM=20 TR=0 RO=16 RM=16 TR=0 RO=8 RM=24 TR=0 RO=4 RM=28 TR=0 RO=0 RM=32 TR=0 RO=0 RM=24 TR=8
+> // // // // //
+> 0K 20K
+> Reward
+> // // // // //
+> 060 120 420 480 540 720 780 840 900 1560 1728.3 2970.7 0K 20K
+> Overall
+> // // // // //
+> Time (s) Disaggregated PivotRL PivotRL in Training
+
+Figure 10. Throughput comparison between the disaggregated deployment and PivotRL in Qwen2.5-7B & Qwen3-30B-A3B. Top to bottom: rollout, reward, and overall throughput (Equation 1). Resource shifts triggered by PivotRL are marked, with the GPU allocations annotated for each role (RO: Rollout, RM: Reward, TR: Training). The pink interval indicates that PivotRL is in training (i.e., TR is not 0). 
+
+8.3 Case Study 
+
+To gain insight into PivotRL ’s behavior, we track the through-put and GPU allocation of both the disaggregated baseline and PivotRL , as illustrated in Figure 10. For PivotRL , we observe the following patterns: (1) At the beginning of the trace, PivotRL assigns all resources to roll-out, while reward has little work to process. As sequences accumulate, the bottleneck gradually moves downstream, prompting the planner to shift resources from rollout to re-ward. During this period, rollout throughput decreases as fewer replicas remain, while reward throughput increases. As a result, the overall throughput generally increases or remains high because the shifted GPUs provide greater mar-ginal throughput when assigned to reward. (2) Once a train-ing batch becomes ready, PivotRL shifts GPUs to training. During this period, the overall throughput (Equation 1) ex-hibits a drop because it accounts only for rollout and reward. Nevertheless, this shift is necessary to make progress on training and advance the RL step. (3) After training finishes, the training GPUs first shift back to rollout, followed by further gradual shifts from reward to rollout. This behav-ior occurs because a new step is unlocked, creating high resource demand at rollout. During this period, the over-all throughput generally decreases because rollout has just started generating new sequences, while the downstream stages temporarily wait for these sequences to arrive. In contrast, the disaggregated baseline maintains a static resource allocation, resulting in relatively stable throughput. However, it cannot adapt resources to the changing demands of different RL stages. Thus, although PivotRL may experi-ence temporary throughput fluctuations and can be slightly worse than the baseline in some periods, it achieves substan-tially higher overall throughput by dynamically adapting resources to evolving workload demands. 
+
+8.4 Ablation Study 
+
+To explain PivotRL ’s throughput gains, we compare its plan-ner’s shift strategy against two heuristics and then analyze the contribution of each system component. Shift Strategy            
+
+> 6K 12K 18K 24K
+> Throughput
+> 1.55× 1.31× 1.95×
+> Qwen2.5-7B & Qwen3-30B-A3B Shift Strategy
+> 20K 30K 40K 50K 1.27× 1.05× 1.61×
+> Qwen2.5-1.5B & GLM-Z1-9B Components
+> 6K 12K 18K 24K
+> Throughput
+> 1.79× 1.87× 1.95×
+> Components
+> 20K 30K 40K 50K 1.43× 1.53× 1.61×
+> Disaggregated Static Strategy Rule-based Strategy PivotRL Disaggregated Vanilla Vanilla + Throughput Model Vanilla + Throughput Model + Migration
+
+Figure 11. Ablation study of shift strategies and system compo-nents across two model groups. 
+
+Shift strategies. We compare PivotRL with two simpler shift strategies. (1) Static strategy , which only performs shift down on training GPUs when the next batch is not ready and always splits them evenly between rollout and reward. (2) 
+
+Rule-based strategy , which reacts to local KV Cache utiliza-tion: a role performs shift up when its utilization exceeds 0 .8and shift down when it falls below 0 .1. As shown in Figure 11 (top), under the two settings, the static strategy achieves 1.55 × and 1 .27 × the throughput of disaggregated deploy-ment, while the rule-based strategy achieves only 1 .31 × and 1.05 ×. In contrast, PivotRL achieves 1 .95 × and 1 .61 ×, respec-tively. This gap shows that neither a fixed split nor a local utilization signal accurately captures where resources are needed. Instead, comparing the aggregate throughput gain against the shift penalty, as PivotRL does, can better reflect the value of a shift and guide more effective resource shifting. 
+
+System components. Figure 11 (bottom) further examines how different components of PivotRL contribute to its over-all throughput. We first evaluate a vanilla variant that only enables the resource-shiftable runtime (§5) and planner (§7), without sequence migration or the throughput model for precise estimation (i.e., the throughput of a replica is treated as either 0 or 1, depending on whether it has a running se-quence). It already improves throughput to 1 .79 × and 1 .43 ×.
+
+> 10
+
+Table 2. The time breakdown of the planner for Qwen2.5-1.5B & GLM-Z1-9B and Qwen2.5-7B & Qwen3-30B-A3B. 
+
+Qwen2.5-1.5B & GLM-Z1-9B 
+
+GPU count 16 32 64 128 Pre-processing (s) 0.06 ±0.19 0.18 ±0.41 0.47 ±0.90 0.39 ±0.71 
+
+Construction (s) 0.15 ±0.14 0.32 ±0.28 0.68 ±0.53 1.34 ±1.21 
+
+Simulation (s) 0.10 ±0.13 0.24 ±0.17 0.56 ±0.52 1.22 ±0.91 
+
+Total (s) 0.31 ±0.27 0.74 ±0.52 1.71 ±1.17 2.95 ±1.67 
+
+Qwen2.5-7B & Qwen3-30B-A3B 
+
+GPU count 32 64 128 Pre-processing (s) 0.14 ±0.38 0.20 ±0.55 0.60 ±0.78 
+
+Construction (s) 0.14 ±0.16 0.31 ±0.18 0.84 ±0.25 
+
+Simulation (s) 0.27 ±0.26 0.65 ±0.78 1.37 ±1.71 
+
+Total (s) 0.55 ±0.49 1.16 ±0.97 2.81 ±1.90 
+
+Incorporating the throughput model (§6.1) raises the gains to 1 .87 × and 1 .53 ×, while adding sequence migration (§6.2) further reaches 1 .95 × and 1 .61 ×. Thus, resource shifting provides the largest gain, while the throughput model and sequence migration yield additional improvements by as-signing workloads to resources more effectively. 
+
+8.5 Overhead and Scalability 
+
+We further analyze the overhead and scalability. Specifically, we measure the time spent on planning, performing shift up 
+
+and shift down , and migrating sequences, while varying the GPU cluster size or model size to evaluate scalability. 
+
+Planner. We divide the planning overhead into three parts. (1) Pre-processing , where the planner analyzes the workload state to prepare shift pairs, (2) Candidate construction , where the planner generates candidate shift plans (§7.2) (3) Sim-ulation , where the planner evaluates candidate benefits by simulating sequence migration (§7.3). Table 2 shows that the total planner overhead ranges from 0.31 to 2.95 s across different cluster sizes. Although the overhead of all three parts increases with the number of GPUs, it remains small. Moreover, the planner runs concurrently with RL execution, so its overhead does not affect system performance. 
+
+Shift down and shift up . We further measure the shift overhead across different model sizes and cluster sizes. First, as shown in Figure 12, the overhead generally in-creases with model size. Shift up is consistently more expen-sive because it needs to Read model parameters from GPS, whereas shift down simply discards them. For inference (i.e., rollout and reward), the shift up overhead increases from about 1 s for Qwen2.5-1.5B to about 9 s for Qwen3.5-122B-A10B, while shift down remains below 2 s. For training, the 
+
+shift up overhead increases from about 2 s to 8.5 s, while 
+
+shift down remains below 6 s. The higher shift down over-head for training is due to the additional context that must be offloaded (e.g., optimizer states). Second, as shown in Figure 13, increasing the cluster size causes only a modest increase in overhead. Shift up remains 0.0 4.0 8.0 12.0         
+
+> Overhead (s)  Inference Shift Up
+> 0.0 0.6 1.2 1.8 2.4
+> Inference Shift Down
+> 0.0 2.5 5.0 7.5 10.0
+> Overhead (s)  Training Shift Up
+> 0.0 1.5 3.0 4.5 6.0
+> Training Shift Down
+> Qwen2.5-1.5B Qwen2.5-7B GLM-Z1-9B Qwen3-30B-A3B Qwen2.5-32B Qwen2.5-72B Qwen3.5-122B-A10B Qwen2.5-1.5B Qwen2.5-7B Qwen2.5-32B Qwen2.5-72B
+
+Figure 12. Overhead of shift up and shift down for inference and training across different model sizes. 16 32 64 128    
+
+> GPU Count
+> 024
+> Overhead (s)  Qwen2.5-7B
+> 32 64 128
+> GPU Count
+> 024
+> Qwen3-30B-A3B
+> Shift Down Shift Up
+
+Figure 13. Overhead of shift up and shift down for Qwen2.5-7B and Qwen3-30B-A3B under different GPU counts. 
+
+Table 3. The per-sequence time breakdown during migration for Qwen2.5-1.5B & GLM-Z1-9B and Qwen2.5-7B & Qwen3-30B-A3B. 
+
+Qwen2.5-1.5B & GLM-Z1-9B 
+
+GPU count 16 32 64 128 
+
+Abort (s) 0.07 ±0.13 0.07 ±0.10 0.10 ±0.07 0.12 ±0.08 
+
+Dispatch (s) 0.72 ±2.99 1.03 ±2.75 0.53 ±1.33 0.55 ±1.00 
+
+Re-prefill (s) 0.15 ±0.24 0.09 ±0.08 0.12 ±0.10 0.09 ±0.05 
+
+Total (s) 0.94 ±3.06 1.18 ±2.79 0.75 ±1.36 0.76 ±1.01 
+
+Qwen2.5-7B & Qwen3-30B-A3B 
+
+GPU count 32 64 128 
+
+Abort (s) 0.07 ±0.08 0.08 ±0.05 0.10 ±0.07 
+
+Dispatch (s) 0.95 ±2.23 0.22 ±0.62 0.37 ±0.66 
+
+Re-prefill (s) 0.09 ±0.01 0.13 ±0.02 0.19 ±0.04 
+
+Total (s) 1.12 ±2.24 0.43 ±0.62 0.67 ±0.68 
+
+within about 2–3 s for Qwen2.5-7B and 3–4 s for Qwen3-30B-A3B, while shift down remains below 2 s. Overall, both shift up and shift down complete within a few seconds, incurring minimal overhead. 
+
+Sequence Migration. We break down sequence migration overhead into three parts: (1) Abort , (2) Dispatch , includ-ing queue waiting time, and (3) re-prefill, where migrated sequences recompute their KV Cache before resuming gen-eration. As shown in Table 3, Dispatch is the main source of overhead, taking 0.22–1.03 s, while Abort and re-prefill each take less than 0.19 s. The end-to-end overhead remains be-low 1.18 s across all cluster sizes. Moreover, migration only affects the execution of shift-up replicas without pausing others, limiting its impact on overall performance. 
+
+8.6 Sensitivity Study 
+
+Next, we investigate the sensitivity of end-to-end throughput to the only hyperparameter, the time window H (in seconds),            
+
+> 11 0.01 530 60 90 120
+> H
+> 21K 22K 23K
+> Throughput
+> 600 0.01 530 60 90 120
+> H
+> 456
+> Shifts per Step
+> 600
+
+Figure 14. The throughput and average number of shifts taken per step with different H .10 20 30 40 50               
+
+> Time(h)
+> −0.50 0.00
+> Reward
+> 050 100 150 200
+> Step
+> −0.50 0.00
+> Reward
+> 10 20 30 40 50
+> Time(h)
+> 0.10 0.15
+> AIME@1
+> 050 100 150 200
+> Step
+> 0.10 0.15
+> AIME@1
+> Colocated Disaggregated PivotRL
+
+Figure 15. RL post-training convergence of PivotRL , colocated, and disaggregated deployments. Reward and AIME@1 are plotted against wall-clock time (left) and RL steps (right). 
+
+which represents the expected duration over which a shift yields throughput benefits (see §7.3). As shown in Figure 14, we vary H from 0.01 to 600, with 60 as the default value used in the other experiments. For small 
+
+H , the expected throughput gains accumulated over this du-ration are often insufficient to offset the penalty 𝜙 associated with resource shifting. Consequently, the planner tends to be conservative in deciding when to shift, shifting resources only when the workload of a particular role is extremely light. This yields fewer shifts and lower throughput. In con-trast, for excessively large H , even marginal improvements in estimated throughput can accumulate enough benefit to outweigh 𝜙 . This encourages overly aggressive resource shift-ing, leading to frequent shifts whose overhead ultimately reduces overall throughput. When H is set between 60 and 120, PivotRL exhibits relatively stable performance in terms of throughput and number of shifts. 
+
+8.7 Convergence 
+
+We compare the RL reward and AIME@1 of PivotRL with the colocated and disaggregated deployments. As shown in Figure 15, the curves nearly overlap when plotted against RL steps, indicating comparable convergence. When plotted against wall-clock time, PivotRL reaches the same reward and AIME@1 levels in about 30 hours, whereas the baselines require more than 50 hours. Thus, PivotRL reaches compara-ble convergence in substantially less wall-clock time. 
+
+## 9 Related Works 
+
+RL post-training systems for LLMs. Existing LLM RL post-training systems follow two deployment paradigms: colo-cated systems [15, 39, 46, 67] share GPUs across stages and execute them sequentially, while disaggregated systems [5, 12, 13, 23, 26, 29, 38, 52, 65] statically partition GPUs for each stage and overlap the stages. As discussed in §2, both paradigms retain static resource allocations and cannot adapt to time-varying resource demands. We propose the resource-shiftable deployment paradigm to address this limitation. Recently, some concurrent work [35, 43, 48] has also rec-ognized the inefficiency of static resource allocation in RL with verifiable reward (RLVR), and dynamically adjusts the resources allocated to rollout and training. Unlike these works, our setting further employs a GenRM, and there-fore must shift resources across three roles spanning two models, which is considerably more challenging. Besides deployment, numerous works improve RL post-training efficiency in orthogonal ways: SortedRL, RollPacker, and Seer [6, 33, 63] mitigate long-tail generation through length-aware or fine-grained scheduling. Kimi k1.5, MiMo, AReaL, and AReaL-Hex [5, 45, 53, 56] introduce partial roll-out to break the synchronization barrier. Laminar and Stale-Flow [23, 38] further exploit finer-grained per-replica asyn-chrony. These techniques are compatible with our work. 
+
+Elasticity in LLM inference and training systems. Alarge body of work studies elasticity in LLM inference and training. On the inference side, Llumnix [41] migrates re-quests across replicas, LoongServe [51] varies the sequence-parallel degree for long-context requests, and SpotServe [28] reconfigures parallelism and migrates state as GPU avail-ability changes. On the training side, Pollux [32] jointly optimizes resource allocation and training efficiency, Sin-gularity [40] transparently preempts, migrates, and resizes jobs, and Malleus [20] adapts hybrid parallelism to stragglers. These systems, however, confine elasticity to a single, iso-lated inference or training stack, whereas RL couples rollout, reward, and training in one workload. Elasticity here en-tails shifting GPUs from one role to another, which is more complicated than scaling a single role up or down. 
+
+Reward-as-a-Service. Another line of work, including Dis-tRS [66] and RollArt [7], serves reward evaluation as a stan-dalone service that supplies rewards to RL jobs in a multi-tenant manner. This approach, however, requires additional dedicated resources outside the cluster. More importantly, these systems target scenarios that are orthogonal to ours. Their rewards are often naturally amenable to cross-tenant sharing, such as rewards obtained through API calls or ver-ification in sandboxes, and can therefore be provided as a shared microservice. In contrast, GenRMs are typically spe-cific to individual RL jobs. This is particularly true for recent rubric-based GenRMs [10, 11, 16, 54, 55], whose evaluation criteria are tightly coupled with the task and may need to be frequently updated or customized. Deploying GenRMs as a reward service is therefore not a good fit. Finally, a re-ward service does not change the fundamental problem: the mismatch between the static resource allocations of rollout and training and their dynamic workload still remains, and resource shifting is what actually resolves this mismatch. 
+
+> 12
+
+## 10 Conclusion 
+
+This paper studies RL post-training with generative reward models, where reward evaluation itself becomes a full LLM inference workload and all three stages contend for GPUs. We identified static resource allocation as a key bottleneck and proposed resource-shiftable deployment, realized in Piv-otRL through a Global Parameter Storage with a unified role-shifting mechanism, a shift-aware scheduler, and a planner that decides when and how to shift. Our evaluation shows that PivotRL improves end-to-end post-training throughput by up to 2 .05 × across different models and cluster configura-tions, while preserving RL convergence. 
+
+## References 
+
+[1] Xiusi Chen, Gaotang Li, Ziqi Wang, Bowen Jin, Cheng Qian, Yu Wang, Hongru WANG, Yu Zhang, Denghui Zhang, Tong Zhang, Hanghang Tong, and Heng Ji. 2026. RM-R1: Reward Modeling as Reasoning. In 
+
+The Fourteenth International Conference on Learning Representations .
+
+https://openreview.net/forum?id=1ZqJ6jj75q .[2] DeepSeek-AI, Daya Guo, Dejian Yang, et al. 2025. DeepSeek-R1: Incen-tivizing Reasoning Capability in LLMs via Reinforcement Learning. 
+
+https://arxiv.org/abs/2501.12948 .[3] Hugging Face. 2025. AIME24 Dataset. https://huggingface.co/datasets/ math-ai/aime24 .[4] Hugging Face. 2025. DAPO-Math-17k Dataset. https://huggingface. co/datasets/BytedTsinghua-SIA/DAPO-Math-17k .[5] Wei Fu, Jiaxuan Gao, Xujie Shen, Chen Zhu, Zhiyu Mei, Chuyi He, Shusheng Xu, Guo Wei, Jun Mei, Jiashu Wang, Tongkai Yang, Bin-hang Yuan, and Yi Wu. 2025. AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning. https: //arxiv.org/abs/2505.24298 .[6] Wei Gao, Yuheng Zhao, Dakai An, Tianyuan Wu, Lunxi Cao, Shaopan Xiong, Ju Huang, Weixun Wang, Siran Yang, Wenbo Su, Jiamang Wang, Lin Qu, Bo Zheng, and Wei Wang. 2025. RollPacker: Mitigating Long-Tail Rollouts for Fast, Synchronous RL Post-Training. https: //arxiv.org/abs/2509.21009 .[7] Wei Gao, Yuheng Zhao, Tianyuan Wu, Shaopan Xiong, Weixun Wang, Dakai An, Lunxi Cao, Dilxat Muhtar, Zichen Liu, Haizhou Zhao, Ju Huang, Siran Yang, Yongbin Li, Wenbo Su, Jiamang Wang, Lin Qu, Bo Zheng, and Wei Wang. 2026. RollArt: Disaggregated Multi-Task Agentic RL Training at Scale. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . https://www.usenix. org/conference/osdi26/presentation/gao .[8] Hao Ge, Fangcheng Fu, Haoyang Li, Xuanyu Wang, Sheng Lin, Yujie Wang, Xiaonan Nie, Hailin Zhang, Xupeng Miao, and Bin Cui. 2024. Enabling Parallelism Hot Switching for Efficient Training of Large Lan-guage Models. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles . https://doi.org/10.1145/3694715.3695969 .[9] GLM-5-Team. 2026. GLM-5: from Vibe Coding to Agentic Engineering. 
+
+https://arxiv.org/abs/2602.15763 .[10] Shashwat Goel, RISHI HAZRA, Dulhan Jayalath, Timon Willi, Parag Jain, William F. Shen, Ilias Leontiadis, Francesco Barbieri, Yoram Bachrach, Jonas Geiping, and Chenxi Whitehouse. 2026. Training AI Co-Scientists Using Rubric Rewards. In Forty-third International Conference on Machine Learning . https://openreview.net/forum?id= bTySLCPXHO .[11] Anisha Gunjal, Anthony Wang, Elaine Lau, Vaskar Nath, Yunzhong He, Bing Liu, and Sean M. Hendryx. 2026. Rubrics as Rewards: Reinforcement Learning Beyond Verifiable Domains. In The Four-teenth International Conference on Learning Representations . https: //openreview.net/forum?id=c1bTcrDmt4 .[12] Zhenyu Han, Ansheng You, Haibo Wang, Kui Luo, Guang Yang, Wenqi Shi, Menglong Chen, Sicheng Zhang, Zeshun Lan, Chunshi Deng, Huazhong Ji, Wenjie Liu, Yu Huang, Yixiang Zhang, Chenyi Pan, Jing Wang, Xin Huang, Chunsheng Li, and Jianping Wu. 2025. AsyncFlow: An Asynchronous Streaming RL Framework for Efficient LLM Post-Training. https://arxiv.org/abs/2507.01663 .[13] Jingkai He, Tianjian Li, Erhu Feng, Dong Du, Qian Liu, Tao Liu, Yubin Xia, and Haibo Chen. 2025. History Rhymes: Accelerating LLM Rein-forcement Learning with RhymeRL. https://arxiv.org/abs/2508.18588 .[14] Ilgee Hong, Changlong Yu, Liang Qiu, Weixiang Yan, Zhenghao Xu, Haoming Jiang, Qingru Zhang, Qin Lu, Xin Liu, Chao Zhang, and Tuo Zhao. 2025. Think-RM: Enabling Long-Horizon Reasoning in Generative Reward Models. In The Thirty-ninth Annual Conference on Neural Information Processing Systems . https://openreview.net/forum? id=UfQAFbP6xq .[15] Jian Hu, Xibin Wu, Wei Shen, Jason Klein Liu, Zilin Zhu, Weixun Wang, Songlin Jiang, Haoran Wang, Hao Chen, Bin Chen, Weikai Fang, Xianyu, Yu Cao, Haotian Xu, and Yiming Liu. 2025. OpenRLHF: An Easy-to-use, Scalable and High-performance RLHF Framework. 
+
+https://arxiv.org/abs/2405.11143 .[16] Zijian Kan, Wei Wang, Long Luo, Bing Zhao, Xuan Ren, Weixu Qiao, Wenbo Li, Hu Wei, and Lin Qu. 2026. RubricRM: Generative Reward Modeling via Dynamic Rubrics for Image Generation and Editing. 
+
+=https://arxiv.org/abs/2608.26956. [17] Devvrit Khatri, Lovish Madaan, Rishabh Tiwari, Rachit Bansal, Sai Surya Duvvuri, Manzil Zaheer, Inderjit S. Dhillon, David Brandfon-brener, and Rishabh Agarwal. 2025. The Art of Scaling Reinforcement Learning Compute for LLMs. https://arxiv.org/abs/2510.13786 .[18] Yanlin Lai, Mitt Huang, Hangyu Guo, Xiangfeng Wang, Haodong Li, Shaoxiong Zhan, Liang Zhao, Chengyuan Yao, Yinmin Zhang, Qi Han, Chun Yuan, Zheng Ge, Xiangyu Zhang, and Daxin Jiang. 2026. R-Align: Enhancing Generative Reward Models through Rationale-Centric Meta-Judging. https://arxiv.org/abs/2602.06763 .[19] Harrison Lee, Samrat Phatale, Hassan Mansoor, Kellie Ren Lu, Thomas Mesnard, Johan Ferret, Colton Bishop, Ethan Hall, Victor Carbune, and Abhinav Rastogi. 2024. RLAIF: Scaling Reinforcement Learning from Human Feedback with AI Feedback. https://openreview.net/ forum?id=AAxIs3D2ZZ .[20] Haoyang Li, Fangcheng Fu, Hao Ge, Sheng Lin, Xuanyu Wang, Ji-awen Niu, Yujie Wang, Hailin Zhang, Xiaonan Nie, and Bin Cui. 2025. Malleus: Straggler-Resilient Hybrid Parallel Training of Large-scale Models via Malleable Data and Model Parallelization. Proc. ACM Manag. Data (2025). https://doi.org/10.1145/3725322 .[21] Haoyang Li, Fangcheng Fu, Hao Ge, Sheng Lin, Xuanyu Wang, Jiawen Niu, Yuming Zhou, Xupeng Miao, and Bin Cui. 2026. Hetu v2: A General and Scalable Deep Learning System with Hierarchical and Heterogeneous Single Program Multiple Data Annotations. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . https://www.usenix.org/conference/osdi26/presentation/li-haoyang .[22] Haoyang Li, Fangcheng Fu, Sheng Lin, Hao Ge, Xuanyu Wang, Ji-awen Niu, Jinbao Xue, Yangyu Tao, Di Wang, Jie Jiang, and Bin Cui. 2025. Hydraulis: Balancing Large Transformer Model Training via Co-designing Parallel Strategies and Data Assignment. Proc. ACM Manag. Data (2025). https://doi.org/10.1145/3769802 .[23] Haoyang Li, Sheng Lin, Fangcheng Fu, Yuming Zhou, Xiaodong Ji, Yanfeng Zhao, Lefeng Wang, Jie Jiang, and Bin Cui. 2026. StaleFlow: Staleness-Aware Data Management for Mitigating Data Skewness in Fully Disaggregated RL Post-Training. CoRR abs/2601.12784 (2026). [24] Wanchao Liang, Tianyu Liu, Less Wright, Will Constable, Andrew Gu, Chien-Chin Huang, Iris Zhang, Wei Feng, Howard Huang, Junjie Wang, Sanket Purandare, Gokul Nadathur, and Stratos Idreos. 2025. TorchTitan: One-stop PyTorch native solution for production ready LLM pre-training. https://arxiv.org/abs/2410.06511 .
+
+> 13
+
+[25] Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harrison Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. 2024. Let’s Verify Step by Step. In The Twelfth International Conference on Learning Representations . https://openreview.net/forum? id=v8L0pN6EOi .[26] Han Lu, Zichen Liu, Shaopan Xiong, Yancheng He, Wei Gao, Yanan Wu, Weixun Wang, Jiashun Liu, Yang Li, Haizhou Zhao, Ju Huang, Siran Yang, Xiaoyang Li, Yijia Luo, Zihe Liu, Ling Pan, Junchi Yan, Wei Wang, Wenbo Su, Jiamang Wang, Lin Qu, and Bo Zheng. 2025. Part II: ROLL Flash – Accelerating RLVR and Agentic Training with Asynchrony. https://arxiv.org/abs/2510.11345 .[27] Dakota Mahan, Duy Van Phung, Rafael Rafailov, Chase Blagden, Nathan Lile, Louis Castricato, Jan-Philipp Fränken, Chelsea Finn, and Alon Albalak. 2024. Generative Reward Models. https://arxiv.org/abs/ 2410.12832 .[28] Xupeng Miao, Chunan Shi, Jiangfei Duan, Xiaoli Xi, Dahua Lin, Bin Cui, and Zhihao Jia. 2024. SpotServe: Serving Generative Large Lan-guage Models on Preemptible Instances. In Proceedings of the 29th ACM International Conference on Architectural Support for Program-ming Languages and Operating Systems, Volume 2 . https://arxiv.org/ abs/2311.15566 .[29] Michael Noukhovitch, Shengyi Huang, Sophie Xhonneux, Arian Hos-seini, Rishabh Agarwal, and Aaron Courville. 2025. Asynchronous RLHF: Faster and More Efficient Off-Policy RL for Language Models. 
+
+https://arxiv.org/abs/2410.18252 .[30] NVIDIA. 2025. NVIDIA Inference Xfer Library (NIXL). https://github. com/ai-dynamo/nixl .[31] openucx. 2025. Unified Communication X. https://github.com/ openucx/ucx .[32] Aurick Qiao, Sang Keun Choe, Suhas Jayaram Subramanya, Willie Neiswanger, Qirong Ho, Hao Zhang, Gregory R. Ganger, and Eric P. Xing. 2021. Pollux: Co-adaptive Cluster Scheduling for Goodput-Optimized Deep Learning. In 15th USENIX Symposium on Operating Systems Design and Implementation (OSDI 21) . https://www.usenix. org/conference/osdi21/presentation/qiao .[33] Ruoyu Qin, Weiran He, Weixiao Huang, Yangkun Zhang, Yikai Zhao, Bo Pang, Xinran Xu, Yingdi Shan, Yongwei Wu, and Mingxing Zhang. 2025. Seer: Online Context Learning for Fast Synchronous LLM Rein-forcement Learning. https://arxiv.org/abs/2511.14617 .[34] Qwen, :, An Yang, Baosong Yang, Beichen Zhang, et al. 2025. Qwen2.5 Technical Report. https://arxiv.org/abs/2412.15115 .[35] Yanyu Ren, Xizheng Wang, Xiao Liu, Bowen Lv, Hanchen Zhang, Shudan Zhang, Hanyu Lai, Shuai Wang, Li Chen, Dan Li, and Jie Tang. 2026. TideRL: Boosting Agentic RL Goodput with Readiness-Aware Scheduling. https://arxiv.org/abs/2608.10402 .[36] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. 2017. Proximal Policy Optimization Algorithms. https: //arxiv.org/abs/1707.06347 .[37] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo. 2024. DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models. https://arxiv.org/abs/2402.03300 .[38] Guangming Sheng, Yuxuan Tong, Borui Wan, Wang Zhang, Chaobo Jia, Xibin Wu, Yuqi Wu, Xiang Li, Chi Zhang, Yanghua Peng, Haibin Lin, Xin Liu, and Chuan Wu. 2025. Laminar: A Scalable Asynchronous RL Post-Training Framework. https://arxiv.org/abs/2510.12633 .[39] Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2025. Hy-bridFlow: A Flexible and Efficient RLHF Framework. In Proceedings of the Twentieth European Conference on Computer Systems . http: //dx.doi.org/10.1145/3689031.3696075 .[40] Dharma Shukla, Muthian Sivathanu, Srinidhi Viswanatha, Bhargav Gulavani, Rimma Nehme, Amey Agrawal, et al. 2022. Singularity: Planet-Scale, Preemptive and Elastic Scheduling of AI Workloads. 
+
+https://arxiv.org/abs/2202.07848 .[41] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang, Yong Li, and Wei Lin. 2024. Llumnix: Dynamic Scheduling for Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . https://www.usenix. org/conference/osdi24/presentation/sun-biao .[42] Zelin Tan, Hejia Geng, Mulei Zhang, Xiaohang Yu, Guancheng Wan, Yifan Zhou, Qiang He, Xiangyuan Xue, Heng Zhou, Yutao Fan, Zhongzhi Li, Zaibin Zhang, Guibin Zhang, Chen Zhang, Zhenfei Yin, and Lei Bai. 2025. Scaling Behaviors of LLM Reinforcement Learn-ing Post-Training: An Empirical Study in Mathematical Reasoning. 
+
+https://arxiv.org/abs/2509.25300 .[43] Zhiqiang Tan, Maoxin Wang, Sijie Wang, Yiming Yin, Qiang Wang, Xiaowen Chu, and Shaohuai Shi. 2026. Bidirectional Resource Sched-uling for Disaggregated and Asynchronous RL Post-Training. https: //arxiv.org/abs/2607.09207 .[44] Kimi Team, Tongtong Bai, Yifan Bai, et al. 2026. Kimi K3: Open Frontier Intelligence. https://arxiv.org/abs/2607.24653 .[45] Kimi Team, Angang Du, Bofei Gao, et al. 2025. Kimi k1.5: Scaling Reinforcement Learning with LLMs. https://arxiv.org/abs/2501.12599 .[46] Leandro von Werra, Younes Belkada, Lewis Tunstall, Edward Beech-ing, Tristan Thrush, Nathan Lambert, Shengyi Huang, Kashif Rasul, and Quentin Gallouédec. 2020. TRL: Transformers Reinforcement Learning. https://github.com/huggingface/trl .[47] Weixun Wang, Shaopan Xiong, Gengru Chen, Wei Gao, et al. 2025. Reinforcement Learning Optimization for Large-Scale Learning: An Efficient and User-Friendly Scaling Library. https://arxiv.org/abs/2506. 06122 .[48] Yuanqing Wang, Hao Lin, Junhao Hu, Chunyang Zhu, Quanlu Zhang, Zhen Guo, Yuchen Zhang, Xu Fu, Si Xu, Bo Dai, Zixiao Huang, Chao Yu, Boxun Li, Guohao Dai, Zhi Yang, and Yu Wang. 2026. DynaRL: Flexible and Dynamic Scheduling of Large-Scale Reinforcement Learn-ing Training. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . https://www.usenix.org/conference/ osdi26/presentation/wang-yuanqing .[49] Zongqi Wang, Rui Wang, Yuchuan Wu, Yiyao Yu, Pinyi Zhang, Shaoning Sun, Yujiu Yang, and Yongbin Li. 2026. Reward Modeling from Natural Language Human Feedback. In Forty-third International Conference on Machine Learning . https://openreview.net/forum?id= nd0hT1eyEo .[50] Xumeng Wen, Zihan Liu, Shun Zheng, Shengyu Ye, Zhirong Wu, Yang Wang, Zhijian Xu, Xiao Liang, Junjie Li, Ziming Miao, Jiang Bian, and Mao Yang. 2025. Reinforcement Learning with Verifiable Rewards Implicitly Incentivizes Correct Reasoning in Base LLMs. https: //arxiv.org/abs/2506.14245 .[51] Bingyang Wu, Shengyu Liu, Yinmin Zhong, Peng Sun, Xuanzhe Liu, and Xin Jin. 2024. LoongServe: Efficiently Serving Long-Context Large Language Models with Elastic Sequence Parallelism. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles .
+
+https://doi.org/10.1145/3694715.3695948 
+
+[52] Bo Wu, Sid Wang, Yunhao Tang, Jia Ding, Eryk Helenowski, Liang Tan, Tengyu Xu, Tushar Gowda, Zhengxing Chen, Chen Zhu, Xi-aocheng Tang, Yundi Qian, Beibei Zhu, and Rui Hou. 2025. LlamaRL: A Distributed Asynchronous Reinforcement Learning Framework for Efficient Large-scale LLM Training. https://arxiv.org/abs/2505.24034 .[53] Xiaomi LLM-Core Team, Bingquan Xia, Bowen Shen, et al. 2025. MiMo: Unlocking the Reasoning Potential of Language Model – From Pre-training to Posttraining. https://arxiv.org/abs/2505.07608 .[54] Fengyu Xie, Yilun Zhao, Bingsen Chen, Arman Cohan, and Chen Zhao. 2026. Small Language Models as Judges for Rubric-Based Reinforce-ment Learning. https://arxiv.org/abs/2608.30005 .[55] Ran Xu, Tianci Liu, Zihan Dong, Tony Yu, Ilgee Hong, Carl Yang, Lin-jun Zhang, Tao Zhao, and Haoyu Wang. 2026. Alternating Reinforce-ment Learning for Rubric-Based Reward Modeling in Non-Verifiable 
+
+> 14
+
+LLM Post-Training. https://arxiv.org/abs/2602.01511 .[56] Ran Yan, Youhe Jiang, Tianyuan Wu, Jiaxuan Gao, Zhiyu Mei, Wei Fu, Haohui Mai, Wei Wang, Yi Wu, and Binhang Yuan. 2025. AReaL-Hex: Accommodating Asynchronous RL Training over Heterogeneous GPUs. https://arxiv.org/abs/2511.00796 .[57] An Yang, Anfeng Li, Baosong Yang, et al. 2025. Qwen3 Technical Report. https://arxiv.org/abs/2505.09388 .[58] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . https: //www.usenix.org/conference/osdi22/presentation/yu .[59] Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo, Yu Yue, Weinan Dai, Tiantian Fan, Gaohong Liu, Lingjun Liu, Xin Liu, Haibin Lin, Zhiqi Lin, Bole Ma, Guangming Sheng, Yuxuan Tong, Chi Zhang, Mofan Zhang, Wang Zhang, Hang Zhu, Jinhua Zhu, Jiaze Chen, Jiangjie Chen, Chengyi Wang, Hongli Yu, Yuxuan Song, Xiangpeng Wei, Hao Zhou, Jingjing Liu, Wei-Ying Ma, Ya-Qin Zhang, Lin Yan, Mu Qiao, Yonghui Wu, and Mingxuan Wang. 2025. DAPO: An Open-Source LLM Reinforcement Learning System at Scale. https://arxiv. org/abs/2503.14476 .[60] Yang Yue, Zhiqi Chen, Rui Lu, Andrew Zhao, Zhaokai Wang, Yang Yue, Shiji Song, and Gao Huang. 2025. Does Reinforcement Learning Really Incentivize Reasoning Capacity in LLMs Beyond the Base Model?. In 
+
+2nd AI for Math Workshop @ ICML 2025 . https://openreview.net/forum? id=upehLVgq1b .[61] Kaiyan Zhang, Yuxin Zuo, Bingxiang He, et al. 2025. A Survey of Reinforcement Learning for Large Reasoning Models. https://arxiv. org/abs/2509.08827 .[62] Lunjun Zhang, Arian Hosseini, Hritik Bansal, Mehran Kazemi, Aviral Kumar, and Rishabh Agarwal. 2025. Generative Verifiers: Reward Modeling as Next-Token Prediction. In The Thirteenth International Conference on Learning Representations . https://openreview.net/forum? id=Ccwp4tFEtE .[63] Yiqi Zhang, Huiqiang Jiang, Xufang Luo, Zhihe Yang, Chengruidong Zhang, Yifei Shen, Dongsheng Li, Yuqing Yang, Lili Qiu, and Yang You. 2025. SortedRL: Accelerating RL Training for LLMs through Online Length-aware Scheduling. In ES-FoMo III: 3rd Workshop on Efficient Systems for Foundation Models . https://openreview.net/forum?id= YoV9lIZ827 .[64] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: disaggregating prefill and decoding for goodput-optimized large language model serv-ing. In Proceedings of the 18th USENIX Conference on Operating Systems Design and Implementation .[65] Yinmin Zhong, Zili Zhang, Xiaoniu Song, Hanpeng Hu, Chao Jin, Bingyang Wu, Nuo Chen, Yukun Chen, Yu Zhou, Changyi Wan, Hongyu Zhou, Yimin Jiang, Yibo Zhu, and Daxin Jiang. 2025. StreamRL: Scalable, Heterogeneous, and Elastic RL for LLMs with Disaggregated Stream Generation. https://arxiv.org/abs/2504.15930 .[66] Ruidong Zhu, Mingcong Han, Yinmin Zhong, Wencong Xiao, Xuanzhe Liu, and Xin Jin. 2026. DistRS: Disaggregated Reward Service for RLVR with Batch-Level Constraint. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . https://www.usenix. org/conference/nsdi26/presentation/zhu-ruidong .[67] Zilin Zhu, Chengxing Xie, Xin Lv, and slime Contributors. 2025. slime: An LLM post-training framework for RL Scaling. https://github.com/ THUDM/slime .
+
+> 15
+
+## A Throughput Model Details 
+
+This appendix details the throughput model introduced in §6.1. This model is used by the scheduler to dispatch se-quences (§6.1), handle shift-time sequence migration (§6.2), and used by the planner to estimate the benefit of a candi-date shift plan (§7.3). Inspired by prior work [64], we build a throughput model in which throughput is estimated from the number of running sequences and the total number of their tokens. Most current inference systems batch active (running) sequences together and perform synchronous one-token-at-a-time generation (i.e., continuous batching [58]). Therefore, we model the inter-token latency 𝐿 to compute generation throughput. For mainstream LLMs, the generation process can be approximated by considering only the attention and feed-forward network (FFN) layers. 
+
+Attention latency. The latency of attention layers is domi-nated by memory accesses, specifically reads from and writes to the KV Cache. The rate at which data is loaded from the GPU’s high-bandwidth memory (HBM) is generally deter-mined by memory bandwidth. Consequently, the correspond-ing latency scales linearly with the KV Cache size. Since the KV Cache size scales linearly with sequence length, atten-tion latency can be modeled as a linear function of sequence length: 
+
+𝜏 Attn = 𝐴 × 𝑁 Token + 𝐷 1,
+
+where 𝑁 Token is the total length of all running sequences, and 𝐴 and 𝐷 1 are hardware-dependent constants. 
+
+FFN latency. The latency of the FFN layers is determined by whichever is greater: the memory-access cost or the compu-tation cost. FFN layers primarily perform matrix multiplica-tions, so both matrix-loading time and matrix-multiplication time must be considered. The loading time can be modeled similarly to that of the attention layers. Because the data being loaded consists of model weights, this part of the la-tency is typically constant. Consider the multiplication of an R𝑛 ×ℎ matrix by an Rℎ×ℎ′
+
+matrix. The operation requires 2𝑛ℎℎ ′ floating-point operations, where 𝑛 is the number of active sequences in the current decoding batch, and ℎ and 
+
+ℎ′ are the hidden dimensions. The computation time can therefore be modeled as a linear function of the number of active sequences. Together, the latency of FFN layers can be formulated as: 
+
+𝜏 FFN = max (𝐵, 𝐶 × 𝑁 Seq ) + 𝐷 2,
+
+where 𝑁 Seq is the number of running sequences, and 𝐵 , 𝐶 ,
+
+𝐷 2 are constants determined by the hardware. 
+
+Throughput. As a conclusion, the inter-token latency of instance 𝑖 can be formulated as: 
+
+𝜏 𝑖 = 𝐴 × 𝑁 Token  
+
+> 𝑖
+
++ max (𝐵, 𝐶 × 𝑁 Seq  
+
+> 𝑖
+
+) + 𝐷. 
+
+Further, the throughput of instance 𝑖 can be formulated as: 
+
+𝑇 𝑖 = 𝑁 Seq 
+
+> 𝑖
+
+𝜏 𝑖 
+
+.
+
+The constants 𝐴, 𝐵, 𝐶, 𝐷 can be profiled and fitted in advance, which is quite a fast procedure. 
+
+## B GPS Details 
+
+This appendix details the two engineering aspects of GPS deferred from §5.1: how GPS partitions the parameters it holds in CPU memory (Appendix B.1), and how the all-to-all collective underlying Read and Write is planned and executed (Appendix B.2). 
+
+B.1 Parameter Partitioning Read-Intensive workload. The partitioning of GPS deter-mines which CPUs hold which parameters, and therefore how much traffic each Read and Write must move and over which links. Our choice is driven by the observation that re-source shifting is a Read -intensive workload. Within a single RL step, resources may be shifted several times, e.g., from reward back to rollout as the reward stage drains, and then from both to training once the batch is ready, and every such shift issues a Read on the newly assigned GPUs. In contrast, GPS is updated at most once per step: GenRM is frozen and thus never written, and the policy model is committed by exactly one Write after the training stage. Read s therefore outnumber Write s within a step. The asymmetry is reinforced by where the two operations sit on the critical path. Write need only complete before the optimizer applies the next update, so it can be overlapped with the remainder of the training computation and is largely hidden. Read , on the other hand, gates the GPUs that have just performed shift up : they cannot begin serving their new role until the parameters have landed. The non-overlapped cost of Read is thus the quantity that matters. 
+
+Replication-First partitioning. Following this reasoning, GPS is fully replicated whenever the memory budget permits: every node holds a complete copy of the parameters of all involved models in its CPU memory. Full replication makes every Read node-local. A shift-up GPU can find all the slices it needs in the CPU memory of its own node, so the transfer is a CPU-to-GPU copy over PCIe and never touches the RDMA fabric. This is the fastest configuration available, and it also removes the fabric as a point of contention: concurrent 
+
+Read s on different nodes proceed independently instead of competing for the same inter-node links. The price is paid by 
+
+Write , which must now reach every replica and does traverse the fabric, but as argued above that cost is overlapped. 
+
+Partitioning under memory pressure. Full replication requires the policy model and GenRM to fit together in the CPU memory of a single node. When they do not, we fall back to a hybrid layout analogous to HSDP [24]: the nodes of the cluster are divided into replication groups, the parameters are                                                              
+
+> 16 c0
+> c1
+> 1Align Slicing Granularity
+> C0
+> C1
+> GPS layout
+> G0G1
+> Target layout
+> S0S1
+> S2S3
+> Atomic slices
+> 2Pick Least-Loaded Holder
+> CPU 0
+> RDMA
+> CPU 1
+> RDMA
+> CPU 2
+> PCIe
+> S0→GPU 00.0 0.0 0.0
+> S2→GPU 00.1 0.0 0.0
+> S1→GPU 10.1 0.1 0.0
+> S3→GPU 10.1 0.1 0.08
+> Accumulated Est. Latency
+> 3Balanced, Cached Plan
+> CPU 0S0→GPU 0
+> CPU 1S2→GPU 0
+> CPU 2S1→GPU 1
+> Balanced Accumulated Est. Latency
+> CPU 3
+> RDMA
+> 0.0
+> 0.0
+> 0.0
+> 0.0
+> 4CPUs
+> Sharded ×2
+> Replicated ×2
+> 2GPUs
+> DP= 1, TP= 2
+> Weight
+> 𝑊 0
+> Weight
+> 𝑊 1
+> S0→GPU 00.1 0.1 0.08 0.1
+> S2→GPU 00.1 0.1 0.16 0.1
+> …
+> CPU 3S3→GPU 1
+> S1→GPU 1
+> S2→GPU 0
+> S0→GPU 0
+> S3→GPU 1
+> Weight
+> 𝑊 0
+> Read (M=PM, G={GPU 0, GPU 1}, P=<DP= 1, TP= 2>) Plan for M=PM, G={GPU 0, GPU 1},
+> P=<DP= 1, TP= 2>
+
+Figure 16. The all-to-all collective underlying Read (Write is symmetric). In this example, GPU0 and GPU1 reside on CPU2, which can reach both GPUs over PCIe, while other CPUs must reach them via RDMA. ❶ The GPS layout and the caller’s target layout are refined to their common granularity, yielding atomic slices 𝑆 1–𝑆 4. ❷ We sweep the (slice, receiver) demands from top to bottom, assigning each to the candidate holder with the smallest accumulated estimated latency at that point (shaded). The cells show the accumulated latency at the time of each assignment. ❸ The resulting plan is balanced and cached for reuse. 
+
+fully sharded within each group so that every node holds only a 1 /𝑘 fraction and the per-node footprint fits, and the groups are fully replicated across the cluster. The group size 𝑘 is set to the smallest value that satisfies the memory constraint, which keeps the layout as close to full replication as the budget allows. Under this layout a Read still draws the bulk of its data from nearby nodes within one group, and only the 
+
+(𝑘 − 1)/ 𝑘 remainder crosses the fabric. Besides, enlarging the cluster adds replication groups rather than widening the shard, so the Read cost does not grow with scale. 
+
+B.2 All-to-All Collective 
+
+Because GPS and the caller partition each weight (i.e., pa-rameter) differently, Read and Write entail re-partitioning data between a set of CPUs and a set of GPUs. We realize this re-partitioning as an all-to-all collective [8, 21, 22]. The collective is executed through NIXL [30]. NIXL builds on UCX [31] and abstracts point-to-point transfers across CPU, GPU, and interconnect types behind a single interface. This abstraction allows GPS to be hosted on CPUs while com-municating efficiently with GPUs in both directions. The remaining task is to decide which point-to-point transfers to issue. The communication plan governs this decision. We describe the plan for Read , since Write is symmetric, with the roles of the CPU and GPU sides exchanged. 
+
+Aligning slicing granularity. The two sides of the trans-fer do not agree on slice boundaries: a weight may be cut row-wise across GPS slices and column-wise by the target parallelism 𝑃 , so a single GPS-side slice may be needed by several GPUs and a single GPU-side slice may have to be assembled from several GPS slices. As shown in step ❶ of Figure 16, we first take the common refinement of the two layouts, which yields a set of atomic slices that are indivisible on both sides. A converter performs this refinement, and in doing so also reconciles the differing parameter naming and layout conventions of the training backend, GPS, and the inference engine into one canonical representation. After refinement, every transfer moves a whole atomic slice, so no slice is ever split or concatenated in flight. 
+
+Load-Balancing communication planning. Refinement turns the collective into a set of demands , one per (atomic slice, receiving GPU) pair. Each demand admits multiple valid senders, since replication means an atomic slice gen-erally resides on several CPUs, and any of them can serve it. Choosing arbitrarily concentrates traffic on a few senders and lets the slowest one dictate the completion time of the whole collective, so we choose deliberately. For every candi-date sender we maintain an accumulated estimated latency, i.e., the total cost of the demands already assigned to it. The cost of one transfer is estimated as the size of the slice in bytes divided by the profiled bandwidth of the link between that sender and the receiver, plus a constant per-transfer overhead. Both terms are obtained by offline profiling, and the bandwidth term is what distinguishes a node-local PCIe path from a remote RDMA one. As illustrated in step ❷, we walk the demands and greedily assign each to the candidate whose accumulated latency is currently smallest. Step ❸ shows the effect. The greedy rule equalizes latency, so a sender on a fast link is given proportionally more data than one on a slow link, and the bottleneck sender is pushed down. 
+
+Plan caching. The plan depends only on the signature 
+
+⟨𝑀, 𝐺, 𝑃 ⟩ of the operation and on the profiled link band-widths, none of which change between invocations with the same arguments. Since resource shifting may repeatedly re-turn to the same configurations across RL steps, we compute each plan once and memorize it, so subsequent Read s and 
+
+Write s with the same signature skip planning entirely and issue the cached set of point-to-point transfers directly. 
+
+## C Shift-Time Sequence Migration Details 
+
+C.1 Pseudocode for Sequence Migration 
+
+We further describe the shift-time sequence migration proce-dure introduced in §6.2. The procedure relies on two common 
+
+> 17
+
+Algorithm 2 Common operations for sequence migration  
+
+> 1:
+
+function Abort( 𝑟, 𝑑, 𝑄 ) 
+
+> 2:
+
+// 𝑟 : replica  
+
+> 3:
+
+// 𝑑 : selection specification, either All or a specific sequence  
+
+> 4:
+
+// 𝑄 : shared waiting queue  
+
+> 5:
+
+𝑆 ← 𝑟 . GetSeqences (𝑑 ) 
+
+> 6:
+
+for all 𝑠 ∈ 𝑆 do  
+
+> 7:
+
+𝑟 . Stop (𝑠 ) 
+
+> 8:
+
+𝑄. Insert (𝑠 ) 
+
+> 9:
+
+function Dispatch( 𝑄, 𝑅 ) 
+
+> 10:
+
+// 𝑄 : shared waiting queue  
+
+> 11:
+
+// 𝑅 : set of candidate replicas  
+
+> 12:
+
+while 𝑄 ≠ ∅ do  
+
+> 13:
+
+𝑠 ← 𝑄. Pop  
+
+> 14:
+
+for all 𝑟 𝑖 ∈ 𝑅 do  
+
+> 15:
+
+Compute Δ𝑇 𝑖 (𝑠 ) as described in §6.1  
+
+> 16:
+
+𝑟 ★ ← arg max 𝑟 𝑖 ∈𝑅 Δ𝑇 𝑖 (𝑠 ) 
+
+> 17:
+
+𝑟 ★.Generate (𝑠 )
+
+Algorithm 3 Sequence migration for shift down  
+
+> 1:
+
+function ShiftDownMigration( 𝑅 ↓, 𝑅 ′, 𝑄 ) 
+
+> 2:
+
+// 𝑅 ↓: replicas scheduled to shift down  
+
+> 3:
+
+// 𝑅 ′: remaining replicas that can receive migrated sequences  
+
+> 4:
+
+// 𝑄 : shared waiting queue  
+
+> 5:
+
+for all 𝑟 ∈ 𝑅 ↓ do  
+
+> 6:
+
+Abort( 𝑟, All , 𝑄 ) 
+
+> 7:
+
+Dispatch( 𝑄, 𝑅 ′)
+
+operations, Abort and Dispatch , which are shared by both 
+
+shift-down and shift-up migration. 
+
+Abort and Dispatch . As shown in Algorithm 2, the Abort 
+
+operation stops the selected sequences on a replica and in-serts them into the shared waiting queue. The specification 
+
+𝑑 can select either all sequences on a replica or a particular sequence, such as the shortest one. The Dispatch opera-tion repeatedly pops a sequence from the waiting queue, estimates the throughput gain Δ𝑇 𝑖 of dispatching it to each replica (§6.1), and assigns the sequence to the replica with the largest Δ𝑇 𝑖 .
+
+Shift down . When a set of replicas 𝑅 ↓ is scheduled to shift down, all sequences running on these replicas must be evac-uated. As shown in Algorithm 3, Abort is called and all sequences are returned to the shared waiting queue 𝑄 . The scheduler then redispatches the aborted sequences among the remaining replicas 𝑅 ′. The sequence states are preserved during the abort process, allowing generation to resume from the previously produced tokens instead of restarting from scratch. 
+
+Shift up . As shown in Algorithm 4, for shift up , the newly added replicas 𝑅 ↑ first consume the sequences already present in the waiting queue. However, this initial dispatch may still 
+
+Algorithm 4 Sequence migration for shift up  
+
+> 1:
+
+function ShiftUpMigration( 𝑅 ↑, 𝑅 ′, 𝑄 ) 
+
+> 2:
+
+// 𝑅 ↑: replicas scheduled to shift up  
+
+> 3:
+
+// 𝑅 ′: existing replicas  
+
+> 4:
+
+// 𝑄 : shared waiting queue  
+
+> 5:
+
+Dispatch( 𝑄, 𝑅 ↑) 
+
+> 6:
+
+𝑅 ← 𝑅 ↑ ∪ 𝑅 ′ 
+
+> 7:
+
+T ← EvaluateThroughput (𝑅 ) 
+
+> 8:
+
+Build a max-heap ℎ𝑀 over 𝑅 keyed by replica throughput  
+
+> 9:
+
+while true do  
+
+> 10:
+
+𝑟 𝑀 ← ℎ𝑀 .Pop  
+
+> 11:
+
+Abort( 𝑟 𝑀 , Shortest , 𝑄 ) 
+
+> 12:
+
+Dispatch( 𝑄, 𝑅 ) 
+
+> 13:
+
+T ′ ← EvaluateThroughput (𝑅 ) 
+
+> 14:
+
+if T ′ ≤ T then  
+
+> 15:
+
+break  
+
+> 16:
+
+T ← T ′ 
+
+> 17:
+
+UpdateThroughput (𝑟 𝑀 ) 
+
+> 18:
+
+ℎ𝑀 .Insert (𝑟 𝑀 )
+
+yield suboptimal throughput, since existing replicas can of-ten host substantially more sequences. We therefore perform an iterative migration procedure over the entire replica set 
+
+𝑅 = 𝑅 ↑ ∪ 𝑅 ′. In each iteration, the replica with the highest throughput is selected, and its shortest sequence is migrated. The procedure terminates when migration no longer im-proves the aggregate throughput. 
+
+C.2 Analysis of Complexity 
+
+The upper-bound complexity is 𝑂  𝐼 · 𝑁 Seq + 𝐼 log 𝐼 , where 
+
+𝑁 Seq denotes the total number of sequences across all replicas and 𝐼 denotes the number of replicas. During shift down , aborting sequences from the shift-down 
+
+replicas takes at most 𝑂 (𝐼 ) time. Dispatching 𝑁 Seq sequences across 𝐼 replicas takes 𝑂 (𝐼 · 𝑁 Seq ) time. Thus, the overall complexity of sequence migration during shift down is 𝑂 (𝐼 ·
+
+𝑁 Seq ).During shift up , the queued sequences are first dispatched to the newly activated replicas. The max-throughput replica is then selected iteratively for further sequence migration. The initial dispatch takes at most 𝑂 (𝐼 · 𝑁 Seq ) time. Construct-ing the heap ℎ𝑀 takes 𝑂 (𝐼 log 𝐼 ) time. During subsequent dispatching, at most 𝑁 Seq sequences are migrated across all replicas, which serves as an upper bound on the number of migration operations. For each migrated sequence, selecting its destination replica takes 𝑂 (𝐼 ) time, while updating the corresponding replica in the heap takes 𝑂 (log 𝐼 ) time. Thus, sequence migration takes 𝑂 (𝐼 · 𝑁 Seq ) time, resulting in an overall complexity of 𝑂  𝐼 · 𝑁 Seq + 𝐼 log 𝐼 .
+
+## D Candidate Set Construction Details 
+
+D.1 Shift Pair Representation 
+
+We consider rollout and reward, each serving a single model. Once the target role 𝑟 ↑ is selected, the planner constructs 
+
+> 18
+
+Table 4. Resource configurations for different model groups under various deployment paradigms. In the colocated paradigm, all three roles (rollout, reward, and training) share the same GPUs, so the total number is shown once across the three role columns. In the disaggregated paradigm, the numbers in the Rollout, Reward, and Training columns indicate the GPUs allocated to each role. In the rollout-reward colocated mode, the number spanning the Rollout and Reward columns denotes the GPUs shared by these two roles. For PivotRL , since resources can be dynamically shifted across roles, each column shows the range of GPUs that can be allocated to the corresponding role. Since training is shifted as a whole, its allocation can only be zero or the full training workload. Policy Model GenRM Deployment GPUs for Each Role Rollout Reward Training Qwen2.5-1.5B (TP=1) GLM-Z1-9B (TP=1) Colocated 32 Disaggregated 8 8 16 Rollout-Reward Colocated 16 16 
+
+PivotRL 0–32 0–32 0 or 16 Qwen2.5-7B (TP=1) Qwen3-30B-A3B (TP, EP=4) Colocated 32 Disaggregated 12 12 8Rollout-Reward Colocated 24 8
+
+PivotRL 0–32 0–32 0 or 8 Qwen2.5-32B (TP=4) Qwen3-30B-A3B (TP, EP=4) Colocated 64 Disaggregated 16 16 32 Rollout-Reward Colocated 32 32 
+
+PivotRL 0–64 0–64 0 or 32 Qwen2.5-72B (TP=8) Qwen3.5-122B-A10B (TP, EP=8) Colocated 128 Disaggregated 32 32 64 Rollout-Reward Colocated 64 64 
+
+PivotRL 0–128 0–128 0 or 64 
+
+candidates from the ordered shift pairs P = (𝑃 1, . . . , 𝑃 𝑔 ).Each shift pair 𝑃 𝑖 contains 𝑟 𝑖 ordered eligible replicas to shift up , a common set of opposite-role replicas to shift down , and the corresponding penalty 𝜙 𝑖 .For 1 ≤ 𝑒 ≤ 𝑟 𝑖 , 𝑃 (𝑒 ) 
+
+> 𝑖
+
+denotes the partial shift plan that includes the first 𝑒 shift-up replicas in 𝑃 𝑖 and its common 
+
+shift-down set. Thus, selecting any positive number of repli-cas from 𝑃 𝑖 incurs 𝜙 𝑖 only once. Since the preprocessed shift pairs are disjoint, their penalties can be accumulated directly. 
+
+D.2 DP Transition 
+
+The penalty array 𝐷 [ 𝑗 ] stores the minimum accumulated penalty for shifting up exactly 𝑗 replicas using the processed shift pairs. The plan array C [ 𝑗 ] stores the corresponding shift plan candidates. Initially, only the empty plan is reachable: 
+
+𝐷 [0] = 0, C [ 0] = ∅,
+
+while 𝐷 [ 𝑗 ] = +∞ and C [ 𝑗 ] = ∅ for 1 ≤ 𝑗 ≤ 𝐾 .Before processing 𝑃 𝑖 , the planner initializes b𝐷 ← 𝐷 and 
+
+bC ← C . These assignments preserve the states that skip 𝑃 𝑖 .For every reachable count 𝑗 , the planner considers 1 ≤ 𝑒 ≤ min (𝑟 𝑖 , 𝐾 − 𝑗 ).
+
+The extended plan and its penalty are 
+
+𝑐 = C [ 𝑗 ] ∪ 𝑃 (𝑒 ) 
+
+> 𝑖
+
+, 𝑑 = 𝐷 [ 𝑗 ] + 𝜙 𝑖 .
+
+The penalty transition is 
+
+b𝐷 [ 𝑗 + 𝑒 ] = min 
+
+nb𝐷 [ 𝑗 + 𝑒 ], 𝐷 [ 𝑗 ] + 𝜙 𝑖 
+
+o
+
+.
+
+If 𝑑 attains the updated value of b𝐷 [ 𝑗 +𝑒 ], the planner updates 
+
+bC [ 𝑗 + 𝑒 ] with 𝑐 . When penalties are equal, the later candi-date in the deterministic traversal order is retained. After processing 𝑃 𝑖 , the next tables replace the current tables. After all shift pairs have been processed, every reachable positive count contributes one candidate: 
+
+Cout = {C [ 𝑘 ] | 1 ≤ 𝑘 ≤ 𝐾, 𝐷 [𝑘 ] < +∞} .
+
+The candidate set therefore contains at most 𝐾 shift plans. 
+
+D.3 Complexity Analysis 
+
+Let 𝑔 be the number of non-empty shift pairs, 𝐼 be the total number of replicas in the shift-up role, and 𝐾 = Í𝑔 𝑖 =1 𝑟 𝑖 be the number of eligible shift-up replicas. The upper-bound of 𝑔 is 
+
+𝐼 , when the numbers of GPUs per each replica in both roles are the same. Copying the two DP tables for each shift pair requires 𝑂 (𝐾𝑔 ) entry assignments. The number of non-skip transitions is bounded by 
+
+𝑇 DP ≤
+
+> 𝑔
+
+∑︁ 
+
+> 𝑖 =1
+> 𝐾
+
+∑︁ 
+
+> 𝑗 =0
+
+min (𝑟 𝑖 , 𝐾 − 𝑗 ) ≤ 𝐾 
+
+> 𝑔
+
+∑︁ 
+
+> 𝑖 =1
+
+𝑟 𝑖 = 𝑂 (𝐾𝐼 ).
+
+Since every shift pair is non-empty, 𝑔 ≤ 𝐼 , and the table initialization and transitions together require 𝑂 (𝐾𝐼 ) DP op-erations. When 𝐾 ≤ 𝐼 , this becomes 𝑂 (𝐼 2).
+
+## E Deployment Details 
+
+In this appendix, we provide detailed descriptions of the implementation of each method and the resource configura-tions used in our experiments. 
+
+> 19
+
+Implementation. PivotRL and all baselines are built upon veRL [39]. 
+
+Colocated directly builds on the veRL framework, with only the necessary modifications to adapt the reward func-tion and datasets. Upon completion of each rollout, reward evaluation, or training phase, all resources are released and reassigned to the subsequent phase. 
+
+Disaggregated uses the same training and inference back-ends as veRL. Each role is assigned an independent resource pool that cannot be used by other roles. In addition, disag-gregated introduces staleness 4 to enable asynchronous RL post-training. In all our experiments, we set the data stale-ness to 2. 
+
+Rollout-Reward collocated builds upon the disaggregated implementation. It allows the rollout and reward evaluation stages to share the same set of resources, while the training stage uses a separate resource pool. Once rollout completes sampling a batch, reward evaluation is launched on the same resources to evaluate the generated samples, and the cy-cle repeats. We set the data staleness to 2, allowing rollout and reward evaluation to continue processing subsequent batches while training proceeds concurrently. 
+
+PivotRL is also built upon the disaggregated implementa-tion. To enable resource shifting among roles, it implements all key components described in §4, including a resource-shiftable runtime (§5), a shift-aware scheduler for rollout and reward (§6) and a planner (§7). Besides we also implement a monitor to capture the workload state for the planner, and an executor to execute shift plans generated by the planner. Unlike the baselines above, PivotRL allows all three stages to utilize resources from the entire resource pool. We also set the data staleness to 2. 
+
+Resource allocation. The resource configurations for differ-ent baselines over different model groups are listed in Table 4. In all experiments, we keep the total number of GPUs for each model group the same across all baselines. For each baseline, we tune its resource configuration to achieve the best end-to-end throughput.

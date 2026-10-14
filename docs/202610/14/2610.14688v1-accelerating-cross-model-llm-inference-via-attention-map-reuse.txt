@@ -1,0 +1,814 @@
+Title: Accelerating Cross-Model LLM Inference via Attention Map Reuse
+
+URL Source: https://arxiv.org/pdf/2610.14688v1
+
+Published Time: Wed, 14 Oct 2026 00:46:00 GMT
+
+Number of Pages: 27
+
+Markdown Content:
+# Accelerating Cross-Model LLM Inference via Attention Map Reuse 
+
+ZHAN JIN ∗, Peking University, China 
+
+YUZE LUO ∗, Peking University, China 
+
+BIN CUI ∗† , Peking University, China 
+
+XUPENG MIAO ∗, Peking University, China LLM-augmented data workflows often involve multiple heterogeneous models operating over substantial shared context, such as schemas, tool specifications, interaction history, and intermediate results. Although prefix caching can reduce prefilling overhead, existing approaches are largely limited to reuse within the same model because KV states are tightly coupled to model-specific architectures. We present MapFlow, a system for efficient heterogeneous LLM serving via cross-model attention map reuse. Instead of reusing KV states, MapFlow reuses attention maps, which capture token dependency patterns and are more transferable across models. To enable efficient and accurate reuse, we combine partial recomputation with lightweight linear translation across layers and heads. To make attention reuse practical for long contexts, we further introduce block-level sparse compression and a fused retrieval kernel. Experiments show that MapFlow reduces prefilling latency and improves end-to-end serving efficiency while preserving generation quality across heterogeneous model pairs and multi-turn routing workloads. These results suggest that attention maps provide an effective reusable state for heterogeneous LLM serving, especially in prefix-heavy data workflows. Our code is available: https://github.com/PKU-DAIR/MapFlow. CCS Concepts: • Information systems → Database management system engines ; Information storage systems ; • Computing methodologies → Artificial intelligence .Additional Key Words and Phrases: Large language models; Heterogeneous LLM serving; Cross-model prefix reuse; Attention map reuse; LLM-augmented data systems; Multi-LLM workflows 
+
+ACM Reference Format: 
+
+Zhan Jin, Yuze Luo, Bin Cui, and Xupeng Miao. 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse. Proc. ACM Manag. Data 4, 6 (SIGMOD), Article 317 (December 2026), 27 pages. https://doi.org/10. 1145/3856312 
+
+1 Introduction 
+
+Large language models (LLMs) are increasingly becoming a core building block of modern data systems. Recent studies [11, 14, 17, 24, 67, 68, 79, 80, 87] have explored using LLMs for database interaction and symbolic memory, query optimization and tuning, data preprocessing, and entity matching, suggesting that LLMs are no longer merely front-end interfaces but active components in data management pipelines. In these settings, LLM execution is rarely a single prompt-response step. Instead, requests are embedded in multi-stage workflows that repeatedly expose models 
+
+> ∗
+
+School of Computer Science & Beijing Key Laboratory of Software and Hardware Cooperative Artificial Intelligence Systems, Peking University 
+
+> †
+
+Key Lab of High Confidence Software Technologies (MOE), Peking University Authors’ Contact Information: Zhan Jin, zhanjin2004@gmail.com, Peking University, Beijing, China; Yuze Luo, luoyuze@ stu.pku.edu.cn, Peking University, Beijing, China; Bin Cui, bin.cui@pku.edu.cn, Peking University, Beijing, China; Xupeng Miao, xupeng.miao@pku.edu.cn, Peking University, Beijing, China. 
+
+This work is licensed under a Creative Commons Attribution 4.0 International License. © 2026 Copyright held by the owner/author(s). ACM 2836-6573/2026/12-ART317 https://doi.org/10.1145/3856312 Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. arXiv:2610.14688v1 [cs.LG] 10 Oct 2026 317:2 Jin et al. 
+
+to long, structured contexts, including database schemas, system constraints, tool specifications, prior interaction history, and intermediate results. As these contexts accumulate across turns and operators, repeatedly processing the same prefix becomes a major bottleneck for interactive latency and system throughput [24, 45, 47, 57, 68]. When multiple requests share the same prompt prefix and are served by the same model, cached Key-Value (KV) tensors can be reused to avoid redundant prefilling and reduce Time-to-First-Token (TTFT), as demonstrated by recent LLM serving systems such as vLLM [33] and SGLang [84]. However, this assumption does not hold in many LLM-augmented data systems, where a single data workflow often involves multiple heterogeneous LLMs or agents. To balance quality, cost, and response time, these systems assign different subtasks to different models, such as using a stronger model for planning or semantic interpretation and smaller models for refinement, formatting, or summarization. Such heterogeneous execution appears naturally in routing-based assistants, cascaded inference, and multi-agent workflows [27, 51, 64]. Although these executions frequently share substantial prompt prefixes, existing prefix caching mechanisms are largely restricted to 
+
+identical model instances . Once execution moves across models, even identical database-centric context must be recomputed from scratch, leading to high latency and poor reuse. This problem is particularly acute in data management workloads. Compared with open-ended chat, many database-facing prompts are highly structured and persist across multiple requests. A text-to-SQL or database assistant may repeatedly prepend the same schema and system instructions; a tuning assistant may repeatedly condition on workload summaries and engine constraints; and an agentic analytics pipeline may pass along tool traces, metadata, and prior reasoning results [74]. These workloads therefore create a distinctive combination of prefix-heavy execution and cross-model transitions. From a data systems perspective, this is not merely a serving inefficiency; it is a missed opportunity for intermediate state reuse across operators in heterogeneous LLM pipelines. A straightforward idea is to reuse cached KV states across models. Prior work on cross-model or multi-model execution has explored routing, blending, multiplexing, and state reuse, but KV tensors remain tightly coupled to model-specific hidden representations, dimensions, structures, and param-eters [12, 16, 40, 46, 56, 73, 86]. This coupling makes them difficult to translate across heterogeneous architectures without incurring either substantial accuracy loss or nontrivial adaptation overhead. As a result, existing approaches struggle to achieve the accuracy-efficiency trade-off required by online systems. This limitation suggests a broader question: what form of intermediate state can be reused across heterogeneous LLMs while remaining efficient enough for real-time execution? 
+
+In this paper, we answer this question with MapFlow, an efficient heterogeneous LLM serving system based on cross-model attention map reuse. Our key insight is that, while KV states are model-specific latent representations, attention maps encode token-to-token dependency structure in Transformer models . For models that share the same tokenizer and process the same context, these dependency patterns can exhibit stronger structural similarity across models than KV tensors do. This makes attention maps a more suitable reusable state for heterogeneous execution. Based on this observation, MapFlow transfers attention maps from a sender model to a receiver model, uses lightweight linear translation to bridge differences in layers and heads, and combines this with partial recomputation to preserve semantic fidelity. Turning this idea into a practical runtime raises two systems challenges. First, raw attention maps have quadratic size in context length, making naive caching prohibitively expensive. Second, even if cached, directly reconstructing dense receiver-side attention would introduce excessive memory traffic and runtime overhead. MapFlow addresses these challenges through a co-designed system runtime. It applies a hardware-friendly block-level top-𝑝 sparse compression scheme to store attention maps in a compact block-sparse layout, and uses a fused retrieval kernel that combines attention translation and value aggregation without materializing dense intermediate tensors.  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:3
+
+The system further organizes cached sparse blocks with prefix-hash-based indexing and overlaps retrieval with partial recomputation, enabling efficient online reuse within modern serving stacks. We evaluate our system across heterogeneous model pairs and multi-turn workloads. Our results show that MapFlow reduces TTFT by 15%–20% while maintaining generation quality, and improves end-to-end throughput by up to 25% under the same latency target. We further show that its benefits are especially pronounced in long-context, multi-turn settings, where repeated workflow-level context amplifies the cost of standard prefilling. These results suggest that cross-model attention reuse can serve as an effective execution primitive for LLM-augmented data systems. Our paper makes four main contributions: 
+
+• We identify cross-model prefix reuse as a fundamental bottleneck in LLM-augmented data workflows, where long structured contexts are repeatedly processed across heterogeneous models. 
+
+• We propose attention maps as a reusable intermediate execution state for heterogeneous LLM serving, avoiding the tight architectural coupling of KV-cache-based reuse. 
+
+• We design MapFlow, a practical LLM serving system that combines partial recomputation, lightweight attention-map translation, sparse block-level compression, and fused online retrieval. 
+
+• We demonstrate through extensive experiments that MapFlow improves latency and through-put for heterogeneous multi-model execution, making it a promising systems substrate for prefix-heavy LLM data workflows. 
+
+2 Background Q K V     
+
+> X
+> A
+> O
+> ABCD EF
+> Iter 1 Iter 2 Iter 3
+> KV cache
+> Prefill
+> Phase
+> Decode
+> Phase
+> A) Attention Mechanism B) Prefill and Decode Phase
+
+Fig. 1. Illustration of attention mechanism, prefill phase and decode phase. 
+
+2.1 Transformer and Multi-Head Attention 
+
+Modern Large Language Models (LLMs) are predominantly built upon the Transformer architecture [63], utilizing a decoder-only configuration. A standard Transformer block consists of two primary components: Multi-Head Attention (MHA) and a Feed-Forward Network (FFN). As shown in Figure 1A, the MHA layer processes an embedding sequence 𝑋 ∈ R𝐿 ×𝑑 model , where 𝐿 is the sequence length and 𝑑 model is the hidden dimension. The embedding is linearly projected into 𝐻 distinct attention heads. For the ℎ-th head, the queries (Q), keys (K), and values (V) are computed as: 
+
+𝑄 ℎ = 𝑋𝑊 ℎ𝑄 , 𝐾 ℎ = 𝑋𝑊 ℎ𝐾 , 𝑉 ℎ = 𝑋𝑊 ℎ𝑉  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:4 Jin et al.
+
+The attention map 𝐴 ℎ is derived using a scaled dot-product, and is then multiplied by 𝑉 ℎ to produce the head’s output 𝑂 ℎ :
+
+𝑂 ℎ = 𝐴 ℎ𝑉 ℎ = softmax 
+
+ 𝑄 ℎ𝐾 ⊤
+
+> ℎ
+
+√𝑑 head 
+
+
+
+𝑉 ℎ
+
+Finally, the outputs from all 𝐻 heads are concatenated and linearly projected to form the final MHA output. 
+
+2.2 Inference Phases: Prefill and Decode 
+
+As shown in Figure 1B, LLM inference is distinctively characterized by two sequential phases: Prefill 
+
+and Decode .
+
+Prefill Phase: This phase processes the input prompt in parallel and serves two primary purposes: (1) computing and storing the Key-Value (KV) cache for all input tokens to accelerate subsequent generation; (2) generating the first output token. This phase is typically compute-bound due to the highly parallelizable matrix multiplications ( 𝑂 (𝐿 2) complexity for attention). The latency of this phase is referred to as Time-to-First-Token (TTFT). 
+
+Decode Phase: Following prefill, the model generates tokens auto-regressively, one by one. In each step, the model attends to all previous tokens (prompt + generated). This phase is typically 
+
+memory-bound , dominated by the cost of loading model weights and KV caches from memory. 
+
+2.3 Prefix Caching 
+
+Due to the quadratic computational complexity of the attention mechanism, the prefill phase remains a major bottleneck for processing long prompts. Prefix caching [33, 84] mitigates this by retaining the KV cache of frequently reused prefixes (e.g., system prompts or few-shot examples). When a new request shares a prefix with a cached entry, the serving engine retrieves the pre-computed KV tensors, bypassing redundant computation. However, traditional prefix caching strictly requires identical model architectures and weights, severely limiting its applicability in heterogeneous environments. 
+
+2.4 Multi-LLM Systems 
+
+In production environments, a “one-size-fits-all” model strategy is often inefficient. Multi-LLM systems [2, 4, 20, 21, 26, 35, 38, 43, 44, 53, 69, 85] leverage the distinct capabilities and cost-efficiency profiles of heterogeneous models to optimize performance. As a typical example shown in Figure 2, the multi-LLM router system [7, 10, 51] has a router that will analyze the complexity of an incoming query and direct it to the most appropriate model (e.g., sending simple queries to smaller, faster models and complex reasoning tasks to larger models). Crucially, in multi-LLM system workflows, identical prompt prefixes are often processed by different models (query 1 and answer 1 in Figure 2). This redundancy highlights the critical need for a cross-model prefix caching mechanism. 
+
+2.5 Sparse Attention 
+
+Empirical studies demonstrate that attention matrices in LLMs are highly sparse [48, 71, 78, 81]. Although the attention mechanism allows every token to attend to every other token, in practice, a token heavily attends to only a small subset of previous tokens. Formally, for the 𝑘 -th token, let the attention probability distribution be {𝑃 𝑖 }𝑘 𝑖 =1. Given a cumula-tive probability threshold 𝑝 , we define the significant attention set 𝑆 as the minimal set of indices that accumulate to 𝑝 :    
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:5 Model A
+> Prompt
+> Query 1
+> Answer 1
+> Router
+> Model B
+> Prompt
+> Query 1
+> Answer 1
+> Answer 1
+> Query 2
+> Cross-Model
+> Prefix Cache
+> Resp 1 Resp 2
+> Round 1 Round 2
+> Store Retrieve
+
+Fig. 2. Illustration of cross-model prefix cache framework in multi-LLM router system. 
+
+𝑆 = argmin   
+
+> 𝑆 ⊆ { 1,...,𝑘 }
+
+|𝑆 |, s.t. ∑︁  
+
+> 𝑖 ∈𝑆
+
+𝑃 𝑖 ≥ 𝑝 (1) Empirical results show that |𝑆 | ≪ 𝑘 , implying that the storage complexity of the attention pattern can be reduced from 𝑂 (𝑁 2) to near-linear with minimal loss in precision. This structural sparsity is a key property leveraged by our proposed MapFlow to enable efficient storage and transfer of attention maps. Existing sparse-attention methods can be broadly divided by the inference phase they accelerate. Prefill-oriented methods, such as MInference [28] and FlexPrefill [34], avoid computing the full attention matrix by identifying sparse patterns from prefill. In contrast, decode-oriented methods, such as IceCache [42] and ParisKV [52], first perform full prefill to construct the KV cache and exploit sparsity only during subsequent decoding. MapFlow focuses on prefill acceleration by reusing and sparsifying attention maps already computed by a sender model. 
+
+2.6 Cross-model Communication 
+
+The conventional approach for inter-model communication relies on transmitting raw token se-quences, requiring the receiving model to perform a full prefill computation. While straightforward, this method incurs significant computational overhead during the prefill phase, as the context length expands rapidly over multiple rounds of interaction. To alleviate this bottleneck, recent studies leverage the intermediate KV cache, rather than raw text, as the cross-model communication medium. These techniques generally fall into two paradigms: selective partial recomputation and learned cache adaptation. As an example of the partial recomputation paradigm, Droidspeak [40] isolates critical trans-former layers via profiling, selectively recomputing the KV cache only at these layers while reusing the cached tensors for the rest. Similarly, CacheBlend [73] identifies tokens exhibiting significant KV state deviation between the source and target models, recomputing the KV cache exclusively for these divergent tokens. Conversely, under the learned adaptation paradigm, C2C [16] fuses the KV cache from both sender and receiver, generating a composite cache that encapsulates context from both. But it doesn’t eliminate receiver prefill since it requires both models to compute the KV cache. KVCOMM [75] and Q-KVComm [32] communicate or compress KV caches among homogeneous agents whose inputs contain related content under diverging prefixes. Addressing  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:6 Jin et al.
+
+architectural heterogeneity, [13] introduces lightweight transformer adapters to project the sender’s KV cache into an architecture-agnostic latent space, from which the receiver extracts a compatible KV representation. 
+
+3 Motivation 3.1 Terminology 
+
+Table 1 summarizes the mathematical notations used in this paper. 
+
+> Table 1. Summary of notations.
+
+Notation Description 
+
+𝑆, 𝑅 Sender and Receiver models 
+
+𝐿 𝑀 , 𝐻 𝑀 Number of layers and heads for model 𝑀 ∈ { 𝑆, 𝑅 }
+
+𝑗, 𝑖 Layer index (1 ≤ 𝑗 ≤ 𝐿 𝑀 ) and head index (1 ≤ 𝑖 ≤ 𝐻 𝑀 )
+
+𝑟 Number of recomputed prefix layers in 𝑅 𝐴 𝑗 𝑖 (𝑀 ) Attention map of the 𝑖 -th head in the 𝑗 -th layer of model 𝑀 
+
+ˆ𝐴 𝑗 𝑖 (𝑀 ) Reused (approximated) attention map for 𝑅 𝐴 𝑗 (𝑀 ) Concatenation of all heads: [𝐴 𝑗  
+
+> 1
+
+(𝑀 ), . . . , 𝐴 𝑗 𝐻 𝑀 (𝑀 )] 
+
+𝑤 𝑗 Linear projection weights for the 𝑗 -th layer 
+
+𝑚 (·) Layer mapping function 𝑗 𝑅 → 𝑗 𝑆 
+
+3.2 Challenges in Cross-Model Reuse 
+
+Multi-LLM systems typically contain heterogeneous models with varying architectures (e.g., dif-ferent layer counts, head counts and head dimensions). This heterogeneity renders naive reuse approaches, such as Droidspeak and CacheBlend, ineffective, as they are tailored strictly for homo-geneous models. To enable KV cache reuse across heterogeneous architectures, recent works have introduced learning-based approaches that employ neural networks to project KV states between models. However, these methods primarily prioritize generation quality over system efficiency. The com-putational overhead introduced by complex adapters often negates the latency benefits of reuse, failing to achieve the optimal accuracy-efficiency trade-off required by online serving systems. The fundamental limitation of these approaches lies in the nature of the reused state. KV caches are tightly coupled with model weights and hidden dimensions. Even models fine-tuned from the same base checkpoint can exhibit drastically different KV distributions for identical prompts, let alone fully heterogeneous pairs. Consequently, translating KV caches requires complex non-linear transformations to maintain accuracy, making efficient reuse intrinsically difficult. 
+
+3.3 Attention Maps as Reuse States 
+
+In contrast to KV caches, we identify the Attention Map as a superior candidate for cross-model state reuse. While KV states are model-specific representations, attention maps capture the 
+
+semantic dependencies between tokens (i.e., "which token attends to which"). Intuitively, if two models share the same tokenizer and context, their attention patterns should exhibit structural similarity regardless of their hidden dimensions or parameter counts. Figure 3 shows different computation paths between attention map reuse and KV cache reuse. Compared to recomputed layers, attention map reuse avoids computing softmax (𝑄𝐾 𝑇 /√𝑑 ) in       
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:7 VVKVVV
+> VVKVVV
+> VVK
+> AVVV
+> O
+> FFN
+> Q
+> E
+> A
+> VVV
+> Q
+> A
+> O
+> FFN
+> Q
+> E
+> Q
+> A
+> O
+> VVK
+> FFN
+> Q
+> E
+> VVV
+> A) Attention Map
+> Reuse
+> B) Full KV Cache Reuse C) Reuse KV Cache
+> then Recompute
+> VVKVVV
+
+Fig. 3. Illustration of attention map reuse. Each circle represents a computational module; purple circles signify modules requiring computation, while gray circles indicate inactive modules. The blue rectangles correspond to their respective caches. 
+
+reused layers. It must be admitted that KV cache reuse mechanism doesn’t need any computation (except for last token) in full reuse layers. But the result of Droidspeak showed that a large portion of contiguous layers need recomputation to maintain accuracy, so recomputing pattern (Figure 3) is common in KV cache reuse mechanism in practice. Attention-map reuse also creates an opportunity to remove key projection from the critical path of reuse layers. The receiver produces the attention output by applying the transferred attention map to its value vectors, so keys are not needed for that output. Key states are still required for the subsequent decode phase, but their projection can be delayed and overlapped with pipeline bubbles such as cross-GPU communication. Through empirical analysis, we find that certain aligned layers of a given sender–receiver model pair can exhibit an approximately linear relationship in their attention maps. Such transferability is specific to both the model pair and the selected layer mapping, and must therefore be calibrated and validated offline rather than assumed to hold universally. Observation 1. Given an appropriate layer mapping 𝑚 (·) , the attention map of the receiver model’s layer 𝑗 , denoted as {𝐴 𝑗 𝑖 (𝑅 )} 𝐻 𝑅 
+
+> 𝑖 =1
+
+, can be linearly approximated by the sender model’s corresponding attention maps {𝐴 𝑚 ( 𝑗 ) 
+
+> 𝑖
+
+(𝑆 )} 𝐻 𝑆 
+
+> 𝑖 =1
+
+.
+
+To identify transferable layer pairs and determine which receiver layers require recomputation, we use 𝐿 1 or TV (Total Variation) distance to measure the attention-map fitting error between the two models. Specifically, for a model pair (𝑅, 𝑆 ) and a target layer 𝑗 , we fit the following simplex-constrained regression error offline: min   
+
+> 𝑤 𝑗
+
+𝐴 𝑚 ( 𝑗 ) (𝑆 ) · 𝑤 𝑗 − 𝐴 𝑗 𝑖 (𝑅 ) 1 s.t. 𝑤 𝑗 ≥ 0,∑︁ 𝑤 𝑗 = 1 (2) where 𝑤 𝑗 represents the linear transformation weights that aggregate sender heads to approximate a specific receiver head. Here we fit the weights on a small calibration set to diagnose transferability and guide layer selection. The deployed transfer weights are instead optimized using receiver’s end-to-end response loss (Section 5.1). The simplex constraint makes each receiver head a nonnegative, normalized convex mixture of sender heads, preserving the basic structure of an attention distribution. This lightweight linear form can be fused with sparse retrieval and value aggregation. Unconstrained, low-rank, or                          
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:8 Jin et al. 04812 16 20 24 28 32 i (Sender Layer) 04812 16 20 24 j (Receiver Layer) HotpotQA 04812 16 20 24 28 32 i (Sender Layer) 04812 16 20 24 Multinews 04812 16 20 24 28 32 i (Sender Layer) 04812 16 20 24 Conversation
+> 0.2 0.4 0.6 0.8
+
+Fig. 4. TV-distance heatmaps for linear fits between every sender–receiver layer pair in Qwen3-8B →1.7B. The x-axis is the sender-layer index, and the y-axis is the receiver-layer index. Entry (𝑖, 𝑗 ) is the TV distance between the attention map fitted from sender layer 𝑖 and the original attention map of receiver layer 𝑗 ; lower values indicate a better fit. 
+
+MLP mappings could be more expressive, but would add online computation, memory traffic, or intermediate materialization and thereby weaken the latency benefit of reuse. As illustrated in Figure 4, across various datasets, the earliest receiver layers (lower rows) exhibit high fitting errors across candidate sender layers, whereas the middle and later receiver layers can be reconstructed more accurately through linear projection. This motivates us to recompute the first few receiver layers (e.g., 𝑟 = 1 ∼ 3) and reuse attention maps thereafter. Our ablation on Qwen3-8B →1.7B with Conversation further confirms this trade-off: increasing 𝑟 from 3 to 15 provides no ROUGE-L improvement but introduces unnecessary latency (i.e., raises TTFT from 0.3205s to 0.3556s). Using the diagnostic weights fitted above, MapFlow profiles the layer-wise TV distance and determines 𝑟 offline for each model pair. For layer mapping 𝑚 (·) , we use suffix alignment, 𝑚 ( 𝑗 ) = 𝑗 + 𝐿 𝑆 − 𝐿 𝑅 , where 𝐿 𝑆 and 𝐿 𝑅 denote the numbers of layers in the sender and receiver models, to align the empirically more stable later layers. If a model pair exhibits high fitting error, MapFlow conservatively increases r or falls back to full prefill when no reliable reuse region remains. 
+
+4 Data Flow in MapFlow 
+
+Based on the observations above, we propose MapFlow, a novel LLM serving system designed to accelerate the prefill phase via attention reuse. As depicted in Figure 5, MapFlow contains three core components: Partial Recomputation , Layer Mapping , and Head Mapping .
+
+Partial Recomputation : let 𝑟 denote the number of recomputed layers. For the first 𝑟 layers, the receiver model 𝑅 performs standard computation to obtain accurate hidden states. For the subsequent layers ( 𝑗 > 𝑟 ), 𝑅 skips the heavy attention computation and instead reuses the cached attention maps from the sender model 𝑆 .
+
+Layer Mapping : each reuse receiver layer 𝑗 is mapped to a sender layer 𝑚 ( 𝑗 ) and ˆ 𝐴 𝑗 (𝑅 ) is sourced from 𝐴 𝑚 ( 𝑗 ) (𝑆 ).
+
+Head Mapping : Head mapping determines how each reuse receiver head ˆ 𝐴 𝑗 𝑖 (𝑅 ) is computed via 𝐴 𝑚 ( 𝑗 ) (𝑆 ). MapFlow uses linear transformation as head mapping. Formally, the attention map for the 𝑖 -th head in the 𝑗 -th layer of 𝑅 is derived as follows: ˆ𝐴 𝑗 𝑖 (𝑅 ) =
+
+(
+
+𝐴 𝑗 𝑖 (𝑅 ), 1 ≤ 𝑗 ≤ 𝑟 𝐴 𝑚 ( 𝑗 ) (𝑆 ) · 𝑤 𝑗 𝑖 , 𝑟 < 𝑗 ≤ 𝐿 𝑅 
+
+(3) where 𝑤 𝑗 𝑖 is the learned linear transformation weight (Section 5.1).   
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:9 @Linear
+> Weight
+> Reuse
+> Reuse
+> Data
+> Flow
+> Sender
+> Attn Map
+> Receiver
+> Attn Map
+> A) Attnmap Reuse Mechanism
+> B) Partial Recomputation
+> Recompute
+> Top P
+> Compress
+
+... 
+
+... 
+
+> Attn Map
+> Cache
+
+Fig. 5. Overview of the data flow mechanism in MapFlow, illustrating the workflow of partial recomputation and linear attention translation. 
+
+Top P Compression : Note that reusing attention maps introduces storage challenges due to the 
+
+𝑂 (𝑁 2) space complexity. It is not practical to store complete attention maps when the sequence is extremely long. We leverage sparsity in attention maps, compress them via top-𝑝 , and store the compressed attention maps in Block Sparse Row (BSR) format. 
+
+Complexity Analysis : For an input with 𝑛 heads, 𝐷 head dim and sequence length 𝐿 , standard dense attention incurs 𝑂 (𝑛𝐿 2𝐷 ) cost for attention map construction and 𝑂 (𝑛𝐿 2𝐷 ) cost for applying the attention map to the value states. In contrast, MapFlow first linearly transforms the sender attention maps from 𝑚 heads to 𝑛 heads, costing 𝑂 (𝑚𝑛𝐿𝑘 ), where 𝑘 is the average number of retained key positions per query after top-𝑝 compression. Since typically 𝑘 ≪ 𝐿 , the reuse path reduces the dependence on 𝐿 from quadratic to near-linear. We defer the empirical characterization of 𝑘 /𝐿 under different top-𝑝 settings to Section 7.5.     
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:10 Jin et al. Application
+> Router
+> Attn Retrieval
+> Engine
+> VAOA
+> Receiver
+> Model
+> ...
+> Sender
+> Model
+> Attn State
+> Compressor
+> QBKB
+> Cache Server
+> Block Indices Table
+> Hash A0,1,2,3,5,6,7
+> 4,8,10,11,12,13 Hash B
+> Block Pool
+> Fig. 6. An overview of MapFlow
+
+5 MapFlow System Design 
+
+To efficiently reuse the attention map across different models, we must address two primary challenges. The first is mitigating memory bloat: the memory complexity of the attention map scales quadratically with the context length, making it infeasible to fully materialize it during both the training phase and runtime storage. The second challenge lies in computation: given the attention map collected from the sender, we need to efficiently apply it with transformation weights to the receiver’s value vectors without incurring prohibitive inference overhead. We design MapFlow to overcome these bottlenecks in three steps, as shown in Figure 6. First, to reduce the memory footprint of the generated attention maps, MapFlow employs an Attention State Compressor to compress and store the attention map in a block-wise format. Second, to manage the compressed attention map cache and minimize memory fragmentation, MapFlow implements a Block Manager that organizes the cache by maintaining a prefix-hash-based indexing system for efficient retrieval. Third, to efficiently reuse the block-sparse attention map, MapFlow performs Attention Retrieval by utilizing a custom GPU kernel which fuses the reconstruction of the receiver’s attention map (using the cached sender’s map and transformation weights) with the matrix multiplication of the receiver’s value vectors, directly producing the attention output without intermediate dense materialization. 
+
+5.1 Offline Calibration and Training 
+
+For each sender–receiver model pair, MapFlow only trains the head-mapping weights (i.e., 𝑤 in Eq. (3)) while freezing both LLMs. The training process follows the online reusing steps. The sender prefills the shared context to produce its attention state, the receiver prefills that context through  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:11
+
+Algorithm 1 Sparse Compression of Attention Map 
+
+Require: Query 𝑄 ∈ R𝐿 𝑄 ×𝑚 ×𝐷 , Key 𝐾 ∈ R𝐿 𝐾𝑉 ×𝑚 𝑘𝑣 ×𝐷 , Block size 𝐵 , Top-𝑝 threshold 𝑝 
+
+Stage 1: Block-Level Top-𝑝 Filtering  
+
+> 1:
+
+Parallel Execution : Assign each threadblock to compute stats for a block pair (𝑞 𝑖 , 𝑘 𝑗 ) 
+
+> 2:
+
+𝑆 𝑖,𝑗 ← ( 𝑞 𝑖 𝑘 ⊤ 
+
+> 𝑗
+
+)/ √𝐷 ⊲ Block-level attention logits  
+
+> 3:
+
+block_row_lse 𝑖,𝑗 ← max row (𝑆 𝑖,𝑗 ) + log Írow exp  𝑆 𝑖,𝑗 − max row (𝑆 𝑖,𝑗 ) ⊲ Row-wise LSE over 
+
+𝐵 × 𝐵 block  
+
+> 4:
+
+row_lse 𝑖 ← log Í𝑗 exp (block_row_lse 𝑖,𝑗 ) ⊲ Global row log-sum-exp  
+
+> 5:
+
+block_sumprob 𝑖,𝑗 ← Ícol exp (block_row_lse 𝑖,𝑗 − row_lse 𝑖 ) ⊲ Sender block prob  
+
+> 6:
+
+mask ← Top-𝑝 _Filter (block_sumprob , 𝑝 ) ⊲ Boolean mask of retained blocks  
+
+> 7:
+
+crow , col , nnz_offsets ← Get_BSR_Metadata (mask ) 
+
+> 8:
+
+Allocate val ∈ Rnnz ×𝐵 ×𝐵 
+
+Stage 2: Sparse Exact Extraction  
+
+> 9:
+
+Parallel Execution : Assign each threadblock to process one non-zero block guided by 
+
+nnz_offsets  
+
+> 10:
+
+for 𝑖𝑑𝑥 = 0 to nnz − 1 do ⊲ Execute in parallel across non-zero blocks  
+
+> 11:
+
+𝑖, 𝑗, ℎ ← Decode (nnz_offsets [𝑖𝑑𝑥 ]) ⊲ Query block, Key block, Head index  
+
+> 12:
+
+𝑞 𝑏𝑙𝑜𝑐𝑘 ← Load (𝑄, q_idx = 𝑖, head = ℎ) 
+
+> 13:
+
+𝑘 𝑏𝑙𝑜𝑐𝑘 ← Load (𝐾, k_idx = 𝑗, head = ℎ) 
+
+> 14:
+
+𝐴 𝑏𝑙𝑜𝑐𝑘 ← exp (𝑞 𝑏𝑙𝑜𝑐𝑘 𝑘 ⊤ 
+
+> 𝑏𝑙𝑜𝑐𝑘
+
+/√𝐷 − row_lse 𝑖,ℎ ) ⊲ Exact attention scores  
+
+> 15:
+
+val [𝑖𝑑𝑥 ] ← 𝐴 𝑏𝑙𝑜𝑐𝑘 ⊲ Store exact scores to contiguous memory  
+
+> 16:
+
+end for  
+
+> 17:
+
+return crow , col , val 
+
+the reuse path, and the newly appended and answer tokens are then passed to the receiver with non-answer tokens masked. The mapping weights are optimized using the receiver’s end-to-end response loss, rather than the TV/ 𝐿 1 distance in Section 3.3. Note that, each reused receiver layer has 𝐻 𝑆 × 𝐻 𝑅 scalar weights, for a total of (𝐿 𝑅 − 𝑟 )𝐻 𝑆 𝐻 𝑅 . For Ministral3-8B →Ministral3-3B on Conversation, the weights account for less than 0.001% of the receiver parameters and converge within two 20-hour epochs on two A800 80GB GPUs. This one-time calibration cost can be amortized across subsequent requests, making this approach suitable for deployments with a relatively stable model pool and repeated cross-model reuse, such as multi-model routing or multi-agent serving over shared long contexts. 
+
+5.2 Attention State Compressor 
+
+MapFlow utilizes Sparse Compression mechanism that filters the attention map before it is cached. Empirical profiling of attention distributions across extended sequence lengths reveals a heavy-tail phenomenon, as extensively studied in previous works [5, 34, 61]. This implies that retaining only the tokens necessary to satisfy a cumulative probability 𝑝 requires only a small fraction of the memory compared to full dense materialization, with minimal impact on generation quality. Guided by this insight, MapFlow systematically compresses the attention map by exploiting this inherent sparsity. Details about memory footprint analysis can be found at Section 7.5. Instead of applying token-level sparsity, which leads to irregular memory access patterns, MapFlow adopts a hardware-friendly block-level sparsity approach which partitions the attention map into 2D blocks (e.g., 64 × 64 tokens). As shown in Algorithm 1, the process avoids full dense matrix materialization by splitting the compression into two primary stages:  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:12 Jin et al.
+
+Stage 1: Block-Level Top-𝑝 Filtering. For each query block and key block pair, we efficiently compute an aggregated block-level importance score via LogSumExp reductions ( block_row_lse ). Using these block-level statistics, we calculate the sum probabilities for each block ( block_sumprob )and apply a Top-𝑝 filtering strategy. For each blocks in a row, we sort the target key blocks by their aggregated scores in descending order and retain only the subset of blocks required to reach a cumulative probability threshold 𝑝 . This yields a binary mask indicating which blocks are to be kept. 
+
+Stage 2: Sparse Extraction. Once the block-sparsity mask is determined, we extract the BSR metadata, including compressed row indices ( crow ), column indices ( col ), and non-zero offsets (nnz_offsets ) which map the logical coordinates of each retained block within the [num_blocks_q ,
+
+num_blocks_k , heads ] space to its physical index in the compacted 1D memory array. Guided by these offsets, a specialized kernel ( sparse_extract ) computes the exact attention scores exp (𝑄𝐾 ⊤ −
+
+row_lse ) only for the retained sparse blocks and stores them in a contiguous 1D array of dense blocks ( values ). This two-stage compression packs the attention map into a BSR layout ultimately, drastically reducing the memory footprint and network transmission payload and aligning with memory constraints and layout of the downstream fused kernel. Note that, compression can be performed once after the sender produces the attention map, without blocking the sender’s critical path. And the compressed map can be reused by multiple receivers. 
+
+5.3 Block Manager 
+
+MapFlow organizes the attention map cache in a block-wise structure to bound memory consump-tion, analogous to how vLLM manages the KV cache in paged blocks[33]. However, a fundamental distinction complicates our design: whereas KV caches maintain uniform shape across layers and sequence positions, block-sparse attention maps exhibit highly dynamic shapes. Specifically, the attention context length varies across different sequence positions due to the causal masking, while the number of retained attention blocks fluctuates across different layers depending on the local sparsity patterns. This variability makes dynamic memory management more challenging. 
+
+Block Structure and Indexing. To accommodate these irregular shapes, we partition the attention map into blocks along the sequence dimension. For each token span (contiguous token segment), we compute a prefix hash that incorporates the content of the span and all preceding context. This hash serves as a unique identifier for cache retrieval. We maintain, for each layer of the sender model, a list of block indices corresponding to the non-zero columns of the attention map for that token span. This sparse indexing allows MapFlow to store only the attended positions rather than the full quadratic attention matrix. 
+
+Cache Storage. During the caching phase, after the sender model computes the attention map, it identifies the retained column indices for each token span (as determined by the sparsifying strategy in Section 5.2). The sender transmits these indices along with their prefix hashes to the MapFlow cache server. The server maintains a hash table mapping each prefix hash to its corresponding block indices across all layers, enabling efficient lookup during retrieval. 
+
+Cache Retrieval and Overlap. During online serving, the receiver model identifies the prefix hashes of the context it wishes to reuse. It transmits these hashes to the cache server, which returns the corresponding block indices for cache hits. The server then streams the hit blocks to the receiver’s GPU memory. This retrieval process is fully overlapped with the receiver’s partial recomputation phase described in Section 4, ensuring that the attention map blocks are available  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:13
+
+Algorithm 2 Fused decompress reuse attention Kernel 
+
+Require: Sender Attention 𝐴 ∈ R𝐿 𝐵 ×𝐿 𝐵 𝑚 in BSR format ( crow , col , val ), Receiver Values 𝑉 ∈
+
+R𝐿 𝐵 ×𝑛 ×𝐷 , Weights 𝑊 ∈ R𝑚 ×𝑛 , Block size 𝐵  
+
+> 1:
+
+Parallel Execution : Assign each threadblock to proceed one row of blocks ( 𝑟 𝑖 ) and one head of recv values ( ℎ𝑖 ) 
+
+> 2:
+
+Initialize accumulators: 𝐴𝑐𝑐 𝑎𝑡𝑡𝑛 ← 0, 𝐴𝑐𝑐 𝑜𝑢𝑡 ← 0 
+
+> 3:
+
+𝑝 𝑠𝑡𝑎𝑟𝑡 ← crow [𝑟 𝑖 ], 𝑝 𝑒𝑛𝑑 ← crow [𝑟 𝑖 + 1], 𝑙𝑎𝑠𝑡 _𝑠𝑒𝑞 _𝑝𝑜𝑠 ← 0 
+
+> 4:
+
+for 𝑝 = 𝑝 𝑠𝑡𝑎𝑟𝑡 to 𝑝 𝑒𝑛𝑑 do ⊲ Iterate sparse blocks  
+
+> 5:
+
+𝑐𝑢𝑟 _𝑐𝑜𝑙 ← col [𝑝 ] 
+
+> 6:
+
+𝑐𝑢𝑟 _𝑠𝑒𝑞 _𝑝𝑜𝑠 ← 𝑐𝑢𝑟 _𝑐𝑜𝑙 // 𝑚  
+
+> 7:
+
+ℎ𝑠 ← 𝑐𝑢𝑟 _𝑐𝑜𝑙 mod 𝑚  
+
+> 8:
+
+if 𝑐𝑢𝑟 _𝑠𝑒𝑞 _𝑝𝑜𝑠 ≠ 𝑙𝑎𝑠𝑡 _𝑠𝑒𝑞 _𝑝𝑜𝑠 then ⊲ Flush one sequence pos accumulated from different send heads  
+
+> 9:
+
+𝑉 𝑏𝑙𝑜𝑐𝑘 ← Load (𝑉 , head_idx = ℎ𝑖 , pos = 𝑙𝑎𝑠𝑡 _𝑠𝑒𝑞 _𝑝𝑜𝑠 ) 
+
+> 10:
+
+𝐴𝑐𝑐 𝑜𝑢𝑡 ← 𝐴𝑐𝑐 𝑜𝑢𝑡 + Matmul (𝐴𝑐𝑐 𝑎𝑡𝑡𝑛 , 𝑉 𝑏𝑙𝑜𝑐𝑘 ) 
+
+> 11:
+
+𝐴𝑐𝑐 𝑎𝑡𝑡𝑛 ← 0 
+
+> 12:
+
+𝑙𝑎𝑠𝑡 _𝑠𝑒𝑞 _𝑝𝑜𝑠 ← 𝑐𝑢𝑟 _𝑠𝑒𝑞 _𝑝𝑜𝑠  
+
+> 13:
+
+end if  
+
+> 14:
+
+Accumulate different send heads’ attention of one position  
+
+> 15:
+
+𝐴 𝑏𝑙𝑜𝑐𝑘 ← val [𝑝 ] ⊲ Load sparse attention block ( 𝐵 × 𝐵 ) 
+
+> 16:
+
+𝑊 𝑠𝑐𝑎𝑙𝑎𝑟 ← Load (𝑊 , indices based on 𝑐𝑜𝑙 ) 
+
+> 17:
+
+𝐴𝑐𝑐 𝑎𝑡𝑡𝑛 ← 𝐴𝑐𝑐 𝑎𝑡𝑡𝑛 + ( 𝐴 𝑏𝑙𝑜𝑐𝑘 × 𝑤 𝑠𝑐𝑎𝑙𝑎𝑟 ) ⊲ Linear transform  
+
+> 18:
+
+end for 
+
+Final Flush for the last sequence block  
+
+> 19:
+
+𝑉 𝑏𝑙𝑜𝑐𝑘 ← Load (𝑉 , head_idx = ℎ𝑖 , pos = 𝑙𝑎𝑠𝑡 _𝑠𝑒𝑞 _𝑝𝑜𝑠 ) 
+
+> 20:
+
+𝐴𝑐𝑐 𝑜𝑢𝑡 ← 𝐴𝑐𝑐 𝑜𝑢𝑡 + Matmul (𝐴𝑐𝑐 𝑎𝑡𝑡𝑛 , 𝑉 𝑏𝑙𝑜𝑐𝑘 ) 
+
+> 21:
+
+Store 𝐴𝑐𝑐 𝑜𝑢𝑡 to 𝑂𝑢𝑡𝑝𝑢𝑡 [𝑟 𝑖𝑑𝑥 ]
+
+before the receiver reaches the layers that require them. This overlap hides the network and I/O latency of cache transfer, preventing stalls in the generation pipeline. 
+
+5.4 Attention Retrieval with Fused Kernel 
+
+To retrieve sender’s attention map and transform into receiver’s, a naive implementation would follow a two-stage pipeline: (1) materialize a dense receiver attention map 𝐴 𝑅 ∈ R𝐿 ×𝐿 ×𝑛 by transforming the sender map 𝐴 𝑆 ∈ R𝐿 ×𝐿 ×𝑚 with weights 𝑊 ∈ R𝑚 ×𝑛 , and (2) multiply 𝐴 𝑅 with the receiver values 𝑉 𝑅 to produce the output. However, even though 𝐴 𝑆 is stored in a block-sparse format, the head transformation induced by 𝑊 densifies attention across heads. Consequently, explicitly materializing 𝐴 𝑅 requires O( 𝑛𝐿 2) memory and is infeasible for long contexts. To overcome this memory bottleneck, MapFlow employs a custom fused GPU kernel (Algo-rithm 2) that reconstructs the receiver’s attention and computes the output on the fly, without allocating global memory for intermediate dense states. The attention retrieval engine organizes the sparse 𝐴 𝑆 logically into a shape of [𝐿 𝐵 , 𝐿 𝐵 , 𝑚, 𝐵, 𝐵 ], where 𝐿 𝐵 is the number of blocks along the sequence dimension and 𝐵 is the block size. Within the BSR layout, the column array (denoted as col in Algorithm 2) stores the non-zero indices of a flattened 2D logical grid of size [𝐿 𝐵 , 𝑚 ].Because this flattening process strictly packs the 𝑚 sender heads for a single sequence position contiguous in memory before advancing to the next sequence position, a 1D compressed column  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:14 Jin et al.
+
+index ( cur_col ) inherently encodes both spatial dimensions. Therefore, during kernel execution, the original 2D coordinates can be efficiently recovered on the fly via standard integer arithmetic: integer division by 𝑚 yields the sequence block position ( cur_seq_pos ← cur_col // 𝑚 ), while the modulo operation extracts the corresponding sender head index ( ℎ𝑠 ← cur_col mod 𝑚 ). During computation, each threadblock is assigned to process one receiver block row 𝑟 𝑖 for a specific receiver head ℎ𝑖 . The effective receiver attention is defined as 𝐴 𝑅 ℎ𝑖 = Í𝑚 𝑘 =1 𝑊 𝑘,ℎ 𝑖 𝐴 𝑆 𝑘 , and the corresponding output is 𝑂 ℎ𝑖 = 𝐴 𝑅 ℎ𝑖 𝑉 𝑅 ℎ𝑖 . As the kernel streams over the non-zero blocks of 𝐴 𝑆 , the localized index layout ensures that it can incrementally accumulate the attention contributions from all 𝑚 sender heads for the current sequence position, weighted by the linear projection scalar 
+
+𝑊 𝑘,ℎ 𝑖 . Once all sender heads for a given sequence block are accumulated (detected when cur_seq_pos 
+
+changes), the kernel immediately executes a matrix multiplication between this aggregated attention block and the corresponding receiver value block 𝑉 𝑅 , accumulating the result directly into the final output register. This operator fusion entirely eliminates the need to instantiate 𝐴 𝑅 in High Bandwidth Memory (HBM). By keeping intermediate attention scores on-chip (in registers or shared memory) through-out the computation, it drastically reduces global memory traffic. Additional implementation-level optimizations, such as cache-aware memory scheduling and autotuning configurations, are detailed in Appendix C [30]. 
+
+6 Implementation 
+
+We implement the MapFlow inference server in 5K lines of code in Python, comprising three main modules: the sender, the receiver, and the cache server. We integrated our sender and re-ceiver modules into vLLM [33]. We wrote a fused retrieval kernel using Triton [62], supporting features including PagedAttention [33], Chunked Prefill [1] and Variable Length Sequences Packing. Currently we store the compressed attention map in GPU memory for fast retrieval due to the large size of attention maps and limited bandwidth of PCIe. In order to reduce interference when multiple processes access the shared GPU resources, we launch the NVIDIA MPS server [50] to create a unified CUDA context for all processes and only reserve a little fraction of GPU SMs for cache server to operate inside receiver’s GPU memory without interrupting the receiver’s main workflow. Inter-module tensor communication leverages CUDA Inter-Process Communication (IPC) [49], which allows tensors to be accessed across process boundaries by passing hardware memory handles over TCP connections, eliminating the need for explicit data copies through the CPU. A naive IPC approach would invoke cudaIpcOpenMemHandle for each tensor transfer, incurring significant overhead from repeated CUDA handle operations. To mitigate this, MapFlow pre-allocates a large, fixed-size memory buffer in GPU memory and registers it for IPC during server initialization. The buffer handle is shared once across processes via TCP. Subsequently, modules write tensors to pre-negotiated offsets within this buffer and signal availability through lightweight metadata messages. This design amortizes the cost of handle creation and avoids per-transfer CUDA API overhead. The cache server performs attention map reconstruction and compression entirely on the GPU. Since compression is applied once during the caching phase, the computational cost is independent of the number of receivers. This allows MapFlow to scale efficiently to serve multiple receiver instances without recomputing or recompressing the cached attention maps. Our current implementation follows prior works [22, 37, 86] on multi-model multiplexing serving that assume a co-located deployment to isolate the computational benefit of attention-map reuse, but the method itself does not require models to reside on the same GPU. In distributed settings,  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:15
+
+the compressed block-sparse attention map can be transferred to the receiver, where the fused retrieval kernel is applied locally. 
+
+7 Experiments 7.1 Setup 
+
+Models: We conduct our evaluation of MapFlow using two distinct model families: Qwen3 [54], Ministral3 [39]. To analyze performance across different scales, we select three model sizes and form two pairs for each family: Qwen3 (1.7B, 8B, and 14B), Ministral3 (3B, 8B, and 14B). 
+
+Hardware Configuration: All experiments are conducted on virtual machines with 8 × NVIDIA A800 (80GB) GPUs. 
+
+Datasets: We evaluate MapFlow on three diverse datasets (top-𝑝 = 0.7 by default), including HotpotQA [72] , LMSYS [83], ShareGPT4 [9], and Multi-News [15]. For each dataset, we utilize a split of approximately 10,000 examples for training and validation, and 1,000 examples for testing. Following conventions [3, 41, 73], we assess generation quality using task-specific metrics: F1 scores for Question-Answering tasks, and ROUGE-L for conversation and summarization tasks. 
+
+Baselines: We compare MapFlow against state-of-the-art methods that also optimize the trade-off between generation quality and latency. Specifically, we select: 
+
+• Full Prefill: The receiver model prefills the text of the context with vLLM [33], representing the highest computation overhead but the best quality. 
+
+• KV Cache Reuse: We extend CacheBlend’s [73] algorithm to determine the fraction of tokens to recompute for cross model KV cache reuse based on the difference between the recomputed KV cache and sender model’s original KV cache. In addition, we adopt a reverse layer mapping strategy since now sender has more layers than receiver, which is different from CacheBlend’s setting. 
+
+• Sparse Prefill: We also compare with FlexPrefill [34] and MInference [28] which reduce computation costs using sparse attention patterns instead of full attention. 
+
+• Attention Map Reuse: We compare with IAM [82] and implement it ourselves since its repository is empty, following its suggested 50% layer-mapping setting. We did not compare with prior works with strong application constraints, like DroidSpeak using selective recomputation and necessitating embedding tensor transfers at transition layers, which is infeasible for heterogeneous model pairs with differing hidden dimensions (i.e., different shape of embedding tensors). 
+
+7.2 Prefill Latency–Generation Quality Trade-off 
+
+We first demonstrate MapFlow’s favorable trade-off between TTFT reduction and generation quality in Figure 7. Across four pairs of models on three datasets, MapFlow achieves a 15%–20% reduction in prefill delay over the full prefill method, without compromising generation quality. Compared to FlexPrefill, MapFlow can achieve a 7%–12% further reduction in prefill delay with better or equal generation quality. Compared to MInference, the prefill delay reduction is more significant. In contrast, CacheBlend suffers a significant degradation in accuracy. This outcome aligns with our analysis in Section 3, where we argue that the KV cache is tightly coupled with model-specific parameters, leading to substantial distribution differences across heterogeneous models. CacheBlend’s strategy of recomputing only a fraction of tokens is insufficient to bridge this fundamental gap, resulting in a notable drop in quality. Compared to IAM, MapFlow provides better generation quality and better latency on most settings because of more robust and flexible attention map reusing design. 
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026.
+
+317:16 Jin et al. 0.18 0.20 TTFT (s) 010 20 30 40                         
+
+> HotpotQA F1 Score (%)
+> Better Qwen3 8B vs Qwen3 1.7B
+> 0.425 0.450 0.475 TTFT (s) 010 20 30 40 F1 Score (%)
+> Better Qwen3 14B vs Qwen3 8B
+> 0.28 0.30 0.32 TTFT (s) 010 20 30 40 F1 Score (%)
+> Better Ministral3 8B vs Ministral3 3B
+> 0.50 0.55 0.60 TTFT (s) 010 20 30 40 F1 Score (%)
+> Better Ministral3 14B vs Ministral3 8B
+> 0.32 0.34 0.36 TTFT (s) 10 20 30
+> Conversation ROUGE-L (%)
+> Better
+> 1.0 1.1 TTFT (s) 10 20 30 ROUGE-L (%)
+> Better
+> 0.65 0.70 TTFT (s) 10 20 30 ROUGE-L (%)
+> Better
+> 1.2 1.3 TTFT (s) 10 20 30 ROUGE-L (%)
+> Better
+> 0.20 0.22 TTFT (s) 0510 15 20
+> Multinews ROUGE-L (%)
+> Better
+> 0.450 0.475 0.500 0.525 TTFT (s) 0510 15 20 ROUGE-L (%)
+> Better
+> 0.32 0.34 0.36 TTFT (s) 0510 15 20 ROUGE-L (%)
+> Better
+> 0.55 0.60 0.65 TTFT (s) 0510 15 20 ROUGE-L (%)
+> Better
+> Ours CacheBlend FlexPrefill IAM Minference Full prefill
+
+Fig. 7. MapFlow reduces prefill latency while maintaining generation quality. Table 2. F1 / TTFT (s) results on RULER-20K. 
+
+Model pair Full prefill FlexPrefill IAM Minference MapFlow Qwen3 8B 0.305 / 0.288 / 0.165 / 0.133 / 0.288 / 
+
+→ 1.7B 0.5726 0.5001 0.5285 0.4232 0.4928 Qwen3 14B 0.526 / 0.380 / 0.204 / 0.259 / 0.392 / 
+
+→ 8B 1.8604 1.6026 1.7171 1.3409 1.5767 Ministral3 8B 0.454 / 0.318 / 0.344 / 0.176 / 0.348 / 
+
+→ 3B 1.2043 1.0530 1.1116 0.8638 1.0434 Ministral3 14B 0.550 / 0.406 / 0.478 / 0.198 / 0.481 / 
+
+→ 8B 2.4112 2.1697 2.2255 1.9719 2.1557 The existing results also reveal model-pair and task sensitivity. The evaluated Ministral3 pairs converge in fewer epochs and preserve generation quality more consistently than the Qwen3 pairs. Conversation and summarization are generally well suited to reuse because much of a long prefix provides broad contextual grounding. QA is more sensitive: small attention errors can change which evidence is selected. These trends reinforce that reuse should be calibrated per model pair and workload rather than enabled as an unchecked universal optimization. 
+
+7.3 Long-Context Evaluation 
+
+To evaluate the long-context regime, we increase the context length to 20K using RULER [23]. We tune top_ 𝑝 to preserve enough attention map information. Specifically, we use 𝑝 = 0.92, 0.87, 0.85, and 0.87 for Qwen3 8B →1.7B, Qwen3 14B →8B, Ministral3 8B →3B, Ministral3 14B →8B, 
+
+Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:17 1.0 1.5 2.0 0.26 0.28 TTFT (s)        
+
+> Qwen3-1.7B reuses Qwen3-8B
+> Ours Full Prefill 0.8 1.0 0.80 0.85
+> Qwen3-8B reuses Qwen3-14B
+> 1.0 1.5 2.0 2.5 0.3 0.4 0.5
+> Ministral3-3B reuses Ministral3-8B
+> 0.75 1.00 1.25 1.50 0.7 0.8 0.9 1.0
+> Ministral3-8B reuses Ministral3-14B
+> QPS
+
+Fig. 8. MapFlow achieves higher end-to-end throughput in multi-turn conversation routing. 
+
+respectively in MapFlow. MapFlow achieves better F1 over FlexPrefill, IAM, and MInference, for all four pairs, while maintaining competitive prefill latency, which demonstrates the effectiveness of our approach for long context scenarios. We also find that the latency speedups are not as significant as the results on short datasets due to larger top-𝑝 . More broadly, MapFlow is complementary to receiver-side sparse prefill: the former reuses attention patterns computed by the sender, while the latter discovers sparse patterns within the receiver. Exploring attention-map-guided hybrid strategies that combine these two mechanisms is a promising direction for improving long-context serving. 
+
+7.4 End-to-End Throughput Improvement on Multi-turn Conversation 
+
+To see the impact of MapFlow on improving the throughput of an online LLM serving system with multi-model routing, we simulate the routing traces. Instead of deploying a specific learned router, we adopt the noise-injection methodology introduced in [10][25] to emulate prediction uncertainty. Specifically, we first evaluate the ground-truth scores of both the large and small models. We then inject zero-centered Gaussian noise into these true values to simulate the imperfect predictions of a practical router. Finally, we apply a threshold-based policy: the query is routed to the large model only if its noisy score exceeds that of the small model by a pre-defined threshold 𝜏 , thereby achieving a controllable trade-off between quality and cost. For each multi-turn conversation dataset trajectory, we carefully pair each single turn with request arrival times to simulate the real-world scenario of an online system. We then run our model with optimal top-𝑝 (which achieves the best performance with sufficient quality as a raw small model) and compare it with full prefill on routing. As shown in Figure 8, we compare the TTFT of the receiver model under various arrival rates on the LMSYS [83] and ShareGPT4 [9] dataset. MapFlow achieves lower P90 TTFT across all arrival rates, and achieves at most 25% higher throughput (QPS) under same P90 TTFT constraint across different model pairs. 
+
+Understanding MapFlow’s Impact: To further understand the impact of MapFlow on the overall system performance, we analyze the distribution of Time-To-First-Token (TTFT) for turns that are routed from the large model to the small model. Figure 9 shows the Cumulative Distribution Function (CDF) of TTFT for these turns. Across all the evaluated model pairs, the CDF curves for MapFlow consistently shift to the left compared to the full prefill baseline. More importantly, the performance gap between the two methods widens significantly at the upper tail of the distribution. In multi-turn scenarios, these tail latencies correspond to queries with extensive context histories where the quadratic complexity of standard attention becomes a severe bottleneck. As highlighted by the 95th percentile (p95) markers, MapFlow drastically reduces tail latency. This demonstrates that reusing block-sparse attention maps effectively mitigates the compute 
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026.
+
+317:18 Jin et al. 0.0 0.1 0.2 0.3 0.4 0.5                       
+
+> TTFT (s)
+> 0.00 0.25 0.50 0.75 1.00
+> CDF
+> Qwen3-8B vs Qwen3-1.7B
+> 0.0 0.2 0.4 0.6 0.8 1.0 1.2 1.4 1.6
+> TTFT (s)
+> 0.00 0.25 0.50 0.75 1.00
+> CDF
+> Qwen3-14B vs Qwen3-8B
+> 0.0 0.2 0.4 0.6 0.8 1.0 1.2
+> TTFT (s)
+> 0.00 0.25 0.50 0.75 1.00
+> CDF
+> Ministral3-8B vs Ministral3-3B
+> 0.0 0.5 1.0 1.5 2.0 2.5 3.0
+> TTFT (s)
+> 0.00 0.25 0.50 0.75 1.00
+> CDF
+> Ministral3-14B vs Ministral3-8B
+> Full Prefill Ours 95th Percentile (p95)
+
+Fig. 9. CDF comparison of the distribution of TTFT when switching from large to small models. The y-axis represents the cumulative probability. 
+
+penalty typically incurred when a small model inherits a long context from a large model. Conse-quently, MapFlow not only accelerates average response times but ensures a much more stable and predictable user experience in online serving systems. 
+
+7.5 Sparsification Analysis 
+
+7.5.1 Memory Footprint. To better understand the practical efficiency of MapFlow, we analyze the memory footprint of compressed attention maps induced by block-level top-𝑝 filtering across different sequence intervals. Specifically, we measure the storage cost of retained attention map blocks under varying context lengths. The following experiments are conducted using the Qwen3-8B to Qwen3-1.7B model pair on the ShareGPT4 dataset. As shown in Table 3, the memory footprint increases initially as the sequence length grows, but it plateaus after 12k tokens. Notably, the memory usage remains stable across all top-𝑝 settings in the 12k–24k token ranges. This indicates that by utilizing top-𝑝 compression, MapFlow can effectively scale to long contexts without incurring additional memory overhead, making it a practical solution 
+
+Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:19 
+
+> Table 3. Memory Footprint Increments by Top_p (GiB)
+
+Token Range top_p = 0.7 top_p = 0.8 top_p = 0.9 
+
+0∼4k 1.23 1.80 3.11 4k ∼8k 1.84 3.09 6.35 8k ∼12k 2.82 4.87 10.07 12k ∼16k 3.35 5.86 12.29 16k ∼20k 2.99 5.53 12.94 20k ∼24k 3.12 5.52 12.84  
+
+> Table 4. Generation quality under different sparsification ratios (top-𝑝 thresholds) on RULER (20k context)
+
+Model Full attention 𝑝 = 0.9 𝑝 = 0.85 𝑝 = 0.8Qwen3 1.7B 0.296 0.293 0.286 0.092 Ministral3 3B 0.365 0.418 0.282 0.172 Qwen2.5 7B 0.076 0.055 0.025 0.008 Llama3.1 8B 0.531 0.506 0.306 0.193 Phi-4-Mini 0.389 0.325 0.060 0.020 
+
+> Table 5. Cross-dataset transfer results on 2WikiMultihopQA (F1 score). Weights were trained on HotpotQA and evaluated zero-shot on 2WikiMultihopQA.
+
+Receiver model Full prefill MapFlow (top-𝑝 =0.9) FlexPrefill Qwen3 1.7B 0.432 0.335 0.218 Qwen3 8B 0.464 0.432 0.226 Ministral3 3B 0.367 0.403 0.146 Ministral3 8B 0.513 0.461 0.223 for real-world applications that require handling extensive conversation histories. More analysis about the effective sparsity ratio are in Appendix B.3 [30]. 
+
+7.5.2 Quality Loss. We additionally quantify the quality loss caused by sparsification in isolation from cross-model reuse. Table 4 reports generation quality for five representative models span-ning different families under progressively more aggressive top-𝑝 sparsification. Quality degrades gracefully at top-𝑝 = 0.9, closely tracking full attention for most models, but drops sharply below top-𝑝 = 0.85 for several models (e.g., Qwen3 1.7B falls from 0.286 to 0.092 between top-𝑝 = 0.85 and 0.8). This confirms that the sparsification threshold cannot be fixed globally and must be calibrated per model, consistent with MapFlow’s offline calibration design. 
+
+7.6 Generalizability Evaluation 
+
+To study whether the learned transfer weights generalize beyond the calibration corpus, we perform a cross-dataset transfer generalization experiment. In particular, we train the transfer weights on HotpotQA and evaluate them zero-shot on 2WikiMultihopQA. As shown in Table 5, generation quality remains similar without retraining, suggesting the learned weights capture model-pair-level attention correspondence rather than overfitting to a specific dataset. 
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026.
+
+317:20 Jin et al. 0.2 0.3 0.4 0.5 0.6 0.14 0.15 0.16 0.17 0.18              
+
+> Qwen3-8B vs Qwen3-1.7
+> 0.2 0.3 0.4 0.5 0.6 0.20 0.25 0.30 0.35 0.40 0.45
+> Qwen3-14B vs Qwen3-8B
+> 0.2 0.3 0.4 0.5 0.6 0.15 0.20 0.25 0.30
+> Ministral3-8B vs Ministral3-3B
+> 0.2 0.3 0.4 0.5 0.6 0.2 0.3 0.4 0.5 0.6
+> Ministral3-14B vs Ministral3-8B
+> Ours Full Prefill
+
+Fig. 10. MapFlow achieves speedup across varying transition probabilities 𝑝 . The x-axis represents the probability of transitioning from a large model to a small model, while the y-axis represents the P90 TTFT in seconds. 
+
+7.7 Case Study of Different Routing Thresholds 
+
+Consider a multi-turn trajectory where a given turn 𝑡 (𝑡 > 1) is routed to a small model. Let 𝑝 
+
+denote the probability that the preceding turn ( 𝑡 − 1) was processed by a large model, meaning the probability of a consecutive small-to-small model transition is 1 − 𝑝 . Furthermore, let 𝑇 𝑙𝑎𝑟𝑔𝑒 
+
+and 𝑇 𝑠𝑚𝑎𝑙𝑙 represent the baseline Time-To-First-Token (TTFT) for the small model when inheriting context from a large model versus a small model, respectively. Given that MapFlow achieves a cross-model prefill time ratio of 𝑎 (𝑎 < 1), the expected overall TTFT speedup ratio for the system can be formulated as: Expected Speedup = 𝑝𝑇 𝑙𝑎𝑟𝑔𝑒 + ( 1 − 𝑝 )𝑇 𝑠𝑚𝑎𝑙𝑙 
+
+𝑝𝑎𝑇 𝑙𝑎𝑟𝑔𝑒 + ( 1 − 𝑝 )𝑇 𝑠𝑚𝑎𝑙𝑙 
+
+Rearranging this equation, we obtain: Expected Speedup = 11 − 1−𝑎    
+
+> 1+( 1
+> 𝑝 −1)𝑇 𝑠𝑚𝑎𝑙𝑙 𝑇 𝑙𝑎𝑟𝑔𝑒
+
+As 𝑝 increases, 𝑇 𝑠𝑚𝑎𝑙𝑙 remains relatively constant, whereas 𝑇 𝑙𝑎𝑟𝑔𝑒 increases significantly due to the longer contexts inherited from the large model after multiple turns, mutually contributing to a greater overall speedup. To validate this analysis, we conduct a case study by selecting different routing thresholds 𝜏 to achieve various 𝑝 values, measuring the P90 TTFT under a constant request arrival rate. As demonstrated in Figure 10, MapFlow consistently delivers speedups across varying 
+
+𝑝 values. The most pronounced improvements are observed at higher 𝑝 values, which aligns with our theoretical expectations. Furthermore, it is important to note that a higher 𝑝 indicates the system selects the large model more frequently. While this yields higher generation quality, it inherently introduces higher baseline latency. MapFlow effectively mitigates this latency penalty, enabling to maintain a favorable balance between quality and responsiveness, even under aggressive large-model routing policies. 
+
+Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:21 8k/128/128/128 8k/256/128/128 8k/256/256/256 12k/128/128/128 12k/256/128/128 12k/256/256/256 16k/128/128/128 16k/256/128/128 16k/256/256/256 20k/128/128/128 20k/256/128/128 20k/256/256/256  
+
+> 0510 15 20
+> AVG Latency (s) Ours Baseline
+
+Fig. 11. Speedup for single agentic workflow for Ministral model family. Horizontal axis: Prompt length / large model decoding length / medium model decoding length / small model decoding length .
+
+7.8 Single-Workflow Latency for Three Models 
+
+We evaluate MapFlow on a representative three-model agentic workflow [55, 65, 76], where a request is sequentially processed by Ministral3-14B, 8B, and 3B for planning, refinement, and summarization. Both receiver models reuse the attention map produced by the 14B sender. We group trajectories by context length and let each model decode a fixed number of tokens. The 14B model uses two-way tensor parallelism, while the 8B and 3B models are co-located on one GPU to directly share the block pool. As shown in Figure 11, MapFlow consistently reduces end-to-end latency, saving 0.48–0.73 seconds per round and achieving up to 5.4% speedup. This demonstrates that sender-side compression can be amortized across multiple downstream receivers. This experiment demonstrates that attention-map reuse provides a measurable end-to-end benefit in an agentic workflow, rather than representing the maximum acceleration achievable by MapFlow. Because MapFlow accelerates prefill but not decode, its workflow-level benefit is naturally bounded when decoding dominates the overall latency. It is therefore particularly suitable for TTFT-sensitive, routing-heavy, and long-context workflows, where repeated prefill constitutes a substantial fraction of execution time. For example, with a 20K-token context and 256 decoded tokens across the large, medium, and small models, prefilling the two downstream models accounts for approximately 23.4% of the end-to-end latency. MapFlow accelerates these prefill stages by approximately 1 .28 ×, resulting in the observed 5.4% end-to-end speedup. 
+
+8 Related Work 
+
+LLM-augmented Data Systems. Integrating Large Language Models (LLMs) into data manage-ment has shifted from basic natural language interfaces toward autonomous, agentic databases. Recent research explores LLM-driven database tuning and query optimization (e.g., 𝜆 -Tune [18], LL-MOpt [74], LLM-QO [60], LlamaTune [31], GENO [58]), where generative models replace heuristic planners to directly infer execution plans and synthesize configurations. Furthermore, frameworks increasingly leverage LLMs for complex data integration, cleaning, and entity resolution (e.g., Jelly-fish [77], PromptEM [66], Seed [8]). At the orchestration level, frameworks like BridgeScope [68] and ChatDB [24] securely modularize operations, enabling agents to execute ACID-compliant transactions without exposing raw data. Crucially, these LLM-augmented pipelines frequently process highly redundant prefixes—such as exhaustive database schemas, system constraints, and multi-turn instructions. Dispatching these shared contexts across heterogeneous models incurs pro-hibitive prefill computational costs, which directly motivate our approach for efficient cross-model state reuse mechanisms.  
+
+> Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:22 Jin et al.
+
+Multi-Model Serving and Management. To optimize the cost-latency-accuracy tradeoff in production environments, algorithms for multi-model serving frequently employ LLM routing and cascade inference (e.g., RouteLLM [51], CascadeLLM [29], and LLM-Blender [27]). At the system level, serving infrastructures have evolved across three paradigms. For identical model instances, high-throughput frameworks like vLLM [33] and SGLang [84] utilize prefix caching to minimize redundant prefill computation. Expanding beyond a single base model, multi-adapter serving architectures—such as Punica [6] and S-LoRA [56] enable the concurrent execution of thousands of fine-tuned task variants by sharing the base model’s weights. Furthermore, as application workflows increasingly demand entirely distinct architectures, multi-tenant heterogeneous frameworks like AlpaServe [37], MuxServe [86], and Llumnix [59] have been developed to spatially and temporally multiplex completely different models across shared GPU clusters. All these heterogeneous serving frameworks remain unoptimized for shared prefix prompts. 
+
+KV Cache Management. Foundational research has tackled KV Cache memory fragmentation by adapting OS-level virtualization techniques: PagedAttention enables non-contiguous memory allocation, while frameworks like SGLang [84] and PromptCache [19] leverage Radix Trees to facilitate prefix-aware KV cache sharing among requests directed to the same model. Concurrently, to bound cache growth during long-context generation, a proliferation of cache compression and eviction algorithms (e.g., StreamingLLM [70], H2O [81], SnapKV [36], PQCache [78]) dynamically prune non-essential tokens by preserving only critical attention sinks or high-activation states. Despite these advancements, existing paradigms remain bound to rigid KV tensors, making them orthogonal to the attention-map-based design of MapFlow. 
+
+9 Limitations and Future Work 
+
+While MapFlow establishes attention maps as a practical reusable state for cross-model prefix caching, our current design choices prioritize structural compatibility and online serving efficiency. We briefly discuss their implications and promising directions for future work. 
+
+Applicability beyond shared tokenization. MapFlow is currently most effective when the sender and receiver share the same tokenizer and process the same canonicalized input context. This assumption holds for many realistic multi-model deployments, especially within a model family. Taking the Llama 3 family as an example, Meta has officially released at least 15 publicly available text-model checkpoints across Llama 3, 3.1, 3.2, and 3.3 1 that share the same underlying tokenizer vocabulary, while HuggingFace hosts hundreds of additional community-developed vari-ants. There still remains many challenges to consider settings with mismatched tokenizers, prompt canonicalization pipelines, or more divergent architectures. Extending MapFlow to these broader scenarios will likely require additional alignment mechanisms, such as token-level correspondence recovery or intermediate semantic anchoring. Exploring such alignment strategies is an important direction for broadening the scope of cross-model attention reuse. 
+
+Compact representations for reusable attention state. Our current system adopts block-level Top-𝑝 compression to make attention-map caching practical for long contexts. Although this design substantially reduces the cost of storing dense attention, reusable attention states can still occupy nontrivial memory under long-context, high-reuse workloads. This suggests an opportunity for richer compression schemes that preserve the transferability of attention structure while further reducing storage overhead. Examples include quantized sparse attention, low-rank or hybrid sparse–low-rank representations, and mechanisms that allow one sender-layer cache 
+
+> 1https://huggingface.co/meta-llama Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026.
+
+Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:23 
+
+to serve multiple semantically aligned receiver layers. Such extensions could improve both cache capacity and reuse efficiency. Overall, these limitations do not change the central conclusion of this work: attention maps provide a promising systems abstraction for heterogeneous prefix reuse. Instead, they highlight a broader design space for reusable cross-model execution states, which we believe will become increasingly important as multi-LLM data workflows continue to grow in complexity and diversity. 
+
+10 Conclusion 
+
+In this paper, we address the prefill latency bottleneck in multi-LLM systems caused by redundant prompt processing across heterogeneous models. We propose MapFlow, a novel heterogeneous LLM serving system that allows different LLMs to share semantic attention maps for prefix reuse. To enable efficient cross-model sharing, we utilize a lightweight linear adapter alongside a block-level Top-𝑝 sparse compression technique and a custom fused kernel to prevent memory bloat. Extensive evaluations demonstrate that MapFlow achieves a 15% to 20% reduction in Time-to-First-Token and up to a 25% increase in end-to-end throughput for multi-turn routing , all while maintaining generation quality. Ultimately, MapFlow provides a scalable, memory-efficient solution that significantly accelerates serving times for complex multi-model workflows. 
+
+Acknowledgement 
+
+We thank the anonymous SIGMOD reviewers for their comments and helpful feedback. This work is supported by National Natural Science Foundation of China (U23B2048, U22B2037), Beijing Municipal Natural Science Foundation (Grant No. L2603008), and the Fundamental Research Funds for the Central Universities, Peking University. Bin Cui and Xupeng Miao are the corresponding authors. 
+
+References 
+
+[1] Amey Agrawal, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, and Ramachandran Ramjee. 2024. SARATHI: Efficient LLM Inference by Piggybacking Decodes with Chunked Prefills. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, 537–552. [2] Anysphere Inc. 2025. Cursor: The AI Code Editor. https://www.cursor.com/. Accessed: 2025-04-23. [3] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A Bilingual, Multitask Benchmark for Long Context Understanding. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) . Association for Computational Linguistics. [4] Butterfly Effect AI. 2025. Manus: AI Agent. https://manus.im. Accessed: 2025-04-23. [5] Beidi Chen, Tri Dao, Eric Winsor, Zhao Song, Atri Rudra, and Christopher Ré. 2021. Scatterbrain: Unifying sparse and low-rank attention. In Advances in Neural Information Processing Systems , Vol. 34. 17413–17426. [6] Liana Chen et al. 2024. Punica: Multi-Tenant LoRA Serving. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) .[7] Lingjiao Chen, Matei Zaharia, and James Zou. 2023. FrugalGPT: How to Use Large Language Models While Reducing Cost and Improving Performance. In Advances in Neural Information Processing Systems (NeurIPS) .[8] Zui Chen, Lei Cao, Sam Madden, Tim Kraska, Zeyuan Shang, Ju Fan, Nan Tang, Zihui Gu, Chunwei Liu, and Michael Cafarella. 2023. SEED: Domain-specific data curation with large language models. arXiv preprint arXiv:2310.00749 
+
+(2023). [9] Wei-Lin Chiang, Zhuohan Li, Zi Lin, Ying Sheng, Zhanghao Wu, Hao Zhang, Lianmin Zheng, Siyuan Zhuang, Yonghao Zhuang, Joseph E. Gonzalez, Ion Stoica, and Eric P. Xing. 2023. Vicuna: An Open-Source Chatbot Impressing GPT-4 with 90%* ChatGPT Quality. https://lmsys.org/blog/2023-03-30-vicuna/. [10] Jasper Dekoninck, Maximilian Baader, and Martin T. Vechev. 2025. A Unified Approach to Routing and Cascading for LLMs. In Forty-second International Conference on Machine Learning, ICML 2025, Vancouver, BC, Canada, July 13-19, 2025 (Proceedings of Machine Learning Research) . PMLR / OpenReview.net. https://proceedings.mlr.press/v267/ dekoninck25a.html Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:24 Jin et al. 
+
+[11] Yangshen Deng, Zhengxin You, Long Xiang, Qilong Li, Peiqi Yuan, Zhaoyang Hong, Yitao Zheng, Wanting Li, Runzhong Li, Haotian Liu, et al. 2025. AlayaDB: The Data Foundation for Efficient and Effective Long-context LLM Inference. In 
+
+Companion of the 2025 International Conference on Management of Data . 364–377. [12] Lucio M. Dery, Zohar Yahav, Henry Prior, Qixuan Feng, Jiajun Shen, and Arthur Szlam. 2026. Latent Space Communi-cation via K-V Cache Alignment. arXiv:2601.06123 [cs.LG] https://arxiv.org/abs/2601.06123 [13] Lucio M. Dery, Zohar Yahav, Henry Prior, Qixuan Feng, Jiajun Shen, and Arthur Szlam. 2026. Latent Space Communi-cation via K-V Cache Alignment. CoRR abs/2601.06123 (2026). doi:10.48550/ARXIV.2601.06123 [14] Anas Dorbani, Sunny Yasser, Jimmy Lin, and Amine Mhedhbi. 2025. Beyond Quacking: Deep Integration of Language Models and RAG into DuckDB. Proceedings of the VLDB Endowment 18, 12 (2025), 5415–5418. [15] Alexander R. Fabbri, Irene Li, Tianwei She, Suyi Li, and Dragomir Radev. 2019. Multi-News: A Large-Scale Multi-Document Summarization Dataset and Evaluative Benchmark. In Proceedings of the 57th Annual Meeting of the Association for Computational Linguistics . Association for Computational Linguistics, 1074–1084. doi:10.18653/v1/P19-1102 [16] Tianyu Fu, Zihan Min, Hanling Zhang, Jichao Yan, Guohao Dai, Wanli Ouyang, and Yu Wang. 2025. Cache-to-Cache: Direct Semantic Communication Between Large Language Models. arXiv:2510.03215 [cs.CL] https://arxiv.org/abs/ 2510.03215 [17] Victor Giannakouris and Immanuel Trummer. 2024. Demonstrating 𝜆 -tune: Exploiting large language models for workload-adaptive database system tuning. In Companion of the 2024 International Conference on Management of Data .508–511. [18] Victor Giannakouris and Immanuel Trummer. 2024. 𝜆 -Tune: Harnessing Large Language Models for Automated Database System Tuning. arXiv preprint arXiv:2411.03500 (2024). [19] Insu Gim et al. 2024. PromptCache: Modular Attention Multiplexing for LLM System. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) .[20] GitHub. 2025. GitHub Copilot. https://github.com/features/copilot. Accessed: 2025-04-23. [21] Sirui Hong, Mingchen Zhuge, Jonathan Chen, Xiawu Zheng, Yuheng Cheng, Jinlin Wang, Ceyao Zhang, Zili Wang, Steven Ka Shing Yau, Zijuan Lin, Liyang Zhou, Chenyu Ran, Lingfeng Xiao, Chenglin Wu, and Jürgen Schmidhuber. 2024. MetaGPT: Meta Programming for A Multi-Agent Collaborative Framework. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. https://openreview.net/forum? id=VtmBAGCN7o [22] Zicong Hong, Yuyan Chen, Haoyue Zhang, Peng Li, Wuhui Chen, Song Guo, and Xiaowei Shen. 2026. Efficient Multimodal Serving via Module Multiplexing. In Proceedings of the 21st European Conference on Computer Systems .2292–2307. [23] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Gins-burg. 2024. RULER: What’s the real context size of your long-context language models? arXiv preprint arXiv:2404.06654 
+
+(2024). [24] Chenxu Hu, Jie Fu, Chenzhuang Du, Simian Luo, Junbo Zhao, and Hang Zhao. 2023. ChatDB: Augmenting LLMs with Databases as Their Symbolic Memory. arXiv preprint arXiv:2306.03901 (2023). [25] Qitian Jason Hu, Jacob Bieker, Xiuyu Li, Nan Jiang, Benjamin Keigwin, Gaurav Ranganath, Kurt Keutzer, and Shriyash Kaustubh Upadhyay. 2024. RouterBench: A Benchmark for Multi-LLM Routing System. arXiv:2403.12031 [cs.ML] [26] Shengran Hu, Cong Lu, and Jeff Clune. 2024. Automated Design of Agentic Systems. arXiv:2408.08435 [cs.AI] [27] Dongfu Jiang et al. 2023. LLM-Blender: Ensembling Large Language Models with Pairwise Ranking and Generative Fusion. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (ACL) .[28] Huiqiang Jiang, Yucheng Li, Chengruidong Zhang, Qianhui Wu, Xufang Luo, Surin Ahn, Zhenhua Han, Amir H. Abdi, Dongsheng Li, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. 2024. MInference 1.0: Accelerating Pre-filling for Long-Context LLMs via Dynamic Sparse Attention. In Advances in Neural Information Processing Systems .[29] Youhe Jiang, Fangcheng Fu, Wanru Zhao, Stephan Rabanser, Jintao Zhang, Nicholas D Lane, and Binhang Yuan. 2026. Cascadia: An Efficient Cascade Serving System for Large Language Models. In The Fourteenth International Conference on Learning Representations (ICLR) .[30] Jin, Zhan and Luo, Yuze and Cui, Bin and Miao, Xupeng. 2026. MapFlow Appendix. https://github.com/PKU-DAIR/MapFlow/blob/main/Appendix.pdf. Accessed: 2028-10-10. [31] Konstantinos Kanellis, Cong Ding, Brian Kroth, Andreas Müller, Carlo Curino, and Shivaram Venkataraman. 2022. LlamaTune: sample-efficient DBMS configuration tuning. arXiv preprint arXiv:2203.05128 (2022). [32] Boris Kriuk and Logic Ng. 2025. Q-KVComm: Efficient Multi-Agent Communication Via Adaptive KV Cache Compres-sion. arXiv preprint arXiv:2512.17914 (2025). [33] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E Gonzalez, Hao Zhang, and Zhihao Lin. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:25 
+
+In Proceedings of the 29th Symposium on Operating Systems Principles . 611–626. [34] Xunhao Lai, Jianqiao Lu, Yao Luo, Yiyuan Ma, and Xun Zhou. 2025. FlexPrefill: A Context-Aware Sparse Attention Mechanism for Efficient Long-Sequence Inference. arXiv:2502.20766 [cs.LG] https://arxiv.org/abs/2502.20766 [35] Huanchun Li, Hao Wen, Weijun Wang, et al. 2024. Personal LLM Agents: Insights and Survey about the Capability, Efficiency and Security. arXiv:2401.05459 [cs.CL] [36] Yuhong Li et al. 2024. SnapKV: LLM Knows What You are Looking for Before Generation. arXiv preprint arXiv:2404.14469 
+
+(2024). [37] Zhuohan Li et al. 2023. AlpaServe: Statistical Multiplexing with Foundation Models for Cloud Systems. In 17th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .[38] Zikun Li, Zhuofu Chen, Remi Delacourt, Gabriele Oliaro, Zeyu Wang, Qinghan Chen, Shuhuai Lin, April Yang, Zhihao Zhang, Zhuoming Chen, et al. 2026. Adaserve: Accelerating multi-slo llm serving with slo-customized speculative decoding. In Proceedings of the 21st European Conference on Computer Systems . 36–54. [39] Alexander H. Liu, Kartik Khandelwal, Sandeep Subramanian, Victor Jouault, Abhinav Rastogi, et al. 2026. Ministral 3. arXiv:2601.08584 [cs.CL] https://arxiv.org/abs/2601.08584 [40] Yuhan Liu, Esha Choukse, Shan Lu, Junchen Jiang, and Madan Musuvathi. 2024. DroidSpeak: Enhancing Cross-LLM Communication. CoRR abs/2411.02820 (2024). doi:10.48550/ARXIV.2411.02820 [41] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Ananthanarayanan, Michael Maire, Henry Hoffmann, Ari Holtzman, and Junchen Jiang. 2024. CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving. In Proceedings of the ACM SIGCOMM 2024 Conference . Association for Computing Machinery. [42] Yuzhen Mao, Qitong Wang, Martin Ester, and Ke Li. 2026. IceCache: Memory-efficient KV-cache Management for Long-Sequence LLMs. In The Fourteenth International Conference on Learning Representations .[43] Yixuan Mei, Zikun Li, Zixuan Chen, Shiqi Pan, Mengdi Wu, Xupeng Miao, Zhihao Jia, and KV Rashmi. 2026. Coral: Cost-Efficient Multi-LLM Serving over Heterogeneous Cloud GPUs. arXiv preprint arXiv:2605.04357 (2026). [44] Yixuan Mei, Yonghao Zhuang, Xupeng Miao, Juncheng Yang, Zhihao Jia, and Rashmi Vinayak. 2025. Helix: Serving large language models over heterogeneous gpus and network via max-flow. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 . 586–602. [45] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Hongyi Jin, Tianqi Chen, and Zhihao Jia. 2026. Towards Efficient Generative Large Language Model Serving: A Survey from Algorithms to Systems. ACM Comput. Surv. 58, 1 (2026), 15:1–15:37. doi:10.1145/3754448 [46] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, et al. 2024. Specinfer: Accelerating large language model serving with tree-based speculative inference and verification. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 . 932–949. [47] Xupeng Miao, Chunan Shi, Jiangfei Duan, Xiaoli Xi, Dahua Lin, Bin Cui, and Zhihao Jia. 2024. Spotserve: Serving generative large language models on preemptible instances. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 . 1112–1127. [48] Xupeng Miao, Shenhan Zhu, Fangcheng Fu, Ziyu Guo, Zhi Yang, Yaofeng Tu, Zhihao Jia, and Bin Cui. 2024. X-former Elucidator: Reviving Efficient Attention for Long Context Language Modeling.. In IJCAI . 8179–8187. [49] NVIDIA Corporation. 2024. CUDA C++ Programming Guide . Accessed: 2024-05-14. https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#interprocess-communication [50] NVIDIA Corporation. 2026. Multi-Process Service (MPS) . NVIDIA. Accessed: 2026-04-17. https://docs.nvidia.com/ deploy/mps/index.html [51] Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chiang, Tianhao Wu, Joseph E. Gonzalez, M. Waleed Kadous, and Ion Stoica. 2025. RouteLLM: Learning to Route LLMs from Preference Data. In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net. https://openreview.net/forum? id=8sSqNntaMr [52] Yanlin Qi, Xinhang Chen, Huiqiang Jiang, Qitong Wang, Botao Peng, and Themis Palpanas. 2026. ParisKV: Fast and Drift-Robust KV-Cache Retrieval for Long-Context LLMs. In International Conference on Machine Learning .[53] Chen Qian, Wei Liu, Hongzhang Liu, Nuo Chen, Yufan Dang, Jiahao Li, Cheng Yang, Weize Chen, Yusheng Su, Xin Cong, Juyuan Xu, Dahai Li, Zhiyuan Liu, and Maosong Sun. 2024. ChatDev: Communicative Agents for Software Development. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), ACL 2024, Bangkok, Thailand, August 11-16, 2024 , Lun-Wei Ku, Andre Martins, and Vivek Srikumar (Eds.). Association for Computational Linguistics, 15174–15186. doi:10.18653/V1/2024.ACL-LONG.810 [54] Qwen Team. 2025. Qwen3 Technical Report. arXiv:2505.09388 [cs.CL] https://arxiv.org/abs/2505.09388 [55] Souvika Sarkar, Mohammad Fakhruddin Babar, Monowar Hasan, and Shubhra Kanti Karmaker. 2024. LLMs as On-demand Customizable Service. arXiv (2024). doi:10.48550/arxiv.2401.16577 Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. 317:26 Jin et al. 
+
+[56] Ying Sheng et al. 2024. S-LoRA: Serving Thousands of Concurrent LoRA Adapters. In 7th Conference on Machine Learning and Systems (MLSys) .[57] Chunan Shi, Yilei Chen, Yilin Chen, Xupeng Miao, and Bin Cui. 2026. Multi-Segment Attention: Enabling Efficient KV-Cache Management for Faster Large Language Model Serving. arXiv preprint arXiv:2606.02964 (2026). [58] Aditi Singh, Akash Shetty, Abul Ehtesham, Saket Kumar, and Tala Talaei Khoei. 2025. A survey of large language model-based generative ai for text-to-sql: Benchmarks, applications, use cases, and challenges. In 2025 IEEE 15th Annual Computing and Communication Workshop and Conference (CCWC) . IEEE, 00015–00021. [59] Biao Sun et al. 2024. Llumnix: Dynamic Scheduling for Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .[60] Jie Tan et al. 2025. Can Large Language Models Be Query Optimizer for Relational Databases? Proceedings of the ACM on Management of Data (SIGMOD) 3, 6 (2025), 306:1–306:27. [61] Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. 2024. Quest: Query-Aware Sparsity for Efficient Long-Context LLM Inference. arXiv:2406.10774 [cs.CL] [62] Philippe Tillet, H. T. Kung, and David Cox. 2019. Triton: an intermediate language and compiler for tiled neural network computations. In Proceedings of the 3rd ACM SIGPLAN International Workshop on Machine Learning and Programming Languages . ACM, 10–19. [63] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. 2017. Attention is All you Need. In Advances in Neural Information Processing Systems 30: Annual Conference on Neural Information Processing Systems 2017, December 4-9, 2017, Long Beach, CA, USA . 5998–6008. https://proceedings.neurips.cc/paper/2017/hash/3f5ee243547dee91fbd053c1c4a845aa-Abstract.html [64] Noppanat Wadlom, Junyi Shen, and Yao Lu. 2026. Efficient LLM serving for agentic workflows: A data systems perspective. arXiv preprint arXiv:2603.16104 (2026). [65] Fali Wang, Jihai Chen, Shuhua Yang, Ali Al-Lawati, Linli Tang, Hui Liu, and Suhang Wang. 2025. A Survey on Collabo-rating Small and Large Language Models for Performance, Cost-effectiveness, Cloud-edge Privacy, and Trustworthiness. 
+
+arXiv (2025). doi:10.48550/arxiv.2510.13890 [66] Pengwei Wang, Zui Zeng, et al. 2023. PromptEM: Prompt-tuning for Low-resource Generalized Entity Matching. 
+
+Proceedings of the VLDB Endowment 16 (2023). [67] Xin Wang, Zirui Chen, Haofen Wang, Leong Hou U, Zhao Li, and Wenbin Guo. 2025. Large Language Model Enhanced Knowledge Representation Learning: A Survey. Data Sci. Eng. 10, 3 (2025), 315–338. doi:10.1007/S41019-025-00285-Y [68] Lianggui Weng et al. 2025. BridgeScope: A Universal Toolkit for Bridging Large Language Models and Databases. 
+
+arXiv preprint arXiv:2508.04031 (2025). [69] Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Shaokun Zhang, Erkang Zhu, Beibin Li, Li Jiang, Xiaoyun Zhang, and Chi Wang. 2023. AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversation Framework. CoRR 
+
+abs/2308.08155 (2023). doi:10.48550/ARXIV.2308.08155 [70] Guangxuan Xiao et al. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth International Conference on Learning Representations (ICLR) .[71] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth International Conference on Learning Representations .[72] Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William W. Cohen, Ruslan Salakhutdinov, and Christopher D. Manning. 2018. HotpotQA: A Dataset for Diverse, Explainable Multi-Hop Question Answering. In Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing (EMNLP) . 2369–2380. https://arxiv.org/abs/1809.09600 [73] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2024. CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowledge Fusion. Association for Computing Machinery, New York, NY, USA. doi:10.1145/3689031.3696098 [74] Zhiming Yao, Haoyang Li, Jing Zhang, Cuiping Li, and Hong Chen. 2025. A Query Optimization Method Utilizing Large Language Models. arXiv preprint arXiv:2503.06902 (2025). [75] Hancheng Ye, Zhengqi Gao, Mingyuan Ma, Qinsi Wang, Yuzhe Fu, Ming-Yu Chung, Yueqian Lin, Zhijian Liu, Jianyi Zhang, Danyang Zhuo, and Yiran Chen. 2025. KVCOMM: Online Cross-context KV-cache Communication for Efficient LLM-based Multi-agent Systems. In Advances in Neural Information Processing Systems .[76] Huiyou Zhan, Xuan Zhang, Haisheng Tan, Han Tian, Dongping Yong, Junyang Zhang, and Xiang-Yang Li. 2025. PICE: A Semantic-Driven Progressive Inference System for LLM Serving in Cloud-Edge Networks. arXiv (2025). doi:10.48550/arxiv.2501.09367 [77] Haochen Zhang, Yuyang Dong, Chuan Xiao, and Masafumi Oyamada. 2024. Jellyfish: A Large Language Model for Data Quality. Proceedings of the VLDB Endowment (2024). [78] Hailin Zhang, Xiaodong Ji, Yilin Chen, Fangcheng Fu, Xupeng Miao, Xiaonan Nie, Weipeng Chen, and Bin Cui. 2025. Pqcache: Product quantization-based kvcache for long context llm inference. Proceedings of the ACM on Management of Data 3, 3 (2025), 1–30. Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026. Accelerating Cross-Model LLM Inference via Attention Map Reuse 317:27 
+
+[79] Hang Zhang, Chaokun Wang, Hongwei Li, Cheng Wu, Songyao Wang, Yabin Liu, Gengyuan Shi, and Ziyang Liu. 2025. PLForge: Enhancing Language Models for Natural Language to Procedural Extensions of SQL. Proceedings of the ACM on Management of Data 3, 6 (2025), 1–28. [80] Xinyi Zhang, Liangzu Liu, Xupeng Miao, Yinjun Wu, Zhen Chen, Wei Lu, Xiaoyong Du, and Bin Cui. 2026. DistVec: Efficient Distributed Machine Learning in Parallel Database Systems. In 42nd IEEE International Conference on Data Engineering, ICDE 2026, Montreal, QC, Canada, May 4-8, 2026 . IEEE, 1–14. doi:10.1109/ICDE65706.2026.00169 [81] Zhenyu Zhang et al. 2023. H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) .[82] Yi Zhao, Zuchao Li, and Hai Zhao. 2025. IAM: Efficient Inference through Attention Mapping between Different-scale LLMs. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) .[83] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Tianle Li, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zhuohan Li, Zi Lin, Eric. P Xing, Joseph E. Gonzalez, Ion Stoica, and Hao Zhang. 2023. LMSYS-Chat-1M: A Large-Scale Real-World LLM Conversation Dataset. arXiv:2309.11998 [cs.CL] [84] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark W. Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024 . http://papers.nips. cc/paper_files/paper/2024/hash/724be4472168f31ba1c9ac630f15dec8-Abstract-Conference.html [85] Tianbao Zhou, Yi Wang, Yu Zhou, Zirui Liu, Zhiming Wang, Yebo Peng, Yongfu Wang, Yi Zhang, Jinrun Yin, Kemeng Tian, et al. 2026. Janus: Multi-LLM Serving at Production Scale. In Proceedings of the ACM SIGOPS 32nd Symposium on Operating Systems Principles . 1–17. [86] Haojie Zhu et al. 2024. MuxServe: Flexible Spatial-Temporal Multiplexing for Multiple LLM Serving. In 41st International Conference on Machine Learning (ICML) .[87] Jingyu Zhu, Xintong Zhao, Yu Sun, Shaoxu Song, and Xiaojie Yuan. 2025. Relational Data Cleaning Meets Artificial Intelligence: A Survey. Data Sci. Eng. 10, 2 (2025), 147–174. doi:10.1007/S41019-024-00266-7 
+
+Received 17 April 2026; revised 19 August 2026; accepted 12 September 2026 
+
+Proc. ACM Manag. Data, Vol. 4, No. 6 (SIGMOD), Article 317. Publication date: December 2026.
