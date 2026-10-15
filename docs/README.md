@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-14</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-15</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 25 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>14</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-14 21:05:57 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-15 19:51:57 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>规模化 AI 系统成为今日焦点：完成 25 篇论文筛选，其中精读 14 篇、速读 11 篇。</p>
-<p>最值得关注 RDMA 支撑大规模分布式训练与推理、以及通过专家放置和副本协同加速 MoE 训练，两篇均获 10/10。</p>
-<p>建议普通读者优先理解“网络通信如何决定大模型效率”，再延伸阅读联邦学习同步、跨模型注意力复用与分布式 Agent 服务。</p>
+<p>今日完成17篇AI系统与协同学习论文筛选，精读6篇、速读11篇。</p>
+<p>最值得关注的是分布式训练的混合投影与自动调参，以及面向AI-RAN的应用透明、可扩展GPU共享。</p>
+<p>建议优先精读两篇10分/9分论文，再结合去中心化多模态学习了解协同训练趋势。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">14 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Deploying RDMA for Distributed Inference and Training At Scale">Deploying RDMA for Distributed Inference and Training At Scale</span></li><li><span class="dpr-home-dashboard-paper-title" title="Accelerating MoE Training through Expert Placement and Replica Coordination">Accelerating MoE Training through Expert Placement and Replica Coordination</span></li><li><span class="dpr-home-dashboard-paper-title" title="BSIPipe: Bidirectional Sequence-Level Interleaved Pipeline Parallelism for Long-Sequence Large Language Model Training">BSIPipe: Bidirectional Sequence-Level Interleaved Pipeline Parallelism for Long-Sequence Large Language Model Training</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Beyond the Trial-and-Error Loop: Hybrid Projection and Automated Tuning for Distributed Training">Beyond the Trial-and-Error Loop: Hybrid Projection and Automated Tuning for Distributed Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Eunoia: Toward Application-Transparent, Scalable GPU Sharing in AI-RAN">Eunoia: Toward Application-Transparent, Scalable GPU Sharing in AI-RAN</span></li><li><span class="dpr-home-dashboard-paper-title" title="Stable Token-level Scheduling for Serverless LLM Inference">Stable Token-level Scheduling for Serverless LLM Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>14</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Learning to Sync at the Edge: Client-Side Adaptive Synchronization for Federated Learning">Learning to Sync at the Edge: Client-Side Adaptive Synchronization for Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Accelerating Cross-Model LLM Inference via Attention Map Reuse">Accelerating Cross-Model LLM Inference via Attention Map Reuse</span></li><li><span class="dpr-home-dashboard-paper-title" title="AgentWeave: Efficient Distributed Agent Serving via Flow Decomposition">AgentWeave: Efficient Distributed Agent Serving via Flow Decomposition</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MODAIC: Coordinated Asynchrony for Decentralized Multimodal Learning">MODAIC: Coordinated Asynchrony for Decentralized Multimodal Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Decentralized collaborative continual learning: A multi-objective minimization-based technique">Decentralized collaborative continual learning: A multi-objective minimization-based technique</span></li><li><span class="dpr-home-dashboard-paper-title" title="Best of Both Worlds in Federated LSA: Speedup When Possible, Personalization Always">Best of Both Worlds in Federated LSA: Speedup When Possible, Personalization Always</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
