@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-15</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-16</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 17 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-15 19:51:57 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-16 19:52:02 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成17篇AI系统与协同学习论文筛选，精读6篇、速读11篇。</p>
-<p>最值得关注的是分布式训练的混合投影与自动调参，以及面向AI-RAN的应用透明、可扩展GPU共享。</p>
-<p>建议优先精读两篇10分/9分论文，再结合去中心化多模态学习了解协同训练趋势。</p>
+<p>17 篇分布式训练与边缘推理论文完成筛选，聚焦大模型训练效率与部署可靠性。</p>
+<p>最值得精读的是 ETH 的异构流水并行数据均衡方案，以及免协调的变成本分布式训练负载规整思路。</p>
+<p>建议优先了解这两项训练系统优化，再按需关注跨地域 KV Cache 迁移和可靠性边缘推理部署。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Beyond the Trial-and-Error Loop: Hybrid Projection and Automated Tuning for Distributed Training">Beyond the Trial-and-Error Loop: Hybrid Projection and Automated Tuning for Distributed Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Eunoia: Toward Application-Transparent, Scalable GPU Sharing in AI-RAN">Eunoia: Toward Application-Transparent, Scalable GPU Sharing in AI-RAN</span></li><li><span class="dpr-home-dashboard-paper-title" title="Stable Token-level Scheduling for Serverless LLM Inference">Stable Token-level Scheduling for Serverless LLM Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ETH: Data-Balanced Heterogeneous Pipeline Parallelism for Training Large Models">ETH: Data-Balanced Heterogeneous Pipeline Parallelism for Training Large Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Coordination-Free Workload Regularization for Variable-Cost Distributed Training">Coordination-Free Workload Regularization for Variable-Cost Distributed Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Lightweight Scheduling Policies for Continuously Batched LLM Serving Across GPU Architectures">Lightweight Scheduling Policies for Continuously Batched LLM Serving Across GPU Architectures</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="MODAIC: Coordinated Asynchrony for Decentralized Multimodal Learning">MODAIC: Coordinated Asynchrony for Decentralized Multimodal Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Decentralized collaborative continual learning: A multi-objective minimization-based technique">Decentralized collaborative continual learning: A multi-objective minimization-based technique</span></li><li><span class="dpr-home-dashboard-paper-title" title="Best of Both Worlds in Federated LSA: Speedup When Possible, Personalization Always">Best of Both Worlds in Federated LSA: Speedup When Possible, Personalization Always</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing">Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing</span></li><li><span class="dpr-home-dashboard-paper-title" title="RAPID-DNN: Reliability-Aware Partitioning for Robust DNN Inference Deployment on Edge AI">RAPID-DNN: Reliability-Aware Partitioning for Robust DNN Inference Deployment on Edge AI</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedPCD: Priority-Constrained Federated Aggregation">FedPCD: Priority-Constrained Federated Aggregation</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

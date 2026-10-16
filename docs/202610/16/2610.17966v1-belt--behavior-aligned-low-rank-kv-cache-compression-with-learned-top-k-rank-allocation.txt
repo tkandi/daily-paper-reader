@@ -1,0 +1,5393 @@
+BELT: BEHAVIOR-ALIGNED LOW-RANK KV CACHE
+COMPRESSION WITH LEARNED TOP-K RANK ALLOCATION
+Yaoyang Liu
+Peking University
+Shuwei Shen
+JD.com
+Jincheng Tang
+Peking University
+Jinguang Liu
+JD.com
+Jinbao Xue
+Tencent
+Hailong Yang
+BeiHang University
+Ke Zhang
+JD.com
+Yinjun Wu
+Peking University
+ABSTRACT
+Long-context inference makes the key-value (KV) cache a major memory bottleneck for large
+language models. We propose BELT, a low-rank KV cache compression framework. Its key-side
+objective targets attention distributions rather than raw keys or pre-softmax logits, yielding a quadratic
+surrogate with a closed-form low-rank solution. A learned global rank allocator uses differentiable soft
+selection during training and hard selection at deployment to meet a user-specified component budget.
+Experiments demonstrate improved model quality under aggressive compression and increased
+decoding throughput at comparable accuracy. Evaluated across three LLMs and multiple benchmarks,
+BELT achieves up to 70% low-rank KV cache compression while outperforming the strongest baseline
+by up to 23.3 points on LongBench, and up to 17.8× overall KV cache reduction when combined
+with quantization. With Triton-based GPU kernels and a quantized cache, BELT delivers up to 2.7×
+speedup for the attention module and 3.3× end-to-end decoding throughput.
+Keywords First keyword · Second keyword · More
+1
+Introduction
+Large language models (LLMs) have become ubiquitous in modern AI applications, yet their growing scale—in both
+model size and context length—poses significant inference challenges. Modern LLMs support 128K-token contexts or
+more [1, 2, 3], making the key-value (KV) cache a critical inference bottleneck. During autoregressive generation,
+the cache stores keys and values for preceding tokens, and its memory footprint grows linearly with sequence length,
+potentially exceeding available GPU memory [4]. Efficient KV cache management is therefore essential, motivating
+approaches such as token eviction [5, 6], quantization [7, 8], and low-rank decomposition [9, 10].
+Among these, low-rank decomposition exploits hidden-dimension redundancy to reduce KV cache memory. Prior work
+follows two broad directions: adapting general-purpose decomposition methods to the KV cache [11, 12, 13, 14, 15, 16],
+and developing KV-specific methods tailored to attention and caching dynamics [17, 9, 18, 19, 20, 21]. STAR-KV [10]
+and A3 [22] represent recent state-of-the-art advances in adaptive rank control and analytical attention approximation,
+respectively.
+Despite this progress, two challenges still remain. First, the compression criterion of the state-of-the-art does not reflect
+the effect of approximation errors on attention behavior. Methods based on KV reconstruction do not explicitly account
+for how key errors interact with queries and the nonlinear softmax map. As illustrated in Figure 1, retaining dominant
+singular directions of the KV tensors can distort attention and change the generated answer. A3 moves beyond raw
+key reconstruction by targeting pre-softmax attention logits, which, however, is not the same as preserving attention
+probabilities or the resulting attention output. This motivates a key-compression criterion that explicitly accounts for
+post-softmax behavior.
+Second, allocating ranks across heterogeneous KV projections under a prescribed global budget remains challenging.
+Uniform allocation ignores differences in compression sensitivity, while sensitivity-based searches and learned threshold
+arXiv:2610.17966v1  [cs.LG]  13 Oct 2026
+
+
+Running Title for Header
+Input:
+… Particularly destructive, causing a substantial number of deaths, injuries, and structural collapses. It caused 
+the most  property damage of any earthquake in U.S. history, estimated at over $20 billion ...
+What kind of destruction did the 1994 earthquake cause the most of in US history?
+Passage
+Question
+Misleading
+Evidence
+Full KV
+𝒒
+𝒌𝑷𝒓𝒐𝒑.𝑫𝒂𝒎.
+𝒌$𝟐𝟎𝑩
+𝐥𝐨𝐠𝐢𝐭𝐬: 𝒒𝒌𝑷𝒓𝒐𝒑.𝑫𝒂𝒎. > 𝒒𝒌$𝟐𝟎𝑩
+𝒒
+PALU
+Basis 𝝁
+(𝝁𝒒)(𝝁𝒌𝑷𝒓𝒐𝒑.𝑫𝒂𝒎.) < (𝝁𝒒)(𝝁𝒌$𝟐𝟎𝑩)
+𝝁𝒒
+𝝁𝒌𝒆𝒗𝒊𝒅
+𝝁𝒌𝒎𝒊𝒔𝒍
+OURS
+𝒒
+(𝝁𝒒)(𝝁𝒌𝑷𝒓𝒐𝒑.𝑫𝒂𝒎.) > (𝝁𝒒)(𝝁𝒌$𝟐𝟎𝑩)
+𝝁𝒒
+𝝁𝒌𝒆𝒗𝒊𝒅
+𝝁𝒌𝒎𝒊𝒔𝒍
+Basis 𝝁
+Full KV
+PALU
+OURS
+“Property damage”
+0.49
+0.18
+0.45
+“$20 billion” 
+0.04
+0.49
+0.04
+Accuracy
+✓
+✗
+✓
+Figure 1: Left: Full attention, where each query attends to all context tokens. Middle: State-of-the-art low-rank
+compression (e.g., vanilla SVD) retains only the dominant KV eigenvector µ, reducing the query–key product from q⊤k
+to (q⊤µ)(µ⊤k). Since µ is derived solely from the input-context tokens and ignores subsequent queries, this distorts
+the attention distribution and can yield an incorrect answer. Right: The dominant eigen-vector derived by ours aligns
+the query and key decompositions, preserving the downstream attention output and yielding the correct answer.
+methods offer different approaches to adaptive allocation. STAR-KV [10] learns block-specific thresholds with a soft
+compression penalty, without directly enforcing a prescribed global component budget. Our analysis further identifies
+these learned thresholds concentrate under certain conditions, potentially limiting allocation effectiveness.
+We address these challenges from two complementary perspectives. First, we design compression objectives to preserve
+the attention output of the uncompressed model. While our value-side construction is closely related to A3 [22], our
+key-side objective targets attention-distribution preservation rather than pre-softmax logit reconstruction like A3. By
+accounting for query-dependent softmax sensitivity and RoPE interactions, BELT better preserves attention behavior
+under aggressive compression, as demonstrated empirically. Second, we learn ranks across KV blocks under an explicit
+global budget. Our allocator learns how to distribute ranks across attention heads according to their compression
+sensitivity. We use a differentiable relaxation of top-B selection for end-to-end training, followed by hard selection of
+B components, where B is the user-specified budget.
+Extensive experiments evaluate BELT across multiple models, compression budgets, and tasks. At 70% KV cache
+compression on Qwen3-32B, BELT improves the average score over the strongest evaluated baseline by 23.3 points on
+LongBench and 13.8 points on RULER. We additionally evaluate perplexity, zero-shot accuracy, and the contributions
+of the compression bases and rank allocation; combined with 3-bit KV quantization, BELT reaches 17.8× KV cache
+compression within 2 points of the uncompressed zero-shot accuracy. System-level measurements show up to 3.26×
+higher decoding throughput and 87% lower KV cache memory than full-cache inference on LLaMA-2-7B with KV
+quantization. These results demonstrate the practical benefits of attention-aware compression and globally coordinated
+rank allocation.
+In summary, our contributions are:
+• We formulate an attention-output-motivated approach to low-rank KV compression, with a key-side metric derived
+from attention-distribution KL rather than pre-softmax logit reconstruction.
+• We derive quadratic compression surrogates with exact weighted-SVD solutions, extend the construction to RoPE
+and GQA, and explicitly characterize their approximation errors.
+2
+
+
+Running Title for Header
+• We introduce a learned global rank allocator that enforces a relaxed budget during training and an exact component-
+count budget at deployment, while preserving an ordered prefix within each KV block.
+• We empirically evaluate model quality, approximation accuracy, rank allocation, and decoding efficiency under
+aggressive KV cache compression.
+2
+Preliminaries
+2.1
+Attention and KV Cache
+We consider a single attention head in a Transformer decoder layer [23]. Let X ∈Rn×d be the stacked representations
+of the n preceding tokens stored in the KV cache. For any input token x ∈R1×d, each head computes its query, key,
+and value projections as
+qx = xWQ,
+kx = xWK,
+vx = xWV ,
+where WQ, WK, WV ∈Rd×dh and dh is the per-head dimension. During autoregressive generation, the queries, keys,
+and values of the n tokens are obtained from X as
+Q = XWQ,
+K = XWK,
+V = XWV
+so the KV cache stores K, V ∈Rn×dh, which is interacted with q for attention calculation as follows:
+ox(WK, WV ) = ax(WK) V WO ∈R1×d = ax(WK) X WV WO ∈R1×d,
+where ax(WK) = Softmax
+qx K
+√dh
+
+= Softmax
+qx XWK
+√dh
+
+∈R1×n, and WO ∈Rdh×d
+(1)
+In this formula, ax(WK) is the attention probability vector, where we explicitly highlight its reliance on WK. Similarly,
+we use ox(WK, WV ) to denote the final attention output which relies on both Wk and WV . In practice, Rotary Position
+Embedding (RoPE) [24] is applied to queries and keys as a non-linear, position-dependent embedding before attention.
+More detailed description for attention mechanism with RoPE and how BELT is generalized to RoPE is Appendix D.
+State-of-the-art large language models typically employ multiple attention heads per layer with two widely adopted
+strategies: Multi-head attention (MHA) runs h such heads in parallel, while grouped-query attention (GQA) shares
+each key–value pair among a group of query heads. Our framework aims to compress KV cache at individual heads,
+which thus applies to both. We start by assuming the use of MHA by default and discuss the extension of BELT to
+GQA in Appendix C.
+2.2
+Low-Rank KV Cache Compression
+Low-rank compression reduces the KV cache size by approximating each key/value projection matrix WK ∈
+Rd×dh, WV ∈Rd×dh with a rank-r factorization (r < dh):
+WK ≈ˆ
+WK = W down
+K
+W up
+K , WV ≈ˆ
+WV = W down
+V
+W up
+V
+where W down
+K
+, W down
+V
+∈Rd×r, W up
+K , W up
+V
+∈Rr×dh and ˆWK, ˆWV ∈Rd×dh, which all have rank at most r. For an
+input token sequence X, we project it using ˆWK and ˆWV as follows:
+XWK ≈XW down
+K
+W up
+K , XWV ≈XW down
+V
+W up
+V
+where XW down
+K
+, XW down
+V
+∈Rn×r are the compressed KV cache. Instead of storing the full K, V ∈Rn×dh, we
+cache only the compressed representations K′ = XW down
+K
+and V ′ = XW down
+V
+. This reduces the per-token memory
+footprint from dh to r during inference. Following prior studies, e.g., [10, 9], W down
+K
+, W down
+V
+, W up
+K and W up
+V
+are
+learned with a small calibration dataset, X.
+2.3
+Inference with Compressed Cache
+The overall inference process with low-rank decomposition remains largely the same as that with no compression.
+The only difference is at the attention computation phase, where low-rank decomposition requires that the input
+sequence X is first projected down using W down
+K
+and W down
+V
+, which is then cached throughout the inference phase,
+and projected back to dh dimensions using W up
+K and WupV respectively. Weight absorption [25, 9] further accelerates
+this process by merging W up
+V
+into the subsequent projection for value tensors. Specifically, the attention output defined
+in (1) changes from ax(WK) V WO to ax(WK) V ′ W up
+V WO. Since both W up
+V
+and WO are fixed, precomputing
+3
+
+
+Running Title for Header
+W ′
+O = W up
+V WO ∈Rr×d yields ax(WK) V ′ W ′
+O, eliminating the need of multiplying projecting V ′ back to dh
+dimensions at each step. In contrast, a similar absorption does not apply to the key tensor since W up
+K cannot be absorbed
+with the RoPE computation due to its non-linearity nor commute it to merge it with other matrices like the query
+projection WQ.
+3
+The BELT Framework
+In this section, we first present low-rank decomposition within one head under a given rank budget in Section 3.1. We
+then generalize the method to multiple heads under a global budget in Section 3.2, and finally combine rank allocation
+with quantization in Section 3.3.
+3.1
+Low-rank decomposition within one head
+3.1.1
+Decomposition objective
+Unlike methods that directly minimize key/value reconstruction error, BELT seeks low-rank projections whose induced
+attention output remains close to that of the original model, which is formulated as the following loss function defined
+over every input x from the calibration data X:
+J(c
+WK, c
+WV ) =
+X
+x
+ox(WK, WV ) −ox(c
+WK, c
+WV )
+
+2
+2, c
+W ∗
+K, c
+W ∗
+V =
+arg min
+rank(c
+WK)≤rK,rank(c
+WV )≤rV
+J (c
+WK, c
+WV ).
+However, jointly solving c
+W ∗
+K, c
+W ∗
+V in J(c
+WK, c
+WV ) is difficult due to their inter-dependency. Indeed, the above objective,
+J (c
+WK, c
+WV ), can be relaxed to the summation of the following two objectives, which decouples the optimization of
+c
+W ∗
+K,c
+W ∗
+V :
+J (c
+WK, c
+WV ) ≤2LV (c
+WV ) + 4M 2 · LK(c
+WK),
+where LV (c
+WV ) :=
+X
+x
+axX(WV −c
+WV )WO
+
+2
+2 ,
+LK(c
+WK) :=
+X
+x DKL
+
+ax(WK)
+ ax(c
+WK)
+
+, MX,t := maxi ∥( bZX,t)i,:∥2 ≤M.
+(2)
+The detailed derivation of the above formula is delayed to Appendix A.
+3.1.2
+Solving LV (c
+WV )
+Indeed, we can derive a closed-form c
+WV by solving LV (c
+WV ). To achieve this, we first transform LV (c
+WV ) into the
+following surrogate objective.
+Lemma 1. Let G0
+V = P
+x X⊤
+x a⊤
+x axXx, H0
+V = WOW ⊤
+O . For ϵ > 0, let GV = G0
+V + ϵId = L⊤
+V LV , HV =
+H0
+V + ϵIdh = CV C⊤
+V be their positive-definite regularizations and Cholesky factorizations. Define
+L≈
+V (c
+WV ) =
+LV (WV −c
+WV )CV
+
+2
+F .
+Then, with E = WV −c
+WV , L≈
+V (c
+WV ) −LV (c
+WV ) = ∆ϵ,V (E) ≥0,
+where ∆ϵ,V (E) = ϵ P
+x ∥axXxE∥2
+2 + ϵ∥EWO∥2
+F + ϵ2∥E∥2
+F . In particular, for fixed E and calibration statistics,
+∆ϵ,V (E) = O(ϵ) as ϵ →0.
+The proof of Lemma 1 is given in Appendix B.1.1. Subsequently, by performing some essential linear algebric
+transformations and applying Eckart–Young–Mirsky theorem [26, 27], The following theorem gives a closed-form
+global minimizer of the regularized value surrogate L≈
+V .
+Theorem 1.
+let LV WV CV
+=
+¯UV ¯ΣV ¯R⊤
+V
+be a thin singular value decomposition,
+where
+¯ΣV
+=
+diag(¯σV,1, . . . , ¯σV,m), m = min(d, dh), and ¯σV,1 ≥· · · ≥¯σV,m ≥0. Let ¯UV,1:r, ¯ΣV,1:r, and ¯RV,1:r denote the
+components associated with the largest r singular values. Then one global minimizer of minrank(c
+WV )≤r L≈
+V (c
+WV ) is
+c
+W ∗
+V,r = L−1
+V ¯UV,r ¯ΣV,r ¯R⊤
+V,rC−1
+V .
+(3)
+The corresponding projection matrix, W down
+V,1:r = L−1
+V ¯UV,1:r ¯Σ1/2
+V,1:r, and W up
+V,1:r = ¯Σ1/2
+V,1:r ¯R⊤
+V,1:rC−1
+V .
+4
+
+
+Running Title for Header
+The proof is provided in Appendix B.1.2. The above decomposition via solving LV (c
+WV ) is closely related to A3 [22];
+we do not claim the weighted-SVD solution itself as a distinct contribution. Our principal distinction lies in the key-side
+decomposition described next.
+3.1.3
+Solving LK(c
+WK)
+Unlike the value objective, LK(c
+WK) contains the nonlinear softmax map. Hence, directly solving LK(c
+WK) cannot
+yield a closed-form solution. To mitigate this issue, we first approximate LK(c
+WK) by a quadratic objective using Taylor
+expansion [28] and Kronecker decomposition [29], which only incurs a small approximation error. Before formally
+presenting how this approximation is performed in Theorem 2, we first compute the following intermediate quantities,
+taking as input each query token x ∈X and its corresponding attention probability distribution ax calculated using (1):
+Jx = diag(ax) −a⊤
+x ax, , Ax := Jx diag(1/ax)Jx, Gϵ
+K,x :=
+1
+2dh X⊤AxX + ϵId,
+(4)
+Theorem 2. Let MK := P
+x qxq⊤
+x ⊗Gϵ
+K,x ∈R(dhd)×(dhd), and approximate it using its Kronecker rank-1
+approximation MK ≈AK ⊗BK, AK ∈Rdh×dh,
+AK ⪰0, BK ∈Rd×d,
+BK ⪰0. For ϵ > 0, let
+BK + ϵId = L⊤
+KLK, AK + ϵIdh = CKC⊤
+K be Cholesky decompositions. Then LK ∈Rd×d and CK ∈Rdh×dh are
+invertible. Define the surrogate objective
+L≈
+K(c
+WK) :=
+LK(WK −c
+WK)CK
+
+2
+F .
+This is a quadratic function of E := WK −c
+WK, which incurs an approximation error
+|LK(c
+WK) −L≈
+K(c
+WK)| ≤| vec(E)⊤(MK −AK ⊗BK) vec(E)|
+|
+{z
+}
+Kronecker truncation error
++
+ETaylor(E)
+|
+{z
+}
+Taylor approximation error
++O(ϵ),
+where ETaylor(E) represents the overall Taylor approximation error.
+The proof and explicit approximation error terms are provided in Appendix B.2.1, and Algorithm 2 in Appendix B.2.3
+details the construction of L≈
+K. Our empirical analysis in Section 4 verifies that both Taylor and Kronecker errors are
+consistently small at the low-rank solutions returned by our method. These results support the accuracy of L≈
+K as an
+approximation to LK at those solutions under the evaluated compression settings. They do not establish a uniform
+approximation guarantee over all rank-constrained candidates.
+Theorem 2 yields a weighted quadratic surrogate with the same algebraic form as the one for LV (c
+WV ). Applying the
+argument of Theorem 1 therefore gives a closed-form minimizer of L≈
+K (see Corollary 1 in Appendix B.2.2).
+3.2
+Learned Rank Allocation across heads
+An LLM contains key and value projections across many heads and layers, and their sensitivity to low-rank compression
+varies substantially. We therefore allocate a global singular component budget across these heads. In this section, we
+concatenate all WK’s and WV ’s across all heads across all layers and index them using i ∈{1, . . . , N}. Plus, we use
+mi to denote the total numbers of singular components for each i, and B is the total number of retained components
+across all i’s. We require N ≤B ≤P
+i mi and retain at least one component for each i.
+To address this problem, we propose to rank all singular components globally throughout training, as summarized in
+Algorithm 1.
+Budget-constrained relaxation.
+Each block i has a learnable score si, and its j-th singular component receives score
+ti,j = si −j. We reserve the first component of every block in both training and deployment. For a total budget B, the
+remaining budget is b = B −N. During training, we use
+gi,1 = 1,
+gi,j = σ ((ti,j −α)/τ) ,
+j ≥2,
+where the shared cutoff α is solved using the Newton’s method [30] so that P
+i
+Pmi
+j=2 gi,j = b.
+We differentiate through this constraint using implicit differentiation. Thus training preserves an exact relaxed gate-mass
+budget, rather than an exact matrix-rank budget. More training details are delayed to Appendix F.1.
+Hard allocation.
+After training, we retain the first component of every block and the b remaining components with
+the largest scores ti,j, using deterministic tie-breaking. The resulting ranks satisfy
+1 ≤ri ≤mi,
+X
+i ri = B.
+5
+
+
+Running Title for Header
+Algorithm 1 Learned global rank allocation across KV blocks
+1: Input: budget N ≤B ≤P
+i mi, calibration set X, temperature τ > 0.
+2: Output: ranks {ri}N
+i=1 with P
+i ri = B.
+3: Compute and freeze all transformed SVD components using Theorem 1 and Corollary 1.
+4: Set b = B −N; initialize one score si per block.
+5: while not converged do
+6:
+Set ti,j = si −j and reserve gi,1 = 1.
+7:
+Solve the shared cutoff α so that P
+i
+Pmi
+j=2 σ((ti,j −α)/τ) = b. using the Newton’s method.
+8:
+Set gi,j = σ((ti,j −α)/τ) for j ≥2 and gate the fixed transformed singular values.
+9:
+Compute LKD on X; update {si} by implicitly differentiating through α.
+10: end while
+11: Recompute the scores; retain each block’s first component and the top-b remaining components, breaking ties deterministically.
+12: Set ri to the number retained in block i.
+13: return {ri}N
+i=1.
+3.3
+Integration with Quantization
+To further compress the KV cache, BELT can be combined with existing low-rank KV quantizers without modification.
+We integrate Palu [9] and STAR-KV [10]. Since the leading coordinates of the compressed representation dominate
+the quantization range, both quantizers apply an orthogonal transform—a norm-preserving change of basis R with
+R⊤R = I that mixes coordinates to spread outliers—before quantization. We fuse these transforms into the factors
+offline, adding no inference cost. Arbitrary learned ranks are handled with orthogonal matrices, and no retraining is
+required. Full details are in Appendix F.2.
+4
+Experiments
+4.1
+Experiment Settings
+Models and Tasks.
+We evaluate on four LLMs: LLaMA-2-7B [31], LLaMA-3.1-8B-Instruct [32], Qwen3-32B [33],
+and MPT-7B. They span both MHA (LLaMA-2-7B, MPT-7B) and GQA (LLaMA-3.1-8B-Instruct, Qwen3-32B), as
+well as RoPE (first three) and NoPE (MPT-7B). For accuracy, we measure perplexity on WikiText-2 [34] and C4 [35],
+and zero-shot accuracy on six tasks via LM-Evaluation-Harness [36]. For long-context evaluation, we additionally test
+on LongBench [37] and RULER [38], covering diverse document-level and structured tasks.
+Baseline.
+We compare BELT against two types of baselines for low-rank KV cache compression: (1) general
+low-rank decomposition methods for LLM compression, including SVD-LLM [11], ASVD [12], Zero Sum SVD [13],
+and ERC-SVD [14]; and (2) KV-specific low-rank methods, including PALU [9] and the state-of-the-art STAR-KV [10]
+and A3 [22]. Other baselines such as S2VD [16] are excluded due to code unavailability.
+4.2
+Accuracy Analysis
+Perplexity and Zero-Shot Evaluation.
+Figure 2 shows that BELT maintains model quality under aggressive KV
+cache compression. On LLaMA-2-7B and LLaMA-3.1-8B-Instruct, BELT consistently achieves the best perplexity
+and zero-shot accuracy at both 50% and 70% compression, with only marginal degradation from the uncompressed
+model. In contrast, baselines degrade sharply at 70% compression, with several collapsing entirely. These results
+demonstrate that BELT preserves generation quality even at high compression rates.
+Long Context Evaluation.
+Figure 2 shows that BELT achieves the best average score at both rates, surpassing even
+the uncompressed LLaMA-3.1-8B at 50% compression. Baselines competitive on LM-Eval-Harness collapse here,
+confirming that short-context metrics underestimate long-context damage. Retrieval-intensive tasks (Qasper,
+TriviaQA) are the most compression-sensitive and where BELT gains the most, while summarization remains
+insensitive—consistent with our motivation that query–key matching dominates retrieval.
+Comparison with Fine-tuning.
+BELT constructs compressed KV projections without fine-tuning model weights,
+whereas the methods in Table 1 additionally update weights on LLaMA-3.1-8B-Instruct. Fine-tuning constantly
+improves the results of all methods, but baselines still fall behind BELT. Direct FT trains low-rank key and value
+projection matrix from a random orthogonal initialization. Despite using the same objective and training data as
+BELT+FT, it achieves substantially lower accuracy, which can potentially be attributed to the local minimum issue.
+6
+
+
+Running Title for Header
+5
+6
+7
+8
+10
+12
+15
+20
+better →
+5.23 / 5.68
+Ours
+STAR-KV
+Palu
+SVD-LLM
+ASVD
+ERC-SVD
+ZS-SVD
+A3
+LLaMA-2-7B
+WikiText-2 PPL (log)
+◀142
+40
+60
+better →
+63.9 / 61.5
+Zero-shot avg. (%)
+0
+20
+40
+better →
+30.6 / 26.1
+LongBench avg.
+better →
+Exceeds 4K context
+window
+unseen
+0
+4K
+16K
+LLaMA-2-7B: 4K max
+RULER input: 16K
+RULER avg. (16K)
+7
+8
+10
+12
+15
+20
+7.12 / 8.54
+Ours
+STAR-KV
+Palu
+SVD-LLM
+ASVD
+ERC-SVD
+ZS-SVD
+A3
+LLaMA-3.1-8B-Inst
+◀28
+◀45/240
+40
+60
+67.8 / 63.4
+0
+20
+40
+45.3 / 34.6
+0
+50
+100
+95.2 / 74.2
+7
+8
+10
+12
+15
+20
+7.01 / 7.38
+not applicable
+Ours
+STAR-KV
+Palu
+SVD-LLM
+ASVD
+ERC-SVD
+ZS-SVD
+A3
+Qwen3-32B
+◀63
+40
+60
+71.9 / 70.4
+not applicable
+0
+20
+40
+47.2 / 40.2
+not applicable
+0
+50
+100
+96.1 / 95.1
+not applicable
+50% compression
+70% compression
+FullKV (uncompressed)
+Figure 2: Main results at 50% (dark) and 70% (light) KV cache compression. Each row connects one method’s two
+rates; the dashed line marks the uncompressed model. All axes point right toward better results; perplexity is reversed
+and logarithmic, with out-of-range values printed at the left end. Numbers beside BELT denote 50%/70% results.
+RULER uses 16K tokens, exceeding LLaMA-2-7B’s 4K context. A3 is not applicable to Qwen3-32B, whose query/key
+normalization lies between the projections and RoPE. Per-task results are in Appendix H.4.
+4.3
+System-level Performance Analysis
+We measure decoding speed on LLaMA-2-7B in FP16 on a single NVIDIA RTX PRO 6000 (96 GB). The baseline is
+PyTorch SDPA over the full cache, which dispatches to FlashAttention-2 [39]. Because BELT at 70% compression
+matches or exceeds the quality of STAR-KV, Palu, and ERC-SVD at 50% (Table 9), we compare BELT at 70% against
+these baselines at 50%. More details about these configurations are given in Appendix G.
+Attention Latency.
+Figure 3 reports speedups at roughly matched accuracy, where BELT’s better accuracy–speed
+trade-off yields faster performance at the same recall. BELT consistently outperforms SDPA and all baselines, with its
+advantage growing at longer contexts, while STAR-Q further boosts the speedup. STAR-KV and Palu remain nearly flat
+below 1.5×, and BELT at 70% compression already surpasses all baselines at 50%, whereas ERC-SVD is even slower
+than the uncompressed baseline. Further runtime breakdown in Appendix H.1 shows that attention computation
+dominates the overhead and that BELT substantially accelerates it.
+Generation Throughput.
+Table 3 reports full-model decoding throughput without prefill, using the largest power-
+of-two batch that fits in memory. By storing the BELT cache in a small fraction of the FP16 size, STAR-Q enables
+7
+
+
+Running Title for Header
+Table 1: Fine-tuning the low-rank projection matrix on LLaMA-3.1-8B-Instruct. Bold marks the best result at each
+compression rate.
+Method
+Comp (%)
+Perplexity ↓
+Zero-Shot Accuracy (%) ↑
+Wiki2
+C4
+OBQA
+PIQA
+ARC-e
+ARC-c
+Hella
+Wino
+Avg.
+ZS-SVD
+50
+7.72
+14.70
+43.20
+77.53
+77.90
+49.66
+74.66
+72.61
+65.93
+70
+9.34
+22.51
+35.60
+71.98
+65.36
+38.99
+64.90
+65.51
+57.06
+STAR-KV
+50
+8.31
+14.82
+40.20
+76.66
+76.01
+47.61
+71.65
+66.06
+63.03
+70
+9.73
+18.64
+37.20
+74.16
+70.24
+41.89
+65.71
+61.64
+58.48
+Direct FT
+50
+8.66
+17.56
+37.20
+75.95
+72.43
+43.34
+68.56
+59.67
+59.53
+70
+10.65
+27.99
+33.60
+71.11
+59.30
+31.14
+58.94
+53.99
+51.35
+Ours+FT
+50
+6.96
+12.63
+44.20
+79.87
+80.01
+54.95
+78.24
+72.45
+68.29
+70
+7.75
+15.11
+42.80
+77.31
+75.34
+49.40
+75.00
+69.69
+64.92
+0
+0.5
+1
+1.5
+2
+2.5
+3
+8K
+16K
+32K
+64K
+128K
+Context Length
+Speedup
+2.0x
+2.7x
+STAR-KV (50%)
+Palu (50%)
+ERC-SVD (50%)
+Ours (70%)
+Ours (70%) + STAR-Q
+Figure 3: Speedup of the attention module over PyTorch
+SDPA for one decoding step of LLaMA-2-7B at batch size
+16, measured over all 32 layers; layers left uncompressed
+run SDPA. Baselines use 50% compression and Ours uses
+70%; the dashed line adds STAR-Q.
+Table 2: Quantization results on Qwen3-32B: average
+KV bit-width, KV cache compression ratio, and average
+zero-shot accuracy over the six commonsense tasks.
+Method
+Bit
+Comp.
+Avg. (%)
+Qwen3-32B
+16
+1×
+71.29
+KIVI-2-gs32-r0
+2
+8.0×
+67.90
+Palu (50%)
+4
+8.0×
+52.02
+Palu (50%)
+3
+10.7×
+48.43
+STAR-KV (50%)
+3.3
+9.7×
+63.30
+Ours (70%)
+16
+3.3×
+70.45
+Ours (70%) + Palu-Q
+4
+13.3×
+70.12
+Ours (70%) + Palu-Q
+3
+17.8×
+69.36
+Ours (70%) + STAR-Q
+3.2
+16.7×
+70.28
+substantially larger batch sizes than the baselines, yielding a large throughput gain over SDPA, whereas STAR-KV
+improves throughput only modestly. Even without STAR-Q, BELT still achieves considerable speedups.
+4.4
+Quantization.
+Table 2 reports quantization results on Qwen3-32B. Applying Palu-Q and STAR-Q to BELT at 70% compression yields
+13.3× and 16.7× compression at 70.12% and 70.28% accuracy, nearly matching the unquantized model, with 3-bit
+Palu-Q further raising compression to 17.8× at 69.36%. In contrast, Palu and STAR-KV reach only 48.43% and 63.30%
+at lower compression (10.7× and 9.7×), and KIVI-2 attains 67.90% at 8×. The accuracy advantage of BELT under
+low-rank compression thus carries over to the quantized cache.
+Table 3: End-to-end generation throughput (tokens/s). The gray text in brackets denotes batch size. Baselines use 50%
+KV cache compression and BELT uses 70% with STAR-KV.
+Context Len.
+PyTorch SDPA
+STAR-KV
+Palu
+ERC-SVD
+BELT
+Gain (BELT)
+1K
+2091 (128)
+3092 (256)
+2485 (256)
+855 (256)
+4859 (1024)
+2.32×
+2K
+1044 (64)
+1681 (128)
+1340 (128)
+456 (128)
+2935 (512)
+2.81×
+4K
+530 (32)
+867 (64)
+688 (64)
+234 (64)
+1642 (256)
+3.10×
+8K
+271 (16)
+437 (32)
+343 (32)
+117 (32)
+869 (128)
+3.21×
+16K
+137 (8)
+211 (16)
+174 (16)
+58 (16)
+447 (64)
+3.26×
+8
+
+
+Running Title for Header
+Other experiments, e.g., ablation studies and verifying the assumption of our theoretical analysis, are included in
+Appendix H.
+5
+Related Work
+Low-rank decomposition for general LLM compression.
+A broad line of work decomposes projection weights to
+reduce model memory and computation, including SVD-LLM [11], ASVD [12], Zero Sum SVD [13], ERC-SVD [14],
+and S2VD [16]. These methods motivate data-weighted factorizations, but their layer- or weight-reconstruction
+objectives do not directly reflect attention behavior under KV caching. BELTinstead derives its weighting from attention
+outputs and attention-distribution curvature.
+General KV-cache compression.
+KV-cache compression has also been studied along the token and precision axes:
+token-selection methods retain a subset of cached tokens [5, 6, 40, 41, 42, 43], while quantization methods reduce
+cache precision [44, 45, 8, 46, 7, 47]. These are complementary to low-rank compression, which reduces the hidden
+dimension rather than the sequence dimension or bit-width. Our joint allocator further treats rank and bit-width as
+choices under a shared memory budget.
+6
+conclusion
+We revisited low-rank KV cache compression and addressed two limitations of existing methods: objectives that
+minimize KV reconstruction error rather than preserve attention outputs, and rank allocation that collapses to uniform
+thresholds. We reformulated compression to align with generation outputs, derived a closed-form solution via an
+approximate objective, and proposed a global rank allocation mechanism with a hard budget that preserves the truly
+important components across heads. Extensive experiments show consistent accuracy and efficiency gains under
+aggressive compression, with up to 3.26× faster decoding and 87% lower memory at comparable accuracy.
+Acknowledgments
+This was was supported in part by......
+References
+[1] Di Liu, Meng Chen, Baotong Lu, Huiqiang Jiang, Zhenhua Han, Qianxi Zhang, Qi Chen, Chengruidong Zhang,
+Bailu Ding, Kai Zhang, Chen Chen, Fan Yang, Yuqing Yang, and Lili Qiu. Retrievalattention: Accelerating
+long-context llm inference via vector retrieval, 2024.
+[2] Matt Stallone, Vaibhav Saxena, Leonid Karlinsky, Bridget McGinn, Tim Bula, Mayank Mishra, Adriana Meza
+Soria, Gaoyuan Zhang, Aditya Prasad, Yikang Shen, et al. Scaling granite code models to 128k context. arXiv
+preprint arXiv:2407.13739, 2024.
+[3] Peng Xu, Wei Ping, Xianchao Wu, Chejian Xu, Zihan Liu, Mohammad Shoeybi, and Bryan Catanzaro. Chatqa 2:
+Bridging the gap to proprietary llms in long context and rag capabilities, 2025.
+[4] Jiantong Jiang, Peiyu Yang, Rui Zhang, and Feng Liu. Towards efficient large language model serving: A survey
+on system-aware kv cache optimization. In Findings of the Association for Computational Linguistics: ACL 2026,
+pages 38450–38476, 2026.
+[5] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian,
+Christopher Ré, Clark Barrett, et al. H2o: Heavy-hitter oracle for efficient generative inference of large language
+models. Advances in neural information processing systems, 36:34661–34710, 2023.
+[6] Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyrillidis, and
+Anshumali Shrivastava. Scissorhands: Exploiting the persistence of importance hypothesis for llm kv cache
+compression at test time. Advances in Neural Information Processing Systems, 36:52342–52364, 2023.
+[7] Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W Mahoney, Yakun S Shao, Kurt Keutzer, and
+Amir Gholami. Kvquant: Towards 10 million context length llm inference with kv cache quantization. Advances
+in Neural Information Processing Systems, 37:1270–1303, 2024.
+[8] Yujun Lin, Haotian Tang, Shang Yang, Zhekai Zhang, Guangxuan Xiao, Chuang Gan, and Song Han. Qserve:
+W4a8kv4 quantization and system co-design for efficient llm serving, 2025.
+9
+
+
+Running Title for Header
+[9] Chi-Chih Chang, Wei-Cheng Lin, Chien-Yu Lin, Chong-Yan Chen, Yu-Fang Hu, Pei-Shuo Wang, Ning-Chi
+Huang, Luis Ceze, Mohamed S. Abdelfattah, and Kai-Chiang Wu. Palu: KV-cache compression with low-rank
+projection. In The Thirteenth International Conference on Learning Representations, 2025.
+[10] Priyansh Bhatnagar, Ashkan Moradifirouzabadi, Se-Hyun Yang, SeungJae Lee, Jungwook Choi, and Mingu Kang.
+Star-kv: Low-rank kv cache compression via soft thresholding for adaptive rank control, 2026.
+[11] Xin Wang, Yu Zheng, Zhongwei Wan, and Mi Zhang. Svd-llm: Truncation-aware singular value decomposition
+for large language model compression, 2025.
+[12] Zhihang Yuan, Yuzhang Shang, Yue Song, Dawei Yang, Qiang Wu, Yan Yan, and Guangyu Sun. Asvd: Activation-
+aware singular value decomposition for compressing large language models. arXiv preprint arXiv:2312.05821,
+2023.
+[13] Ali Abbasi, Chayne Thrash, Haoran Qin, Shansita Sharma, Sepehr Seifi, and Soheil Kolouri. Zero sum svd:
+Balancing loss sensitivity for low rank llm compression. arXiv preprint arXiv:2602.02848, 2026.
+[14] Haolei Bai, Siyong Jian, Tuo Liang, Yu Yin, and Huan Wang. Erc-svd: Error-controlled svd for large language
+model compression. arXiv preprint arXiv:2505.20112, 2025.
+[15] Haolei Bai, Siyong Jian, Tuo Liang, Yu Yin, and Huan Wang. Erc-svd: Error-controlled svd for large language
+model compression, 2026.
+[16] Hao Zhou, Jiapeng Guan, Jie Zhang, Ran Wei, Xudong Zhao, Zhe Jiang, and Xiangyang Ji. S 2 vd: A subspace-
+aware svd method for efficient llm compression. In ICASSP 2026-2026 IEEE International Conference on
+Acoustics, Speech and Signal Processing (ICASSP), pages 20506–20510. IEEE, 2026.
+[17] Rongzhi Zhang, Kuang Wang, Liyuan Liu, Shuohang Wang, Hao Cheng, Chao Zhang, and Yelong Shen.
+Lorc: Low-rank compression for llms kv cache with a progressive compression strategy.
+arXiv preprint
+arXiv:2410.03111, 2024.
+[18] Jaeseong Lee, Seung-won Hwang, Aurick Qiao, Daniel Campos, Zhewei Yao, and Yuxiong He. Tale: Token-
+adaptive low-rank kvcache approximation with reconstruction elimination. Transactions of the Association for
+Computational Linguistics, 13:1298–1318, 2025.
+[19] Junlin Mu, Hantao Huang, Jihang Zhang, Minghui Yu, Tao Wang, and Yidong Li. Sals: Sparse attention in latent
+space for kv cache compression, 2025.
+[20] Shiyu Ji, Yixuan Wang, Yijun Liu, Qingfu Zhu, and Wanxiang Che. Echokv: Efficient kv cache compression via
+similarity-based reconstruction, 2026.
+[21] Chi-Chih Chang, Wei-Cheng Lin, Chien-Yu Lin, Hung-Yueh Chiang, Yash Akhauri, Xilai Dai, Huiqiang Jiang,
+Yucheng Li, Luis Ceze, Kai-Chiang Wu, and Mohamed S. Abdelfattah. xkv: Cross-layer kv-cache compression
+via aligned singular vector extraction, 2026.
+[22] Jeffrey TH Wong, Cheng Zhang, Xinye Cao, Pedro Gimenes, Christos-Savvas Bouganis, George A Constantinides,
+Wayne Luk, and Yiren Zhao. A3: an analytical low-rank approximation framework for attention. arXiv preprint
+arXiv:2505.12942, 2025.
+[23] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and
+Illia Polosukhin. Attention is all you need, 2023.
+[24] Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. RoFormer: Enhanced transformer
+with rotary position embedding. Neurocomputing, 568:127063, 2024.
+[25] Aixin Liu, Hao Bei, Haowei Chen, et al. DeepSeek-V2: A strong, economical, and efficient mixture-of-experts
+language model. arXiv preprint arXiv:2405.04434, 2024.
+[26] Carl Eckart and Gale Young. The approximation of one matrix by another of lower rank. Psychometrika,
+1(3):211–218, 1936.
+[27] Leon Mirsky. Symmetric gauge functions and unitarily invariant norms. The quarterly journal of mathematics,
+11(1):50–59, 1960.
+[28] W. Rudin. Principles of Mathematical Analysis. International series in pure and applied mathematics. McGraw-
+Hill, 1976.
+[29] James Hardy Wilkinson. Kronecker’s canonical form and the qz algorithm. Linear Algebra and its Applications,
+28:285–303, 1979.
+[30] Carl T Kelley. Solving nonlinear equations with Newton’s method. SIAM, 2003.
+10
+
+
+Running Title for Header
+[31] Hugo Touvron, Louis Martin, Kevin Stone, Peter Albert, Amjad Almahairi, Yasmine Babaei, Nikolay Bashlykov,
+Soumya Batra, Prajjwal Bhargava, Shruti Bhosale, Dan Bikel, Lukas Blecher, Cristian Canton Ferrer, Moya
+Chen, Guillem Cucurull, David Esiobu, Jude Fernandes, Jeremy Fu, Wenyin Fu, Brian Fuller, Cynthia Gao,
+Vedanuj Goswami, Naman Goyal, Anthony Hartshorn, Saghar Hosseini, Rui Hou, Hakan Inan, Marcin Kardas,
+Viktor Kerkez, Madian Khabsa, Isabel Kloumann, Artem Korenev, Punit Singh Koura, Marie-Anne Lachaux,
+Thibaut Lavril, Jenya Lee, Diana Liskovich, Yinghai Lu, Yuning Mao, Xavier Martinet, Todor Mihaylov, Pushkar
+Mishra, Igor Molybog, Yixin Nie, Andrew Poulton, Jeremy Reizenstein, Rashi Rungta, Kalyan Saladi, Alan
+Schelten, Ruan Silva, Eric Michael Smith, Ranjan Subramanian, Xiaoqing Ellen Tan, Binh Tang, Ross Taylor,
+Adina Williams, Jian Xiang Kuan, Puxin Xu, Zheng Yan, Iliyan Zarov, Yuchen Zhang, Angela Fan, Melanie
+Kambadur, Sharan Narang, Aurelien Rodriguez, Robert Stojnic, Sergey Edunov, and Thomas Scialom. Llama 2:
+Open foundation and fine-tuned chat models, 2023.
+[32] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle,
+Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony
+Hartshorn, Aobo Yang, Archi Mitra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, Arun Rao, Aston
+Zhang, Aurelien Rodriguez, Austen Gregerson, Ava Spataru, Baptiste Roziere, Bethany Biron, Binh Tang,
+Bobbie Chern, Charlotte Caucheteux, Chaya Nayak, Chloe Bi, Chris Marra, Chris McConnell, Christian Keller,
+Christophe Touret, Chunyang Wu, Corinne Wong, Cristian Canton Ferrer, Cyrus Nikolaidis, Damien Allonsius,
+Daniel Song, Danielle Pintz, Danny Livshits, Danny Wyatt, David Esiobu, Dhruv Choudhary, Dhruv Mahajan,
+Diego Garcia-Olano, Diego Perino, Dieuwke Hupkes, Egor Lakomkin, Ehab AlBadawy, Elina Lobanova, Emily
+Dinan, Eric Michael Smith, Filip Radenovic, Francisco Guzmán, Frank Zhang, Gabriel Synnaeve, Gabrielle
+Lee, Georgia Lewis Anderson, Govind Thattai, Graeme Nail, Gregoire Mialon, Guan Pang, Guillem Cucurell,
+Hailey Nguyen, Hannah Korevaar, Hu Xu, Hugo Touvron, Iliyan Zarov, Imanol Arrieta Ibarra, Isabel Kloumann,
+Ishan Misra, Ivan Evtimov, Jack Zhang, Jade Copet, Jaewon Lee, Jan Geffert, Jana Vranes, Jason Park, Jay
+Mahadeokar, Jeet Shah, Jelmer van der Linde, Jennifer Billock, Jenny Hong, Jenya Lee, Jeremy Fu, Jianfeng Chi,
+Jianyu Huang, Jiawen Liu, Jie Wang, Jiecao Yu, Joanna Bitton, Joe Spisak, Jongsoo Park, Joseph Rocca, Joshua
+Johnstun, Joshua Saxe, Junteng Jia, Kalyan Vasuden Alwala, Karthik Prasad, Kartikeya Upasani, Kate Plawiak,
+Ke Li, Kenneth Heafield, Kevin Stone, Khalid El-Arini, Krithika Iyer, Kshitiz Malik, Kuenley Chiu, Kunal Bhalla,
+Kushal Lakhotia, Lauren Rantala-Yeary, Laurens van der Maaten, Lawrence Chen, Liang Tan, Liz Jenkins, Louis
+Martin, Lovish Madaan, Lubo Malo, Lukas Blecher, Lukas Landzaat, Luke de Oliveira, Madeline Muzzi, Mahesh
+Pasupuleti, Mannat Singh, Manohar Paluri, Marcin Kardas, Maria Tsimpoukelli, Mathew Oldham, Mathieu Rita,
+Maya Pavlova, Melanie Kambadur, Mike Lewis, Min Si, Mitesh Kumar Singh, Mona Hassan, Naman Goyal,
+Narjes Torabi, Nikolay Bashlykov, Nikolay Bogoychev, Niladri Chatterji, Ning Zhang, Olivier Duchenne, Onur
+Çelebi, Patrick Alrassy, Pengchuan Zhang, Pengwei Li, Petar Vasic, Peter Weng, Prajjwal Bhargava, Pratik
+Dubal, Praveen Krishnan, Punit Singh Koura, Puxin Xu, Qing He, Qingxiao Dong, Ragavan Srinivasan, Raj
+Ganapathy, Ramon Calderer, Ricardo Silveira Cabral, Robert Stojnic, Roberta Raileanu, Rohan Maheswari, Rohit
+Girdhar, Rohit Patel, Romain Sauvestre, Ronnie Polidoro, Roshan Sumbaly, Ross Taylor, Ruan Silva, Rui Hou,
+Rui Wang, Saghar Hosseini, Sahana Chennabasappa, Sanjay Singh, Sean Bell, Seohyun Sonia Kim, Sergey
+Edunov, Shaoliang Nie, Sharan Narang, Sharath Raparthy, Sheng Shen, Shengye Wan, Shruti Bhosale, Shun
+Zhang, Simon Vandenhende, Soumya Batra, Spencer Whitman, Sten Sootla, Stephane Collot, Suchin Gururangan,
+Sydney Borodinsky, Tamar Herman, Tara Fowler, Tarek Sheasha, Thomas Georgiou, Thomas Scialom, Tobias
+Speckbacher, Todor Mihaylov, Tong Xiao, Ujjwal Karn, Vedanuj Goswami, Vibhor Gupta, Vignesh Ramanathan,
+Viktor Kerkez, Vincent Gonguet, Virginie Do, Vish Vogeti, Vítor Albiero, Vladan Petrovic, Weiwei Chu, Wenhan
+Xiong, Wenyin Fu, Whitney Meers, Xavier Martinet, Xiaodong Wang, Xiaofang Wang, Xiaoqing Ellen Tan,
+Xide Xia, Xinfeng Xie, Xuchao Jia, Xuewei Wang, Yaelle Goldschlag, Yashesh Gaur, Yasmine Babaei, Yi Wen,
+Yiwen Song, Yuchen Zhang, Yue Li, Yuning Mao, Zacharie Delpierre Coudert, Zheng Yan, Zhengxing Chen,
+Zoe Papakipos, Aaditya Singh, Aayushi Srivastava, Abha Jain, Adam Kelsey, Adam Shajnfeld, Adithya Gangidi,
+Adolfo Victoria, Ahuva Goldstand, Ajay Menon, Ajay Sharma, Alex Boesenberg, Alexei Baevski, Allie Feinstein,
+Amanda Kallet, Amit Sangani, Amos Teo, Anam Yunus, Andrei Lupu, Andres Alvarado, Andrew Caples, Andrew
+Gu, Andrew Ho, Andrew Poulton, Andrew Ryan, Ankit Ramchandani, Annie Dong, Annie Franco, Anuj Goyal,
+Aparajita Saraf, Arkabandhu Chowdhury, Ashley Gabriel, Ashwin Bharambe, Assaf Eisenman, Azadeh Yazdan,
+Beau James, Ben Maurer, Benjamin Leonhardi, Bernie Huang, Beth Loyd, Beto De Paola, Bhargavi Paranjape,
+Bing Liu, Bo Wu, Boyu Ni, Braden Hancock, Bram Wasti, Brandon Spence, Brani Stojkovic, Brian Gamido,
+Britt Montalvo, Carl Parker, Carly Burton, Catalina Mejia, Ce Liu, Changhan Wang, Changkyu Kim, Chao
+Zhou, Chester Hu, Ching-Hsiang Chu, Chris Cai, Chris Tindal, Christoph Feichtenhofer, Cynthia Gao, Damon
+Civin, Dana Beaty, Daniel Kreymer, Daniel Li, David Adkins, David Xu, Davide Testuggine, Delia David,
+Devi Parikh, Diana Liskovich, Didem Foss, Dingkang Wang, Duc Le, Dustin Holland, Edward Dowling, Eissa
+Jamil, Elaine Montgomery, Eleonora Presani, Emily Hahn, Emily Wood, Eric-Tuan Le, Erik Brinkman, Esteban
+Arcaute, Evan Dunbar, Evan Smothers, Fei Sun, Felix Kreuk, Feng Tian, Filippos Kokkinos, Firat Ozgenel,
+Francesco Caggioni, Frank Kanayet, Frank Seide, Gabriela Medina Florez, Gabriella Schwarz, Gada Badeer,
+11
+
+
+Running Title for Header
+Georgia Swee, Gil Halpern, Grant Herman, Grigory Sizov, Guangyi, Zhang, Guna Lakshminarayanan, Hakan
+Inan, Hamid Shojanazeri, Han Zou, Hannah Wang, Hanwen Zha, Haroun Habeeb, Harrison Rudolph, Helen
+Suk, Henry Aspegren, Hunter Goldman, Hongyuan Zhan, Ibrahim Damlaj, Igor Molybog, Igor Tufanov, Ilias
+Leontiadis, Irina-Elena Veliche, Itai Gat, Jake Weissman, James Geboski, James Kohli, Janice Lam, Japhet Asher,
+Jean-Baptiste Gaya, Jeff Marcus, Jeff Tang, Jennifer Chan, Jenny Zhen, Jeremy Reizenstein, Jeremy Teboul,
+Jessica Zhong, Jian Jin, Jingyi Yang, Joe Cummings, Jon Carvill, Jon Shepard, Jonathan McPhie, Jonathan Torres,
+Josh Ginsburg, Junjie Wang, Kai Wu, Kam Hou U, Karan Saxena, Kartikay Khandelwal, Katayoun Zand, Kathy
+Matosich, Kaushik Veeraraghavan, Kelly Michelena, Keqian Li, Kiran Jagadeesh, Kun Huang, Kunal Chawla,
+Kyle Huang, Lailin Chen, Lakshya Garg, Lavender A, Leandro Silva, Lee Bell, Lei Zhang, Liangpeng Guo,
+Licheng Yu, Liron Moshkovich, Luca Wehrstedt, Madian Khabsa, Manav Avalani, Manish Bhatt, Martynas
+Mankus, Matan Hasson, Matthew Lennie, Matthias Reso, Maxim Groshev, Maxim Naumov, Maya Lathi, Meghan
+Keneally, Miao Liu, Michael L. Seltzer, Michal Valko, Michelle Restrepo, Mihir Patel, Mik Vyatskov, Mikayel
+Samvelyan, Mike Clark, Mike Macey, Mike Wang, Miquel Jubert Hermoso, Mo Metanat, Mohammad Rastegari,
+Munish Bansal, Nandhini Santhanam, Natascha Parks, Natasha White, Navyata Bawa, Nayan Singhal, Nick
+Egebo, Nicolas Usunier, Nikhil Mehta, Nikolay Pavlovich Laptev, Ning Dong, Norman Cheng, Oleg Chernoguz,
+Olivia Hart, Omkar Salpekar, Ozlem Kalinli, Parkin Kent, Parth Parekh, Paul Saab, Pavan Balaji, Pedro Rittner,
+Philip Bontrager, Pierre Roux, Piotr Dollar, Polina Zvyagina, Prashant Ratanchandani, Pritish Yuvraj, Qian Liang,
+Rachad Alao, Rachel Rodriguez, Rafi Ayub, Raghotham Murthy, Raghu Nayani, Rahul Mitra, Rangaprabhu
+Parthasarathy, Raymond Li, Rebekkah Hogan, Robin Battey, Rocky Wang, Russ Howes, Ruty Rinott, Sachin
+Mehta, Sachin Siby, Sai Jayesh Bondu, Samyak Datta, Sara Chugh, Sara Hunt, Sargun Dhillon, Sasha Sidorov,
+Satadru Pan, Saurabh Mahajan, Saurabh Verma, Seiji Yamamoto, Sharadh Ramaswamy, Shaun Lindsay, Shaun
+Lindsay, Sheng Feng, Shenghao Lin, Shengxin Cindy Zha, Shishir Patil, Shiva Shankar, Shuqiang Zhang, Shuqiang
+Zhang, Sinong Wang, Sneha Agarwal, Soji Sajuyigbe, Soumith Chintala, Stephanie Max, Stephen Chen, Steve
+Kehoe, Steve Satterfield, Sudarshan Govindaprasad, Sumit Gupta, Summer Deng, Sungmin Cho, Sunny Virk,
+Suraj Subramanian, Sy Choudhury, Sydney Goldman, Tal Remez, Tamar Glaser, Tamara Best, Thilo Koehler,
+Thomas Robinson, Tianhe Li, Tianjun Zhang, Tim Matthews, Timothy Chou, Tzook Shaked, Varun Vontimitta,
+Victoria Ajayi, Victoria Montanez, Vijai Mohan, Vinay Satish Kumar, Vishal Mangla, Vlad Ionescu, Vlad Poenaru,
+Vlad Tiberiu Mihailescu, Vladimir Ivanov, Wei Li, Wenchen Wang, Wenwen Jiang, Wes Bouaziz, Will Constable,
+Xiaocheng Tang, Xiaojian Wu, Xiaolan Wang, Xilun Wu, Xinbo Gao, Yaniv Kleinman, Yanjun Chen, Ye Hu,
+Ye Jia, Ye Qi, Yenda Li, Yilin Zhang, Ying Zhang, Yossi Adi, Youngjin Nam, Yu, Wang, Yu Zhao, Yuchen Hao,
+Yundi Qian, Yunlu Li, Yuzi He, Zach Rait, Zachary DeVito, Zef Rosnbrick, Zhaoduo Wen, Zhenyu Yang, Zhiwei
+Zhao, and Zhiyu Ma. The llama 3 herd of models, 2024.
+[33] An Yang et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388, 2025.
+[34] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models, 2016.
+[35] Jesse Dodge, Maarten Sap, Ana Marasovi´c, William Agnew, Gabriel Ilharco, Dirk Groeneveld, Margaret Mitchell,
+and Matt Gardner. Documenting large webtext corpora: A case study on the colossal clean crawled corpus. In
+Marie-Francine Moens, Xuanjing Huang, Lucia Specia, and Scott Wen-tau Yih, editors, Proceedings of the 2021
+Conference on Empirical Methods in Natural Language Processing, pages 1286–1305, Online and Punta Cana,
+Dominican Republic, November 2021. Association for Computational Linguistics.
+[36] Lintang Sutawika, Hailey Schoelkopf, Leo Gao, Baber Abbasi, Stella Biderman, Jonathan Tow, ben fattori,
+Charles Lovering, farzanehnakhaee70, Jason Phang, Anish Thite, Fazz, Aflah, Niklas Muennighoff, Thomas
+Wang, sdtblck, nopperl, gakada, tttyuntian, et al. EleutherAI/lm-evaluation-harness: v0.4.3. Zenodo, version
+v0.4.3, July 2024.
+[37] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan
+Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. LongBench: A bilingual, multitask benchmark for long
+context understanding. In Lun-Wei Ku, Andre Martins, and Vivek Srikumar, editors, Proceedings of the 62nd
+Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), pages 3119–3137,
+Bangkok, Thailand, August 2024. Association for Computational Linguistics.
+[38] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and
+Boris Ginsburg. Ruler: What’s the real context size of your long-context language models?, 2024.
+[39] Tri Dao. Flashattention-2: Faster attention with better parallelism and work partitioning, 2023.
+[40] Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang, Jiawei Han, and Jianfeng Gao. Model tells you what to
+discard: Adaptive kv cache compression for llms, 2024.
+[41] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick
+Lewis, and Deming Chen. Snapkv: Llm knows what you are looking for before generation. Advances in Neural
+Information Processing Systems, 37:22947–22970, 2024.
+12
+
+
+Running Title for Header
+[42] Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong,
+Junjie Hu, et al. Pyramidkv: Dynamic kv cache compression based on pyramidal information funneling. arXiv
+preprint arXiv:2406.02069, 2024.
+[43] Matanel Oren, Michael Hassid, Nir Yarden, Yossi Adi, and Roy Schwartz. Transformers are multi-state rnns. In
+Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing, pages 18724–18741,
+2024.
+[44] Yilong Zhao, Chien-Yu Lin, Kan Zhu, Zihao Ye, Lequn Chen, Size Zheng, Luis Ceze, Arvind Krishnamurthy,
+Tianqi Chen, and Baris Kasikci. Atom: Low-bit quantization for efficient and accurate llm serving, 2024.
+[45] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu.
+Kivi: A tuning-free asymmetric 2bit quantization for kv cache. arXiv preprint arXiv:2402.02750, 2024.
+[46] Zunhai Su, Zhe Chen, Wang Shen, Hanyu Wei, Linge Li, Huangqi Yu, and Kehong Yuan. Rotatekv: Accurate and
+robust 2-bit kv cache quantization for llms via outlier-aware adaptive rotations, 2025.
+[47] Yefei He, Luoming Zhang, Weijia Wu, Jing Liu, Hong Zhou, and Bohan Zhuang. Zipcache: Accurate and efficient
+kv cache quantization with salient token identification. Advances in Neural Information Processing Systems,
+37:68287–68307, 2024.
+[48] Saleh Ashkboos, Amirkeivan Mohtashami, Maximilian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan
+Alistarh, Torsten Hoefler, and James Hensman. Quarot: Outlier-free 4-bit inference in rotated llms. In Advances
+in Neural Information Processing Systems, 2024.
+[49] Ofir Press, Noah A. Smith, and Mike Lewis. Train short, test long: Attention with linear biases enables input
+length extrapolation, 2022.
+[50] Guilherme Penedo, Hynek Kydlíˇcek, Loubna Ben allal, Anton Lozhkov, Margaret Mitchell, Colin Raffel, Le-
+andro Von Werra, and Thomas Wolf. The fineweb datasets: Decanting the web for the finest text data at scale,
+2024.
+13
+
+
+Running Title for Header
+A
+Derivation of LV (c
+WV ) and LK(c
+WK)
+We derive separate value and key criteria from the single-head attention-output error using the notation of Section D.1.
+For each calibration query x, X denotes its corresponding context matrix; we suppress this dependence to match the
+main-text notation. Calibration representations and queries are held fixed, and all attention distributions are restricted to
+their common finite, unmasked support. All objectives below are summed over calibration queries, consistently with
+Equation 3.1.1.
+For brevity, write
+ax = ax(WK),
+bax = ax(c
+WK).
+Using Equation 1, adding and subtracting axXc
+WV WO gives the exact decomposition
+ox(WK, WV ) −ox(c
+WK, c
+WV )
+= axX(WV −c
+WV )WO
+|
+{z
+}
+value perturbation
++ (ax −bax)Xc
+WV WO
+|
+{z
+}
+key perturbation
+.
+(5)
+Applying Young’s inequality to these two terms and summing over queries yields, for every ξ > 0,
+J (c
+WK, c
+WV ) ≤(1 + ξ)LV (c
+WV ) + (1 + ξ−1)LK,out(c
+WK; c
+WV ),
+(6)
+where
+LV (c
+WV ) =
+X
+x
+axX(WV −c
+WV )WO
+
+2
+2 ,
+(7)
+LK,out(c
+WK; c
+WV ) =
+X
+x
+(ax −bax)Xc
+WV WO
+
+2
+2 .
+(8)
+Thus LV is exactly the output error caused by compressing the value projection while keeping the original attention
+distributions fixed. The key-output term remains coupled to c
+WV .
+To obtain a value-independent key criterion, define
+LK(c
+WK) =
+X
+x
+DKL
+
+ax(WK)
+ ax(c
+WK)
+
+.
+(9)
+For each query, let
+Mx(c
+WV ) = max
+1≤i≤n ∥(Xc
+WV WO)i,:∥2.
+The triangle inequality gives
+(ax −bax)Xc
+WV WO
+
+2 ≤Mx(c
+WV )∥ax −bax∥1.
+Pinsker’s inequality, with natural logarithms, then implies
+(ax −bax)Xc
+WV WO
+
+2
+2 ≤2Mx(c
+WV )2DKL(ax ∥bax).
+Summing over queries yields the candidate-dependent bound
+LK,out(c
+WK; c
+WV ) ≤2
+X
+x
+Mx(c
+WV )2DKL(ax ∥bax).
+(10)
+Suppose a common finite constant M satisfies
+Mx(c
+WV ) ≤M
+for every calibration query and every value approximation in the considered candidate class. Then
+LK,out(c
+WK; c
+WV ) ≤2M 2LK(c
+WK).
+(11)
+Taking ξ = 1 in Equation 6 gives
+J (c
+WK, c
+WV ) ≤2LV (c
+WV ) + 4M 2LK(c
+WK).
+(12)
+14
+
+
+Running Title for Header
+Scope of the bound.
+Equation 12 requires the same finite M throughout the considered candidate class; a rank
+constraint alone does not ensure this condition. Without a uniform norm bound, Equation 10 still holds, but its
+coefficients depend on c
+WV . In that setting, LK is an upper-bound-motivated, distribution-preserving surrogate, rather
+than a value-independent upper bound on the unrestricted joint problem.
+The value objective has an exact quadratic representation, and its positive-definite regularization admits the weighted-
+SVD solution in Theorem 1. For the nonlinear key objective, we derive its local quadratic term, apply pre-fitting
+regularization and a Kronecker approximation, and solve the resulting regularized surrogate in closed form. These
+solutions exactly minimize their respective surrogates, not necessarily the original joint objective. The analysis concerns
+attention-output errors on fixed calibration inputs, rather than a guarantee of final autoregressive generation preservation.
+B
+Theoretical analysis without RoPE
+B.1
+Theoretical analysis for L≈
+V (c
+WV )
+B.1.1
+Proof of Lemma 1
+Proof. Let
+E = WV −c
+WV ,
+ux = axXx.
+Then
+G0
+V =
+X
+x
+u⊤
+x ux,
+H0
+V = WOW ⊤
+O
+are positive semidefinite. Adding ϵI with ϵ > 0 makes both matrices positive definite, so their Cholesky factors LV and
+CV exist and are invertible.
+Aggregated quadratic form.
+Using the trace identity for a squared Euclidean norm and cyclicity of the trace,
+LV (c
+WV ) =
+X
+x
+∥uxEWO∥2
+2
+=
+X
+x
+tr
+ uxEH0
+V E⊤u⊤
+x
+
+=
+X
+x
+tr
+ u⊤
+x uxEH0
+V E⊤
+= tr
+ G0
+V EH0
+V E⊤
+.
+Regularized weighted Frobenius form.
+By the Cholesky factorizations,
+L≈
+V (c
+WV ) = ∥LV ECV ∥2
+F
+= tr
+ LV ECV C⊤
+V E⊤L⊤
+V
+
+= tr
+ GV EHV E⊤
+= tr
+ (G0
+V + ϵId)E(H0
+V + ϵIdh)E⊤
+.
+Expanding yields
+L≈
+V (c
+WV ) = tr(G0
+V EH0
+V E⊤) + ϵ tr(G0
+V EE⊤)
++ ϵ tr(EH0
+V E⊤) + ϵ2∥E∥2
+F .
+The first term is LV (c
+WV ). Furthermore,
+tr(G0
+V EE⊤) =
+X
+x
+∥uxE∥2
+2 =
+X
+x
+∥axXxE∥2
+2,
+and
+tr(EH0
+V E⊤) = ∥EWO∥2
+F .
+Therefore,
+L≈
+V (c
+WV ) = LV (c
+WV ) + ∆ϵ,V (E),
+15
+
+
+Running Title for Header
+with ∆ϵ,V (E) = ϵ P
+x ∥axXxE∥2
+2 + ϵ∥EWO∥2
+F + ϵ2∥E∥2
+F . Every term in this correction is nonnegative.
+Finally,
+0 ≤∆ϵ,V (E) ≤
+
+ϵ
+ ∥G0
+V ∥op + ∥H0
+V ∥op
+
++ ϵ2
+∥E∥2
+F .
+(13)
+For fixed E and calibration statistics, this is O(ϵ) as ϵ →0, completing the proof.
+B.1.2
+Proof of Theorem 1
+Proof. By Lemma 1, the rank-constrained value problem is
+min
+rank(c
+WV )≤r
+LV WV CV −LV c
+WV CV
+
+2
+F .
+Define
+MV := LV WV CV ,
+Y := LV c
+WV CV .
+Since LV and CV are invertible, rank(Y ) = rank(c
+WV ), and the transformation is bijective. The problem is therefore
+equivalent to
+min
+rank(Y )≤r ∥MV −Y ∥2
+F .
+By the Eckart–Young–Mirsky theorem [26, 27], one global minimizer is
+Y ∗
+r = ¯UV,r ¯ΣV,r ¯R⊤
+V,r,
+and the minimum value is Pm
+j=r+1 ¯σ2
+V,j. Applying the inverse transformation gives
+c
+W ∗
+V,r = L−1
+V ¯UV,r ¯ΣV,r ¯R⊤
+V,rC−1
+V .
+B.2
+Theoretical analysis for L≈
+K(c
+WK)
+B.2.1
+Proof of Theorem 2
+Before proving Theorem 2, we prove the following lemma for the objective LK(WK) evaluated on individual input
+token, i.e., LK,x(c
+WK) = DKL
+
+ax(WK)
+ ax(c
+WK)
+
+such that LK(c
+WK) = P
+x LK,x(c
+WK).
+Lemma 2 (Per-query key-side quadratic approximation). For a query x, let Jx, Ax, Gϵ
+K,x be defined in (4), and write
+GK,x = Gϵ
+K,x −ϵId,
+HK,x = qxq⊤
+x ,
+Hϵ
+K,x = HK,x + ϵIdh.
+Let
+Gϵ
+K,x = L⊤
+K,xLK,x,
+Hϵ
+K,x = CK,xC⊤
+K,x.
+be the Choleskey decomposition of Gϵ
+K,x and Hϵ
+K,x. For E = WK −c
+WK, define
+L≈
+K,x(c
+WK) = ∥LK,xECK,x∥2
+F .
+Then
+LK,x(c
+WK) −L≈
+K,x(c
+WK) = Rx(E) −∆ϵ,x(E),
+(14)
+where
+|Rx(E)| ≤
+1
+6d3/2
+h
+ω(XxEqx)3,
+ω(v) := max
+n
+vn −min
+n vn,
+and
+∆ϵ,x(E) = ϵ tr(GK,xEE⊤) + ϵ∥Eqx∥2
+2 + ϵ2∥E∥2
+F ≥0.
+Consequently,
+LK,x(c
+WK) −L≈
+K,x(c
+WK)
+ ≤
+1
+6d3/2
+h
+ω(XxEqx)3 + ∆ϵ,x(E).
+(15)
+For the one-sided regularization used in Kronecker fitting,
+LK,x(c
+WK) = q⊤
+x E⊤Gϵ
+K,xEqx + Rx(E) −ϵ∥Eqx∥2
+2.
+(16)
+16
+
+
+Running Title for Header
+Proof. All attention quantities are restricted to the finite, unmasked support. Let
+hx = zx(c
+WK)⊤−zx(WK)⊤= −
+1
+√dh
+XxEqx
+be the logit-perturbation column vector, and define
+Fx(t) = log
+ X
+n
+ax,nethx,n
+!
+,
+t ∈[0, 1].
+The exact softmax KL identity gives
+LK,x(c
+WK) = Fx(1) −Fx(0) −F ′
+x(0),
+where Fx(0) = 0 and F ′
+x(0) = axhx.
+Define the tilted probabilities and their mean by
+a(t)
+x,n =
+ax,nethx,n
+P
+j ax,jethx,j ,
+µx(t) =
+X
+n
+a(t)
+x,nhx,n.
+Differentiation yields
+F ′′
+x (0) = h⊤
+x Jxhx,
+F ′′′
+x (t) =
+X
+n
+a(t)
+x,n
+ hx,n −µx(t)
+3.
+Taylor’s theorem with integral remainder therefore gives
+LK,x(c
+WK) = 1
+2h⊤
+x Jxhx + Rx(E),
+Rx(E) = 1
+2
+Z 1
+0
+(1 −t)2F ′′′
+x (t) dt.
+(17)
+Since µx(t) lies between the minimum and maximum entries of hx,
+|F ′′′
+x (t)| ≤
+X
+n
+a(t)
+x,n|hx,n −µx(t)|3 ≤ω(hx)3.
+Hence
+|Rx(E)| ≤1
+6ω(hx)3 =
+1
+6d3/2
+h
+ω(XxEqx)3.
+To connect this expansion to the previously defined metric, write Dx = diag(ax). Because D−1
+x a⊤
+x = 1 and Jx1 = 0,
+Ax = JxD−1
+x Jx = JxD−1
+x (Dx −a⊤
+x ax) = Jx.
+Substituting hx into (17) therefore yields
+LK,x(c
+WK) = q⊤
+x E⊤GK,xEqx + Rx(E)
+= tr(GK,xEHK,xE⊤) + Rx(E).
+(18)
+By the Cholesky factorizations and cyclicity of the trace,
+L≈
+K,x(c
+WK) = tr
+ Gϵ
+K,xEHϵ
+K,xE⊤
+= tr(GK,xEHK,xE⊤) + ϵ tr(GK,xEE⊤)
++ ϵ∥Eqx∥2
+2 + ϵ2∥E∥2
+F .
+The additional terms equal ∆ϵ,x(E) and are nonnegative. Subtracting this expression from (18) proves (14); the triangle
+inequality gives (15).
+Finally,
+q⊤
+x E⊤Gϵ
+K,xEqx = q⊤
+x E⊤GK,xEqx + ϵ∥Eqx∥2
+2,
+which, together with (18), proves (16).
+Lemma 3 (Kronecker–vectorization identity). Let A ∈Rm×m and B ∈Rn×n be symmetric matrices, and let
+E ∈Rn×m. Then
+vec(E)⊤(A ⊗B) vec(E) = tr
+ BEAE⊤
+.
+In particular, for any vector q ∈Rm and any symmetric matrix G ∈Rn×n,
+q⊤E⊤GEq = vec(E)⊤(qq⊤⊗G) vec(E).
+Proof. We prove the general identity first.
+17
+
+
+Running Title for Header
+Step 1: Vectorization identity.
+For matrices P, X, Q of compatible dimensions,
+vec(PXQ) = (Q⊤⊗P) vec(X).
+Applying this with P = B, X = E, Q = A, and using A = A⊤(since A is symmetric),
+(A ⊗B) vec(E) = vec(BEA).
+Step 2: Trace inner product.
+For any matrices P, Q of the same size,
+vec(P)⊤vec(Q) = tr(P ⊤Q).
+Applying this with P = E and Q = BEA,
+vec(E)⊤vec(BEA) = tr
+ E⊤BEA
+
+.
+Combining with Step 1,
+vec(E)⊤(A ⊗B) vec(E) = tr
+ E⊤BEA
+
+.
+Step 3: Cyclicity of the trace.
+Using cyclicity of the trace,
+tr
+ E⊤BEA
+
+= tr
+ BEAE⊤
+.
+Therefore
+vec(E)⊤(A ⊗B) vec(E) = tr
+ BEAE⊤
+.
+Corollary: per-token identity.
+Set A = qq⊤and B = G. Since qq⊤and G are symmetric, the general identity gives
+vec(E)⊤(qq⊤⊗G) vec(E) = tr
+ GEqq⊤E⊤
+.
+On the other hand, q⊤E⊤GEq is a scalar, so it equals its own trace:
+q⊤E⊤GEq = tr
+ q⊤E⊤GEq
+
+= tr
+ E⊤GEqq⊤
+= tr
+ GEqq⊤E⊤
+,
+where the last equality follows from cyclicity of the trace. Therefore
+q⊤E⊤GEq = vec(E)⊤(qq⊤⊗G) vec(E).
+Then we formally provide the proof of Theorem 2 below:
+Proof. Let E = WK −c
+WK and e = vec(E). By (16),
+LK,x(c
+WK) = q⊤
+x E⊤Gϵ
+K,xEqx + Rx(E) −ϵ∥Eqx∥2
+2.
+Applying Lemma 3 and summing over calibration queries gives
+LK(c
+WK) = e⊤MKe +
+X
+x
+Rx(E) −∆ϵ,pre(E),
+(19)
+where
+MK =
+X
+x
+(qxq⊤
+x ) ⊗Gϵ
+K,x,
+∆ϵ,pre(E) = ϵ
+X
+x
+∥Eqx∥2
+2.
+Lemma 2 also gives
+
+X
+x
+Rx(E)
+ ≤
+1
+6d3/2
+h
+X
+x
+ω(XxEqx)3.
+Let AK, BK be the fixed positive-semidefinite Kronecker factors specified in the theorem. Their post-fitting reg-
+ularizations are positive definite, so LK and CK exist and are invertible. Using their Cholesky factorizations and
+Lemma 3,
+L≈
+K(c
+WK) = ∥LKECK∥2
+F
+= tr
+ (BK + ϵId)E(AK + ϵIdh)E⊤
+= e⊤(AK ⊗BK)e + ∆ϵ,post(E),
+18
+
+
+Running Title for Header
+where
+∆ϵ,post(E) = ϵ tr(BKEE⊤) + ϵ tr(EAKE⊤) + ϵ2∥E∥2
+F .
+Both regularization contributions are nonnegative. Writing
+∆ϵ,K(E) = ∆ϵ,pre(E) + ∆ϵ,post(E),
+and subtracting the surrogate from (19) yields the exact signed decomposition
+LK(c
+WK) −L≈
+K(c
+WK) = e⊤(MK −AK ⊗BK)e
++
+X
+x
+Rx(E) −∆ϵ,K(E).
+(20)
+Taking absolute values gives
+LK(c
+WK) −L≈
+K(c
+WK)
+ ≤
+e⊤(MK −AK ⊗BK)e
+
++
+1
+6d3/2
+h
+X
+x
+ω(XxEqx)3 + ∆ϵ,K(E).
+(21)
+The three terms in (21) correspond to distinct approximation sources. The first,
+e⊤(MK −AK ⊗BK)e
+, is the
+absolute Kronecker approximation error evaluated along the residual E. The second is an explicit upper bound on
+the total Taylor expansion error |P
+x Rx(E)|. The third, ∆ϵ,K(E), accounts for both the pre-fitting ridge and the
+post-fitting factor regularization. In particular,
+∆ϵ,K(E) ≤ϵ
+X
+x
+∥Eqx∥2
+2 +
+
+ϵ
+ ∥AK∥op + ∥BK∥op
+
++ ϵ2
+∥E∥2
+F .
+For fixed E and calibration data, this term is O(ϵ) as ϵ →0, provided the fitted factors remain bounded in operator
+norm. Without this boundedness condition, the explicit regularization term should be retained rather than abbreviated as
+O(ϵ).
+B.2.2
+Corollary for decomposing key tensor
+Corollary 1. let LKWKCK
+=
+¯UK ¯ΣK ¯R⊤
+K
+be a thin singular value decomposition,
+where
+¯ΣK
+=
+diag(¯σK,1, . . . , ¯σK,m), m = min(d, dh), and ¯σK,1 ≥· · · ≥¯σK,m ≥0. Let ¯UK,1:r, ¯ΣK,1:r, and ¯RK,1:r denote
+the components associated with the largest r singular values. Then one global minimizer of minrank(c
+WK)≤r L≈
+K(c
+WK)
+is
+c
+W ∗
+K,1:r = L−1
+K ¯UK,1:r ¯ΣK,1:r ¯R⊤
+K,1:rC−1
+K .
+(22)
+The corresponding projection matrix, W down
+K,1:r = L−1
+V ¯UK,1:r ¯Σ1/2
+K,1:r, and W up
+K,1:r = ¯Σ1/2
+K,1:r ¯R⊤
+K,1:rC−1
+K .
+B.2.3
+Overall algorithm for computing L≈
+K(WK)
+Algorithm 2 summarizes the rank-1 Kronecker-factored low-rank approximation of the key projection matrix WK.
+Given the KV cache X, the query vectors {qx}, and the current key matrix WK, the algorithm aims to find a rank-r
+approximation c
+WK that minimizes a quadratic surrogate of the token-summed KL divergence between the original and
+approximated attention distributions. The algorithm proceeds in three main stages. First, for each query token x, it
+computes the attention distribution px, the softmax Jacobian Jx, the Fisher weight Ax, and the regularized per-token left
+weight Gϵ
+K,x. Second, it assembles the exact Kronecker quadratic form MK = P
+x qxq⊤
+x ⊗Gϵ
+K,x and approximates it
+by a rank-1 Kronecker product AK ⊗BK using alternating least squares. Third, it regularizes and Cholesky-factorizes
+AK and BK to obtain LK and CK, and then solves the resulting weighted low-rank approximation problem in closed
+form via truncated SVD of LKWKCK. The output is the optimal rank-r key matrix c
+W ⋆
+K. The alternating least squares
+step avoids forming the full (dhd) × (dhd) matrix MK, making the algorithm scalable.
+19
+
+
+Running Title for Header
+Algorithm 2 Rank-1 Kronecker-factored low-rank approximation of WK
+1: Input: KV cache X, query vectors {qx}, current key matrix WK, rank r, regularization ϵ.
+2: for each query token x do
+3:
+Compute attention distribution: px ←Softmax
+ 1
+√dh XWKqx
+
+.
+4:
+Compute softmax Jacobian: Jx ←diag(px) −pxp⊤
+x .
+5:
+Compute Fisher weight: Ax ←Jx diag(1/px)Jx.
+6:
+Compute per-token left weight: Gϵ
+K,x ←
+1
+2dh X⊤AxX + ϵId.
+7: end for
+8: Form exact Kronecker quadratic form: MK ←P
+x qxq⊤
+x ⊗Gϵ
+K,x.
+9: Compute rank-1 Kronecker approximation MK ≈AK ⊗BK via alternating least squares.
+10: Regularize: Bϵ
+K ←BK + ϵId, Aϵ
+K ←AK + ϵIdh.
+11: Cholesky: Bϵ
+K = L⊤
+KLK, Aϵ
+K = CKC⊤
+K.
+12: Compute SVD LKWKCK = UΣV ⊤.
+13: Return c
+W ⋆
+K ←L−1
+K UrΣrV ⊤
+r C−1
+K .
+C
+Extension to Grouped-Query Attention
+Grouped-query attention (GQA) shares one key projection and one value projection among multiple query heads.
+Consequently, compression must assign a single pair of low-rank projections to each KV group, while accounting for
+the behavior of all query heads in that group.
+We first consider one KV group with query-head index set H and size H = |H|. The group shares
+WK, WV ∈Rd×dh.
+Each query head h ∈H has its own query qx,h ∈Rdh and output-projection block Oh ∈Rdh×d. For calibration
+query x, let Xx ∈Rnx×d contain its causal context representations, and let px,h(WK) ∈Rnx denote the corresponding
+attention probability column vector. All attention distributions are restricted to the finite, unmasked support.
+The contribution of this group to the layer output is
+ox(WK, WV ) =
+X
+h∈H
+px,h(WK)⊤XxWV Oh.
+(23)
+All derivations below condition on the calibration inputs and query vectors.
+C.1
+Output-Error Decomposition
+Let
+EV = WV −c
+WV ,
+px,h = px,h(WK),
+bpx,h = px,h(c
+WK).
+Adding and subtracting the output obtained with original attention and compressed values yields
+ox(WK, WV ) −ox(c
+WK, c
+WV ) =
+X
+h∈H
+p⊤
+x,hXxEV Oh
+|
+{z
+}
+vx
++
+X
+h∈H
+(px,h −bpx,h)⊤Xxc
+WV Oh
+|
+{z
+}
+kx
+.
+(24)
+Define
+JGQA =
+X
+x
+∥ox(WK, WV ) −ox(c
+WK, c
+WV )∥2
+2,
+(25)
+LV,GQA(c
+WV ) =
+X
+x
+∥vx∥2
+2,
+(26)
+LK,GQA(c
+WK) =
+X
+x
+X
+h∈H
+DKL(px,h ∥bpx,h).
+(27)
+20
+
+
+Running Title for Header
+Suppose that, on the considered candidate class,
+max
+x,h,n ∥(Xxc
+WV Oh)n,:∥2 ≤M
+for a common finite constant M. Then
+JGQA ≤2LV,GQA + 4HM 2LK,GQA.
+(28)
+To verify this, write
+kx,h = (px,h −bpx,h)⊤Xxc
+WV Oh.
+The row-norm bound and Pinsker’s inequality imply
+∥kx,h∥2
+2 ≤M 2∥px,h −bpx,h∥2
+1 ≤2M 2DKL(px,h ∥bpx,h).
+Using ∥P
+h kx,h∥2
+2 ≤H P
+h ∥kx,h∥2
+2 and ∥vx + kx∥2
+2 ≤2∥vx∥2
+2 + 2∥kx∥2
+2 gives (28).
+As in the single-head case, this is a conditional upper bound: a rank constraint alone does not provide the required
+uniform row-norm bound.
+C.2
+Shared-Key Compression
+The shared key projection affects every query head in the group. Accordingly, the key objective (27) aggregates their
+attention KL divergences before constructing the low-rank approximation.
+Let
+EK = WK −c
+WK,
+eK = vec(EK).
+For each query-head pair (x, h), define
+Jx,h = diag(px,h) −px,hp⊤
+x,h.
+With RoPE, define the logit-perturbation map
+(Bx,h)n,: = vec
+ X⊤
+x,nq⊤
+x,hRn−mx
+⊤.
+The corresponding logit perturbation is
+∆zx,h = −
+1
+√dh
+Bx,heK.
+Applying the logit-space KL expansion separately to each query head gives
+LK,GQA(c
+WK) = e⊤
+KMK,GQAeK +
+X
+x,h
+Rx,h,
+(29)
+where
+MK,GQA =
+1
+2dh
+X
+x
+X
+h∈H
+B⊤
+x,hJx,hBx,h ⪰0.
+(30)
+Using ω(v) = maxn vn −minn vn, the remainder obeys
+|Rx,h| ≤
+1
+6d3/2
+h
+ω(Bx,heK)3.
+(31)
+Without RoPE, Bx,h = q⊤
+x,h ⊗Xx, and therefore
+MK,GQA =
+1
+2dh
+X
+x,h
+(qx,hq⊤
+x,h) ⊗(X⊤
+x Jx,hXx).
+Thus the shared-key extension consists of aggregating the curvature of all associated query heads. The Kronecker fitting
+and low-rank optimization are performed once for the shared key projection, rather than independently for each query
+head.
+21
+
+
+Running Title for Header
+C.3
+Shared-Value Compression
+Sharing values requires additional care because the group output sums the contributions of multiple query heads before
+its error is measured. Define
+ux,h = p⊤
+x,hXx ∈R1×d,
+eV = vec(EV ).
+Then
+vx =
+X
+h∈H
+ux,hEV Oh.
+By column vectorization,
+v⊤
+x = TxeV ,
+Tx =
+X
+h∈H
+(O⊤
+h ⊗ux,h) ∈Rd×ddh.
+Consequently, the exact shared-value objective is
+LV,GQA(c
+WV ) = e⊤
+V MV,GQAeV ,
+MV,GQA =
+X
+x
+T ⊤
+x Tx ⪰0.
+(32)
+Expanding the metric gives
+MV,GQA =
+X
+x
+X
+h,k∈H
+(OhO⊤
+k ) ⊗(u⊤
+x,hux,k).
+(33)
+The terms with h̸ = k capture cross-head interactions in the summed group output.
+In general, (32) is not a single Kronecker product. Therefore, the single-head weighted-SVD theorem does not apply
+unchanged to the exact shared-value objective. A tractable extension approximates MV,GQA by a positive-semidefinite
+Kronecker product before applying weighted SVD.
+For comparison, a headwise surrogate that discards output cross terms would be
+LV,head =
+X
+x,h
+∥ux,hEV Oh∥2
+2,
+with metric
+MV,head =
+X
+x,h
+(OhO⊤
+h ) ⊗(u⊤
+x,hux,h).
+It satisfies
+LV,GQA ≤HLV,head,
+but remains a sum of Kronecker products in general. Thus even this alternative does not automatically reduce to one
+exact two-sided weighted Frobenius objective.
+When H = 1, the exact value metric reduces to
+MV,GQA = (O1O⊤
+1 ) ⊗
+ X
+x
+u⊤
+x,1ux,1
+!
+,
+recovering the single-head formulation.
+C.4
+Common Kronecker Surrogate and Closed-Form Solution
+For S ∈{K, V }, let MS,GQA denote the corresponding metric above. Fit fixed positive-semidefinite factors
+MS,GQA ≈AS ⊗BS,
+AS ∈Rdh×dh,
+BS ∈Rd×d.
+For ϵ > 0, factor
+BS + ϵId = L⊤
+S LS,
+AS + ϵIdh = CSC⊤
+S .
+The surrogate is
+bLS,GQA(c
+WS) = ∥LS(WS −c
+WS)CS∥2
+F .
+If
+LSWSCS = USΣSV ⊤
+S ,
+then a global rank-rS minimizer is
+c
+WS,rS = L−1
+S US,rSΣS,rSV ⊤
+S,rSC−1
+S .
+(34)
+22
+
+
+Running Title for Header
+This follows because the invertible change of variables Y = LSc
+WSCS preserves rank, reducing the problem to ordinary
+truncated SVD.
+For ES = WS −c
+WS and eS = vec(ES), define
+∆ϵ,S(ES) = ϵ tr(BSESE⊤
+S ) + ϵ tr(ESASE⊤
+S ) + ϵ2∥ES∥2
+F .
+The value approximation satisfies
+LV,GQA −bLV,GQA
+ ≤
+e⊤
+V (MV,GQA −AV ⊗BV )eV
+
++ ∆ϵ,V (EV ).
+(35)
+The key approximation satisfies
+LK,GQA −bLK,GQA
+ ≤
+e⊤
+K(MK,GQA −AK ⊗BK)eK
+
++
+1
+6d3/2
+h
+X
+x,h
+ω(Bx,heK)3 + ∆ϵ,K(EK).
+(36)
+Thus the GQA value construction incurs Kronecker and regularization errors, while the key construction additionally
+incurs the KL Taylor remainder. Equation (34) exactly minimizes the constructed surrogate, not necessarily the original
+grouped objective.
+C.5
+Multiple Groups and Cache Accounting
+The construction is applied separately to each KV group. If a layer has G groups and their output errors are
+∆ox,1, . . . , ∆ox,G, then
+
+G
+X
+g=1
+∆ox,g
+
+2
+2
+≤G
+G
+X
+g=1
+∥∆ox,g∥2
+2.
+Independent groupwise optimization therefore need not exactly minimize the total layer-output error, whose expansion
+also contains cross-group terms.
+A shared KV group stores only one compressed key representation and one compressed value representation per token.
+If their ranks are rK,g and rV,g, its cache stores rK,g + rV,g latent coordinates per token, regardless of the number of
+query heads in the group. Accordingly, at a common precision and context length, the global rank budget is imposed
+over KV groups:
+X
+ℓ,g
+(rK,ℓ,g + rV,ℓ,g) ≤Bcache,
+rather than counting the shared projections once per query head.
+D
+Extension to RoPE
+D.1
+RoPE-Aware Attention and KV Cache
+Rotary Position Embedding (RoPE) [24] injects position information by rotating the query and key vectors before the
+attention dot product. Let mx denote the position of the query token x, and let n index the positions of the keys stored
+in the KV cache. For each position m, let Rm ∈Rdh×dh be the orthogonal rotation matrix associated with position m.
+For a query row vector qx = xWQ ∈R1×dh and a key row vector kn = XnWK ∈R1×dh, where Xn ∈R1×d is the
+n-th row of X, RoPE applies
+˜qx = qxR⊤
+mx,
+˜kn = knR⊤
+n .
+The attention logit between query x and key n is therefore
+zx,n(WK) = ˜qx˜k⊤
+n
+√dh
+= qxR⊤
+mxRnW ⊤
+KX⊤
+n
+√dh
+= qxRn−mxW ⊤
+KX⊤
+n
+√dh
+,
+where the relative rotation is
+Rn−mx := R⊤
+mxRn.
+23
+
+
+Running Title for Header
+The RoPE attention probability vector is
+px(WK) = Softmax
+ zx,1(WK), . . . , zx,n(WK)
+
+∈R1×n.
+The attention output is
+ox(WK, WV ) = px(WK)XWV WO ∈R1×d,
+with px(WK) computed with RoPE. When RoPE is disabled, Rn−mx = I, and px(WK) reduces to the NoPE attention
+vector ax(WK).
+For the key-side analysis, under WK →c
+WK = WK −E, the logit perturbation is
+∆zx,n = −
+1
+√dh
+qxRn−mxE⊤X⊤
+n .
+Collecting over n,
+∆zx = −
+1
+√dh
+Bx vec(E),
+where Bx ∈Rn×ddh has rows
+(Bx)n,: = vec
+ X⊤
+n qxRn−mx
+⊤.
+When RoPE is disabled, Rn−mx = I, and the above notation reduces to the NoPE case with
+zx,n(WK) =
+1
+√dh
+qxW ⊤
+KX⊤
+n ,
+Bx replaced by (qx ⊗X⊤
+n )⊤.
+D.2
+Extension of Lemma 1 and Theorem 1
+Let aRoPE
+x
+= aRoPE
+x
+(WK) denote the original attention probability row vector computed with RoPE. As in Appendix A,
+X denotes the context associated with query x, with this dependence suppressed. The attention output is
+ox(WK, WV ) = aRoPE
+x
+XWV WO.
+RoPE acts on queries and keys, but not on the value or output projections. Holding the original attention distributions
+fixed, the value objective is therefore
+LV (c
+WV ) =
+X
+x
+aRoPE
+x
+X(WV −c
+WV )WO
+
+2
+2 .
+Writing E = WV −c
+WV , define the aggregated statistics
+G0
+V =
+X
+x
+X⊤(aRoPE
+x
+)⊤aRoPE
+x
+X,
+H0
+V = WOW ⊤
+O .
+The same trace calculation as in Lemma 1 gives
+LV (c
+WV ) = tr(G0
+V EH0
+V E⊤).
+For ϵ > 0, factor
+GV = G0
+V + ϵId = L⊤
+V LV ,
+HV = H0
+V + ϵIdh = CV C⊤
+V .
+The regularized surrogate satisfies
+L≈
+V (c
+WV ) = ∥LV ECV ∥2
+F = LV (c
+WV ) + ∆ϵ,V (E),
+where
+∆ϵ,V (E) = ϵ
+X
+x
+∥aRoPE
+x
+XE∥2
+2 + ϵ∥EWO∥2
+F + ϵ2∥E∥2
+F ≥0.
+Thus Lemma 1 holds with the RoPE-enabled attention distributions used to compute G0
+V . For fixed WO and ϵ, HV and
+its factor CV are unchanged.
+Since LV and CV are invertible, Theorem 1 applies to the regularized surrogate without further modification. If
+LV WV CV = ¯UV ¯ΣV ¯R⊤
+V ,
+24
+
+
+Running Title for Header
+then a global minimizer over rank(c
+WV ) ≤r is
+c
+W ∗
+V,r = L−1
+V ¯UV,1:r ¯ΣV,1:r ¯R⊤
+V,1:rC−1
+V ,
+with factors
+W down
+V,1:r = L−1
+V ¯UV,1:r ¯Σ1/2
+V,1:r,
+W up
+V,1:r = ¯Σ1/2
+V,1:r ¯R⊤
+V,1:rC−1
+V .
+Even when keys are also compressed, aRoPE
+x
+in this value objective remains the original attention distribution. The
+additional output error caused by changing attention is accounted for separately by the key-output term in Appendix A.
+Accordingly, the solution above exactly minimizes the regularized fixed-attention value surrogate, not the joint key–value
+objective.
+D.3
+Extension of Theorem 2
+Lemma 4 (Rank-1 Kronecker weighted Frobenius form with RoPE). For each calibration query x at position mx, let
+qx ∈Rdh be its unrotated query column vector, and let Xx ∈Rnx×d contain the context representations on its finite,
+unmasked attention support. Write Xx,n for the n-th row of Xx, and define
+zx,n(WK) =
+1
+√dh
+q⊤
+x Rn−mxW ⊤
+KX⊤
+x,n,
+px = softmax(zx(WK)).
+Here zx and px are column vectors and px,n > 0. Define
+Jx = diag(px) −pxp⊤
+x ,
+(Bx)n,: = vec
+ X⊤
+x,nq⊤
+x Rn−mx
+⊤,
+where vec stacks matrix columns.
+The exact, unregularized second-order quadratic metric is
+M 0
+K =
+1
+2dh
+X
+x
+B⊤
+x JxBx =
+1
+2dh
+X
+x
+B⊤
+x Jx diag(1/px)JxBx.
+(37)
+For ϵ > 0, define the pre-fitting regularized metric
+PK =
+X
+x
+(qxq⊤
+x ) ⊗Id,
+M ϵ
+K = M 0
+K + ϵPK.
+(38)
+This regularizer is defined in the unrotated query coordinates.
+Let AK ⪰0 and BK ⪰0 be fixed factors of a rank-one Kronecker approximation
+M ϵ
+K ≈AK ⊗BK,
+with dimensions dh × dh and d × d, respectively. The factors may depend on ϵ through the fitting target. Define the
+post-fitting regularizations
+Aϵ
+K = AK + ϵIdh,
+Bϵ
+K = BK + ϵId,
+and factor
+Bϵ
+K = L⊤
+KLK,
+Aϵ
+K = CKC⊤
+K.
+Then the surrogate
+bLK(c
+WK) =
+LK(WK −c
+WK)CK
+
+2
+F
+has a global minimizer over rank(c
+WK) ≤r given by
+c
+W ⋆
+K = L−1
+K UrΣrV ⊤
+r C−1
+K ,
+(39)
+where LKWKCK = UΣV ⊤and Ur, Σr, Vr are its top-r components.
+For E = WK −c
+WK, e = vec(E), and
+LK,x(c
+WK) = DKL
+
+px ∥softmax(zx(c
+WK))
+
+,
+25
+
+
+Running Title for Header
+the approximation error satisfies
+
+X
+x
+LK,x(c
+WK) −bLK(c
+WK)
+ ≤
+e⊤(M ϵ
+K −AK ⊗BK)e
+
+|
+{z
+}
+Kronecker approximation
++
+1
+6d3/2
+h
+X
+x
+ω(Bxe)3
+|
+{z
+}
+Taylor remainder bound
++
+∆ϵ(E)
+| {z }
+total regularization
+,
+(40)
+where
+ω(v) = max
+n
+vn −min
+n vn
+and
+∆ϵ(E) = ∆ϵ,pre(E) + ∆ϵ,post(E),
+(41)
+∆ϵ,pre(E) = ϵe⊤PKe = ϵ
+X
+x
+∥Eqx∥2
+2,
+(42)
+∆ϵ,post(E) = ϵ tr(BKEE⊤) + ϵ tr(EAKE⊤) + ϵ2∥E∥2
+F .
+(43)
+Both regularization contributions are nonnegative.
+When RoPE is disabled, Rn−mx = I and Bx = q⊤
+x ⊗Xx. Consequently,
+M ϵ
+K =
+X
+x
+(qxq⊤
+x ) ⊗
+ 1
+2dh
+X⊤
+x JxXx + ϵId
+
+,
+(44)
+recovering the non-RoPE construction with a pre-fitting ridge in the per-query left metric.
+Proof. Below is the proof:
+Step 1: RoPE-aware logit perturbation.
+For E = WK −c
+WK, define
+hx,n = zx,n(c
+WK) −zx,n(WK) = −
+1
+√dh
+q⊤
+x Rn−mxE⊤X⊤
+x,n.
+Set u = X⊤
+x,n ∈Rd and v = R⊤
+n−mxqx ∈Rdh. The column-vectorization identity gives
+u⊤Ev = vec(E)⊤(v ⊗u) = vec(E)⊤vec(uv⊤).
+Therefore,
+q⊤
+x Rn−mxE⊤X⊤
+x,n = e⊤vec
+ X⊤
+x,nq⊤
+x Rn−mx
+
+.
+Stacking over the attention support yields
+hx = −
+1
+√dh
+Bxe.
+(45)
+Step 2: Direct KL expansion in logit space.
+For a fixed query x, define
+Fx(t) = log
+ nx
+X
+n=1
+px,nethx,n
+!
+,
+t ∈[0, 1].
+The exact softmax KL identity gives
+LK,x(c
+WK) = Fx(1) −Fx(0) −F ′
+x(0).
+(46)
+Here Fx(0) = 0 and F ′
+x(0) = p⊤
+x hx.
+Define
+p(t)
+x,n =
+px,nethx,n
+P
+j px,jethx,j ,
+µx(t) =
+X
+n
+p(t)
+x,nhx,n.
+26
+
+
+Running Title for Header
+Differentiation yields
+F ′′
+x (0) = h⊤
+x Jxhx,
+F ′′′
+x (t) =
+X
+n
+p(t)
+x,n
+ hx,n −µx(t)
+3.
+Taylor’s theorem with integral remainder therefore gives
+LK,x(c
+WK) = 1
+2h⊤
+x Jxhx + Rx,
+Rx = 1
+2
+Z 1
+0
+(1 −t)2F ′′′
+x (t) dt.
+(47)
+Since µx(t) lies between the minimum and maximum entries of hx,
+|F ′′′
+x (t)| ≤
+X
+n
+p(t)
+x,n|hx,n −µx(t)|3 ≤ω(hx)3.
+It follows that
+|Rx| ≤1
+6ω(hx)3 =
+1
+6d3/2
+h
+ω(Bxe)3.
+(48)
+Step 3: Exact metric and pre-fitting ridge.
+Substituting (45) into (47) gives
+LK,x(c
+WK) =
+1
+2dh
+e⊤B⊤
+x JxBxe + Rx.
+To verify the alternative expression for M 0
+K, let Dx = diag(px). Since D−1
+x px = 1 and Jx1 = 0,
+JxD−1
+x Jx = JxD−1
+x (Dx −pxp⊤
+x ) = Jx −Jx1p⊤
+x = Jx.
+Thus the two expressions in (37) coincide, and
+X
+x
+LK,x(c
+WK) = e⊤M 0
+Ke +
+X
+x
+Rx.
+(49)
+The pre-fitting regularization contributes
+ϵe⊤PKe = ϵ
+X
+x
+e⊤ (qxq⊤
+x ) ⊗Id
+
+e = ϵ
+X
+x
+∥Eqx∥2
+2.
+Hence
+X
+x
+LK,x(c
+WK) = e⊤M ϵ
+Ke +
+X
+x
+Rx −∆ϵ,pre(E).
+(50)
+The subtraction is essential: the pre-fitting ridge is added to the fitting target, not to the original KL loss.
+Step 4: Kronecker approximation and post-fitting ridge.
+The vectorization identity gives
+e⊤(AK ⊗BK)e = tr(BKEAKE⊤).
+Using the Cholesky factorizations,
+bLK(c
+WK) = tr
+ (BK + ϵId)E(AK + ϵIdh)E⊤
+= e⊤(AK ⊗BK)e + ∆ϵ,post(E).
+The pre-fitting correction is nonnegative because PK ⪰0, and the post-fitting correction is nonnegative because
+AK, BK ⪰0.
+Combining this equality with (50) yields the exact signed error decomposition
+X
+x
+LK,x(c
+WK) −bLK(c
+WK) = e⊤(M ϵ
+K −AK ⊗BK)e
++
+X
+x
+Rx −∆ϵ(E).
+(51)
+Taking absolute values and applying (48) proves (40).
+When RoPE is disabled,
+Bx = q⊤
+x ⊗Xx,
+B⊤
+x JxBx = (qxq⊤
+x ) ⊗(X⊤
+x JxXx).
+Adding ϵPK therefore gives (44).
+27
+
+
+Running Title for Header
+Step 5: Closed-form surrogate minimizer.
+Since AK + ϵIdh and BK + ϵId are positive definite, LK and CK are
+invertible. Define
+TK = LKWKCK,
+Y = LKc
+WKCK.
+The map c
+WK 7→Y is bijective and preserves rank. Consequently,
+min
+rank(c
+WK)≤r
+bLK(c
+WK) =
+min
+rank(Y )≤r ∥TK −Y ∥2
+F .
+By the Eckart–Young–Mirsky theorem, a global minimizer is Y ⋆= UrΣrV ⊤
+r . Applying the inverse transformation
+proves (39).
+E
+Mathematical Comparison with A3
+A3 [22] and BELT both use analytical low-rank approximation, but differ in their treatment of key compression. A3
+approximates the attention logits before softmax, whereas BELT derives its key metric from preservation of the attention
+distributions after softmax. The distinction lies in the approximation objective and its induced metric, rather than in
+the truncated-SVD operation itself. Our value-side construction is closely related to the attention-aware weighted
+approximation in A3; we therefore focus this comparison on keys.
+E.1
+Notation and the Pre-Softmax Attention Operator
+We use the projection convention of Section D.1: WQ, WK ∈Rd×dh and token representations are row vectors. Without
+RoPE, the logits for query x and context X are
+zx(WK) =
+1
+√dh
+xWQW ⊤
+KX⊤.
+Thus the bilinear attention operator in representation space is
+P = WQW ⊤
+K ∈Rd×d.
+Under the alternative convention in which projection matrices act on column-vector representations, the same operator
+is written as W ⊤
+Q WK. The apparent transpose difference is therefore purely notational.
+To describe covariance-weighted logit reconstruction, let Y stack calibration query representations and let X stack
+context representations. The corresponding logit matrix is
+Z =
+1
+√dh
+Y PX⊤.
+E.2
+A3: Covariance-Weighted Logit Approximation
+The pre-softmax reconstruction criterion underlying the A3 key construction can be written as
+Llogit( bP) = 1
+dh
+∥Y (P −bP)X⊤∥2
+F .
+(52)
+Let
+GQ = Y ⊤Y,
+GX = X⊤X,
+and write covariance factorizations
+GQ = UQU ⊤
+Q ,
+GX = UXU ⊤
+X.
+Then trace cyclicity gives
+Llogit( bP) = 1
+dh
+tr
+
+GQ(P −bP)GX(P −bP)⊤
+= 1
+dh
+∥U ⊤
+Q (P −bP)UX∥2
+F .
+(53)
+When the covariance factors are invertible, minimizing (53) over rank( bP) ≤r reduces to truncated SVD of
+U ⊤
+Q PUX = U ⊤
+Q WQW ⊤
+KUX.
+28
+
+
+Running Title for Header
+In particular,
+bPr = U −⊤
+Q
+ U ⊤
+Q PUX
+
+r U −1
+X .
+When query and context statistics coincide, UQ = UX, giving the same-covariance transformed operator. With
+column-oriented projection matrices, this becomes the expression U ⊤
+XW ⊤
+Q WKUX.
+The covariance weighting accounts for the calibration distribution of token representations. However, the reconstruction
+criterion remains Euclidean in logit space: for a fixed query, its error contribution is the sum of squared perturbations
+of the logits. It does not explicitly distinguish logit perturbations according to their effect on the resulting softmax
+distribution.
+The formula above describes the unregularized covariance-weighted objective. If positive-definite covariance regular-
+ization is used, the SVD instead exactly solves the corresponding regularized weighted objective.
+E.3
+Expressing Logit Reconstruction in Key-Weight Space
+For a direct comparison with BELT, hold WQ fixed and write
+E = WK −c
+WK,
+e = vec(E).
+The logit-perturbation column vector for query x is
+hx = zx(c
+WK)⊤−zx(WK)⊤= −
+1
+√dh
+XEq⊤
+x .
+Here qx = xWQ retains the row-vector convention of the preliminaries, and X denotes the context of the current query.
+The resulting logit-reconstruction objective is
+Llogit(c
+WK) =
+X
+x
+∥hx∥2
+2 = e⊤Mlogite,
+(54)
+where
+Mlogit = 1
+dh
+X
+x
+(q⊤
+x qx) ⊗(X⊤X).
+(55)
+If all queries share the same context matrix, this metric factorizes exactly:
+Mlogit = 1
+dh
+ X
+x
+q⊤
+x qx
+!
+⊗(X⊤X).
+This separability explains why covariance whitening naturally leads to a weighted-SVD solution for logit reconstruction.
+For query-dependent causal supports, X varies with x, and the metric is generally a sum of Kronecker products rather
+than one product. Thus a single covariance-factor construction corresponds to the particular calibration weighting and
+support treatment used in that construction.
+The bilinear-operator formulation (52) and the fixed-query key-weight formulation (54) should not be identified without
+specifying the feasible parameterization. The former optimizes a rank-constrained operator bP, whereas the latter restricts
+that operator to WQc
+W ⊤
+K with fixed WQ. Our comparison of error metrics does not require the two parameterizations to
+be identical.
+E.4
+BELT: Attention-Distribution Curvature
+BELT instead starts from
+LK(c
+WK) =
+X
+x
+DKL
+
+ax(WK)
+ ax(c
+WK)
+
+.
+(56)
+For the original attention row vector ax, let
+Jx = diag(ax) −a⊤
+x ax.
+The direct logit-space expansion gives
+LK(c
+WK) = 1
+2
+X
+x
+h⊤
+x Jxhx +
+X
+x
+Rx(E),
+(57)
+29
+
+
+Running Title for Header
+with the explicit remainder bound derived in Lemma 2.
+The unregularized quadratic metric is therefore
+M 0
+K =
+1
+2dh
+X
+x
+(q⊤
+x qx) ⊗(X⊤JxX).
+(58)
+Comparing (55) and (58), the essential difference is
+X⊤X
+−→
+X⊤JxX.
+Apart from the overall factor 1/2, logit reconstruction uses the identity metric on logit perturbations, whereas BELT
+uses the query-dependent softmax curvature Jx.
+The weighting can also be expressed as
+X⊤JxX =
+X
+n
+ax,nX⊤
+n Xn −(axX)⊤(axX).
+(59)
+Thus BELT uses an attention-weighted, centered covariance of context representations. This differs from the uncentered
+context second moment X⊤X used by Euclidean logit reconstruction.
+E.5
+What the Different Metrics Preserve
+Uniform logit shifts.
+Softmax is invariant to adding the same scalar to every logit:
+softmax(z + c1) = softmax(z).
+For hx = c1, logit reconstruction incurs
+∥hx∥2
+2 = nxc2,
+whereas
+h⊤
+x Jxhx = 0.
+In this case the original attention KL is also exactly zero, not merely zero to second order. BELT’s unregularized
+curvature therefore respects a symmetry of the attention distribution that raw logit reconstruction does not.
+Attention-weighted variation.
+For an arbitrary perturbation,
+h⊤
+x Jxhx =
+X
+n
+ax,nh2
+x,n −
+ X
+n
+ax,nhx,n
+!2
+.
+(60)
+Equivalently,
+h⊤
+x Jxhx = 1
+2
+X
+n,m
+ax,nax,m(hx,n −hx,m)2.
+(61)
+The metric therefore measures changes in relative logits, weighted by the original attention probabilities, rather than
+absolute logit discrepancies.
+For example, with two attended positions and ax = (p, 1 −p),
+h⊤
+x Jxhx = p(1 −p)(hx,1 −hx,2)2,
+while Euclidean logit reconstruction penalizes h2
+x,1 + h2
+x,2. The two criteria thus need not select the same low-rank
+subspace.
+Uniform-attention special case.
+If ax = 1⊤/nx, then
+Jx = 1
+nx
+
+I −1
+nx
+11⊤
+
+.
+Hence BELT’s local objective becomes
+1
+2h⊤
+x Jxhx =
+1
+2nx
+hx −1⊤hx
+nx
+1
+
+2
+2
+.
+In this special case, it is proportional to centered logit reconstruction. For nonuniform attention, however, the weighting
+is generally anisotropic and query dependent.
+30
+
+
+Running Title for Header
+Local sensitivity and its limitation.
+The attention-dependent metric can assign little quadratic cost to directions that
+are locally insensitive under the original attention distribution. This does not imply that arbitrarily large perturbations in
+those directions are harmless. For example, a sufficiently large change to a low-probability logit can substantially alter
+attention. The Taylor remainder is therefore essential when assessing the accuracy of the quadratic approximation.
+Pre-fitting regularization and subsequent Kronecker approximation can also modify the null directions and relative
+weights of the exact curvature. The interpretations above describe M 0
+K; the implemented surrogate approximates this
+metric with the explicit error contributions analyzed in our theorems.
+E.6
+RoPE and Position-Dependent Key Sensitivity
+Without RoPE, a single bilinear operator P = WQW ⊤
+K maps query and context representations to logits. With RoPE,
+the corresponding operator depends on the relative position:
+zx,n(WK) =
+1
+√dh
+xWQRn−mxW ⊤
+KX⊤
+n .
+In general, there is no single position-independent matrix P representing all these interactions.
+Let Bx be the RoPE-aware perturbation map defined in Lemma 4, so that
+hx = −
+1
+√dh
+Bxe.
+A RoPE-aware Euclidean logit objective would have metric
+M RoPE
+logit
+= 1
+dh
+X
+x
+B⊤
+x Bx,
+(62)
+whereas BELT’s exact local KL metric is
+M 0,RoPE
+K
+=
+1
+2dh
+X
+x
+B⊤
+x JxBx.
+(63)
+Thus the distinction between identity weighting and softmax-curvature weighting persists even when both criteria
+account for positional rotations.
+Equation (62) describes a RoPE-aware logit-reconstruction criterion for comparison; it is not an assertion that A3
+implements this extension. BELT explicitly incorporates the relative rotations into the perturbation map used to construct
+its key metric.
+E.7
+Tractability and the Scope of Optimality
+A3 obtains an analytical approximation by applying SVD to a covariance-weighted pre-softmax operator. BELT’s
+query-dependent attention curvature is generally not separable into a single left and right weighting matrix. To obtain a
+tractable weighted-SVD problem, BELT first adds the specified pre-fitting ridge,
+M ϵ
+K = M 0
+K + ϵ
+X
+x
+(q⊤
+x qx) ⊗Id,
+and fits
+M ϵ
+K ≈AK ⊗BK.
+After regularizing the fitted factors, the resulting surrogate is
+L≈
+K(c
+WK) = ∥LK(WK −c
+WK)CK∥2
+F .
+Its global rank-r minimizer is
+c
+WK,r = L−1
+K (LKWKCK)rC−1
+K .
+Both methods therefore use standard weighted low-rank approximation once their respective metrics are fixed. The
+distinction is that A3 targets pre-softmax reconstruction, while BELT constructs its metric from post-softmax distribution
+preservation and then approximates that metric to recover a tractable SVD solution. The Kronecker fitting stage is
+separate from the closed-form SVD stage.
+BELT does not establish that its solution globally minimizes the original attention KL, nor that it universally dominates
+logit reconstruction. Its approximation involves Taylor, Kronecker, and regularization errors, which must be assessed at
+the returned solutions. Moreover, attention KL does not directly incorporate the value vectors or downstream network
+sensitivity; its connection to attention-output preservation is through the conditional bound in Appendix A.
+31
+
+
+Running Title for Header
+F
+Additional method details
+F.1
+Budget-Constrained Gates and Their Gradients
+Let
+F = {(i, j) : 1 ≤i ≤N, 2 ≤j ≤mi}
+be the set of components eligible for allocation after reserving the first component of every block. Write
+Mfree = |F|,
+b = B −N,
+ti,j = si −j.
+For an interior budget 0 < b < Mfree, define α(s) through
+F(α, s) =
+X
+(i,j)∈F
+σ
+si −j −α
+τ
+
+−b = 0.
+(64)
+Existence and uniqueness.
+For finite scores and τ > 0, F is continuous and strictly decreasing in α. Furthermore,
+lim
+α→−∞F(α, s) = Mfree −b > 0,
+lim
+α→+∞F(α, s) = −b < 0.
+Therefore, (64) has a unique finite solution.
+Implicit differentiation.
+For (i, j) ∈F, let
+gi,j = σ
+si −j −α
+τ
+
+,
+wi,j = gi,j(1 −gi,j)
+τ
+,
+and define
+Wi =
+mi
+X
+j=2
+wi,j,
+W =
+X
+i
+Wi > 0.
+Holding α fixed,
+∂F
+∂sk
+= Wk,
+∂F
+∂α = −W.
+The implicit function theorem gives
+∂α
+∂sk
+= −∂F/∂sk
+∂F/∂α = Wk
+W .
+(65)
+Consequently,
+∂gi,j
+∂sk
+= wi,j
+
+1{i=k} −Wk
+W
+
+.
+(66)
+Summing over the free components yields
+X
+(i,j)∈F
+∂gi,j
+∂sk
+= Wk −Wk
+W W = 0,
+consistent with the constant relaxed budget.
+If ℓi,j = ∂LKD/∂gi,j and the scores affect the loss only through the gates, the score gradient is
+∂LKD
+∂sk
+=
+mk
+X
+j=2
+ℓk,jwk,j −Wk
+W
+X
+(i,j)∈F
+ℓi,jwi,j.
+(67)
+The reserved gates gi,1 = 1 have zero derivatives.
+Numerical solution.
+The forward cutoff can be computed using bisection or safeguarded Newton iteration. The
+backward pass uses (65)–(67), rather than treating the cutoff as constant. In finite precision, the relaxed budget
+is satisfied up to the stated root-solving tolerance. Very small temperatures can cause sigmoid saturation and an
+ill-conditioned cutoff derivative; the implementation should monitor the residual and numerical stability.
+Endpoint budgets.
+When b = 0, all free gates are set to zero. When b = Mfree, all free gates are set to one. These
+cases require no cutoff solve or allocation training.
+32
+
+
+Running Title for Header
+Hard allocation and prefix preservation.
+For deployment, retain the first component of every block and select
+exactly b elements of F with the largest scores, breaking ties deterministically. For two free components in the same
+block with j < k,
+ti,j = si −j > si −k = ti,k.
+Thus selecting component k necessarily selects all preceding free components. Together with the reserved first
+component, each block retains a prefix, and the final allocation has exactly B components.
+The relaxed gate-mass constraint does not imply a hard rank constraint during training. Nor does exact budget
+satisfaction establish optimality of the learned hard allocation. Its quality and the soft-to-hard discrepancy are evaluated
+empirically.
+F.2
+Integration with Quantization
+To further enhance compression beyond low-rank decomposition, we quantize the compressed KV cache. BELT
+determines only the factors and the rank of each block, and block i still caches the compressed representation
+Zi = XW down
+i
+∈Rn×ri as in prior low-rank methods. Hence existing quantizers for low-rank KV caches apply to
+BELT without modification. We combine BELT with the quantizers of Palu [9] and STAR-KV [10], denoted Palu-Q
+and STAR-Q.
+Since the j-th column of W down
+i
+is scaled by the square root of the j-th largest singular value (Theorem 1 and
+Corollary 1), the leading coordinates of Zi are much larger than the others and dominate the per-token quantization
+range. Both quantizers therefore apply an orthogonal rotation that spreads these outliers across coordinates [48],
+followed by per-token asymmetric quantization. With Qβ denoting β-bit quantization, Palu-Q and STAR-Q cache
+ˆZi = Qβ(ZiRi)
+and
+ˆZi =
+
+Qβout(Zout
+i
+Rout
+i
+) Qβin(Zin
+i Rin
+i )
+
+,
+(68)
+respectively, where Ri, Rout
+i
+, and Rin
+i are orthogonal matrices. STAR-Q quantizes the leading 20% coordinates Zout
+i
+with βout = 4 bits and the rest Zin
+i with βin = 3 bits, which requires the leading coordinates to be the dominant ones.
+BELT satisfies this requirement because every hard allocation retains a prefix of the transformed SVD of each block
+(Section 3.2). The rotations are fused into the factors offline, i.e., W down
+i
+←W down
+i
+Ri and W up
+i
+←R⊤
+i W up
+i
+with a
+block-diagonal Ri for STAR-Q, and thus add no computation at inference. As the learned ranks are arbitrary integers,
+we use the normalized Walsh–Hadamard matrix when the rotated width is a power of two and a fixed random orthogonal
+matrix otherwise. As a rank can be as small as one, some blocks are single-signed, so we do not clip the zero point of
+Qβ to [0, 2β −1].
+G
+Additional experimental settings
+Configurations for System-level Performance Analysis
+All low-rank methods share STAR-KV’s Triton kernels [10],
+which we generalize to per-head, grouped, and joint layouts: keys are rebuilt with RoPE on chip, attention weights
+are applied directly to the compressed values, and packed codes are dequantized on chip with STAR-Q. Since latency
+depends only on tensor shapes, each cache holds random values in the layout and ranks of the corresponding checkpoint.
+H
+Additional experimental results
+H.1
+Additional system-level analysis results
+H.2
+Additional ablation studies
+Attention without RoPE
+To test BELT without rotary embeddings, we follow A3 [22] and use MPT-7B, which
+encodes position via ALiBi [49]. We keep the main pipeline and data, setting all sequence lengths to 2048. Table 4
+shows that BELT incurs accuracy losses close to those on LLaMA-2-7B, the other multi-head attention model, at both
+compression rates. These results confirm that BELT generalizes to attention without RoPE.
+Effect of Rank Allocation.
+To isolate rank allocation, we fix the key and value bases of BELT on LLaMA-3.1-8B-
+Instruct and vary only the rank distribution under the same KV cache budget, which is reported in Table 6. Baselines
+include Static (uniform fractions), Layer-wise search (ASVD/A3 sensitivity-based), and STAR-KV (learned soft
+thresholds). BELT achieves the lowest perplexity and highest average accuracy at both compression rates.
+Layer-wise search improves over Static but still trails BELT, while the state-of-the-art STAR-KV falls below Static. We
+give an analysis of why START-KV fails in Appendix I. A key pattern is that learned allocation shifts ranks from
+keys to values, retaining only 39–41% in keys versus about half for layer-wise search, and its benefit grows with
+compression: at 70%, it raises average accuracy by over 10 points over Static with identical bases.
+33
+
+
+Running Title for Header
+0.00
+1.00
+2.00
+3.00
+4.00
+5.00
+6.00
+7.00
+Attention Latency (ms)
+Context Length
+8K
+Pytorch SDPA
+STAR-KV (50%)
+Palu (50%)
+ERC-SVD (50%)
+Ours (70%)
+Ours (70%) + STAR-Q
+1.3x
+1.1x
+0.38x
+1.8x
+2.1x
+16K
+Pytorch SDPA
+STAR-KV (50%)
+Palu (50%)
+ERC-SVD (50%)
+Ours (70%)
+Ours (70%) + STAR-Q
+1.4x
+1.1x
+0.36x
+1.9x
+2.3x
+32K
+Pytorch SDPA
+STAR-KV (50%)
+Palu (50%)
+ERC-SVD (50%)
+Ours (70%)
+Ours (70%) + STAR-Q
+1.5x
+1.1x
+0.35x
+2.0x
+2.6x
+FlashAttention
+Low-Rank Attention
+Attention Projections
+Others
+Figure 4: Latency breakdown of the attention module in Figure 3, averaged over all 32 layers. Arrows give the speedup
+over SDPA; the ERC-SVD bars at 16K and 32K are truncated.
+Table 4: BELT on MPT-7B, which encodes position with ALiBi instead of RoPE. Perplexity is measured on 2048-token
+windows.
+Model
+Comp (%)
+Perplexity ↓
+Zero-Shot Accuracy (%) ↑
+Wiki2
+C4
+OBQA
+PIQA
+ARC-e
+ARC-c
+Hella
+Wino
+Avg.
+MPT-7B
+0
+7.70
+9.99
+42.60
+79.22
+74.66
+41.81
+76.15
+69.14
+63.93
+Ours
+50
+7.83
+10.76
+41.20
+78.78
+73.23
+40.36
+74.83
+67.72
+62.69
+70
+8.34
+12.06
+38.80
+76.44
+68.98
+39.08
+71.13
+66.06
+60.08
+Effect of Key and Value Compression.
+To isolate each cache, we compress only the keys or only the values from
+our checkpoints at 50% and 70% compression, without retraining. The results of this experiment are included in Table
+5. First, we observe that Values are substantially more sensitive to compression than keys. At 70%, compressing
+only values degrades accuracy and perplexity more than compressing only keys, even though the latter removes more of
+the cache. This matches our learned allocation, which assigns fewer ranks to keys (39–41%). At high compression, the
+combined loss of both caches roughly equals the sum of individual losses, confirming that most degradation comes
+from the value cache and that keys tolerate much lower ranks.
+Effect of Calibration Data.
+We evaluate the sensitivity of BELT on the calibration data, which is performed on
+WikiText-2 and reported in Table 7. For this experiment, we rebuild BELT for Qwen3-32B at 50% compression using
+FineWeb-Edu [50] and the C4 [35] training split instead, keeping all else fixed. Table 7 suggests that accuracy is
+nearly invariant, varying by only 0.26 points across corpora and consistently exceeding the uncompressed model.
+Perplexity follows the calibration domain: WikiText-2 yields the lowest WikiText-2 perplexity, while web corpora
+lower C4 perplexity. The learned rank allocation also preserves its structure. These results show that BELT is robust
+to the choice of calibration data.
+34
+
+
+Running Title for Header
+Table 5: Compressing only the keys or only the values on LLaMA-3.1-8B-Instruct. Each variant takes the BELT
+checkpoint at 50% or 70% compression, keeps its low-rank projections for the compressed cache and the original
+projections for the other cache, and is not retrained. Comp is the resulting KV cache compression.
+Method
+Compressed cache
+Comp (%)
+Perplexity ↓
+Zero-Shot Accuracy (%) ↑
+Wiki2
+C4
+OBQA
+PIQA
+ARC-e
+ARC-c
+Hella
+Wino
+Avg.
+LLaMA-3.1-8B-Inst
+–
+0
+6.75
+11.10
+43.00
+79.92
+81.82
+55.12
+79.20
+73.56
+68.77
+Ours (50%)
+Keys and values
+50.0
+7.10
+12.99
+44.20
+79.60
+79.63
+53.92
+77.67
+71.82
+67.81
+Keys only
+30.3
+6.90
+11.99
+44.20
+80.30
+81.40
+54.78
+78.37
+73.24
+68.72
+Values only
+19.7
+6.97
+12.17
+44.80
+79.22
+80.89
+54.52
+78.10
+73.56
+68.52
+Ours (70%)
+Keys and values
+70.0
+8.54
+17.51
+41.80
+76.66
+73.32
+47.01
+72.70
+68.75
+63.37
+Keys only
+37.6
+7.46
+13.39
+42.20
+80.14
+79.38
+52.05
+76.76
+70.48
+66.83
+Values only
+32.4
+8.12
+16.44
+43.20
+76.71
+77.31
+50.60
+73.91
+71.51
+65.54
+Table 6: Rank allocation on LLaMA-3.1-8B-Instruct with the key and value bases of BELT fixed. All methods share the
+same KV cache budget; STAR-KV stops once its budgets are met and uses 1.5% and 0.3% fewer ranks at 50% and 70%
+compression. Bold marks the best result at each compression rate.
+Method
+Comp (%)
+Perplexity ↓
+Zero-Shot Accuracy (%) ↑
+Wiki2
+C4
+OBQA
+PIQA
+ARC-e
+ARC-c
+Hella
+Wino
+Avg.
+LLaMA-3.1-8B-Inst
+0
+6.75
+11.10
+43.00
+79.92
+81.82
+55.12
+79.20
+73.56
+68.77
+Static
+50
+7.66
+14.92
+42.20
+78.35
+76.73
+50.77
+74.44
+72.53
+65.84
+70
+14.33
+38.64
+34.80
+71.06
+62.12
+34.56
+55.05
+61.64
+53.20
+Layer-wise search
+50
+7.52
+14.65
+42.40
+78.51
+78.58
+53.33
+75.62
+73.01
+66.91
+70
+11.57
+32.02
+37.20
+72.80
+68.77
+41.04
+61.84
+65.19
+57.81
+STAR-KV
+50
+8.18
+16.21
+40.60
+77.31
+75.51
+46.59
+71.07
+68.90
+63.33
+70
+15.42
+40.21
+35.00
+71.33
+60.61
+31.40
+54.45
+58.64
+51.90
+Ours
+50
+7.10
+12.99
+44.20
+79.60
+79.63
+53.92
+77.67
+71.82
+67.81
+70
+8.54
+17.51
+41.80
+76.66
+73.32
+47.01
+72.70
+68.75
+63.37
+H.3
+Empirical verification for theoretical claims
+Evaluation of the bounds for approximating key-side objectives
+We empirically evaluate the error terms in the
+bound used for bounding the approximation error in Theorem 2 when d
+WK = d
+WK
+∗. The evaluation results are included
+in Table 8, which suggests that these error terms are all quite small, and the sum of Kronecker and Taylor approximation
+error is also very close to the true gap between L≈
+K and LK, thus empirically justifying the theoretical analysis in
+Theorem 2.
+H.4
+Per-task main results
+I
+Why star-KV fails?
+StarKV [10] proposes a differentiable low-rank compression strategy. It performs SVD-based decomposition and
+introduces a learnable threshold αi for each i, which aims to retain components whose singular values exceed αi.
+Considering that this is non-differentiable, StarKV replaces it with a differentiable tanh-based soft-thresholding operator
+parameterized by αi. This operator smoothly approximates the hard threshold while admitting gradients with respect
+to αi, making αi fully learnable via backpropagation. The thresholds are jointly optimized with a hybrid objective
+combining a KL divergence between the original and compressed output distributions, LKD(α), and a compression
+regularizer Lcmp = P
+i e−αi that drives αi upward:
+LStarKV = LKD(α) + λLcmp,
+(69)
+where α = (α1, . . . , αN) and DKL denotes the sequence-level KL divergence.
+However, the following analysis suggests that this strategy produces nearly identical thresholds across all heads,
+regardless of their eigenvalue distributions:
+35
+
+
+Running Title for Header
+Table 7: Sensitivity of BELT to the calibration corpus on Qwen3-32B at 50% KV cache compression. Each corpus
+supplies both the calibration set of the key and value bases and the rank-allocation training data. WikiText-2 is the
+corpus of the main experiments (Table 9).
+Model
+Calibration data
+Perplexity ↓
+Zero-Shot Accuracy (%) ↑
+Wiki2
+C4
+OBQA
+PIQA
+ARC-e
+ARC-c
+Hella
+Wino
+Avg.
+Qwen3-32B
+–
+7.02
+11.98
+45.80
+80.90
+84.43
+60.84
+82.61
+73.16
+71.29
+Ours (50%)
+WikiText-2
+7.01
+12.35
+45.40
+80.25
+84.18
+64.08
+82.50
+75.06
+71.91
+FineWeb-Edu
+7.11
+12.10
+46.00
+80.58
+85.10
+63.57
+82.23
+74.19
+71.94
+C4
+7.10
+12.07
+47.20
+80.09
+84.72
+62.29
+82.06
+73.72
+71.68
+Kronecker truncation error
+0.015933
+Taylor approximation error
+-0.004157
+ϵ
+6.6e-5
+|LK(c
+WK −L≈
+K(c
+WK)|
+0.011775
+Table 8: Evaluation of the bounds used in Theorem 2 at d
+WK
+∗
+Theorem 3. At any finite stationary point α∗of (69), define g∗
+i = ∂αiLKD(α∗), ¯g∗=
+1
+N
+P
+i g∗
+i , ρ∗= maxi |g∗
+i −¯g∗|
+¯g∗
+.
+Then g∗
+i > 0 and
+maxi α∗
+i −mini α∗
+i = log maxi g∗
+i
+mini g∗
+i
+≤log 1 + ρ∗
+1 −ρ∗,
+(70)
+where the inequality holds whenever ρ∗< 1.
+Appendix I provides the proof and an extension to nonstationary checkpoints. Our empirical studies suggest that the
+value of ρ∗is small at convergence.
+We analyze the unconstrained objective
+L(α) = LKD(α) + λ
+N
+X
+i=1
+e−αi,
+λ > 0.
+The positive sign of the exponential regularizer is essential:
+∂αiL = ∂αiLKD −λe−αi.
+Constrained thresholds or alternative parameterizations require their corresponding stationarity conditions.
+I.1
+Proof of Theorem 3
+Proof. At a finite stationary point α∗,
+0 = ∂αiL(α∗) = g∗
+i −λe−α∗
+i .
+Therefore,
+g∗
+i = λe−α∗
+i > 0,
+α∗
+i = log λ −log g∗
+i .
+In particular, ¯g∗> 0, so ρ∗is well defined. Taking the maximum and minimum over i gives
+max
+i
+α∗
+i = log λ −log min
+i
+g∗
+i ,
+min
+i
+α∗
+i = log λ −log max
+i
+g∗
+i .
+Subtracting yields the exact identity
+max
+i
+α∗
+i −min
+i
+α∗
+i = log maxi g∗
+i
+mini g∗
+i
+.
+By the definition of ρ∗,
+(1 −ρ∗)¯g∗≤g∗
+i ≤(1 + ρ∗)¯g∗.
+If ρ∗< 1, the lower bound is positive, and hence
+max
+i
+α∗
+i −min
+i
+α∗
+i ≤log 1 + ρ∗
+1 −ρ∗.
+36
+
+
+Running Title for Header
+The exact identity holds at every finite stationary point. The condition ρ∗< 1 is sufficient for the stated upper bound
+but is not necessary for positivity of all gradients. For small ρ∗,
+log 1 + ρ∗
+1 −ρ∗= 2ρ∗+ O((ρ∗)3).
+Our empirical studies suggest that ρ∗lies between 0.5 and 0.72. Hence, the bound log( 1+ρ∗
+1−ρ∗) ≈0.1, which is a small
+value.
+I.2
+A Measurable Bound Away from Stationarity
+At a finite checkpoint α, define the signed distillation gradients and their mean by
+gi = ∂αiLKD(α),
+¯g = 1
+N
+N
+X
+i=1
+gi.
+Whenever ¯g > 0, define
+ρ = maxi |gi −¯g|
+¯g
+,
+ε = ∥∇L(α)∥∞
+¯g
+.
+(71)
+Thus ρ measures relative gradient dispersion, while ε measures the stationarity residual relative to the mean distillation
+gradient.
+Proposition 1 (Checkpoint-level concentration bound). If ¯g > 0 and ρ + ε < 1, then
+D(α) := max
+i
+αi −min
+i
+αi ≤log 1 + ρ + ε
+1 −ρ −ε.
+(72)
+Proof. Write
+ri = ∂αiL(α) = gi −λe−αi.
+By the definitions in (71),
+|gi −¯g| ≤ρ¯g,
+|ri| ≤ε¯g.
+Consequently,
+(1 −ρ −ε)¯g ≤gi −ri = λe−αi ≤(1 + ρ + ε)¯g.
+The lower endpoint is positive because ρ + ε < 1. Taking logarithms gives
+log λ −log
+ (1 + ρ + ε)¯g
+
+≤αi ≤log λ −log
+ (1 −ρ −ε)¯g
+
+.
+Subtracting the endpoints proves (72).
+At exact stationarity, ε = 0, recovering the bound in Theorem 3. If ρ + ε ≥1, the proposition provides no finite
+certificate; this does not imply that the thresholds are dispersed.
+I.3
+Empirical Evaluation
+All quantities in the bound can be evaluated at a saved checkpoint. For a calibration objective
+LKD(α) = 1
+|C|
+X
+s∈C
+ℓs(α),
+compute the signed gradients
+gi = 1
+|C|
+X
+s∈C
+∂αiℓs(α).
+The model and threshold parameters are held fixed while these gradients are accumulated. The averaging and weighting
+must match those used to define the training objective.
+Next, compute
+¯g = 1
+N
+X
+i
+gi,
+η = max
+i
+|gi −λe−αi|,
+D = max
+i
+αi −min
+i
+αi.
+37
+
+
+Running Title for Header
+When ¯g > 0, report
+ρ = maxi |gi −¯g|
+¯g
+,
+ε = η
+¯g .
+When ρ + ε < 1, also report the certified upper bound
+B = log 1 + ρ + ε
+1 −ρ −ε
+and compare it with the observed diameter D.
+These statistics should be evaluated over training and across regularization strengths and random seeds. Gradients
+should be averaged before computing their dispersion; averaging per-minibatch values of ρ does not produce the same
+quantity. If only a subset of calibration data is used, the resulting statistics estimate those of the full objective and
+are not a rigorous certificate for it without controlling estimation error. If ¯g ≤0, the relative statistics above are not
+applicable. If ¯g is close to zero, numerical and sampling errors require particular care.
+I.4
+Scope and Interpretation
+Theorem 3 is a stationary-point characterization, not a convergence theorem. At stationarity, concentrated positive
+distillation gradients and concentrated thresholds are linked by an exact identity. Observing both at the same stationary
+checkpoint therefore does not independently establish that gradient balancing caused threshold concentration.
+Although λ cancels explicitly from the stationary spread identity, it can affect the stationary point and its gradients. The
+result consequently does not imply concentration independent of the regularization strength.
+Finally, concentrated thresholds need not imply uniform ranks: the same threshold applied to different singular
+spectra can retain different numbers of components. Claims about rank-allocation quality must therefore be supported
+separately.
+J
+Other related works
+KV-specific low-rank compression.
+KV-specific methods include LoRC [17] and PALU [9] (factorized key/value
+projections), TALE [18] (token-adaptive ranks), SALS [19] (latent sparse attention), EchoKV [20] (on-demand
+reconstruction), and xKV [21] (shared subspaces across layers). A3 [22] develops analytical low-rank approximations
+for attention components, while STAR-KV [10] learns soft thresholds for adaptive rank control. Unlike reconstruction-
+centered methods, BELT weights approximation error by attention behavior; unlike independent threshold learning, its
+rank allocator satisfies a hard model-wide budget.
+38
+
+
+Running Title for Header
+Table 9: Zero-shot evaluation on commonsense reasoning benchmarks using LM-Eval-Harness. We report accuracy (%)
+under different KV cache compression rates, together with perplexity on WikiText-2 and C4. A3 does not apply to
+Qwen3-32B. Bold marks the best result at each compression rate.
+Model
+Comp (%)
+Perplexity ↓
+Zero-Shot Accuracy (%) ↑
+Wiki2
+C4
+OBQA
+PIQA
+ARC-e
+ARC-c
+Hella
+Wino
+Avg.
+LLaMA-2-7B
+0
+5.12
+7.04
+44.00
+77.64
+76.26
+46.16
+75.98
+69.22
+64.88
+ASVD
+50
+6.02
+8.22
+43.80
+76.22
+72.77
+42.66
+72.18
+67.40
+62.51
+70
+6.95
+9.48
+40.80
+74.54
+70.08
+38.65
+69.15
+64.64
+59.64
+ERC-SVD
+50
+5.78
+8.27
+43.60
+75.95
+71.76
+42.24
+73.17
+68.51
+62.54
+70
+6.62
+9.46
+38.20
+72.14
+62.50
+36.86
+67.78
+62.51
+56.66
+SVD-LLM
+50
+5.77
+7.99
+41.80
+75.79
+72.52
+41.81
+72.49
+65.82
+61.70
+70
+6.77
+9.90
+37.60
+72.47
+63.93
+36.52
+67.35
+60.77
+56.44
+ZS-SVD
+50
+5.39
+7.71
+42.60
+76.88
+75.04
+44.54
+74.39
+69.30
+63.80
+70
+6.62
+10.36
+41.40
+73.34
+65.24
+39.16
+70.50
+67.56
+59.53
+A3
+50
+12.83
+32.71
+29.60
+63.22
+43.94
+25.60
+46.00
+59.51
+44.64
+70
+142.15
+1581.78
+26.80
+54.35
+29.76
+20.99
+28.80
+51.70
+35.40
+Palu
+50
+5.74
+8.36
+42.20
+76.44
+73.27
+41.98
+73.31
+66.14
+62.22
+70
+8.85
+14.89
+33.00
+69.64
+57.83
+31.48
+59.32
+60.30
+51.93
+STAR-KV
+50
+6.38
+9.15
+42.00
+75.46
+66.79
+38.65
+70.79
+64.64
+59.72
+70
+7.58
+11.26
+35.60
+72.36
+58.50
+33.87
+62.07
+60.30
+53.78
+Ours
+50
+5.23
+7.37
+43.60
+77.64
+75.21
+43.86
+74.77
+68.19
+63.88
+70
+5.68
+8.46
+41.80
+76.55
+71.09
+40.10
+70.97
+68.75
+61.54
+LLaMA-3.1-8B-Inst
+0
+6.75
+11.10
+43.00
+79.92
+81.82
+55.12
+79.20
+73.56
+68.77
+ASVD
+50
+8.29
+14.03
+43.60
+79.49
+80.22
+54.52
+76.93
+73.48
+68.04
+70
+19.57
+26.68
+38.00
+74.81
+70.96
+42.92
+67.84
+68.67
+60.53
+ERC-SVD
+50
+8.05
+15.93
+40.00
+76.12
+75.42
+49.23
+73.50
+72.38
+64.44
+70
+13.65
+37.88
+32.40
+65.34
+54.34
+29.35
+49.74
+64.09
+49.21
+SVD-LLM
+50
+8.31
+17.87
+42.00
+76.28
+73.91
+47.35
+72.06
+71.27
+63.81
+70
+14.75
+50.91
+32.60
+62.51
+53.96
+29.44
+43.94
+62.59
+47.51
+ZS-SVD
+50
+9.03
+17.02
+43.20
+77.20
+76.98
+49.40
+72.37
+72.06
+65.20
+70
+22.90
+185.78
+33.20
+69.70
+61.78
+32.59
+53.18
+60.93
+51.90
+A3
+50
+44.68
+135.68
+32.00
+61.53
+47.90
+26.11
+37.18
+54.22
+43.16
+70
+240.31
+460.40
+28.20
+58.27
+33.59
+21.50
+29.11
+50.75
+36.90
+Palu
+50
+9.79
+37.56
+42.40
+77.86
+77.74
+49.66
+70.89
+71.43
+65.00
+70
+27.78
+119.11
+33.40
+66.43
+49.41
+30.80
+50.10
+56.67
+47.80
+STAR-KV
+50
+8.95
+15.87
+39.40
+76.06
+74.87
+45.65
+71.05
+65.82
+62.14
+70
+10.54
+18.72
+38.00
+75.19
+69.19
+40.44
+66.03
+62.43
+58.55
+Ours
+50
+7.12
+13.02
+43.60
+79.71
+79.67
+54.44
+77.77
+71.90
+67.85
+70
+8.54
+17.51
+41.80
+76.66
+73.32
+47.01
+72.70
+68.75
+63.37
+Qwen3-32B
+0
+7.02
+11.98
+45.80
+80.90
+84.43
+60.84
+82.61
+73.16
+71.29
+ASVD
+50
+9.86
+15.96
+42.40
+77.91
+78.91
+54.18
+72.02
+63.77
+64.87
+70
+16.95
+25.64
+38.60
+72.58
+69.36
+42.32
+60.04
+55.33
+56.37
+ERC-SVD
+50
+8.29
+15.27
+43.80
+76.93
+77.53
+57.25
+77.13
+69.14
+66.96
+70
+18.62
+45.32
+34.00
+65.51
+55.93
+34.39
+49.70
+55.80
+49.22
+SVD-LLM
+50
+8.43
+16.10
+43.80
+77.15
+77.40
+55.72
+76.08
+67.96
+66.35
+70
+17.48
+43.04
+32.20
+66.65
+58.04
+35.49
+50.44
+57.70
+50.09
+ZS-SVD
+50
+8.47
+16.64
+42.00
+75.03
+78.32
+52.30
+74.85
+69.22
+65.29
+70
+15.99
+38.33
+28.40
+59.68
+46.59
+27.56
+43.47
+56.20
+43.65
+Palu
+50
+20.15
+43.55
+32.80
+66.87
+64.94
+41.04
+55.58
+60.14
+53.56
+70
+63.34
+142.59
+25.80
+57.18
+36.28
+24.57
+36.13
+51.54
+38.58
+STAR-KV
+50
+7.61
+14.42
+40.80
+76.01
+77.40
+51.19
+72.54
+67.09
+64.17
+70
+8.19
+16.45
+38.40
+74.70
+74.12
+48.29
+71.53
+63.93
+61.83
+Ours
+50
+7.01
+12.35
+45.40
+80.25
+84.18
+64.08
+82.50
+75.06
+71.91
+70
+7.38
+14.16
+46.80
+78.67
+81.86
+62.71
+79.78
+72.85
+70.45
+39
+
+
+Running Title for Header
+Table 10: LongBench evaluation under different KV cache compression rates. A3 does not apply to Qwen3-32B. Bold
+marks the best result at each compression rate.
+Model
+Comp (%)
+Qasper
+QMSum
+TriviaQA
+MultiQA
+TREC
+MultiNews
+VCSum
+Avg.
+LLaMA-2-7B
+0
+7.37
+20.28
+89.02
+20.68
+68.00
+11.55
+8.14
+32.15
+ASVD
+50
+1.84
+16.51
+79.32
+22.62
+58.00
+4.51
+4.50
+26.76
+70
+2.54
+12.62
+67.37
+15.69
+44.50
+5.24
+4.96
+21.85
+ERC-SVD
+50
+4.86
+17.49
+84.46
+20.73
+57.00
+6.75
+2.81
+27.73
+70
+1.00
+14.47
+65.76
+11.44
+40.50
+6.95
+1.60
+20.25
+SVD-LLM
+50
+2.86
+18.34
+83.75
+17.97
+56.00
+3.97
+0.02
+26.13
+70
+3.84
+14.56
+63.37
+12.45
+44.50
+7.48
+1.29
+21.07
+ZS-SVD
+50
+7.24
+20.02
+88.18
+20.70
+65.50
+5.24
+0.15
+29.58
+70
+4.67
+15.87
+77.83
+17.28
+49.00
+3.60
+6.49
+24.96
+A3
+50
+6.46
+5.80
+6.61
+13.82
+25.50
+0.08
+1.67
+8.56
+70
+0.16
+1.66
+0.32
+0.61
+0.50
+1.29
+0.02
+0.65
+Palu
+50
+6.32
+19.69
+81.92
+26.23
+52.50
+1.39
+3.91
+27.42
+70
+1.17
+13.76
+21.92
+7.15
+44.50
+5.75
+0.25
+13.50
+STAR-KV
+50
+4.03
+7.22
+65.71
+16.25
+38.00
+0.05
+0.34
+18.80
+70
+1.59
+8.60
+19.37
+9.33
+10.00
+1.88
+0.39
+7.31
+Ours
+50
+7.66
+19.63
+84.58
+25.68
+64.50
+4.51
+7.47
+30.57
+70
+6.35
+18.89
+70.30
+20.40
+59.50
+2.34
+5.13
+26.13
+LLaMA-3.1-8B-Inst
+0
+34.46
+22.96
+92.75
+39.48
+75.00
+26.74
+15.93
+43.90
+ASVD
+50
+11.88
+23.09
+90.58
+25.65
+54.00
+24.67
+15.20
+35.01
+70
+6.32
+16.63
+78.06
+13.70
+50.00
+17.51
+5.48
+26.81
+ERC-SVD
+50
+24.93
+23.42
+87.64
+38.06
+72.50
+24.99
+8.69
+40.03
+70
+6.51
+14.84
+72.13
+23.79
+63.50
+10.92
+0.08
+27.40
+SVD-LLM
+50
+23.50
+24.61
+88.23
+37.61
+70.00
+24.68
+10.92
+39.93
+70
+2.73
+13.62
+60.88
+18.66
+62.00
+6.18
+0.03
+23.44
+ZS-SVD
+50
+10.55
+23.91
+88.82
+20.46
+63.50
+22.18
+13.07
+34.64
+70
+0.84
+14.09
+2.01
+1.35
+18.50
+5.61
+0.32
+6.10
+A3
+50
+3.14
+9.63
+5.36
+6.74
+7.50
+9.35
+1.96
+6.24
+70
+1.17
+8.90
+3.16
+1.16
+0.00
+4.92
+3.08
+3.20
+Palu
+50
+9.39
+22.80
+28.43
+19.86
+65.00
+19.15
+3.10
+23.96
+70
+1.95
+12.77
+2.85
+2.90
+0.50
+6.97
+0.14
+4.01
+STAR-KV
+50
+10.50
+18.82
+77.25
+20.13
+55.50
+18.59
+9.46
+30.03
+70
+5.02
+16.22
+38.57
+11.14
+23.00
+16.17
+0.99
+15.87
+Ours
+50
+34.08
+24.09
+91.70
+47.54
+76.50
+26.56
+16.46
+45.28
+70
+14.00
+24.02
+78.32
+31.72
+67.00
+24.20
+3.16
+34.63
+Qwen3-32B
+0
+46.69
+24.02
+90.91
+52.26
+75.00
+24.91
+14.36
+46.88
+ASVD
+50
+17.52
+19.80
+19.12
+29.59
+35.00
+21.31
+14.01
+22.34
+70
+7.47
+13.05
+3.50
+13.65
+5.25
+14.85
+7.71
+9.35
+ERC-SVD
+50
+42.64
+24.21
+87.77
+47.64
+67.00
+25.76
+8.19
+43.32
+70
+18.86
+17.77
+21.70
+26.82
+1.50
+14.93
+0.06
+14.52
+SVD-LLM
+50
+41.41
+24.20
+87.39
+47.72
+59.00
+26.08
+4.90
+41.53
+70
+6.34
+6.32
+0.33
+7.62
+0.00
+6.77
+0.00
+3.91
+ZS-SVD
+50
+43.74
+21.71
+86.85
+47.17
+69.00
+24.30
+15.24
+44.00
+70
+2.27
+12.22
+2.13
+23.08
+0.00
+9.99
+0.20
+7.13
+Palu
+50
+22.29
+17.66
+18.08
+28.46
+7.00
+25.77
+2.00
+17.32
+70
+0.18
+0.28
+0.00
+0.00
+0.00
+0.00
+0.00
+0.07
+STAR-KV
+50
+35.28
+23.17
+62.58
+37.71
+36.00
+24.74
+14.87
+33.48
+70
+11.83
+20.06
+29.37
+24.63
+0.00
+22.86
+9.51
+16.89
+Ours
+50
+47.28
+23.71
+90.67
+52.28
+77.50
+25.80
+13.21
+47.21
+70
+40.09
+23.37
+79.87
+48.17
+64.25
+25.51
+0.37
+40.23
+40
+
+
+Running Title for Header
+Table 11: RULER evaluation at a context length of 16K under different KV cache compression rates. LLaMA-2-7B,
+whose context window is 4K tokens, is not evaluated, and A3 does not apply to Qwen3-32B. MK1/MK2: NIAH
+multi-key 1/2; MQ: NIAH multi-query; MV: NIAH multi-value; S1–S3: NIAH single 1–3; FWE: frequent words
+extraction; SQ: SQuAD QA. Bold marks the best result at each compression rate.
+Model
+Comp (%)
+MK1
+MK2
+MQ
+MV
+S1
+S2
+S3
+FWE
+SQ
+Avg.
+LLaMA-3.1-8B-Inst
+0
+100.00
+100.00
+99.95
+99.25
+100.00
+100.00
+100.00
+95.00
+71.90
+96.23
+ASVD
+50
+99.40
+97.80
+99.60
+98.15
+100.00
+99.80
+98.60
+73.33
+60.57
+91.92
+70
+44.60
+2.60
+4.30
+7.10
+40.60
+60.40
+21.00
+22.33
+25.85
+25.42
+ERC-SVD
+50
+97.80
+94.80
+97.85
+95.95
+99.80
+100.00
+99.40
+87.40
+62.52
+92.84
+70
+79.80
+36.80
+70.70
+73.85
+97.40
+88.00
+18.80
+6.93
+34.98
+56.36
+SVD-LLM
+50
+98.80
+96.40
+96.10
+95.95
+99.80
+99.60
+99.60
+84.20
+65.45
+92.88
+70
+66.00
+38.80
+49.15
+61.25
+97.80
+78.20
+3.60
+31.47
+25.68
+50.22
+ZS-SVD
+50
+99.80
+96.20
+93.50
+86.15
+100.00
+100.00
+99.20
+82.40
+60.45
+90.86
+70
+0.00
+0.00
+0.00
+0.00
+22.60
+0.00
+0.00
+18.27
+0.13
+4.56
+A3
+50
+1.60
+0.00
+0.00
+1.10
+0.00
+0.00
+0.00
+13.67
+2.42
+2.09
+70
+0.00
+0.00
+0.00
+0.00
+0.00
+0.00
+0.00
+0.80
+0.40
+0.13
+Palu
+50
+15.80
+92.80
+7.05
+10.15
+99.60
+22.80
+2.60
+62.33
+8.00
+35.68
+70
+0.00
+0.00
+0.00
+0.00
+6.20
+0.00
+0.00
+0.00
+0.53
+0.75
+STAR-KV
+50
+24.00
+0.00
+7.45
+4.65
+67.60
+33.20
+19.20
+10.00
+18.90
+20.56
+70
+2.20
+0.00
+0.10
+0.45
+54.40
+15.00
+1.20
+4.27
+12.33
+9.99
+Ours
+50
+99.00
+98.40
+99.65
+99.90
+100.00
+100.00
+99.80
+94.33
+65.70
+95.20
+70
+88.80
+8.60
+97.00
+96.55
+100.00
+99.80
+73.80
+58.13
+44.72
+74.16
+Qwen3-32B
+0
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+94.93
+77.77
+96.97
+ASVD
+50
+70.40
+9.60
+67.80
+66.65
+100.00
+98.00
+98.20
+57.13
+2.50
+63.36
+70
+31.20
+0.00
+14.05
+34.65
+94.20
+92.20
+21.60
+18.13
+7.77
+34.87
+ERC-SVD
+50
+98.80
+94.40
+100.00
+99.90
+95.60
+97.60
+100.00
+94.33
+65.70
+94.04
+70
+97.40
+71.60
+91.95
+85.55
+100.00
+100.00
+97.80
+49.53
+37.57
+81.27
+SVD-LLM
+50
+92.00
+95.20
+99.80
+100.00
+98.60
+95.80
+99.40
+94.20
+65.28
+93.36
+70
+87.80
+49.40
+87.85
+75.20
+100.00
+100.00
+52.20
+45.93
+35.55
+70.44
+ZS-SVD
+50
+99.40
+99.60
+100.00
+99.65
+100.00
+99.80
+100.00
+96.60
+61.82
+95.21
+70
+85.60
+77.60
+87.60
+68.55
+97.20
+99.60
+84.00
+41.60
+36.85
+75.40
+Palu
+50
+99.00
+79.60
+80.15
+72.10
+100.00
+100.00
+99.40
+65.07
+44.28
+82.18
+70
+56.00
+0.80
+16.30
+25.70
+99.20
+55.00
+23.20
+0.20
+10.25
+31.85
+STAR-KV
+50
+89.00
+25.00
+89.20
+92.05
+100.00
+100.00
+84.20
+5.73
+49.98
+70.57
+70
+36.40
+0.00
+42.00
+41.10
+99.40
+94.80
+65.80
+1.80
+28.47
+45.53
+Ours
+50
+100.00
+100.00
+100.00
+100.00
+100.00
+100.00
+99.80
+93.47
+71.95
+96.14
+70
+100.00
+99.40
+99.90
+99.65
+100.00
+99.80
+99.60
+94.13
+62.98
+95.05
+41
