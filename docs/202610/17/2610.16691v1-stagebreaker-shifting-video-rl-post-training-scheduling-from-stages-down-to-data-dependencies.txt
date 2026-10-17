@@ -1,0 +1,737 @@
+Title: StageBreaker: Shifting Video RL Post-Training Scheduling from Stages down to Data Dependencies
+
+URL Source: https://arxiv.org/pdf/2610.16691v1
+
+Published Time: Wed, 14 Oct 2026 03:05:21 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# StageBreaker: Shifting Video RL Post-Training Scheduling from Stages down to Data Dependencies 
+
+## Li Peng 1,2 Chenghuan Huang 2 Ziyang Ma 2 Jing Lyu 3 Xiang Chen 1 Jie Zhang 1
+
+> 1
+
+Peking University 2WeChat HPC, Tencent Inc. 3WeChat Vision, Tencent Inc. 
+
+## Abstract 
+
+Reinforcement learning (RL) post-training has emerged as the key paradigm for improving autoregressive video models. Emerging vision-language reward models further strengthen post-training with accurate rewards, but their long chain-of-thought inference substantially raises the associated costs, while the pursuit of long videos prolongs policy training. De-spite these rising costs, existing video RL systems still adopt coarse-grained stage-centric execution, which stalls policy training until all reward evaluation finishes, replays every trajectory twice due to a further barrier within policy train-ing, and induces load imbalance across GPUs. To address the challenges, we propose StageBreaker, a fine-grained data-dependency-driven scheduling framework, which schedules the true dataflow of an RL step rather than its stages. Specif-ically, StageBreaker overlaps policy training with reward evaluation by exploiting reward-separable policy training, and merges the two trajectory replays into one by leverag-ing loss-independent back-propagation. It further balances GPU load by scheduling computation at the finer granularity. Our evaluation results show that StageBreaker achieves a speedup of up to 1.41 × over stage-centric execution. 
+
+## 1 Introduction 
+
+Autoregressive video models (AR models), which generate long videos chunk by chunk (i.e., multiple video frames), now power long-form and streaming video applications [6, 7, 9, 18, 25, 40, 44, 55, 59, 62]. As these models enter real-world deployment, generation quality becomes the decisive require-ment, in particular alignment with human preference, aes-thetic quality, and temporal coherence [12, 13, 26, 36, 46, 67]. By delivering substantial gains across all these dimensions, reinforcement learning (RL) post-training has emerged as the key paradigm to meet this requirement [23, 58, 66]. RL realizes these gains through a training loop of repeated steps, each of which comprises rollout, reward evaluation, and policy training (cf. Figure 1a) [28, 38, 72]. In the rollout stage, the video model being trained ( the policy ) generates multiple candidate videos for each prompt in a batch [16, 38]. A reward model then scores each candidate on desired dimensions [14, 24, 47, 53], and policy training replays each candidate’s trajectory (i.e., its sequence of generation steps) and combines the result with reward scores to compute the loss [49, 58]. Policy training then back-propagates this loss to update the policy, commonly through low-rank adaptation Actor Reward (b) Asynchronous reward evaluation. (a) Stage-centric execution. GPUs 
+
+(c) StageBreaker. 
+
+Actor Reward 
+
+On critical path 
+
+Blocked 11 Redundant replays 
+
+Load unbalance 22
+
+33
+
+Load balance 33
+
+Unblocked 11 Merged replays 22
+
+DiT VAE Reward Policy training Idle 
+
+Rollout 
+
+Figure 1. Comparison of RL step execution. (LoRA) [57, 66], raising the probability of generating high-scoring trajectories. The continued pursuit of high-quality and long videos [13, 23, 26, 58, 67] raises the cost of each RL step. Unlike earlier lightweight reward metrics [53, 54, 56], which can-not comprehensively and reliably assess video qualities, re-cent reward models employ large vision-language models (VLMs) to examine multiple video frames and perform long chain-of-thought (CoT) reasoning to produce holistic judg-ments for video quality [14, 24, 45, 47, 52]. Longer videos, in turn, prolong policy training, whose trajectory replay re-runs the video model for each video generation step [23, 58]. Together, reward evaluation and policy training now account for 63 ∼75% of an RL step. These rising costs unfortunately expose a mismatch with current video RL systems. As illustrated in Figure 1a, these systems [16, 28, 38, 42, 43] organize each RL step into suc-cessive rollout, reward, and policy training stages (i.e., stage-centric execution ). Each stage serves as the unit of com-putation scheduling and GPU assignment, processing the entire batch on a fixed set of GPUs before the next stage starts [16, 38, 73]. However, these stage boundaries impose coarser constraints than the true data dependencies within an RL step, prolonging each step and underutilizing GPUs. For example, while the reward model can score a candidate upon its generation, stage-centric execution starts reward evaluation only after the entire rollout stage finishes, expos-ing its cost entirely in the latency of each RL step. To take this cost off the critical path, as shown in Figure 1b, recent works [11, 41, 50] deploy reward models on dedicated GPUs (reward GPUs) and score each candidate upon generation, 
+
+> 1arXiv:2610.16691v1 [cs.DC] 12 Oct 2026 Li Peng et al.
+
+leaving the remaining GPUs (actor GPUs) to run rollout and policy training. In practice, this mechanism is only a pre-liminary exploration that falls short of the expected gains and even slows RL post-training by 20 ∼29%, as three key challenges remain unaddressed. 
+
+(1) Reward-blocked policy training. Existing RL systems stall policy training until the reward stage scores the entire batch, as policy training needs the complete set of scores to derive the advantages (the relative quality of each candidate) for the subsequent loss computation [23, 38, 65, 71, 72]. Even under asynchronous reward evaluation, the actor GPUs stay idle for 13% of each RL step before starting policy training, waiting for the last reward score of the batch ( 1 in Figure 1b). (2) Redundant trajectory replay. As in conventional model training, existing RL systems first compute the loss over the entire batch, then back-propagate it to derive the policy gra-dient , and finally update the policy. Policy training therefore runs a forward pass for the loss, in which it replays all tra-jectories to derive their probabilities [23, 66]. The backward pass, which back-propagates this loss, starts only after the forward pass finishes, imposing a further batch-level barrier within policy training. Although the backward pass requires these probabilities as well, GPU memory cannot retain the activations of all trajectories until then. The backward pass thus repeats the costly replay ( 2 ), resulting in redundant replay for 19 ∼26% of each RL step. (3) Stage-induced load im-balance. Existing RL systems bind computation to GPUs at the coarse granularity of stages, making it difficult to balance the load evenly across GPUs ( 3 ). For example, asynchro-nous reward evaluation, following this binding, dedicates GPUs to the reward stage but overlooks their potential to execute other computation [38, 41, 42]. The reward GPUs thus sit idle for 64% of each RL step once scoring finishes, while the actor GPUs carry all rollout and policy training. As these limitations all stem from the coarse granularity of stages, our key insight is to schedule the true dataflow, which uncovers potential to shorten each RL step and fill idle GPUs. (1) Reward-separable policy training. Policy training can in fact proceed asynchronously with reward evaluation, as the loss it computes is simply the product of the advantage and a reward-independent part. Policy training can thus com-pute and back-propagate the reward-independent part while reward evaluation is still in progress, and combine it with the advantages after both are complete. (2) Loss-independent back-propagation. Within policy training, back-propagation can likewise proceed without waiting for the loss, as the policy gradient is simply the product of a loss-dependent scalar and the gradient of the trajectory’s probability. Back-propagation can therefore replay each trajectory to compute this probability gradient in advance and apply the scalar afterwards. As this replay also yields the trajectory’s proba-bility required by the loss, the loss computation can reuse it rather than replaying the trajectory again, merging the two trajectory replays into one. (3) Task-level load balancing. Astage can further decompose into independent computation tasks, each inherently binding to its own input data rather than to the stage, which allows decoupling their GPU place-ment from the stage. VAE decoding [17, 64] within rollout, for example, which converts generated latents into video frames, operates solely on its input latents, while the loss computation and back-propagation require only the trajec-tory itself. Once its inputs are ready, a task can thus run on any available GPU rather than the fixed GPUs of its stage, which makes load balancing possible at the finer granularity (i.e., tasks). Inspired by our insights, we propose StageBreaker , a fine-grained data-dependency-driven scheduling framework for AR video RL post-training, which schedules the true dataflow of an RL step rather than its coarse stages (Figure 1c). Specif-ically, building on asynchronous reward evaluation, we pro-pose reward-asynchronous policy training , which computes and back-propagates the reward-independent part of the loss without waiting for the advantages. RL algorithms, how-ever, clip the loss for training stability [37], which confines the reward-independent part to two possible forms depend-ing on the sign of the advantage. StageBreaker therefore retains both forms during back-propagation, which occupy negligible GPU memory under LoRA. Once the advantage ar-rives, StageBreaker applies it to the matching form, yielding a policy gradient identical to that of stage-centric execu-tion. StageBreaker thus overlaps policy training on the actor GPUs with reward evaluation on the reward GPUs, elimi-nating the idle wait of the actor GPUs. Moreover, within policy training, we design merged trajectory replay , which further breaks the barrier between the loss computation and the back-propagation and thus replays each trajectory only once. By exploiting the aggregation granularity of the tra-jectory’s probability (e.g., chunk), StageBreaker feeds the probability of each chunk into the loss computation upon replaying it and then back-propagates this probability for its gradient before replaying the next chunk. After replay-ing the entire trajectory, StageBreaker applies the derived loss-dependent scalar to the probability gradient, completing both the loss computation and the back-propagation within a single replay. Rather than binding computation to GPUs by stage, our task-level placement balances the load across the two GPU groups at the granularity of tasks. Through a profiling-based search for the optimal placement, Stage-Breaker strategically moves VAE decoding and part of the policy training tasks from the overloaded actor GPUs to the underutilized reward GPUs. Our evaluation results show that StageBreaker achieves a speedup of up to 1.41 × over stage-centric execution and 1.81 × over asynchronous reward evaluation. Our main contributions can be summarized as follows: 
+
+• We characterize the challenges of video RL post-training under emerging VLM-based reward models and long videos. 
+
+> 2StageBreaker
+
+Even with asynchronous reward evaluation, stage-centric execution still suffers from reward-blocked policy training, redundant trajectory replay, and imbalanced GPU load. 
+
+• We propose StageBreaker, which schedules the true dataflow of an RL step rather than its stages. StageBreaker exploits the reward-separable policy training to overlap policy train-ing with reward evaluation, leverages the loss-independent back-propagation to merge the two trajectory replays, and balances the load across GPUs via task-level placement. 
+
+• Our evaluation results show that StageBreaker achieves consistent speedups over stage-centric execution and asyn-chronous reward evaluation while preserving the training fidelity. 
+
+## 2 Background 
+
+2.1 Autoregressive Video Generation Model architecture. Video models generate a video by iterative denoising in a latent space [40, 44, 55, 59]. As Fig-ure 2a shows, a text encoder embeds the prompt, a diffusion transformer (DiT) model estimates the clean latent from an initial noisy latent under this embedding, and a varia-tional autoencoder (VAE) decodes the clean latent into video frames [17, 32]. At the core of the video model, the DiT stacks multiple transformer blocks, each of which applies at-tention over the latent and the prompt embedding, followed by a feed-forward network (FFN). With these blocks, the DiT denoises the latent from initial noise 𝑥 𝐾 to the clean latent 𝑥 0 in 𝐾 steps, at each of which the DiT removes a portion of the noise from 𝑥 𝑘 to obtain 𝑥 𝑘 −1. Each denoising step is compute-intensive with little throughput gain from batching, as the attention and FFN of every block run over a long sequence of spatiotemporal latent tokens. Video models therefore typically generate one video at a time, each taking a nearly constant time given the fixed number of denoising steps. 
+
+Autoregressive generation. To support long-form and streaming video generation, recent works have widely ex-plored autoregressive (AR) video models, which generate a video sequentially in 𝐶 chunks (i.e., a few consecutive video frames each) with the DiT-based model [6, 7, 9, 18, 25, 62]. As Figure 2a illustrates, when generating chunk 𝑐 , the DiT additionally attends to the key-value (KV) cache 𝑥 <𝑐 of all preceding chunks at each denoising step, and denoises the chunk from 𝑥 𝑐 𝐾 to 𝑥 𝑐  
+
+> 0
+
+through the same 𝐾 steps. The DiT then appends 𝑥 𝑐  
+
+> 0
+
+to the KV cache for the subsequent generation, and the VAE decodes it into video frames. After all 𝐶 chunks are generated, their frames are concatenated into the com-plete video. To reduce generation cost, these models denoise each chunk in only a few steps, typically 𝐾 = 4, which brings generation to real-time frame rates [7, 9, 18]. Prompt p 
+
+> (a) Autoregressive video model. Text
+> encoder DiT model
+> Noisy latent
+
+𝑥 𝑘 𝑐 Noisy latent 𝑥 𝑘 𝑐 VAE VAE KV cache 𝑥 <𝑐 K steps: 𝑥 k          
+
+> 𝑐 to 𝑥 k-1
+> 𝑐
+> Clean latent Video chunk c
+> Attn FFN 𝑥 0<𝑐
+> (b) Detailed execution of an RL step.
+> Rollout Reward Policy training
+> Policy Clean latents VAE Video Reward model
+> Score Advantage
+> Forward pass
+> replay
+> Loss Backward pass Update policy
+> replay
+> Nprompts
+> Gcandidates 𝜋 𝜃 𝜏 𝑖 ,𝑘 ,𝜌 𝑖 ,𝑘 𝜏 𝑖 ,𝑘
+
+Figure 2. AR video model and its RL post-training. 
+
+2.2 RL Post-Training for Video Models 
+
+Reinforcement learning (RL) post-training optimizes a video model for qualities such as human preference, motion quality, and prompt adherence [12, 13, 21, 26, 36, 46]. RL pursues this goal over repeated steps, each of which consists of three stages. Within a step, the current video model (i.e., policy) generates candidate videos for a batch of prompts in rollout, and the reward stage scores the qualities of candidates [23, 49, 58, 66, 67]. Policy training then updates the policy to favor candidates of higher quality. Existing video RL systems typically execute the three stages sequentially (i.e., stage-centric execution), each over the whole batch [21, 38, 42, 57]. Figure 2b illustrates each stage of the stage-centric execu-tion in detail. (1) Rollout. For each of 𝑁 prompts, the policy generates the clean latents of 𝐺 video candidates. The VAE then decodes them into videos for the reward stage. (2) Re-ward evaluation. The reward model scores video candidate 𝑖 
+
+on the target qualities, returning the score 𝑟 𝑖 . GRPO-based RL algorithms [23, 58, 66] then normalize the score of each candidate within its group G( 𝑖 ), the 𝐺 candidates of the same prompt, into an advantage 𝐴 𝑖 ,
+
+𝐴 𝑖 = 𝑟 𝑖 − mean 𝑗 ∈ G ( 𝑖 ) 𝑟 𝑗 
+
+std 𝑗 ∈ G ( 𝑖 ) 𝑟 𝑗 + 𝜖 . (1) The advantage captures the relative quality of a candidate among its peers, serving as the learning signal for subse-quent policy training. (3) Policy training. While different RL algorithms for video models differ in their algorithmic de-tails [49, 57, 65], they follow a common GRPO-based training paradigm. Specifically, training splits these candidates into several mini-batches and updates the weights 𝜃 of the pol-icy 𝜋 𝜃 after each. Each update raises the probability of the trajectories (i.e., the sequences of denoising steps) that gen-erated the candidates with positive advantages and lowers that of the others. To this end, it minimizes a surrogate loss 
+
+L( 𝜃 ) [35], 
+
+L( 𝜃 ) = − 1
+
+𝑁𝐺𝐾 ∑︁ 𝑖,𝑘 
+
+min  𝜌 𝑖,𝑘 𝐴 𝑖 , clip (𝜌 𝑖,𝑘 , 1−𝜀, 1+𝜀 ) 𝐴 𝑖 
+
+, (2) 
+
+> 3Li Peng et al.
+
+where 𝜌 𝑖,𝑘 is the importance ratio of candidate 𝑖 at its 𝑘 -th denoising step 𝜏 𝑖,𝑘 across all 𝐶 chunks. This ratio compares the probability of 𝜏 𝑖,𝑘 under the current policy 𝜋 𝜃 with that under the rollout policy 𝜋 old ,
+
+𝜌 𝑖,𝑘 = exp   log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) − log 𝜋 old (𝜏 𝑖,𝑘 ). (3) The policy generates 𝜏 𝑖,𝑘 by sampling 𝑥 𝑐 𝑘 −1 ∼ 𝜋 𝜃 (· | 𝑥 𝑐 𝑘 , 𝑝 𝑖 , 𝑥 <𝑐 )
+
+in each chunk, and its probability 𝜋 𝜃 (𝜏 𝑖,𝑘 ) therefore aggre-gates over all 𝐶 chunks as log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) =
+
+> 𝐶
+
+∑︁ 
+
+> 𝑐 =1
+
+log 𝜋 𝜃 (𝑥 𝑐 𝑘 −1 | 𝑥 𝑐 𝑘 , 𝑝 𝑖 , 𝑥 <𝑐 ). (4) As 𝜋 𝜃 (𝜏 𝑖,𝑘 ) depends on all 𝐶 chunks, the policy obtains it only after the last chunk finishes. Moreover, for training stability [35, 37], the clipping in Equation 2 bounds the mag-nitude of each update by constraining 𝜌 𝑖,𝑘 within [1−𝜀, 1+𝜀 ],and a clipped denoising step contributes no gradient. Back-propagating this loss L( 𝜃 ) yields the policy gradient and further updates the weights, 
+
+−∇ 𝜃 L( 𝜃 ) = 1
+
+𝑁𝐺𝐾 ∑︁ 𝑖,𝑘 
+
+𝐴 𝑖 𝜌 𝑖,𝑘 ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ), (5) As in conventional model training, existing systems compute the loss L( 𝜃 ) with a forward pass and back-propagate it with a backward pass [49, 57, 65]. The forward pass replays each trajectory, re-running its denoising steps chunk by chunk under the current policy 𝜋 𝜃 to derive its probability (Equa-tion 4), computes the importance ratios (Equation 3), and then produces the loss. As back-propagation starts only after the loss computation finishes, the forward pass cannot retain the activations of all trajectories within GPU memory until then. The backward pass thus repeats the replay of each tra-jectory with gradient tracking, recomputing its activations along with its probability. It then back-propagates the loss through the DiT with these activations to obtain the policy gradient (Equation 5). Note that while RL algorithms aggre-gate the probability at different granularities (e.g., denoising step or candidate [58, 66]), this changes only the computa-tion of 𝜌 𝑖,𝑘 , not its role as a scalar multiplier in Equation 5. To limit the cost of updating the weights, video RL commonly adopts low-rank adaptation (LoRA) [15, 60, 66], which trains only a small fraction of weights. The updated policy then serves the next RL step. 
+
+## 3 Motivation 
+
+3.1 Preliminary Study 
+
+Reward evaluation and policy training now account for most of each RL step latency, as two recent trends prolong both stages. 
+
+VLM-based reward models. Traditional discriminative re-ward models assess a video in a single forward pass of a fixed scoring function [27, 53, 56], which involves little in-depth reasoning and cannot adapt its criteria to varying prompt 12 24 12 24 0% 20% 40% 60% 80% 100% Latency Breakdown Flex VR-Thinker Batch size        
+
+> (a) DanceGRPO
+> 31% 14% 24% 30% 32% 10% 26% 33% 25% 29% 20% 25% 28% 21% 23% 29%
+> 12 24 12 24 0% 20% 40% 60% 80% 100% Latency Breakdown Flex VR-Thinker Batch size
+> (b) KVPO
+> 37% 15% 20% 28% 32% 14% 22% 31% 34% 22% 19% 26% 30% 19% 21% 30%
+> Rollout Reward Redundant replay Other training
+
+Figure 3. End-to-end RL step latency breakdown. requirements, leading to inaccurate rewards [47]. Recent works [14, 45, 47, 53, 54] therefore turn to VLM-based re-ward models, which leverage a long CoT [3, 53, 54] to activate the VLM’s strong reasoning ability to rigorously analyze the video against the prompt requirements along multiple di-mensions, thereby producing accurate and robust rewards. Rather than judging from a fixed set of sampled frames, some of these reward models [47] further retrieve additional frames via tool calls when examining a candidate, assess-ing temporal coherence across consecutive frames rather than sparse samples. These capabilities, however, come at the cost of turning each scoring from a single forward pass into a long VLM inference, as the reward model encodes many frames of each candidate, decodes a long CoT token by token, and repeats this encoding and decoding for every frame-retrieving tool call. 
+
+Policy training over long videos. AR video models extend generation from short clips of a few chunks to long videos of tens of chunks for long-form and streaming applications, and keep pushing toward minute-scale videos [7, 9, 18, 59]. Such long videos, however, prolong policy training with increasing video length, as its forward pass and backward pass each replay the trajectory of every candidate through all 
+
+𝐶 ×𝐾 denoising steps of the DiT model (§2.2). LoRA does not shorten either pass, as it reduces only the trainable weights while every denoising step still runs through the entire DiT model. Figure 3 breaks down the latency of an RL step for two video RL algorithms (DanceGRPO [58] and KVPO [66]), each with two VLM-based reward models (UnifiedReward-Flex [53] and VR-Thinker [47]) under current stage-centric execution. This execution runs reward evaluation and policy training strictly in sequence, exposing their cost entirely in the end-to-end latency of each RL step. Across the four con-figurations, reward evaluation and policy training together account for 63 ∼75% of the RL step latency. 
+
+3.2 Straightforward Solution and Challenges Asynchronous reward evaluation. Reward evaluation, in particular, need not lie on the critical path, as scoring a candi-date depends only on its own video, which becomes available upon generation rather than after the entire rollout stage. 
+
+> 4StageBreaker
+
+DiT VAE Reward Policy training Idle Boundary 
+
+Actor GPUs Reward GPUs             
+
+> Fwd pass Bwd pass
+> replay 𝜏 𝑖 ,𝑘 replay again
+> Stage-induced load imbalance 33
+> 11Redundant trajectory replay 22Reward-blocked policy training ℒ 𝜃 =−min 𝜌 𝑖 ,𝑘 𝐴 𝑖 ,…𝐴 𝑖 𝜌 𝑖 ,𝑘 ℒ 𝜃 𝜏 𝑖 ,𝑘 → 𝜌 𝑖 ,𝑘
+
+Figure 4. RL step execution in existing systems. To take it off the critical path, a straightforward solution is asynchronous reward evaluation [11, 41, 72] (cf. Figure 4), which deploys the reward model on dedicated GPUs (reward GPUs) to score each candidate upon generation and leaves the remaining GPUs (actor GPUs) to run rollout and policy training. Ideally, reward evaluation overlaps with rollout, shortening the end-to-end latency by nearly the entire re-ward cost. In our evaluation, however, asynchronous reward evaluation fails to deliver the expected gains and even slows RL training down by 20 ∼29% (cf. §5). This solution is only an initial step away from stage-centric execution, since it removes only the stage boundary between rollout and reward evaluation. Under the rising reward and policy training costs, the remaining stage bound-aries and the stage-level GPU binding raise three challenges unaddressed by asynchronous reward evaluation. 
+
+Reward-blocked policy training. Although asynchronous reward evaluation removes the stage boundary of stage-centric execution between rollout and the reward stage, it still keeps the boundary between the reward stage and policy training, making policy training wait for the reward stage to finish scoring the entire batch. This boundary remains since policy training relies on the advantages derived from all reward scores of the entire batch (Equation 2). Under light-weight reward models, this boundary costs little, as scoring the batch finishes nearly with rollout. The current long VLM inference, however, prolongs reward evaluation and keeps a substantial part of the reward cost on the critical path ahead of policy training. The actor GPUs thus finish rollout and sit idle until the last score of the batch arrives, which takes 13% of each RL step in our measurement and leaves 36% of the reward cost on the critical path (§5.5). 
+
+Redundant trajectory replay. Within policy training, ex-isting RL systems keep a further boundary between the loss computation and back-propagation, which results in redundant trajectory replay (§2.2). Inheriting this bound-ary from conventional model training, these systems start back-propagation only after computing the complete loss, and thus take two passes over every trajectory. The forward pass first replays the trajectory to obtain the probabilities 
+
+𝜋 𝜃 (𝜏 𝑖,𝑘 ) for the loss computation. As limited GPU memory cannot retain the activations of every trajectory until the Rollout Reward 
+
+Policy training 
+
+DiT VAE latent Reward scoring Norm. Video 𝐴 𝑖 
+
+Advantage 
+
+Trajectory replay Loss computation Back-propagation Policy gradient Trajectory 𝜏 𝑖 ,𝑘 
+
+Policy 𝜋 𝜃 𝜋 𝜃 𝜏 𝑖 ,𝑘 𝜋 𝜃 𝜏 𝑖 ,𝑘 ℒ 𝜃 Loss 𝜌 𝑖 ,𝑘 ∇𝜃 log 𝜋 𝜃 𝜏 𝑖 ,𝑘 𝐴 𝑖 𝜌 𝑖 ,𝑘 ∇𝜃 log 𝜋 𝜃 𝜏 𝑖 ,𝑘  
+
+> True data dependency Imposed by stage-centric exec.
+
+Figure 5. Dataflow of an RL step. loss computation finishes (§2.2), the backward pass has to repeat the entire replay to rebuild the activations and then derive the gradient from them. As long videos prolong every replay, the resulting redundant trajectory replay accounts for 19 ∼26% of the RL step latency (Figure 3), a substantial waste of GPU computation. 
+
+Stage-induced load imbalance. Each stage binds its com-putation tasks to a fixed set of GPUs regardless of the load across GPUs, resulting in severe load imbalance and GPU underutilization. Asynchronous reward evaluation, for ex-ample, disaggregates the reward stage onto dedicated GPUs due to the rising reward cost but follows existing RL systems and still allocates GPUs at stage granularity, confining these reward GPUs to scoring alone. Moreover, candidates arrive at these reward GPUs in a stream as rollout generates them, keeping each scoring batch small, and the memory-bound CoT decoding of the VLM thus underutilizes these GPUs even during scoring. The long videos, in turn, prolong every task carried by the actor GPUs, from DiT and VAE decod-ing in rollout to policy training. Once scoring finishes, the reward GPUs therefore sit idle throughout the prolonged policy training, while the actor GPUs remain overloaded. Under a fixed GPU budget, the reward GPUs stay busy for only 36% of each RL step (cf. §5.5), and this idle GPU time makes asynchronous reward evaluation 22% slower than the colocated baseline. 
+
+3.3 Key Insights 
+
+The three challenges all stem from stage-centric execution, whose boundaries and GPU binding impose constraints coarser than the true data dependencies within an RL step. In prac-tice, while most of the computation after a boundary can proceed without the awaited result, the boundary still stalls all of it. As Figure 5 shows, in policy training, for example, the boundaries stall the entire policy gradient computation due to its dependence on the advantage and the importance ratio. This dependence, however, involves only the final mul-tiplication, which reveals the separability of the two from the rest of the computation. Similarly, each computation task depends only on its inputs, which suggests a placement be-yond the GPUs of its stage. Our key insight is therefore to 
+
+> 5Li Peng et al.
+
+schedule the true dataflow, not the stages, shortening the critical path and filling the idle GPUs. 
+
+Reward-separable policy training. As Equation 2 and Figure 5 show, the surrogate loss comprises two factors, of which only the advantage 𝐴 𝑖 depends on reward scores. The other factor, the importance ratio 𝜌 𝑖,𝑘 , relies solely on the tra-jectory and the policy. Given their distinct dependencies, the loss computation is separable into these two factors. Policy training can therefore compute and back-propagate the im-portance ratio in advance, and apply the advantage through a single scalar multiplication once it arrives. It thereby over-laps with reward evaluation, which removes the idle wait of the actor GPUs and takes the reward cost entirely off the critical path. 
+
+Loss-independent back-propagation. Equation 5 and Fig-ure 5 illustrate that the policy gradient computation is like-wise separable, as the loss computation contributes only 𝜌 𝑖,𝑘 ,a scalar multiplier of the gradient ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ). This gra-dient itself depends on nothing but the trajectory and the policy, and back-propagation can thus compute it in advance and apply 𝜌 𝑖,𝑘 afterwards, rather than waiting for the loss. This gradient requires replaying each trajectory, which also yields the probabilities log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) for loss. The loss com-putation can therefore reuse these probabilities rather than recompute them, merging the two trajectory replays. 
+
+Task-level load balancing. A stage further decomposes into independent computation tasks, each depending only on its own inputs rather than on the entire stage, which makes the stage-level GPU binding coarser than necessary. As Figure 5 shows, VAE decoding, for example, depends only on the clean latents of a candidate, but the rollout stage binds it to the actor GPUs while the underutilized reward GPUs could run it instead. As VAE decoding takes about 30% of the rollout time (§5.5), moving it alone would shift a substantial load from the actor GPUs to the reward GPUs. Moreover, reward scoring starts once these VAE decodings finish and thus runs on a large batch, raising the throughput of the memory-bound CoT decoding without delaying the comple-tion of reward evaluation. Similarly, the loss computation and back-propagation of a trajectory depend only on the tra-jectory itself and the policy, but still stay on the overloaded actor GPUs. Such tasks can thus strategically move from the overloaded actor GPUs to the idle reward GPUs, mitigating GPU underutilization. 
+
+## 4 Designs 
+
+4.1 Overview 
+
+Inspired by the above analysis, we propose StageBreaker (cf. Figure 6a), a data-dependency-driven scheduling frame-work for AR video RL post-training. StageBreaker executes each RL step as a dataflow of computation tasks along their true data dependencies rather than stage boundaries, and DiT VAE latent Reward scoring Video 𝐴 𝑖                    
+
+> Advantage
+> Merged replay Importance ratio
+> Combine
+> Policy gradient Trajectory 𝜏 𝑖 ,𝑘 𝜋 𝜃 𝜏 𝑖 ,𝑘 ∇𝜃 log 𝜋 𝜃 𝜏 𝑖 ,𝑘 𝜌 𝑖 ,𝑘
+> Norm. 𝑔 𝑖
+> ±=𝜌 𝑖 ,𝑘 𝑘
+> ∇𝜃 log 𝜋 𝜃 𝜏 𝑖 ,𝑘 𝐴 𝑖 𝑔 𝑖
+> +𝑜𝑟 𝐴 𝑖 𝑔 𝑖 −
+> Reward-async policy training
+> DiT VAE Reward Policy training
+> (a) Dataflow scheduling of StageBreaker.
+> Actor
+> GPUs Reward
+> GPUs RL algorithms
+> Controller
+> (unmodified) latent Advantage 𝑔 𝑖
+> ±
+> (b) Execution workflow of StageBreaker.
+> Task-level load balancing
+> Update policy
+> Back-propagating
+> Loss compute
+
+Figure 6. Overview of StageBreaker. dispatches these tasks across GPUs at task level rather than stage granularity. Figure 6a shows the dataflow of an RL step under Stage-Breaker. Following reward-separable policy training, Stage-Breaker designs reward-asynchronous policy training (§4.2), which computes and back-propagates the reward-independent part of each loss term (i.e., the importance ratio 𝜌 𝑖,𝑘 ) on the actor GPUs without waiting for the advantage 𝐴 𝑖 from the reward GPUs. Once the advantage arrives, StageBreaker scales the resulting gradient by it, yielding the policy gra-dient (Equation 5) identical to that of stage-centric execu-tion. Under the clipped form (Equation 2), however, this gradient varies with the sign of the advantage. StageBreaker thus retains it for either sign, 𝑔 + 
+
+> 𝑖
+
+and 𝑔 − 
+
+> 𝑖
+
+, applying the ad-vantage to the matching one. Moreover, within the reward-independent part, merged trajectory replay (§4.3) exploits loss-independent back-propagation to break the barrier be-tween the loss computation and back-propagation. Back-propagation replays each trajectory with gradient tracking to compute the gradient of its probability ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ). The loss computation then reuses the probability 𝜋 𝜃 (𝜏 𝑖,𝑘 ) pro-duced by this same replay for the importance ratio 𝜌 𝑖,𝑘 , rather than replaying the trajectory again. StageBreaker finally com-bines the importance ratio 𝜌 𝑖,𝑘 and ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) at every denoising step (Equation 7). Rather than binding stages to GPUs, task-level load balancing (§4.4) balances the load across the two GPU groups at the granularity of tasks. Beyond asyn-chronous reward evaluation, StageBreaker equips the reward GPUs with a VAE decoder and a training engine, enabling them to take over VAE decoding and the loss computation and back-propagation of trajectories from the overloaded actor GPUs. A profiling-based search then determines the split of these tasks between the two GPU groups, adopting the placement minimizing the end-to-end step latency. 
+
+Workflow. Figure 6b shows RL step execution of Stage-Breaker, where a controller above the engines orchestrates 
+
+> 6StageBreaker
+
+Loss term Back-propagate 𝜌 𝑖 ,𝑘 
+
+Policy gradient 𝐴 𝑖 𝑔 𝑖                 
+
+> +𝑜𝑟 𝐴 𝑖 𝑔 𝑖 −∇𝜃 log 𝜋 𝜃 𝜏 𝑖 ,𝑘 𝜌 𝑖 ,𝑘 𝑘 ∈ 𝑆 𝑖 +:𝜌 𝑖 ,𝑘 ≤1 + 𝜀 𝑘 ∈ 𝑆 𝑖 -:𝜌 𝑖 ,𝑘 ≥1 -𝜀 𝑔 𝑖
+> +𝑔 𝑖 −𝐴 𝑖 > 0 𝐴 𝑖 < 0
+
+Reward scoring Norm. 
+
+Advantage 
+
+Actor GPUs 
+
+Reward GPUs 
+
+Layer j 𝜓 = 𝐴 𝑖 𝜌 𝑖 ,𝑘 𝑦 𝑗 = 𝑓 𝑥 𝑗 ; 𝑊 𝑗 Layer j-1 𝜕𝜓 /𝜕𝜌 𝑖 ,𝑘 = 𝐴 𝑖 𝐴 𝑖 𝜕𝜌 𝑖 ,𝑘 /𝜕𝑥 𝑗 𝐴 𝑖 𝜕𝜌 𝑖 ,𝑘 /𝜕𝑊 𝑗 𝑦 𝑗 -1 = 𝑓 𝑥 𝑗 -1 ; 𝑊 𝑗 -1 
+
+(a) Separability under back-propagation. 
+
+(b) Separating the two factors. 
+
+Figure 7. Reward-asynchronous policy training. the execution of all tasks and keeps the RL algorithm on top unmodified. As the rollout engine on the actor GPUs gener-ates the latent of each candidate, the controller dispatches its latents to the reward GPUs, where the VAE decoder converts them into the video and the reward engine then scores it, while rollout continues. When rollout completes, the actor GPUs start policy training immediately, running the loss computation and back-propagation of each trajectory in a single replay to obtain the gradient of its reward-independent part without waiting for reward scores. As reward scores arrive, the controller applies the advantages to the corre-sponding candidates, and the policy updates once the policy gradient of a mini-batch becomes available. After scoring, the reward GPUs likewise take part in remaining policy training. StageBreaker thereby only reschedules the execution of the RL step, preserving the training semantics of stage-centric execution exactly. 
+
+4.2 Reward-Asynchronous Policy Training 
+
+StageBreaker separates each loss term into its reward-dependent and reward-independent parts, which the reward GPUs and the actor GPUs compute respectively. We first prove that the gradient of each LoRA weight still preserves this separability, then describe the separated execution on GPUs, and finally the overlap of policy training with reward evaluation. 
+
+Separability under back-propagation. Ahead of the ad-vantage, StageBreaker back-propagates the importance ratio 
+
+𝜌 𝑖,𝑘 of each term rather than the complete term 𝐴 𝑖 𝜌 𝑖,𝑘 itself. This back-propagation passes through every layer of the DiT, linear and nonlinear, before reaching each LoRA weight. We now prove that the gradient of each LoRA weight still pre-serves this separability, with 𝐴 𝑖 remaining its scalar factor. As Figure 7a illustrates, for an unclipped term 𝜓 = 𝐴 𝑖 𝜌 𝑖,𝑘 of the loss, back-propagation starts from the derivative 𝜕𝜓 /𝜕𝜌 𝑖,𝑘 =
+
+𝐴 𝑖 , a scalar, and passes it down through the layers of the DiT. Let layer 𝑗 compute output activations 𝑦 𝑗 = 𝑓 𝑗 (𝑥 𝑗 ,𝑊 𝑗 ) from input activations 𝑥 𝑗 and weights 𝑊 𝑗 , where 𝑓 𝑗 can be linear or nonlinear. At every layer, back-propagation applies the chain rule 
+
+𝜕𝜓 𝜕𝑥 =∑︁ 
+
+> 𝑗
+
+ 𝜕𝑦 𝑗 
+
+𝜕𝑥 
+
+⊤ 𝜕𝜓 𝜕𝑦 𝑗 
+
+, 𝜕𝜓 𝜕𝑊 𝑗 
+
+=
+
+ 𝜕𝑦 𝑗 
+
+𝜕𝑊 𝑗 
+
+⊤ 𝜕𝜓 𝜕𝑦 𝑗 
+
+, (6) where 𝑗 ranges over the layers taking 𝑥 as input. Equa-tion 6 implies that 𝐴 𝑖 remains a scalar factor across each layer. To be specific, the input 𝑥 𝑗 and weights 𝑊 𝑗 of the layer determine both Jacobians, 𝜕𝑦 𝑗 /𝜕𝑥 and 𝜕𝑦 𝑗 /𝜕𝑊 𝑗 (e.g., 
+
+𝑊 𝑗 and 𝑥 𝑗 for a linear layer 𝑦 𝑗 = 𝑊 𝑗 𝑥 𝑗 ). As 𝐴 𝑖 appears in neither 𝑥 𝑗 nor 𝑊 𝑗 , both Jacobians are independent of 𝐴 𝑖 .Equation 6 is therefore linear in 𝜕𝜓 /𝜕𝑦 𝑗 , which preserves any scalar factor of 𝜕𝜓 /𝜕𝑦 𝑗 . Hence, for 𝜕𝜓 /𝜕𝑦 𝑗 = 𝐴 𝑖 ℎ𝑗 , Equa-tion 6 yields 𝜕𝜓 /𝜕𝑥 = 𝐴 𝑖 
+
+Í𝑗 (𝜕𝑦 𝑗 /𝜕𝑥 )⊤ℎ𝑗 and 𝜕𝜓 /𝜕𝑊 𝑗 =
+
+𝐴 𝑖 (𝜕𝑦 𝑗 /𝜕𝑊 𝑗 )⊤ℎ𝑗 , both keeping 𝐴 𝑖 as a scalar factor. Appen-dix A verifies both properties for the concrete DiT layers, including attention. Therefore, starting from 𝜕𝜓 /𝜕𝜌 𝑖,𝑘 = 𝐴 𝑖 ,the back-propagation keeps 𝐴 𝑖 as a scalar factor through every layer and arrives at 𝜕𝜓 /𝜕𝑊 𝑗 = 𝐴 𝑖 𝜕𝜌 𝑖,𝑘 /𝜕𝑊 𝑗 for each LoRA weight. Moreover, Equation 5 merely sums these per-term gradients over all 𝑖 and 𝑘 . Back-propagating each 𝜌 𝑖,𝑘 
+
+alone to obtain ∇𝜃 𝜌 𝑖,𝑘 , scaling it by 𝐴 𝑖 afterwards, and sum-ming the results thus recovers the exact policy gradient. Note that the clipping of Equation 2 does not break this separabil-ity, since it only zeroes the gradient of a clipped term and keeps 𝐴 𝑖 a scalar factor. 
+
+Separating the two factors. With the separability proven, StageBreaker computes the gradient of the importance ratio and the advantage separately and combines them afterwards. However, the clipping in Equation 2 complicates this sep-aration, as the clipping result depends on the advantage 
+
+𝐴 𝑖 , while back-propagation runs independently of 𝐴 𝑖 . Stage-Breaker therefore prepares each clipping branch in advance. Specifically, the clipping branch depends on 𝜌 𝑖,𝑘 and the sign of 𝐴 𝑖 , contributing 𝜌 𝑖,𝑘 ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) if 𝜌 𝑖,𝑘 ≤ 1 + 𝜀 under a positive advantage, or if 𝜌 𝑖,𝑘 ≥ 1 − 𝜀 under a negative one, and nothing otherwise. StageBreaker thus accumulates two gradients for each candidate 𝑖 , 𝑔 + 
+
+> 𝑖
+
+for a positive advantage and 𝑔 − 
+
+> 𝑖
+
+for a negative one, 
+
+𝑔 ± 
+
+> 𝑖
+
+=∑︁  
+
+> 𝑘 ∈𝑆 ±
+> 𝑖
+
+𝜌 𝑖,𝑘 ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ), (7) where 𝑔 + 
+
+> 𝑖
+
+sums over 𝑆 + 
+
+> 𝑖
+
+= {𝑘 | 𝜌 𝑖,𝑘 ≤ 1 + 𝜀 }, the steps contributing under a positive advantage, and 𝑔 − 
+
+> 𝑖
+
+over 𝑆 − 
+
+> 𝑖
+
+=
+
+{𝑘 | 𝜌 𝑖,𝑘 ≥ 1 − 𝜀 }, those under a negative one. Holding 𝑔 ± 
+
+> 𝑖
+
+on GPUs is affordable, as each gradient spans only the trainable LoRA weights and thus occupies negligible memory. Once the advantages arrive, StageBreaker takes 𝐴 𝑖 𝑔 + 
+
+> 𝑖
+
+if 𝐴 𝑖 > 0and 𝐴 𝑖 𝑔 − 
+
+> 𝑖
+
+otherwise for each candidate, and accumulates the result over the mini-batch following Equation 5. This combination costs only a scalar multiplication per candidate, negligible against back-propagation. 
+
+Overlapping training with reward stage. As Figure 7b shows, the actor GPUs compute and back-propagate the importance ratios of each mini-batch while the reward GPUs          
+
+> 7Li Peng et al. Chunk 1
+> Ksteps Chunk 2
+> Ksteps Chunk 2
+> Ksteps Chunk 1
+> Ksteps Chunk CKsteps Chunk CKsteps
+
+## ... ... 
+
+> Fwd pass
+> Bwd pass
+
+𝜌 𝑖 ,𝑘 ℒ 𝜃            
+
+> Back-propagate
+> For each chunk c = 1, …, C
+> Replay Ksteps of chunk c Back-propagate Ksteps
+> Next chunk
+> Acc. gradient Log-probability of each step 𝑔 𝑖
+> ±=𝜌 𝑖 ,𝑘 𝑘
+> ∇𝜃 log 𝜋 𝜃 𝜏 𝑖 ,𝑘
+> (a) Redundant trajectory replay. (b) Merged trajectory replay.
+
+Figure 8. Trajectory replay in existing systems and Stage-Breaker. score its groups, and the two GPU groups synchronize only at the optimizer step. StageBreaker thereby removes the stage-level reward barrier and the idle wait it imposes on the actor GPUs. 
+
+4.3 Merged Trajectory Replay 
+
+StageBreaker further eliminates the redundant trajectory replay within policy training (§3.2). As Figure 8a illustrates, existing RL systems replay each trajectory twice, first with-out gradient tracking to obtain the probabilities 𝜋 𝜃 (𝜏 𝑖,𝑘 ) for the importance ratios 𝜌 𝑖,𝑘 and the loss L( 𝜃 ), and then with gradient tracking to back-propagate L( 𝜃 ). The two replays arise as these systems serialize the loss computation and back-propagation, back-propagating only the fully computed loss. Back-propagation, however, need not wait for the com-plete loss. Building on the separated advantage, StageBreaker further separates the gradient of the reward-independent part, ∇𝜃 𝜌 𝑖,𝑘 = 𝜌 𝑖,𝑘 ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) (Equation 7), in which 𝜌 𝑖,𝑘 
+
+is also only a scalar multiplier. Back-propagation therefore replays each trajectory directly to compute ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ),without waiting for 𝜌 𝑖,𝑘 or the loss. This replay inherently produces the probabilities 𝜋 𝜃 (𝜏 𝑖,𝑘 ), which can be reused for the importance ratios. StageBreaker thus merges the two trajectory replays into a single replay. 
+
+Replay procedure. As the activations of all trajectories rarely fit within GPU memory (§2.2), the merged replay proceeds at chunk granularity (Figure 8b), releasing the ac-tivations of each chunk before replaying the next. Within each chunk, it back-propagates each denoising step 𝜏 𝑐 𝑖,𝑘 upon replaying it, buffering its gradient ∇𝜃 log 𝜋 𝜃 (𝜏 𝑐 𝑖,𝑘 ). For chunk 
+
+𝑐 , it re-runs the 𝐾 denoising steps under the current policy, accumulating the log-probability log 𝜋 𝜃 (𝜏 𝑐 𝑖,𝑘 ) of each step 𝑘 
+
+into log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) based on Equation 4. It then back-propagates each step, likewise accumulating the gradient ∇𝜃 log 𝜋 𝜃 (𝜏 𝑐 𝑖,𝑘 )
+
+into ∇𝜃 log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) in a buffer 𝑔 𝑖,𝑘 . After replaying the entire video, StageBreaker computes 𝜌 𝑖,𝑘 from log 𝜋 𝜃 (𝜏 𝑖,𝑘 ) (Equa-tion 3) and adds 𝜌 𝑖,𝑘 𝑔 𝑖,𝑘 to 𝑔 ± 
+
+> 𝑖
+
+according to 𝑆 ± 
+
+> 𝑖
+
+(Equation 7). For RL algorithms aggregating the probability at other gran-ularities (§2.2), StageBreaker analogously accumulates the gradient of each aggregated unit and scales it by its impor-tance ratio once the aggregation completes. The merged replay thus costs no more computation than the second replay of existing RL systems (Figure 8a), and adds only a small GPU memory overhead, the 𝐾 per-step buffers 𝑔 𝑖,𝑘 of the current trajectory, each the size of the LoRA weights. 
+
+4.4 Task-Level Load Balancing 
+
+StageBreaker refines the current GPU binding from stage granularity to task granularity, placing each task according to the load of the two GPU groups rather than its stage. Fol-lowing this principle, StageBreaker moves two kinds of tasks from the overloaded actor GPUs to the underutilized reward GPUs, VAE decoding in rollout and the loss computation and back-propagation in policy training (policy training tasks). As VAE decoding depends only on the clean latents of a candidate, StageBreaker transfers these small latents to the reward GPUs and decodes them there before scoring. The reward GPUs then score the decoded videos as one batch rather than individually upon arrival, which accelerates the memory-bound CoT decoding and thus does not delay re-ward evaluation. Similarly, the policy training tasks of a trajectory (§4.3) depend only on the trajectory itself and the current policy. StageBreaker therefore assigns policy train-ing tasks to the reward GPUs once they finish scoring, and transfers the resulting 𝑔 ± 
+
+> 𝑖
+
+back to the actor GPUs. Moreover, the loss computation of some RL algorithms involves addi-tional forward passes under frozen policies (e.g., the replay under the reference policy for the KL term [23, 37, 66]), which StageBreaker likewise moves to the reward GPUs. 
+
+Scheduling. To minimize the RL step latency, StageBreaker must determine the split of VAE decodings and policy train-ing tasks between the two GPU groups. To this end, Stage-Breaker builds a profiling-based simulator to search for the optimal placement. StageBreaker profiles the execution time of every computation task on the target setup, and the simu-lator executes the dataflow of an RL step under a given split to estimate the end-to-end step latency. Owing to the small search space and the fast simulation [69, 72], StageBreaker enumerates all possible placements and adopts the one with the best performance. Our controller then dispatches tasks by the derived placement at runtime. 
+
+4.5 Implementation 
+
+We implement StageBreaker on top of verl-omni [42], a widely used RL post-training framework. We reuse the roll-out, reward, and training engines of verl-omni for all com-putation, while implementing our controller above these engines to schedule computation tasks. For task-level load balancing (§4.4), we further equip the reward GPUs with a VAE decoder and a lightweight replica of the training engine, 
+
+> 8StageBreaker
+
+holding only the DiT and a LoRA copy and receiving the updated LoRA weights after each optimizer step. Moreover, StageBreaker integrates two RL algorithms, DanceGRPO and KVPO, without modifying either of them. StageBreaker also readily extends to other AR video RL algorithms, as it reschedules only the execution of the RL step rather than the algorithm itself. 
+
+## 5 Evaluation 
+
+5.1 Experiment setup Testbed. We conduct all experiments with NVIDIA RTX PRO 5000 Blackwell GPUs (72 GB GDDR7 each) [31], inter-connected via PCIe 5.0 ×16. The host server has dual-socket 5th-generation AMD EPYC CPUs (384 cores in total) and 2.4 TB of DDR5 memory. Unless otherwise specified, each experiment employs six GPUs. 
+
+Compared systems. We compare StageBreaker against the two popular execution schemes. (1) Colocated follows stage-centric execution, the default of verl-omni, running rollout [38, 42], reward evaluation, and policy training se-quentially over the entire batch on all GPUs. (2) AsyncReward 
+
+enables the asynchronous reward evaluation [41], which dedicates two GPUs to the reward model (reward GPUs) and the remaining four to rollout and policy training (actor GPUs). To understand the contribution of each design, we further break StageBreaker down by enabling its designs pro-gressively. (3) AsyncTrain follows the GPU allocation of 
+
+AsyncReward and adopts reward-asynchronous policy train-ing (§4.2), (4) MergedReplay further integrates merged trajectory replay (§4.3), and (5) StageBreaker completes all three designs with task-level load balancing (§4.4). All sys-tems run the same engines with the same parallelism strategy, LoRA configuration, and hyperparameters, and thus differ only in the execution of the RL step. 
+
+Workloads. We evaluate two RL algorithms, DanceGRPO [58] and KVPO [66], each with two VLM-based reward models, UnifiedReward-Flex (UR-Flex) [53] and VR-Thinker (VRT) [47]. We employ Wan2.1-1.3B Self-Forcing [18] for DanceGRPO and LongLive-1.3B [59] for KVPO, both few-step AR video models trained with LoRA. We take the prompts for RL train-ing from the official prompt sets of the two reward models, VideoGen-RewardBench [20, 23, 24] for VR-Thinker and Pref-GRPO [8, 51] for UnifiedReward-Flex. By default, each candi-date video has 21 latent frames (81 pixel frames) for Dance-GRPO and 33 latent frames (129 pixel frames) for KVPO at 480p, and each RL step processes a batch of 12 candidate videos, split into two mini-batches for updating the policy [57, 58, 65, 66]. We keep the remaining hyperparameters at the defaults of each algorithm. We further vary the video length, resolution, batch size, and number of mini-batches to examine the compared systems under different settings. We report the end-to-end latency of an RL step averaged over eight steps after a warm-up step. UR-Flex VRT 050 100 150 RL Step Latency (s)  
+
+> (a) DanceGRPO
+> 0.71x 0.96x 1.03x 1.19x 0.75x 1.05x 1.13x 1.32x
+> UR-Flex VRT 0200 400 RL Step Latency (s)
+> (b) KVPO
+> 0.73x 0.79x 0.90x 1.22x 0.78x 0.89x 1.02x 1.26x
+> Colocated MergedReplay AsyncReward StageBreaker AsyncTrain
+
+Figure 9. Performance across RL algorithms and reward models. 
+
+5.2 Overall Performance 
+
+Figure 9 compares the end-to-end latency of an RL step under the default configuration across the two RL algo-rithms and the two reward models. Although AsyncReward 
+
+attempts to take the reward cost off the critical path by disaggregating the reward stage onto dedicated GPUs, it leaves multiple challenges unaddressed and thus runs even slower than Colocated under the same GPU budget, reach-ing only 0.71 ∼0.78 × its performance. The reward GPUs sit idle for most of the step, while reward-blocked policy train-ing also leaves the actor GPUs idle, as our following anal-ysis shows in §5.5. AsyncTrain addresses reward-blocked policy training, which computes the reward-independent part before the reward scores arrive and thereby overlaps policy training with reward evaluation. It thus achieves a speedup of up to 1.40 × over AsyncReward and up to 1.05 ×
+
+over Colocated . VR-Thinker brings greater performance benefits, as its longer CoT prolongs the scoring of each candidate and thereby hides more of the reward cost be-hind policy training. However, AsyncTrain still lags be-hind Colocated in most cases, reaching only 0.79 ∼0.96 ×
+
+its performance, as the barrier between the loss computa-tion and the back-propagation still forces the actor GPUs to replay every trajectory twice. MergedReplay breaks this barrier and eliminates these costs with merged trajectory replay. It therefore achieves a speedup of 1.08 ∼1.14 × over 
+
+AsyncTrain , and reaches 0.90 ∼1.13 × the performance of 
+
+Colocated . StageBreaker further addresses stage-induced load imbalance with task-level load balancing, which moves a portion of VAE decoding and policy training tasks to the idle reward GPUs, thereby improving utilization across all GPUs. With all three designs integrated, StageBreaker achieves a speedup of 1.19 ∼1.32 × over Colocated and 1.62 ∼1.76 × over 
+
+AsyncReward .
+
+5.3 Sensitivity Analysis Impact of video length. Figure 10 varies the video length from 21 to 45 latent frames (81 to 177 pixel frames), which covers the typical lengths of mainstream video models [44, 55, 59]. Longer videos raise the cost of policy training, as each trajectory replay runs more denoising steps through 
+
+> 9
+
+Li Peng et al. 21 33 45 0100 200 300 RL Step Latency (s) Video length (latent frames) 
+
+(a) DanceGRPO with UR-Flex 
+
+> 0.71x 0.96x 1.03x 1.19x 0.72x 0.89x 0.97x 1.10x 0.71x 0.86x 0.93x 1.05x
+
+21 33 45 0100 200 300 RL Step Latency (s) Video length (latent frames) 
+
+(b) DanceGRPO with VRT 
+
+> 0.75x 1.05x 1.13x 1.32x 0.75x 1.02x 1.10x 1.25x 0.75x 0.96x 1.04x 1.17x
+
+21 33 45 0200 400 RL Step Latency (s) Video length (latent frames) 
+
+(c) KVPO with UR-Flex 
+
+> 0.83x 0.96x 1.08x 1.27x 0.73x 0.79x 0.90x 1.22x 0.78x 0.83x 0.94x 1.26x
+
+21 33 45 0200 400 RL Step Latency (s) Video length (latent frames) 
+
+(d) KVPO with VRT 
+
+> 0.76x 1.07x 1.23x 1.26x 0.78x 0.89x 1.02x 1.26x 0.77x 0.86x 0.99x 1.26x
+
+Colocated MergedReplay AsyncReward StageBreaker AsyncTrain 
+
+Figure 10. RL step latency with varying video lengths. the DiT. Under AsyncReward , the actor GPUs pay this grow-ing cost twice due to redundant trajectory replay, while the reward GPUs sit idle throughout the longer policy training. 
+
+StageBreaker targets exactly this growing cost with merged trajectory replay and task-level load balancing. StageBreaker 
+
+therefore consistently outperforms both baselines across all lengths, achieving a speedup of 1.05 ∼1.32 × over Colocated 
+
+and 1.48 ∼1.76 × over AsyncReward . Among the three designs, 
+
+AsyncTrain contributes 1.06 ∼1.41 × over AsyncReward , more with VR-Thinker whose scoring takes longer. MergedReplay 
+
+adds a steady 1.08 ∼1.14 × over AsyncTrain at all lengths. 
+
+StageBreaker brings another 1.03 ∼1.35 × over MergedReplay 
+
+by moving the longer policy training tasks onto the un-derutilized reward GPUs. Across the two reward models, 
+
+StageBreaker sustains a speedup of 1.17 ∼1.32 × with VR-Thinker and 1.05 ∼1.27 × with UnifiedReward-Flex over the three lengths. 
+
+Impact of batch size. Figure 11 varies the batch size from 6 to 24 candidates. StageBreaker outperforms both baselines across all batch sizes, achieving a speedup of 1.12 ∼1.41 × over 
+
+Colocated and 1.46 ∼1.79 × over AsyncReward . Between the two RL algorithms, StageBreaker sustains a speedup of 1.19 ∼1.41 × with DanceGRPO and 1.12 ∼1.31 × with KVPO over the three batch sizes. With DanceGRPO, the speedup further rises to 1.25 ∼1.41 × at 24 candidates, as a larger batch provides more computation tasks to relocate and thus bal-ances the load between the actor and reward GPUs at a finer granularity. 
+
+Impact of video resolution. Figure 12 compares StageBreaker 
+
+with Colocated on DanceGRPO at 360p and 480p across the three video lengths. We omit KVPO here for brevity, as it exhibits a similar performance trend. StageBreaker achieves a speedup of 1.13 ∼1.30 × at 360p and 1.05 ∼1.32 × at 480p. 6 12 24 0100 200 300 RL Step Latency (s) Batch size N 
+
+(a) DanceGRPO with UR-Flex 
+
+> 0.72x 0.98x 1.06x 1.23x 0.71x 0.96x 1.03x 1.19x 0.72x 0.85x 0.96x 1.25x
+
+6 12 24 0100 200 300 RL Step Latency (s) Batch size N 
+
+(b) DanceGRPO with VRT 
+
+> 0.77x 1.03x 1.21x 1.36x 0.75x 1.05x 1.13x 1.32x 0.78x 1.00x 1.13x 1.41x
+
+6 12 24 0250 500 750 RL Step Latency (s) Batch size N 
+
+(c) KVPO with UR-Flex 
+
+> 0.76x 0.82x 0.95x 1.17x 0.73x 0.79x 0.90x 1.22x 0.77x 0.80x 0.93x 1.12x
+
+6 12 24 0250 500 750 RL Step Latency (s) Batch size N 
+
+(d) KVPO with VRT 
+
+> 0.80x 0.93x 1.06x 1.31x 0.78x 0.89x 1.02x 1.26x 0.76x 0.84x 0.97x 1.19x
+
+Colocated MergedReplay AsyncReward StageBreaker AsyncTrain 
+
+Figure 11. RL step latency with varying batch sizes. 360 480 360 480 360 480 0100 200 RL Step Latency (s) latent-21 latent-33 latent-45 Resolution (p) 
+
+(a) DanceGRPO x UR-Flex 
+
+> 1.24x 1.19x 1.21x 1.10x 1.13x 1.05x
+
+Colocated StageBreaker 360 480 360 480 360 480 latent-21 latent-33 latent-45 Resolution (p) 
+
+(b) DanceGRPO x VRT 
+
+> 1.26x 1.32x 1.30x 1.25x 1.17x 1.17x
+
+Figure 12. RL step latency with varying video resolutions. 1 2 31.00x 1.10x 1.20x 1.30x 1.40x 1.50x RL Step Speedup 
+
+Mini batch 
+
+DanceGRPO with UR-Flex DanceGRPO with VRT KVPO with UR-Flex KVPO with VRT 
+
+Figure 13. Number of mini-batches. VRT UR-Flex 0200 400 600 RL Step Latency (s) 
+
+> 1.13x 1.21x
+
+Colocated StageBreaker 
+
+Figure 14. 5B model testing. The trend follows that of video length, as a higher resolu-tion likewise raises the cost of rollout and policy training. 
+
+StageBreaker thus sustains a speedup of 1.17 ∼1.32 × at both resolutions with VR-Thinker, where the overlap of reward evaluation contributes most of the gain, and 1.13 ∼1.24 × at 360p and 1.05 ∼1.19 × at 480p with UnifiedReward-Flex. 
+
+Impact of the number of mini-batches. Figure 13 varies the number of mini-batches per RL step. We use 24 candi-dates for DanceGRPO to ensure evenly sized mini-batches un-der its algorithmic constraints. StageBreaker outperforms 
+
+10 StageBreaker 
+
+Colocated across all settings, achieving 1.11 ∼1.41 × speedup. Between the two RL algorithms, its speedup stays stable with KVPO but varies with DanceGRPO. Even as more mini-batches reduce the candidates in each mini-batch, KVPO still provides StageBreaker with enough separable computation tasks within policy training (e.g., the reference-policy scor-ing [66]) to balance the GPU load. DanceGRPO, in contrast, moves computation only as whole candidates and thus can-not partition each mini-batch finely enough to reduce the step latency under 3 mini-batches. 
+
+Impact of model size. Figure 14 compares StageBreaker 
+
+with Colocated on KVPO when scaling the video model from LongLive-1.3B to LongLive-5B [59]. Although larger models commonly adopt techniques such as FP4 accelera-tion in LongLive-5B to mitigate the video generation cost, these techniques speed up each denoising step alone and leave stage-centric execution intact. StageBreaker instead targets the execution itself, and thus sustains a speedup of 1.13 ∼1.21 × on the larger model. 
+
+5.4 Training Fidelity 
+
+StageBreaker reschedules only the execution of an RL step and keeps the gradient of every weight update mathemati-cally identical to that of stage-centric execution. This identity holds in exact arithmetic, while floating-point accumulation on GPUs introduces small numerical differences [39, 74]. To verify that these differences do not alter training, we adopt the official recipe of DanceGRPO [57, 58], which trains Sta-ble Diffusion 1.4 [5] with the HPS-v2.1 [56]. We run this RL post-training for 500 RL steps under Colocated and 
+
+StageBreaker , and Figure 15 plots the training reward, the mean reward score of the candidates generated at each step (light lines), with its 10-step moving average (dark lines). The two curves overlap throughout RL training without any sys-tematic gap, both rising from about 0.24 to 0.26 over the 500 steps with only negligible differences at any step. These dif-ferences stem from floating-point rounding on GPUs, which makes the same computation yield slightly different values when its operations run in a different order. StageBreaker 
+
+reorders these operations by applying the advantage and the importance ratio after back-propagation, but the resulting differences do not compromise the algorithmic fidelity of RL training. 
+
+5.5 Performance Analysis 
+
+Figure 16 traces the execution of an RL step on a represen-tative actor GPU and reward GPU under the five compared systems, using DanceGRPO with VR-Thinker at a batch size of 24 candidates. 
+
+Baseline. Colocated runs the three stages in sequence on all six GPUs (cf. Figure 16a), each of which generates four video candidates in rollout. AsyncReward (cf. Figure 16b) dedicates two of the six GPUs to the reward model, and the remaining four actor GPUs run rollout and policy training 0 100 200 300 400 500 RL step 0.23 0.24 0.25 0.26 0.27 Reward Score  Colocated StageBreaker 
+
+Figure 15. Reward curves. 0 50 100 150 200 250 Time (s) Actor+ Reward 0 50 100 150 200 250 Time (s) Actor Reward 0 50 100 150 200 250 Time (s) Actor Reward 0 50 100 150 200 250 Time (s) Actor Reward 0 50 100 150 200 250 Time (s) Actor Reward 
+
+(a) Colocated (b) AsyncReward (c) AsyncTrain (d) MergedReplay (e) StageBreaker 
+
+> DiT VAE Wait for reward Reward Backward Update policy
+
+Figure 16. Execution timeline. with six video candidates each. The reward GPUs overlap 64% of the scoring with rollout and hide this part of the reward cost from the critical path, while the remaining 36% stays on it. As the Wait for reward block in Figure 16b shows, however, reward evaluation still blocks policy training for 13% of the RL step after rollout, since policy training requires the complete reward scores of the entire batch. Meanwhile, the four actor GPUs carry all rollout and policy training stages, whereas the two reward GPUs stay busy only for the 36% of the RL step spent on scoring and sit idle for the 
+
+> 11 Li Peng et al.
+
+remaining 64%. These challenges together waste 30% of the GPU time of each RL step. AsyncReward thus reaches only 0.78 × the performance of Colocated .
+
+StageBreaker. To address reward-blocked policy training, 
+
+AsyncTrain runs back-propagation on the reward-independent part before the reward scores arrive. As Figure 16c shows, the actor GPUs start policy training immediately after rollout while the reward GPUs are still scoring, which removes the 
+
+Wait for reward block of AsyncReward and reduces the RL step by 22%. MergedReplay then eliminates the redundant trajectory replay, running the DiT over each trajectory once with gradient tracking rather than twice (Figure 16d), which cuts policy training on the actor GPUs by 17% and achieves a speedup of 1.13 × over Colocated . The four actor GPUs, however, still carry every VAE decoding of rollout, which takes about 30% of the rollout time, and every loss compu-tation and back-propagation of policy training. Meanwhile, the reward GPUs sit idle for 37% of the RL step after the last score. StageBreaker further addresses this stage-induced load imbalance with task-level load balancing. As Figure 16e shows, StageBreaker moves five VAE decodings to the re-ward GPUs under our placement plan, which shortens rollout on the actor GPUs by 27%. Scoring starts once these decod-ings finish, which gathers the scoring requests into a larger batch and thus accelerates the memory-bound CoT decod-ing of the VLM. After scoring, the reward GPUs further take over a portion of the loss computation and back-propagation, finishing policy training 15% earlier. The idle bubbles on the reward GPUs thus mostly disappear, raising their utiliza-tion from 36% under AsyncReward to 84%. StageBreaker 
+
+thereby achieves a speedup of 1.41 × over Colocated and 1.81 × over AsyncReward .
+
+## 6 Related Works and Discussions 
+
+Video generation. Numerous efforts have built DiT-based video generation models [6, 7, 9, 18, 25, 40, 44, 55, 59, 62]. Bidirectional models such as HunyuanVideo [55], Wan [44], CogVideoX [61], and Open-Sora [68] attend over all video frames at once, which achieves high visual quality but con-fines generation to short clips of fixed length and precludes streaming. To overcome these limitations, recent works turn to AR models [2, 6, 40], which instead generate videos chunk by chunk under causal attention, supporting long-form and streaming generation. To further reduce the generation cost, CausVid [62], Self-Forcing [18], and their successors [7, 9, 25, 59] distill few-step AR generators from bidirectional models, cutting the denoising steps of each chunk from tens to a few (e.g., from 50 to 4) and thus achieving real-time long video generation. StageBreaker readily accommodates all these AR models, as it reschedules only the execution of the RL step and modifies neither their architectures nor generation procedures. 
+
+RL for video generation. Numerous works [13, 23, 26, 46, 58, 66, 67] post-train video models with RL to improve human preference alignment, motion quality, and temporal coher-ence. DanceGRPO [58] and Flow-GRPO [23] extend GRPO to video diffusion and flow-matching models through SDE sampling. Building on this general formulation, KVPO [66], CM-GRPO [26], and other recent works [13, 46, 67] further customize exploration and the surrogate policy for the few-step AR models. To provide these algorithms with more accurate rewards, numerous works propose VLM-based re-ward models [14, 24, 45, 47, 52–54], such as VideoAlign [24], UnifiedReward-Flex [53], and VR-Thinker [47], which re-place lightweight metrics with multi-dimensional judgments through CoT reasoning. These works improve RL post-training and are orthogonal to StageBreaker, which accelerates its execution without modifying the algorithms or reward mod-els. 
+
+RL post-training systems. A growing number of systems accelerate RL post-training of LLMs by orchestrating its stages across GPUs [10, 11, 16, 38, 70–72]. Frameworks such as HybridFlow [38] and OpenRLHF [16] execute each RL step stage by stage over the entire batch, while RLHFuse [71] and RLinf [63] decompose the stages into sample-level subtasks and micro-batches and recompose them across GPUs to fill the bubbles between stages. To further shorten the critical path, StreamRL [70] and AReaL [10] turn to off-policy train-ing, which overlaps rollout with policy training on stale rollouts at the cost of the on-policy semantics [11, 34]. Roll-Packer [11] and DistRS [72] keep these semantics and overlap only reward evaluation with rollout. All of them, however, back-propagate a sample only after its advantage arrives. StageBreaker instead back-propagates ahead of the reward scores and applies the advantage afterwards, which overlaps policy training with reward evaluation while preserving on-policy semantics exactly. Moreover, these systems optimize LLM rollout, whose memory-bound decoding and long-tail output lengths motivate batching and tail-aware schedul-ing [10, 11, 34, 70]. Video rollout, in contrast, gains little from batching and runs a fixed number of denoising steps for every video, which raises neither issue. 
+
+RL systems for diffusion and video. Systems for diffusion RL mostly accelerate rollout, for example by offloading seed exploration to spot GPUs [21] or sharing generation prefixes across candidates [22]. DigenRL [48] further overlaps rollout with training and lets the idle trainer assist generation, but still back-propagates after the scores arrive. LeanGRPO [49], a concurrent work, removes the redundant trajectory replay by back-propagating during rollout itself. It applies, however, only when rollout and training run on the same engine under the same policy, a narrow setting for current RL systems. In contrast, StageBreaker merges the two replays into one only on the training engine under the current policy, which enables StageBreaker to accommodate separate rollout and 
+
+> 12 StageBreaker
+
+training engines as well as every policy update. More impor-tantly, StageBreaker observes the rising cost of VLM-based reward models, which brings new challenges to stage-centric execution overlooked by these systems built around light-weight rewards. StageBreaker breaks stage-centric execution into a dataflow of computation tasks and schedules them by their true data dependencies to address these challenges. 
+
+Dependency-driven scheduling. A wide range of ML sys-tems schedule computation by its data dependencies rather than by program boundaries [1, 4, 19, 29, 30, 33]. Ray [29] runs a dynamic task graph in which each task starts once its inputs arrive, and zero-bubble pipeline parallelism [33] further splits the backward pass into input-gradient and weight-gradient computations to fill the remaining bubbles. StageBreaker applies the same principle to video RL post-training, scheduling the true dataflow of an RL step, in which the loss and its gradient separate into independent factors and each stage decomposes into individually placeable tasks. 
+
+## 7 Conclusion 
+
+This paper presents StageBreaker, a data-dependency-driven scheduling framework for AR video RL post-training in resource-constrained settings, where a small and fixed GPU budget hosts rollout, VLM-based reward evaluation, and policy training. StageBreaker overlaps policy training with reward evaluation, merges the two redundant trajectory re-plays, and balances the load across GPUs through task-level placement. Evaluation results show that it achieves consis-tent speedups over stage-centric execution and asynchro-nous reward evaluation. In the future, we plan to explore further RL optimizations in resource-constrained settings, including placement across heterogeneous hardware devices and scheduling based on their performance characteristics. 
+
+## Appendix A Back-Propagation through a DiT Block 
+
+We verify that back-propagation through a typical DiT block [44, 55] preserves 𝐴 𝑖 as a scalar factor, as established in §4.2. To this end, we show that each operation’s Jacobians are inde-pendent of 𝐴 𝑖 and its backward computation is linear in the upstream gradient. The DiT block applies self-attention over the current chunk and the KV cache, cross-attention to the prompt embedding 
+
+𝐸 𝑖 , and an FFN. Each sublayer operates on normalized hidden states, and its output is added to the residual stream. 
+
+𝑋 1 = 𝑋 + Attn   ˆ𝑋𝑊 𝑄 , [𝐾 <𝑐 ; ˆ 𝑋𝑊 𝐾 ], [𝑉 <𝑐 ; ˆ 𝑋𝑊 𝑉 ] 𝑊 𝑂 , (8) 
+
+𝑋 2 = 𝑋 1 + Attn   ˆ𝑋 1𝑊 𝑄 ′ , 𝐸 𝑖 𝑊 𝐾 ′ , 𝐸 𝑖 𝑊 𝑉 ′
+
+ 𝑊 𝑂 ′ , (9) 
+
+𝑋 3 = 𝑋 2 + 𝜙   ˆ𝑋 2𝑊 1
+
+ 𝑊 2, (10) where 𝑋 ∈ R𝐿 ×𝑑 holds the 𝐿 tokens of the current chunk, ˆ𝑋 = LN (𝑋 ), 𝐾 <𝑐 and 𝑉 <𝑐 are the cached keys and values of the preceding chunks, and 𝜙 is GELU. We omit the ex-plicit formulas for timestep modulation and RoPE as they are simple affine and linear transformations, respectively. Their backward computations multiply the upstream gradient by matrices independent of 𝐴 𝑖 , preserving 𝐴 𝑖 as a scalar factor. We examine the attention sublayers and the FFN, then the normalization and residual operations shared by all three sublayers. For an unclipped loss term 𝜓 = 𝐴 𝑖 𝜌 𝑖,𝑘 , let ¯ 𝑧 =
+
+𝜕𝜓 /𝜕𝑧 denote the gradient with respect to 𝑧 .The attention sublayers in Equations 8 and 9 combine linear projections with scaled dot-product attention. For a linear projection 𝑌 = 𝑋𝑊 , the gradients are ¯ 𝑋 = ¯𝑌𝑊 ⊤
+
+and ¯ 𝑊 = 𝑋 ⊤ ¯𝑌 . Under LoRA, 𝑊 = 𝑊 0 + 𝐷𝐵 , the trainable parameter gradients are ¯ 𝐷 = 𝑋 ⊤ ¯𝑌 𝐵 ⊤ and ¯ 𝐵 = 𝐷 ⊤𝑋 ⊤ ¯𝑌 . These computations are linear in ¯ 𝑌 , with coefficients independent of 𝐴 𝑖 . For scaled dot-product attention, each head computes 
+
+𝑆 = 𝑄𝐾 ⊤/√𝑑 ℎ , 𝑃 = softmax (𝑆 ), and 𝑂 = 𝑃𝑉 . Here, 𝑑 ℎ is the head dimension, and softmax is applied row-wise. The backward equations are ¯𝑉 = 𝑃 ⊤ ¯𝑂, ¯𝑃 = ¯𝑂𝑉 ⊤,
+
+¯𝑆 = 𝑃 ⊙ ¯𝑃 − diag  (𝑃 ⊙ ¯𝑃 )1 𝑃, (11) ¯𝑄 = ¯𝑆𝐾 /√︁ 𝑑 ℎ, ¯𝐾 = ¯𝑆 ⊤𝑄 /√︁ 𝑑 ℎ .
+
+Each equation is linear in its upstream gradient, while its coefficients are determined by the forward-pass quantities 𝑃 ,
+
+𝑄 , 𝐾 , and 𝑉 , all independent of 𝐴 𝑖 . These equations apply to both self-attention and cross-attention and remain valid un-der attention masking. Together with the linear projections, they preserve 𝐴 𝑖 as a scalar factor throughout each attention sublayer. The FFN in Equation 10 consists of two linear projections and a GELU activation. The projections follow the formulas above. For the activation 𝑌 = 𝜙 (𝑋 ), the backward compu-tation is ¯ 𝑋 = 𝜙 ′ (𝑋 ) ⊙ ¯𝑌 . Since 𝜙 ′ (𝑋 ) depends only on the forward input, this computation also preserves 𝐴 𝑖 as a scalar factor. All three sublayers share normalization and residual op-erations. For the normalization step of LayerNorm, let 𝑛 be the normalized vector for token 𝑥 and 𝜎 the normalization scale. Its backward computation is ¯𝑥 = 1
+
+𝜎 
+
+
+
+𝐼 − 1
+
+𝑑 11 ⊤ − 1
+
+𝑑 𝑛𝑛 ⊤
+
+
+
+¯𝑛. 
+
+This computation is linear in ¯ 𝑛 , while its coefficients depend only on the forward-pass values 𝑛 and 𝜎 , both independent of 𝐴 𝑖 . A residual addition passes the upstream gradient to both inputs. When a hidden state feeds multiple branches, Equation 6 sums their gradients, also preserving the common factor 𝐴 𝑖 .For an upstream gradient ¯ 𝑦 = 𝐴 𝑖 ℎ with ℎ independent of 
+
+𝐴 𝑖 , each operation therefore preserves 𝐴 𝑖 as a scalar factor 
+
+> 13
+
+Li Peng et al. 
+
+in both ¯ 𝑥 and ¯ 𝑊 . This property holds across all three sublay-ers and across stacked blocks, so 𝐴 𝑖 remains a scalar factor throughout back-propagation through the entire DiT. 
+
+## References 
+
+[1] Martín Abadi, Paul Barham, Jianmin Chen, Zhifeng Chen, Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat, Geoffrey Irving, Michael Isard, et al. 2016. TensorFlow: a system for Large-Scale ma-chine learning. In 12th USENIX symposium on operating systems design and implementation (OSDI 16) . 265–283. [2] Niket Agarwal, Arslan Ali, Jon Allen, Martin Antolini, Adeline Aubame, Alisson Azzolini, Junjie Bai, Maciej Bala, Yogesh Balaji, Josh Bapst, et al. 2026. Cosmos 3: Omnimodal world models for physical AI. arXiv preprint arXiv:2606.02800 (2026). [3] Shuai Bai, Yuxuan Cai, Ruizhe Chen, Keqin Chen, Xionghui Chen, Zesen Cheng, Lianghao Deng, Wei Ding, Chang Gao, Chunjiang Ge, et al. 2025. Qwen3-VL technical report. arXiv preprint arXiv:2511.21631 
+
+(2025). [4] Paul Barham, Aakanksha Chowdhery, Jeff Dean, Sanjay Ghemawat, Steven Hand, Daniel Hurt, Michael Isard, Hyeontaek Lim, Ruoming Pang, Sudip Roy, et al. 2022. Pathways: Asynchronous distributed dataflow for ML. Proceedings of Machine Learning and Systems 4 (2022), 430–449. [5] Andreas Blattmann, Tim Dockhorn, Sumith Kulal, Daniel Mendele-vitch, Maciej Kilian, Dominik Lorenz, Yam Levi, Zion English, Vikram Voleti, Adam Letts, et al. 2023. Stable video diffusion: Scaling latent video diffusion models to large datasets. arXiv preprint arXiv:2311.15127 (2023). [6] Guibin Chen, Dixuan Lin, Jiangping Yang, Chunze Lin, Junchen Zhu, Mingyuan Fan, Hao Zhang, Sheng Chen, Zheng Chen, Chengcheng Ma, et al. 2025. SkyReels-V2: Infinite-length film generative model. 
+
+arXiv preprint arXiv:2504.13074 (2025). [7] Yukang Chen, Luozhou Wang, Wei Huang, Shuai Yang, Bohan Zhang, Yicheng Xiao, Ruihang Chu, Weian Mao, Qixin Hu, Shaoteng Liu, et al. 2026. LongLive-2.0: An NVFP4 Parallel Infrastructure for Long Video Generation. arXiv preprint arXiv:2605.18739 (2026). [8] CodeGoat24. 2025. Pref-GRPO: Pairwise Preference Reward-based GRPO for Stable Text-to-Image Reinforcement Learning. https:// github.com/CodeGoat24/Pref-GRPO .[9] Jiaxing Cui, Jie Wu, Ming Li, Tao Yang, Xiaojie Li, Rui Wang, An-drew Bai, Yuanhao Ban, and Cho-Jui Hsieh. 2026. Self-forcing++: Towards minute-scale high-quality video generation. In International Conference on Learning Representations , Vol. 2026. 85802–85822. [10] Wei Fu, Jiaxuan Gao, Xujie Shen, Chen Zhu, Zhiyu Mei, Chuyi He, Shusheng Xu, Guo Wei, Jun Mei, Jiashu Wang, et al. 2026. AReaL: A large-scale asynchronous reinforcement learning system for language reasoning. Advances in Neural Information Processing Systems 38 (2026), 36256–36282. [11] Wei Gao, Yuheng Zhao, Dakai An, Tianyuan Wu, Lunxi Cao, Shaopan Xiong, Ju Huang, Weixun Wang, Siran Yang, Wenbo Su, et al. 2026. RollPacker: Taming Long-Tail Rollouts for RL Post-Training with Tail Batching. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . 849–866. [12] Yu Gao, Haoyuan Guo, Tuyen Hoang, Weilin Huang, Lu Jiang, Fangyuan Kong, Huixia Li, Jiashi Li, Liang Li, Xiaojie Li, et al. 2025. Seedance 1.0: Exploring the boundaries of video generation models. 
+
+arXiv preprint arXiv:2506.09113 (2025). [13] Dailan He, Guanlin Feng, Xingtong Ge, Yi Zhang, Bingqi Ma, Guanglu Song, Yu Liu, and Hongsheng Li. 2026. AR-CoPO: Align Autoregressive Video Generation with Contrastive Policy Optimization. In European Conference on Computer Vision . Springer, 57–73. [14] Xuan He, Dongfu Jiang, Ping Nie, Minghao Liu, Zhengxuan Jiang, Mingyi Su, Wentao Ma, Junru Lin, Chun Ye, Yi Lu, et al. 2025. VideoScore2: Think before you score in generative video evaluation. 
+
+arXiv preprint arXiv:2509.22799 (2025). [15] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. 2021. LoRA: Low-rank adaptation of large language models. arXiv preprint arXiv:2106.09685 
+
+(2021). [16] Jian Hu, Xibin Wu, Wei Shen, Jason Klein Liu, Weixun Wang, Songlin Jiang, Haoran Wang, Hao Chen, Bin Chen, Wenkai Fang, et al. 2025. OpenRLHF: A Ray-based easy-to-use, scalable and high-performance RLHF framework. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing: System Demonstrations . 656– 666. [17] Heyang Huang, Cunchen Hu, Jiaqi Zhu, Ziyuan Gao, Liangliang Xu, Yizhou Shan, Yungang Bao, Sun Ninghui, Tianwei Zhang, and Sa Wang. 2025. DDiT: Dynamic resource allocation for diffusion transformer model serving. arXiv preprint arXiv:2506.13497 (2025). [18] Xun Huang, Zhengqi Li, Guande He, Mingyuan Zhou, and Eli Shecht-man. 2025. Self Forcing: Bridging the Train-Test Gap in Autoregressive Video Diffusion. In Advances in Neural Information Processing Systems (NeurIPS) . arXiv:2506.08009 https://arxiv.org/abs/2506.08009 Spot-light. [19] Yanping Huang, Youlong Cheng, Ankur Bapna, Orhan Firat, Dehao Chen, Mia Chen, HyoukJoong Lee, Jiquan Ngiam, Quoc V Le, Yonghui Wu, et al. 2019. GPipe: Efficient training of giant neural networks using pipeline parallelism. Advances in neural information processing systems 32 (2019). [20] Kling Team, Kuaishou Technology. 2025. VideoAlign: Improv-ing Video Generation with Human Feedback. https://github.com/ KlingAIResearch/VideoAlign .[21] Ruiqi Lai, Dakai An, Wei Gao, Ju Huang, Siran Yang, Jiamang Wang, Lin Qu, Dmitrii Ustiugov, and Wei Wang. 2026. Spotlight: Synergizing Seed Exploration and Spot GPUs for DiT RL Post-Training. arXiv preprint arXiv:2606.19004 (2026). [22] Yuming Li, Yikai Wang, Zhongyu Zhao, Ming Lu, Qi She, Shanghang Zhang, et al. 2026. BranchGRPO: Stable and efficient GRPO with structured branching in diffusion models. In International Conference on Learning Representations , Vol. 2026. 20839–20866. [23] Jie Liu, Gongye Liu, Jiajun Liang, Yangguang Li, Jiaheng Liu, Xintao Wang, Pengfei Wan, Di Zhang, and Wanli Ouyang. 2025. Flow-GRPO: Training flow matching models via online RL. In Advances in Neural Information Processing Systems , Vol. 38. 40783–40818. doi: 10.52202/ 085713-1362 
+
+[24] Jie Liu, Gongye Liu, Jiajun Liang, Ziyang Yuan, Xiaokun Liu, Mingwu Zheng, Xiele Wu, Qiulin Wang, Wenyu Qin, Menghan Xia, et al. 2025. Improving video generation with human feedback. arXiv preprint arXiv:2501.13918 (2025). [25] Kunhao Liu, Wenbo Hu, Jiale Xu, Ying Shan, and Shijian Lu. 2026. Rolling forcing: Autoregressive long video diffusion in real time. In 
+
+International Conference on Learning Representations , Vol. 2026. 91177– 91196. [26] Yanzuo Lu, Ronglai Zuo, and Jiankang Deng. 2026. RAVEN: Real-time Autoregressive Video Extrapolation with Consistency-model GRPO. 
+
+arXiv preprint arXiv:2605.15190 (2026). [27] Yuhang Ma, Xiaoshi Wu, Keqiang Sun, and Hongsheng Li. 2025. HPSv3: Towards wide-spectrum human preference score. In 2025 IEEE/CVF In-ternational Conference on Computer Vision (ICCV) . IEEE, 15086–15095. [28] Pietro Mazzaglia, Tim Verbelen, Bart Dhoedt, Aaron Courville, and Sai Rajeswar. 2024. GenRL: Multimodal-foundation world models for generalization in embodied agents. Advances in neural information processing systems 37 (2024), 27529–27555. [29] Philipp Moritz, Robert Nishihara, Stephanie Wang, Alexey Tumanov, Richard Liaw, Eric Liang, Melih Elibol, Zongheng Yang, William Paul, Michael I Jordan, et al. 2018. Ray: A distributed framework for emerg-ing AI applications. In 13th USENIX symposium on operating systems 
+
+14 StageBreaker 
+
+design and implementation (OSDI 18) . 561–577. [30] Deepak Narayanan, Aaron Harlap, Amar Phanishayee, Vivek Seshadri, Nikhil R Devanur, Gregory R Ganger, Phillip B Gibbons, and Matei Zaharia. 2019. PipeDream: Generalized pipeline parallelism for DNN training. In Proceedings of the 27th ACM symposium on operating sys-tems principles . 1–15. [31] NVIDIA Corporation. 2025. NVIDIA RTX PRO 5000 Blackwell. 
+
+https://www.nvidia.com/en-us/products/workstations/professional-desktop-gpus/rtx-pro-5000/ .[32] William Peebles and Saining Xie. 2023. Scalable diffusion models with transformers. In 2023 IEEE/CVF International Conference on Computer Vision (ICCV) . IEEE, 4172–4182. [33] Penghui Qi, Xinyi Wan, Guangxing Huang, and Min Lin. 2024. Zero Bubble Pipeline Parallelism. In International Conference on Learning Representations (ICLR) .[34] Ruoyu Qin, Weiran He, Weixiao Huang, Yangkun Zhang, Yikai Zhao, Bo Pang, Xinran Xu, Yingdi Shan, Yongwei Wu, and Mingxing Zhang. 2026. Seer: Online Context Learning for Fast Synchronous LLM Rein-forcement Learning. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . 883–901. [35] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. 2017. Proximal policy optimization algorithms. arXiv preprint arXiv:1707.06347 (2017). [36] Team Seedream, Yunpeng Chen, Yu Gao, Lixue Gong, Meng Guo, Qiushan Guo, Zhiyao Guo, Xiaoxia Hou, Weilin Huang, Yixuan Huang, et al. 2025. Seedream 4.0: Toward next-generation multimodal image generation. arXiv preprint arXiv:2509.20427 (2025). [37] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, YK Li, Yang Wu, et al. 2024. DeepSeekMath: Pushing the limits of mathematical reasoning in open language models. arXiv preprint arXiv:2402.03300 (2024). [38] Guangming Sheng, Chi Zhang, Zilingfeng Ye, Xibin Wu, Wang Zhang, Ru Zhang, Yanghua Peng, Haibin Lin, and Chuan Wu. 2025. Hybrid-Flow: A flexible and efficient RLHF framework. In Proceedings of the Twentieth European Conference on Computer Systems . 1279–1297. [39] Cecilia Summers and Michael J Dinneen. 2021. Nondeterminism and instability in neural network optimization. In International Conference on Machine Learning . PMLR, 9913–9922. [40] Hansi Teng, Hongyu Jia, Lei Sun, Lingzhi Li, Maolin Li, Mingqiu Tang, Shuai Han, Tianning Zhang, WQ Zhang, Weifeng Luo, et al. 2025. MAGI-1: Autoregressive video generation at scale. arXiv preprint arXiv:2505.13211 (2025). [41] VeRL-Omni Team. 2026. Async Reward for Diffusion Training. https: //verl-omni.readthedocs.io/en/latest/algo/async_reward.html .[42] VeRL-Omni Team. 2026. VeRL-Omni: Easy, fast, and stable RL training for diffusion and omni-modality models. https://github.com/verl-project/verl-omni .[43] VeRL Team. 2026. verl: Volcano Engine Reinforcement Learning for LLMs. https://github.com/verl-project/verl .[44] Team Wan, Ang Wang, Baole Ai, Bin Wen, Chaojie Mao, Chen-Wei Xie, Di Chen, Feiwu Yu, Haiming Zhao, Jianxiao Yang, et al. 2025. Wan: Open and advanced large-scale video generative models. arXiv preprint arXiv:2503.20314 (2025). [45] Jiyuan Wang, Huan Ouyang, Jiuzhou Lin, Chunyu Lin, Dewen Fan, Bo-heng Zhang, Haonan Fan, Fei Zuo, Jia Sun, Huaiqing Wang, et al. 2026. CAC: Advancing video reward models via hierarchical spatiotemporal concentrating. arXiv preprint arXiv:2605.11723 (2026). [46] Jing Wang, Xiangxin Zhou, Jiajun Liang, Kaiqi Liu, Wanyuan Pang, Zhenyu Xie, Tianyu Pang, and Xiaodan Liang. 2026. TempAct: Ad-vancing Temporal Plausibility in Autoregressive Video Generation via Planner-Executor RL. arXiv preprint arXiv:2606.28016 (2026). [47] Qunzhong Wang, Jie Liu, Jiajun Liang, Yilei Jiang, Yuanxing Zhang, Yaozhi Zheng, Xintao Wang, Pengfei Wan, Xiangyu Yue, and Jia-heng Liu. 2025. VR-Thinker: Boosting video reward models through thinking-with-image reasoning. arXiv preprint arXiv:2510.10518 
+
+(2025). [48] Sijie Wang, Zhengyu Qing, Zhiqiang Tan, Yiming Yin, Yeqing Zhang, Yaoyuan Wang, Qiang Wang, Xiaowen Chu, and Shaohuai Shi. 2026. Accelerating Disaggregated RL for Visual Generative LLMs with Diffusion-Based Parallelism and Trainer-Assisted Generation. arXiv preprint arXiv:2606.24369 (2026). [49] Sijie Wang, Zhiqiang Tan, Xinrui Yang, and Shaohuai Shi. 2026. Lean-GRPO: Eliminating Redundant Recomputation in Diffusion RL. arXiv preprint arXiv:2609.03528 (2026). [50] Weixun Wang, Shaopan Xiong, Gengru Chen, Wei Gao, Sheng Guo, Yancheng He, Ju Huang, Jiaheng Liu, Zhendong Li, Xiaoyang Li, et al. 2025. Reinforcement Learning Optimization for Large-Scale Learn-ing: An Efficient and User-Friendly Scaling Library. arXiv preprint arXiv:2506.06122 (2025). [51] Yibin Wang, Zhimin Li, Yuhang Zang, Yujie Zhou, Jiazi Bu, Chunyu Wang, Qinglin Lu, Cheng Jin, and Jiaqi Wang. 2025. Pref-GRPO: Pairwise Preference Reward-based GRPO for Stable Text-to-Image Reinforcement Learning. arXiv preprint arXiv:2508.20751 (2025). [52] Yibin Wang, Zhiyu Tan, Junyan Wang, Xiaomeng Yang, Cheng Jin, and Hao Li. 2024. Lift: Leveraging human feedback for text-to-video model alignment. arXiv preprint arXiv:2412.04814 (2024). [53] Yibin Wang, Yuhang Zang, Feng Han, Jiazi Bu, Yujie Zhou, Cheng Jin, and Jiaqi Wang. 2026. Unified personalized reward model for vision generation. arXiv preprint arXiv:2602.02380 (2026). [54] Yibin Wang, Yuhang Zang, Chunyu Wang, Qinglin Lu, Cheng Jin, Jiaqi Wang, et al. 2026. Unified multimodal chain-of-thought reward model through reinforcement fine-tuning. Advances in neural information processing systems 38 (2026), 159130–159157. [55] Bing Wu, Chang Zou, Changlin Li, Duojun Huang, Fang Yang, Hao Tan, Jack Peng, Jianbing Wu, Jiangfeng Xiong, Jie Jiang, et al. 2025. HunyuanVideo 1.5 technical report. arXiv preprint arXiv:2511.18870 
+
+(2025). [56] Xiaoshi Wu, Yiming Hao, Keqiang Sun, Yixiong Chen, Feng Zhu, Rui Zhao, and Hongsheng Li. 2023. Human preference score v2: A solid benchmark for evaluating human preferences of text-to-image synthesis. arXiv preprint arXiv:2306.09341 (2023). [57] Zeyue Xue. 2025. DanceGRPO: An Official Implementation of Dance-GRPO: Unleashing GRPO on Visual Generation. https://github.com/ XueZeyue/DanceGRPO .[58] Zeyue Xue, Jie Wu, Yu Gao, Fangyuan Kong, Lingting Zhu, Mengzhao Chen, Zhiheng Liu, Wei Liu, Qiushan Guo, Weilin Huang, et al. 2025. DanceGRPO: Unleashing GRPO on visual generation. arXiv preprint arXiv:2505.07818 (2025). [59] Shuai Yang, Wei Huang, Ruihang Chu, Yicheng Xiao, Yuyang Zhao, Xianbang Wang, Muyang Li, Enze Xie, Yingcong Chen, Yao Lu, Song Han, and Yukang Chen. 2026. LongLive: Real-time Interactive Long Video Generation. In International Conference on Learning Representa-tions (ICLR) . arXiv:2509.22622 https://arxiv.org/abs/2509.22622 
+
+[60] Yuanming Yang, Guoqing Ma, Bo Wang, Yuan Zhang, Wei Tang, Chenyi Li, Haoyang Huang, and Nan Duan. 2026. DiT-Reward: Gen-erative Representations for Text-to-Image Reward Modeling. arXiv preprint arXiv:2606.23626 (2026). [61] Zhuoyi Yang, Jiayan Teng, Wendi Zheng, Ming Ding, Shiyu Huang, Jiazheng Xu, Yuanming Yang, Wenyi Hong, Xiaohan Zhang, Guanyu Feng, et al. 2025. CogVideoX: Text-to-video diffusion models with an expert transformer. In International Conference on Learning Represen-tations , Vol. 2025. 83048–83077. [62] Tianwei Yin, Qiang Zhang, Richard Zhang, William T Freeman, Fredo Durand, Eli Shechtman, and Xun Huang. 2025. From slow bidirec-tional to fast autoregressive video diffusion models. In 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) . IEEE, 22963–22974. 15 Li Peng et al. 
+
+[63] Chao Yu, Yuanqing Wang, Zhen Guo, Hao Lin, Si Xu, Hongzhi Zang, Quanlu Zhang, Yongji Wu, Chunyang Zhu, Junhao Hu, et al. 2026. RLinf: Flexible and Efficient Large-Scale Reinforcement Learning via Macro-to-Micro Flow Transformation. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . 829–846. [64] Hantian Zha, Teng Ma, Yang Yong, Haiwen Fu, Ruiyang Ma, Wei Gao, Ruihao Gong, Xianglong Liu, Wei Wang, and Yunpeng Chai. 2026. Dis-agFusion: Asynchronous Pipeline Parallelism and Elastic Scheduling for Disaggregated Diffusion Serving. arXiv preprint arXiv:2605.25550 
+
+(2026). [65] Ruicheng Zhang. 2026. KVPO: ODE-Native GRPO for Autoregressive Video Alignment via KV Semantic Exploration. https://github.com/ Richard-Zhang-AI/KVPO .[66] Ruicheng Zhang, Kaixi Cong, Jun Zhou, Zhizhou Zhong, Zunnan Xu, Shuiyang Mao, Wei Liu, and Xiu Li. 2026. KVPO: ODE-native GRPO for autoregressive video alignment via KV semantic exploration. arXiv preprint arXiv:2605.14278 (2026). [67] Songchun Zhang, Zeyue Xue, Siming Fu, Jie Huang, Xianghao Kong, Y Ma, Haoyang Huang, Nan Duan, and Anyi Rao. 2026. Astrolabe: Steering Forward-Process Reinforcement Learning for Distilled Au-toregressive Video Models. arXiv preprint arXiv:2603.17051 (2026). [68] Zangwei Zheng, Xiangyu Peng, Tianji Yang, Chenhui Shen, Shenggui Li, Hongxin Liu, Yukun Zhou, Tianyi Li, and Yang You. 2024. Open-Sora: Democratizing efficient video production for all. arXiv preprint arXiv:2412.20404 (2024). [69] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating prefill and decoding for goodput-optimized large language model serving. In 18th USENIX symposium on operating systems design and implementation (OSDI 24) . 193–210. [70] Yinmin Zhong, Zili Zhang, Xiaoniu Song, Hanpeng Hu, Chao Jin, Bingyang Wu, Nuo Chen, Yukun Chen, Yu Zhou, Changyi Wan, et al. 2025. StreamRL: Scalable, heterogeneous, and elastic RL for LLMs with disaggregated stream generation. arXiv preprint arXiv:2504.15930 
+
+(2025). [71] Yinmin Zhong, Zili Zhang, Bingyang Wu, Shengyu Liu, Yukun Chen, Changyi Wan, Hanpeng Hu, Lei Xia, Ranchen Ming, Yibo Zhu, et al. 2025. Optimizing RLHF training for large language models with stage fusion. In 22nd USENIX Symposium on Networked Systems Design and Implementation (NSDI 25) . 489–503. [72] Ruidong Zhu, Mingcong Han, Yinmin Zhong, Wencong Xiao, Xuanzhe Liu, and Xin Jin. 2026. DistRS: Disaggregated Reward Service for RLVR with Batch-Level Constraint. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . 1517–1531. [73] Zilin Zhu, Chengxing Xie, Xin Lv, and slime Contributors. 2025. slime: An LLM post-training framework for RL Scaling. https://github.com/ THUDM/slime . GitHub repository. Corresponding author: Xin Lv. [74] Donglin Zhuang, Xingyao Zhang, Shuaiwen Song, and Sara Hooker. 2022. Randomness in neural network training: Characterizing the impact of tooling. Proceedings of Machine Learning and Systems 4(2022), 316–336. 16

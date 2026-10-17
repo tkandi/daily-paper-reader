@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-16</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-17</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 14 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-16 19:52:02 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-17 19:15:00 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>17 篇分布式训练与边缘推理论文完成筛选，聚焦大模型训练效率与部署可靠性。</p>
-<p>最值得精读的是 ETH 的异构流水并行数据均衡方案，以及免协调的变成本分布式训练负载规整思路。</p>
-<p>建议优先了解这两项训练系统优化，再按需关注跨地域 KV Cache 迁移和可靠性边缘推理部署。</p>
+<p>今日筛选 14 篇 AI 系统论文，完成 3 篇精读与 11 篇速读，重点覆盖统一内存、视频 RL 训练调度与端侧智能。</p>
+<p>最值得关注的是 CPU-GPU 统一内存下的共享特性，以及将视频 RL 后训练调度细化到数据依赖的 StageBreaker，两者均获 8.0 分。</p>
+<p>建议普通读者优先从统一内存与训练调度两篇入手，再按需延伸至端侧 Agent 并行解码和联邦学习。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ETH: Data-Balanced Heterogeneous Pipeline Parallelism for Training Large Models">ETH: Data-Balanced Heterogeneous Pipeline Parallelism for Training Large Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Coordination-Free Workload Regularization for Variable-Cost Distributed Training">Coordination-Free Workload Regularization for Variable-Cost Distributed Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Lightweight Scheduling Policies for Continuously Batched LLM Serving Across GPU Architectures">Lightweight Scheduling Policies for Continuously Batched LLM Serving Across GPU Architectures</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Characterizing CPU-GPU Memory Sharing over Unified Memory Architecture">Characterizing CPU-GPU Memory Sharing over Unified Memory Architecture</span></li><li><span class="dpr-home-dashboard-paper-title" title="StageBreaker: Shifting Video RL Post-Training Scheduling from Stages down to Data Dependencies">StageBreaker: Shifting Video RL Post-Training Scheduling from Stages down to Data Dependencies</span></li><li><span class="dpr-home-dashboard-paper-title" title="Local Epochs as Optimal Stopping: Theory and Evidence in Federated Learning">Local Epochs as Optimal Stopping: Theory and Evidence in Federated Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing">Efficient KV Cache Migration for Geo-Distributed LLM Inference in Collaborative Edge Computing</span></li><li><span class="dpr-home-dashboard-paper-title" title="RAPID-DNN: Reliability-Aware Partitioning for Robust DNN Inference Deployment on Edge AI">RAPID-DNN: Reliability-Aware Partitioning for Robust DNN Inference Deployment on Edge AI</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedPCD: Priority-Constrained Federated Aggregation">FedPCD: Priority-Constrained Federated Aggregation</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SchemaWeaver: Accelerating On-Device Mobile Agentic AI via Schema-Guided Parallel LLM Decoding">SchemaWeaver: Accelerating On-Device Mobile Agentic AI via Schema-Guided Parallel LLM Decoding</span></li><li><span class="dpr-home-dashboard-paper-title" title="FedLoRD: Personalized Federated Learning based on Low-Rank Structures of Model Parameter Differences">FedLoRD: Personalized Federated Learning based on Low-Rank Structures of Model Parameter Differences</span></li><li><span class="dpr-home-dashboard-paper-title" title="Infrastructure-Aware Runtime Protection of Co-Deployed AI Services at the Industrial Edge">Infrastructure-Aware Runtime Protection of Co-Deployed AI Services at the Industrial Edge</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
