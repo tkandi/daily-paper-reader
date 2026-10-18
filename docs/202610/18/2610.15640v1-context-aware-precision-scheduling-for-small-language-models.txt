@@ -1,0 +1,530 @@
+Title: Context-Aware Precision Scheduling for Small Language Models
+
+URL Source: https://arxiv.org/pdf/2610.15640v1
+
+Published Time: Wed, 14 Oct 2026 01:50:30 GMT
+
+Number of Pages: 20
+
+Markdown Content:
+# Context-Aware Precision Scheduling for Small Language Models 
+
+Mukund Athmaram 1,2∗ Manoj Rao 1 Liang Ma 11 Advanced Micro Devices Inc. (AMD) 2 Cornell University 
+
+## Abstract 
+
+Small language models (SLMs) used as on-device agents must balance accuracy and latency as their context grows. Mixed precision helps manage this tradeoff by assigning different precisions to weight tensors according to their size and sensitivity. However, these choices depend on the operating conditions, so a configuration selected for a short context may no longer provide the best tradeoff at a longer one. We calibrate a timing model from measurements at different precisions and context lengths, and combine it with tensor sensitivities to choose configurations under a latency or accuracy budget. We argue that fewer bits do not always mean faster execution, so our predictor estimates latency from calibrated execution costs rather than weight bytes alone. Under a latency budget, reading the larger key–value (KV) cache leaves less time for weight operations, leading the allocator to select lower precisions. This gives a schedule of tensor changes that can be prepared before execution. Our runtime follows the schedule while retaining the session’s KV cache. We evaluate executed schedules on a laptop GPU, including a longer-context schedule with three weight formats and a tool-use benchmark measuring full response time and correctness. Under an accuracy budget, measured error from a quantized KV cache determines the budget left for weights. The allocator can raise or lower weight precision as this estimate changes. These experiments show where context-aware precision helps and where accuracy recovery remains limited. 
+
+## 1 Introduction 
+
+Small language models can run on-device as tool-using agents [Belcak et al., 2025], where memory and bandwidth are limited. Each turn adds instructions, tool outputs, and messages, changing the work required for later responses. A fixed precision configuration must serve both short and long contexts. We ask how to choose that configuration as the session grows. Mixed-precision schemes assign different bit-widths to weight tensors because tensors differ in their sensitivity to quantization and their size. We combine an estimate of each tensor’s timing effect with measurements of its accuracy impact to choose a configuration under a budget. We measure accuracy impact offline through a Kullback–Leibler (KL) divergence test that quantizes one tensor at a time. For speed impact, a simple approach is to use bytes as a proxy. This is a natural assumption: for example, storing weights in four bits rather than eight roughly halves their storage, so it makes sense to assume that this also makes execution faster. However, storage alone does not account for the compute and conversion work of each format’s kernels. Section 2 shows a measured case where Q8 is faster than Q4 and evaluates latency prediction on new mixed-precision configurations. We then use these timing costs to choose precisions as context grows. Context growth introduces two different scheduling questions. Under a latency budget, reading a larger KV cache leaves less time for weight operations. We can predict this change, allocate precision  
+
+> ∗Correspondence to: ma2388@cornell.edu ; Work conducted during an AMD internship. 40th Conference on Neural Information Processing Systems (NeurIPS 2026). Workshop: SLMs for Agentic Systems, Paris, France, 2026. arXiv:2610.15640v1 [cs.LG] 11 Oct 2026
+
+at successive context lengths, and precompute which tensors should change and when. Under an accuracy budget, we approximate weight and KV-cache errors as additive. Measured cache error determines the remaining weight-error budget, allowing precision to move in either direction. We test whether these choices keep measured error within budget and how well the additive model captures the executed schedule. Our prototype keeps model weights at multiple precisions in memory so that switching does not require reloading them. This implementation suits deployments that can spare this memory to prioritize latency or accuracy targets as context grows. We study both questions on a Radeon 780M laptop GPU. The runtime executes tensor changes while retaining the KV cache, and our measurements include switching time. We extend execution to 16K contexts with Q8, Q6, and Q4 (8-, 6-, and 4-bit) weights, execute an accuracy-budget schedule with a quantized KV cache, and evaluate tensor scheduling on tool-use turns. The appendix gives calibration details, additional comparisons, and an evaluation of the additive accuracy estimate. 
+
+Contributions. (i) A calibrated predictor for mixed-precision latency and an allocator that uses it to schedule tensor precisions as context grows. (ii) A runtime that executes the schedule without rebuilding the KV cache. (iii) On-device measurements of longer-context scheduling, the limits of recovering accuracy through weight precision, and the quality–latency tradeoff in tool use. 
+
+## 2 Predicting latency of mixed-precision configurations 
+
+Lower precision reduces weight traffic, but computation and conversion also take time. Under the roofline view [Williams et al., 2009], matrix multiplication can be limited by compute or weight loading. Prefill reuses weights across several token rows, while single-token decode offers less reuse. A lower-bit format can therefore be slower if its compute or conversion costs outweigh the memory saving. We observe this on Llama-3.2-1B-Instruct [Meta, 2024] with native llama.cpp kernels [Gerganov and llama.cpp contributors, 2023] on the Radeon 780M. For a 2048-token prompt, Q8 prefill averages 
+
+1.94 s versus 2.13 s for Q4, despite storing more weight bytes (Fig. 1, left). Weight bytes therefore do not always determine the runtime ordering. Q8 Q4 Weight precision 012Prefill time (s)  1.94 2.13            
+
+> 2048 input tokens
+> 0.4 0.6 0.8
+> Prefill time (s)
+> 512 input tokens
+> 123456
+> Configuration
+> 010
+> Error (%)  234
+> Prefill time (s)
+> 2048 input tokens
+> 123456
+> Configuration
+> 010
+> Error (%) Measured Predicted
+
+Figure 1: Llama-3.2-1B-Instruct [Meta, 2024], Radeon 780M. Left: Q8/Q4 prefill latency, with whiskers spanning three passage means. Right: measured (solid) and predicted (dashed) latency for six F16/Q8 configu-rations excluded from calibration. Gray bands mark ±10% of measurement, and bars show percentage error. Appendix G gives protocols and decode results. 
+
+We contribute a calibrated latency predictor for new mixed-precision configurations. It combines attention, feed-forward, and output costs using tensors’ expected work. Appendix G gives detailed modeling, calibration, and prediction analysis. Section 3.1 specializes the calibration for context scheduling. On the new mixed-precision configurations, mean absolute percentage error is 3.51% for prefill, versus 5.92% for a byte estimate fitted to the same calibration measurements. Decode errors are 22.71% and 2.24% , respectively. Both track decode well, while calibrated costs improve prefill prediction. We now use these costs to allocate precision. 
+
+## 3 Choosing precision at a given context 
+
+At context length L, we choose a precision pu for each unit u: a weight tensor or a group that changes precision together. Calibration keeps the device, software, and decoding workload fixed while context grows. 
+
+3.1 Calibrating context-dependent timing Reference latency. We first measure the reference configuration at several context lengths and fit 
+
+T0(L) = a + c L
+
+1024 . (1) Here a is the fitted intercept in milliseconds and c is the added time per 1024 context tokens. This is the total decode-step time, including weight operations, attention, and cache access. Cache precision stays fixed within each calibration. 
+
+Timing changes. We then change one group of weights at a time, such as attention, feed-forward, or output weights. Together with runs using one precision throughout, these measurements fit a time change ∆Tg (p) for group g at precision p, relative to the reference. This change includes compute, weight loading, dequantization, and other execution overhead together. To estimate the time change for an individual tensor, we distribute the group change by weight count: 
+
+∆T (u, p ) = W (u)
+
+P 
+
+> v∈g
+
+W (v) ∆Tg (p), u ∈ g. (2) Here W (u) is the number of weights in tensor u, so each tensor receives a proportional share of the measured group change. A group allocated as one unit uses ∆Tg (p) directly. 
+
+Configuration latency. Adding the chosen timing changes to the reference gives 
+
+Tpred (cfg , L ) = T0(L) + X
+
+> u
+
+∆T  u, cfg [u]. (3) The fitted quantities are a, c, and the group changes ∆Tg (p). Once calibrated, these coefficients stay fixed as context grows. 
+
+3.2 Allocating precision under a budget 
+
+We combine timing changes with measured accuracy costs to choose a supported precision pu ∈ P u.Units with shared costs are allocated together. 
+
+Accuracy change. We use KL to measure prediction changes that aggregate task accuracy can hide [Dutta et al., 2024]. We quantize one unit at a time, keeping the rest at the accuracy table’s reference precision. Over WikiText [Merity et al., 2017], mean KL between reference and quantized next-token distributions gives A(u, p ). Repeating across units and formats builds the accuracy table; for a change from reference precision p0(u) to p,
+
+∆A(u, p ) = A(u, p ) − A u, p 0(u). (4) Positive values mean that changing precision increases divergence. 
+
+Choosing the configuration. For a latency budget D, we solve 
+
+min 
+
+> {pu}
+
+X
+
+> u
+
+∆A(u, p u) s.t. T0(L) + X
+
+> u
+
+∆T (u, p u) ≤ D, pu ∈ P u. (5) Thus, growing reference latency leaves less room under the same budget. With an accuracy budget instead, we choose the fastest configuration allowed by the additive accuracy estimate (Appendix D). A dynamic program divides the budget into discrete levels and finds the best combination of precisions on this grid. It is exact for this discretized additive model. Appendix D illustrates the tradeoff. Appendix E compares additive and measured joint KL to evaluate how reliable our additive model for accuracy impact is. 34 Executing a context-dependent schedule 
+
+With cache precision fixed, the fitted reference latency grows with context. Meeting a fixed latency budget can therefore require greater time savings from the weight configuration. To choose a configuration for a range of context lengths, we evaluate Eq. 3 at the longest context in that range, leaving room for prediction error and switching time. The cache is retained as weights change and earlier tokens are not reprocessed at the new precision. Repeating the allocation at later context lengths tells us which tensors to change and when. Our first Llama-3.2-1B-Instruct [Meta, 2024] schedule has seven transitions through context 4096, involving 98 distinct weight units (Fig. 2). 0512 1024 1536 2048 2560 3072 3584 4096         
+
+> Context length (tokens)
+> Layer 0 Layer 2 Layer 4 Layer 6 Layer 8 Layer 10 Layer 12 Layer 14
+> Scheduled precision
+> F16 Q8
+> 40 45 50
+> Mean decode latency (ms)  50 ms target
+> Latency and quality as context grows
+> 0512 1024 1536 2048 2560 3072 3584 4096
+> Context length (tokens)
+> 0.0 0.5 1.0 1.5
+> Joint KL (×10⁻³)
+> 42 43 44 45 46 47 Mean decode latency (ms)
+> 0.2 0.4 0.6
+> Mean joint KL (×10⁻³) Fixed precision Byte-aware
+> Our schedule 16.8% lower KL 3.3% lower latency
+> Lower and left is better
+> Average over the same 17 contexts
+> Our schedule Byte-aware Fixed precision
+
+Figure 2: Context scheduling on Llama-3.2-1B-Instruct [Meta, 2024], Radeon 780M. Top: tensor schedule, mean decode latency, and joint KL at matching contexts. Bottom: means over the same 17 context lengths. Fixed precision is the F16/Q8 mix selected during calibration. Timing includes switching, and Appendix A includes all comparisons and perplexity. 
+
+Executing the schedule. We modify llama.cpp [Gerganov and llama.cpp contributors, 2023] to keep alternate tensor versions in memory and switch between them at scheduled context lengths while preserving the KV cache. Median switching time is 1.81 ms, or about 4% of the measured 
+
+44 .91 ms mean decode-step time, and the maximum is 2.39 ms. This cost is paid only at a transition and is included in the latency of the first token after the change. 
+
+Latency and quality as context grows. We compare our schedule, a byte-aware schedule, and five fixed configurations on one complete WikiText passage excluded from calibration [Merity et al., 2017]. The byte-aware schedule estimates latency from the number of bytes used to store the weights, using the same accuracy measurements as our schedule. Joint KL compares the full configuration’s predictions with F16, and perplexity measures how well the model predicts the evaluated tokens. Appendix A describes the measurement procedure. 4The cost schedule has 16 .8% lower joint KL and 3.3% lower mean latency than the byte schedule: 
+
+44 .91 versus 46 .45 ms. Compared with using its final configuration throughout, it retains more fidelity at shorter contexts, with 51 .4% lower joint KL at 44 .91 versus 41 .63 ms. The 50 ms scheduling target is met on 89 .2% of steps, compared with 72 .0% for bytes. 
+
+4.1 Three precision levels through 16K context 
+
+We extend the runtime to Q8, Q6, and Q4 weights on Llama-3.2-1B-Instruct [Meta, 2024]. We check each configuration’s predicted decode latency at the longest context it will serve. Switching time is included only when tensor precisions change. Calibration selects a 77 ms target and for evaluation we use two WikiText passages excluded from calibration [Merity et al., 2017]. 0 4 8 12 16 
+
+> Context (K tokens)
+> Layer 0 Layer 2 Layer 4 Layer 6 Layer 8 Layer 10 Layer 12 Layer 14 Output
+
+Scheduled precision            
+
+> Q8 Q6 Q4
+> 40 60 80
+> Mean decode latency (ms)  77 ms target
+> Latency and quality as context grows
+> 04812 16
+> Context (K tokens)
+> 020 40
+> Joint KL to Q8 (×10⁻³)
+> 0246810 Decode steps above 77 ms (%) 5.5 6.0 6.5 7.0 7.5 Mean joint KL to Q8 (×10⁻³) Our schedule Byte-aware Fixed Q6
+> Lower and left is better
+
+Quality and the decode budget   
+
+> Our schedule Byte-aware Fixed Q6
+
+Figure 3: Context scheduling through 16K. Top left: the tensor schedule. Right: mean latency and joint KL to Q8 at matching contexts in two evaluation passages. The dashed line is the 77 ms target selected from calibration. Bottom: mean KL versus the fraction of decode steps exceeding the budget, over the same 16 context lengths. Fixed Q6 remains unchanged throughout. All six policies appear in Appendix B. 
+
+The cost schedule has 13 .3% lower mean joint KL than byte-aware, with mean latency 58 .12 versus 
+
+53 .81 ms. It meets the 77 ms target on 99 .7% of measured steps, versus 99 .0% for bytes and 90 .9% 
+
+for fixed Q6. Appendix B gives the full comparison and calibration details. 
+
+## 5 Scheduling under an accuracy budget 
+
+We estimate cache error by keeping all weights at Q8 and comparing next-token predictions with quantized and F16 caches on the same text. At six sampled context lengths, mean KL gives Akv (κ, L )
+
+for cache precision κ. We test whether this estimate adds to the separately measured weight error, leaving an accuracy budget for weights of 
+
+ϵweights (L) = ϵtotal − Akv (κ, L ). (6) We minimize predicted weight time under this budget (Eq. 7). Higher cache error can require higher weight precision. We evaluate Llama-3.2-1B-Instruct [Meta, 2024] with Q4 keys and values and Q8/Q6/Q4 weights. We keep the calibrated schedules fixed and evaluate on two WikiText passages [Merity et al., 2017] 5excluded from calibration, extending context to 16K while retaining each policy’s cache. The target is 0.05 joint KL to Q8 weights with an F16 cache, and Appendix F gives calibration details. 0 4 8 12 16 Context (K tokens) 
+
+> Layer 0 Layer 2 Layer 4 Layer 6 Layer 8 Layer 10 Layer 12 Layer 14 Output
+
+Scheduled precision           
+
+> Q8 Q6 Q4
+> 30 40 Mean decode latency (ms)
+> Latency and quality as context grows 04812 16 Context (K tokens) 0.0 0.1 Joint KL
+> 0.05 budget
+> 28 30 32 34 36 Mean decode latency (ms) 0.090 0.095 0.100 0.105 0.110 Mean joint KL
+> Lower and left is better
+
+Average over the same six contexts   
+
+> Our schedule Byte-aware Fixed initial mix
+
+Figure 4: Executed accuracy-budget scheduling with a Q4 KV cache. Top left: tensor precisions chosen by our allocator. Right: mean decode latency and joint KL to Q8 weights with an F16 cache at matching contexts, averaged over two passages starting at 512 tokens; the dashed line is the accuracy budget. Bottom: means over all six context lengths. Fixed initial mix keeps our first configuration throughout. Appendix F also includes Q8 weights with the quantized cache and the F16-cache reference. 
+
+At the first measured context (512 tokens), our configuration was predicted to fit but measures 0.127 
+
+KL. Q8 weights with the same Q4 cache format meet the budget there: the combined accuracy estimate fails before any later precision switch. At 4K and 8K, estimated cache error alone exceeds the budget, so we use Q8 for all weights; lower estimates later allow mixed precision again. At 8K, raising precision gives 35 .5% lower KL than the fixed initial mix, and the mean across both passages falls just below budget. Only 3/12 measurements across the two passages meet the target, versus 1/12 for the fixed mix and 9/12 for Q8 throughout. Higher weight precision can improve future predictions but leaves stored keys and values unchanged. Recovery is partial, and these results do not validate additive weight-plus-cache error as a reliable absolute budget constraint. 
+
+## 6 Tool-use evaluation 
+
+We next evaluate whether tensor scheduling helps an agent respond to tool-use requests. We use Qwen2.5-3B-Instruct [Qwen Team, 2024] on six previously unused BFCL multi-turn tasks [Patil et al., 2025], giving 19 turns per policy. Each policy receives the same preceding messages and tool outputs, generates its own actions, and is scored by the official simulator. This compares current-turn correctness from the same conversation context. Response time includes prompt processing, generation, precision changes, parsing, and tool execution. Cost and byte schedules choose Q8 or Q4 for tensor groups, reusing the KV cache for text shared by successive model calls. We test 95, 85, and 75 ms decode budgets with shared calibration and fixed Q8/Q4 configurations. Figure 5 shows the 85 ms comparison, and Appendix C summarizes all turns and budgets. 64.5 5.0 5.5 6.0 6.5 7.0 7.5 8.0 Median response time (s) 30% 35% 40% Incorrect tool-use turns 
+
+> 10.4% faster
+
+85 ms decode budget    
+
+> Our schedule Byte-aware Fixed Q8 Fixed Q4
+
+Figure 5: Tool-use error versus median complete-turn response time at the 85 ms decode budget. Lower and farther left is better. The arrow shows our response-time improvement over Q8 at matching correctness. All policies use the same model and runtime. 
+
+Our schedule answers the same 13 turns correctly as Q8, with median response time 6.74 s versus 
+
+7.52 s: 10 .4% lower. Byte-aware is close at 6.86 s with the same correctness. Fixed Q4 is faster at 4.74 s with 12/19 correct turns. Our schedule keeps 99 .2% of generated tokens within 85 ms, compared with 59 .8% for Q8; byte-aware reaches 99 .4% .Appendix C includes the response-time table and comparisons at all three budgets. The 75 ms target is missed, while 95 ms gives no median-time benefit over Q8. 
+
+## 7 Related work and discussion 
+
+Mixed-precision allocation. Sensitivity and hardware costs guide precision choices in HAWQ/HAQ [Dong et al., 2019, Wang et al., 2019], dMX/MxMoE [Franco et al., 2026, Duanmu et al., 2025], and LLM-PQ [Zhao et al., 2024]. Kong et al. [2026] use forward-only KL sensitivity in hybrid state-space/Transformer models. 
+
+Precision scheduling. PMPD [Chen et al., 2025] reduces average bit-width under a quality constraint with static and prompt-adaptive decoding schedules. MorphServe [Su et al., 2026] swaps quantized layers as serving load changes, preserving attention state. QAQ [Li et al., 2025] learns to choose precision for each query and loads the required weights on demand. We precompute which tensors to change and when under a context-dependent time budget. 
+
+KV compression. KIVI [Liu et al., 2024] and KVQuant [Hooper et al., 2025] compress the cache itself. We use measured cache error to set the weight-error budget. Raising weight precision can improve predictions but leaves stored cache entries unchanged (Section 5). 
+
+Scope and future work. We test one laptop GPU, and using a different device or software stack requires new timing calibration. Agent turns start from the same conversation context; full sessions would also reveal how earlier actions affect later requests. Loading tensors before each switch and releasing unused copies could reduce memory use, provided transfers fit the latency budget. 
+
+## 8 Conclusion 
+
+Our calibrated predictor estimates the latency of mixed-precision configurations and captures execu-tion costs that weight bytes alone can miss. It provides a way to compare precision choices before running each configuration. Combining context-dependent timing with tensor sensitivities gives a precision schedule that can be prepared in advance and executed while retaining the KV cache. Our experiments show improved latency–fidelity tradeoffs and faster tool-use responses at matching correctness, alongside the limits of recovering cache error through weight precision. We hope serving systems can use the predictor and scheduling approach to choose precision as a session grows. 7A Running the context-dependent schedule 
+
+The 4K comparison uses Llama-3.2-1B-Instruct [Meta, 2024] on the Radeon 780M, with external power and batch 1 decode. All policies share the same prepared weights and retain their own KV caches. 
+
+Calibration. Uniform F16/Q8 runs and runs that quantize one weight group at a time fit the timing model (Table 1). We leave time for prediction error and switching. At the last two scheduled changes, no configuration is predicted to meet the target with this margin, so we use the fastest predicted configuration. Calibration and schedules stay fixed during evaluation. Table 1: 4K timing calibration, using contexts 256, 2048, and 4096. Group changes are relative to F16. 
+
+Quantity Term Value Reference intercept (ms) a 46.94 Context growth (ms per 1024 tokens) c 1.738 Attention change at Q8 (ms) ∆Tattention (Q8) −1.26 
+
+Feed-forward change at Q8 (ms) ∆TFFN (Q8) −6.29 
+
+Output change at Q8 (ms) ∆Toutput (Q8) +0 .66 
+
+Total reserve, including switching (ms) 4.06 Switching allowance (ms) 2.50 
+
+Comparison. Figure 6 adds all fixed configurations to the main comparison. Measurements use one WikiText passage excluded from calibration [Merity et al., 2017] and two timing runs at 17 context lengths. At each context, we average full-vocabulary KL over eight consecutive token positions and compute perplexity from those same positions. We process the complete passage to build the KV cache. Steps exceeding the target and switching costs are included. We selected the fixed F16/Q8 mix by testing each scheduled configuration without switching. 40 50 Mean latency (ms)      
+
+> Our schedule Byte-aware Fixed F16/Q8
+> 01024 2048 3072 4096
+> Context length (tokens)
+> 01Joint KL (×10⁻³) 40 50
+> Our schedule Fixed final Q8
+> 01024 2048 3072 4096
+> Context length (tokens)
+> 0140 50
+> Our schedule Fixed Q6 F16
+> 01024 2048 3072 4096
+> Context length (tokens)
+> 0140 42 44 46 48 50 Mean decode latency (ms) 0.0 0.5 Mean KL (×10⁻³)
+> Our schedule Byte-aware Fixed F16/Q8 Fixed final Q8 Fixed Q6 F16
+
+Average over the same trajectory      
+
+> 40 42 44 46 48 50 Mean decode latency (ms) 9.62 9.64 9.66 9.68 Perplexity
+> Our schedule Byte-aware Fixed F16/Q8 Fixed final Q8 Fixed Q6 F16
+
+Average over the same trajectory 
+
+Figure 6: All seven policies at the same 17 contexts. The dashed line marks 50 ms. Bottom: mean latency versus mean joint KL or perplexity over the same passage; lower and farther left is better. Joint KL compares with F16; perplexity is the exponential of mean negative log-likelihood over all evaluated tokens. 
+
+8Storage and switching. Alongside F16 weights, we store Q8 copies of all weight units and a Q6 copy for one comparison. These add 1.61 GB and take 28.9 s to prepare. A separate test repeats the larger tensor changes (Table 2). The switch leaves the cache unchanged; fixed configurations reproduce the same predictions when given the same saved KV-cache state. Table 2: Additional switching check across three program runs. Times are ms. Median switch summarizes repetitions after the first in each run. The last two columns give maximum first-token latencies, including switching, for the first and later repetitions.          
+
+> Tensors changed Median switch First token: initial First token: later 27 1.68 36.58 22.50 44 1.60 23.15 22.19
+
+## B Long-context schedule and calibration 
+
+The 16K comparison uses Llama-3.2-1B-Instruct [Meta, 2024] on the Radeon 780M, with external power, batch 1, F16 KV, and prompts processed in chunks of 512 tokens. 
+
+Calibration. We run Q8 immediately before and after each test configuration, starting from the same saved KV-cache state. This reduces the effect of performance changes during calibration. Table 3 gives the fit. Byte-aware uses the same measurements and sensitivities, but fits time changes to stored bytes. Table 3: 16K calibration. Weight-group time changes ∆Tg (p) are relative to Q8, in ms. The reference curve is T0(L) = a + cL/ 1024 .                 
+
+> Group Q6 Q4 Attention −1.485 −3.350
+> Feed-forward −4.462 −12 .470
+> Embedding/output −3.306 −2.462
+> Reference intercept a(ms) 41.474 Context growth c(ms per 1024 tokens) 3.045 Prediction-error allowance (ms) 4.384 Switching allowance (ms) 2.50 Group-fit root mean squared error (ms) 1.87
+
+The calibration covers five contexts through 16K, with eight configurations at each context. Each run uses eight warmup and 32 measured steps. Both allocators check latency at the longest context served by each configuration and include switching time only when tensor precisions change. The 77 ms target is selected from calibration to use all three formats; evaluation passages do not affect this choice. 
+
+Comparison. We evaluate two WikiText passages excluded from calibration [Merity et al., 2017] at 16 context lengths, with 24 timed steps and eight token positions per context for quality. Figure 7 shows when each policy exceeds the target; Table 4 gives mean and 99th-percentile latency. All steps remain in the comparison. A policy with lower mean latency can still miss the target more often at long contexts. Table 4: 16K results for all policies. Latencies are ms; P99 is the 99th-percentile decode latency. The final column gives the percentage of steps within 77 ms.                                    
+
+> Policy Mean P99 Joint KL Perplexity Within target (%) Cost schedule 58.12 72.86 0.00574 10.398 99.7 Byte-aware 53.81 76.35 0.00662 10.447 99.0 Fixed final mix 45.32 70.66 0.03785 10.946 100.0 Fixed Q8 62.16 85.18 0.00000 10.365 83.1 Fixed Q6 55.58 82.56 0.00753 10.436 90.9 Fixed Q4 39.49 64.50 0.09345 11.814 100.0
+
+9Allocation reuses the F16-referenced sensitivity table; timing and measured joint KL use Q8. Sub-tracting each tensor’s Q8 table entry would shift every configuration’s objective by the same constant, leaving the allocation unchanged. 0 4 8 12 16 Context (K tokens) 0% 20% 40% 60% 80% Decode steps above budget    
+
+> 0.0% 5.0% 10.0% 15.0% Decode steps above budget 0.00 0.02 0.04 0.06 0.08 Mean joint KL to Q8
+> Cost schedule Byte schedule Fixed Q6 Fixed Q8 Fixed Q4 Final mix throughout
+
+Figure 7: Left: the percentage of decode steps exceeding 77 ms at each context. Right: mean joint KL versus the overall percentage exceeding that target. Lower and left is better. 
+
+Storing the additional weight formats adds 2.072 GB and takes 123 s to prepare. Switching takes a median 1.55 ms and maximum 2.19 ms, including memory allocation for the next computation graph. 
+
+## C Tensor scheduling on tool-use turns 
+
+Table 5: Tool-use results at the 85 ms decode target. Response time is the median for a complete turn. 
+
+Policy Correct turns Median response (s) Tokens within 85 ms (%) Cost schedule 13/19 6.74 99.2 Byte-aware 13/19 6.86 99.4 Fixed Q8 13/19 7.52 59.8 Fixed Q4 12/19 4.74 100.0 
+
+The Qwen2.5-3B-Instruct [Qwen Team, 2024] evaluation uses six BFCL multi-turn tasks [Patil et al., 2025] excluded from calibration. Each policy receives the same preceding messages and tool outputs, generates its own actions, and is scored by the simulator. We evaluate each turn from the same conversation context. Repeating the tasks under different budgets does not add independent tasks. 
+
+Calibration and execution. We allocate six-layer groups plus embedding and output groups. Each group’s accuracy cost is measured at 16 WikiText positions [Merity et al., 2017], with all other groups at Q8. Timing measurements change one group at a time and include uniform Q8/Q4 runs. Table 6 gives the fitted changes. Both allocators share the fit and margin, with schedules chosen every 256 tokens. Q4 variants come from the Q8 model; the cache remains F16 at batch 1. Greedy generation permits six model calls per turn and 192 tokens per call. The runtime reuses the KV cache for text shared by successive calls. Response time includes prefill, generation, switching, parsing, and tool execution; loading and scoring are outside the timer. The alternate weights add 1.911 GB. 
+
+Comparison across budgets. Figure 8 shows the quality–response-time tradeoff at each budget; Table 7 adds 95th-percentile response times and the percentage of tokens within target. At the largest budget, schedules mostly retain Q8. The intermediate budget gives the main paper’s improvement. The smallest-budget run is slower even for unchanged fixed configurations, so its absolute times also reflect changed runtime conditions. Wrong answers and slow turns are retained. 10 Table 6: Tool-use timing calibration. Group changes ∆Tg (Q4) are relative to Q8. The reference curve is T0(L) = a + cL/ 1024 . Configurations are measured at contexts 512/4096, with uniform Q8/Q4 also measured at 8192; each run has three warmup and 24 measured steps. 
+
+Quantity Value Reference intercept a (ms) 78.036 Context growth c (ms per 1024 tokens) 2.751 Layers 1–6: time change (ms) −4.613 
+
+Layers 7–12: time change (ms) −5.606 
+
+Layers 13–18: time change (ms) −4.974 
+
+Layers 19–24: time change (ms) −5.050 
+
+Layers 25–30: time change (ms) −3.586 
+
+Layers 31–36: time change (ms) −7.098 
+
+Embedding: time change (ms) −4.518 
+
+Output: time change (ms) +0 .614 
+
+Scheduling margin (ms) 5.977 
+
+Table 7: Slow response times and the percentage of tokens within each decode target. P95 is the 95th-percentile complete-turn response time. Figure 8 gives median response time and correctness for the same turns. 
+
+Decode target (ms) Policy P95 response (s) Tokens within target (%) 95 Cost schedule 44.40 99.96 95 Byte-aware 26.20 99.37 95 Fixed Q8 28.17 99.84 95 Fixed Q4 24.16 100.00 85 Cost schedule 26.21 99.20 85 Byte-aware 26.08 99.44 85 Fixed Q8 28.80 59.84 85 Fixed Q4 23.98 100.00 75 Cost schedule 45.94 0.00 75 Byte-aware 43.09 0.00 75 Fixed Q8 48.53 0.00 75 Fixed Q4 44.11 74.83 4 6 8 10 12 Median response time (s) 30% 35% 40% Incorrect tool-use turns            
+
+> 95 ms decode budget
+> 46810 12 Median response time (s)
+> 85 ms decode budget
+> 46810 12 Median response time (s)
+> 75 ms decode budget
+> Our schedule Byte-aware Fixed Q8 Fixed Q4
+
+Figure 8: Tool-use error versus median response time under each decode budget. Every point includes the same 19 turns, including errors and slow responses. Lower and left is better. 
+
+11 D Allocator inputs and the accuracy–latency tradeoff 
+
+For an accuracy budget ϵ, allocation minimizes the predicted time change: 
+
+min 
+
+> {pu}
+
+X
+
+> u
+
+∆T (u, p u) s.t. X
+
+> u
+
+∆A(u, p u) ≤ ϵ, pu ∈ P u, (7) Here ϵ is the allowed increase in additive accuracy cost. Reference latency is common to all configurations, so minimizing their time changes also minimizes predicted latency. Figure 9 shows how accuracy measurements, timing calibration, and the budget produce a configura-tion. Figure 10 illustrates the accuracy–time tradeoff. The dynamic program rounds time or accuracy costs up to the next budget level, then checks the chosen configuration against the original, unrounded budget. 
+
+Dynamic program        
+
+> accuracy table ∆A
+> reference latency a, c
+> group changes ∆Tg(p)
+> tensor weight counts W(u)
+> Offline measurements and inputs
+> Q8_0 Q6_K Q4_K F16
+> Supported precision menu
+> target latency or accuracy
+> User budget
+> F16 Q6_K Q4_K Q8_0 ...Q8_0
+> Tensor configuration
+> switch weights retain KV cache
+> Runtime
+> context length L
+> and measured cache error config run
+
+Figure 9: Allocator inputs and output. Measured accuracy and timing changes, supported formats, and context length determine a configuration for the chosen budget. For an accuracy budget, measured cache error sets the remaining weight-error allowance. We solve these choices offline to form the schedule. Available formats depend on the experiment. 
+
+accuracy impact ∆A(u)
+
+time change ∆T (u)
+
+> equal-cost line:  ∆A+λ∆T =c slope  −1/λ
+
+unit u: (∆ A, ∆T )
+
+beneficial region 
+
+lower cost higher cost 
+
+Figure 10: Accuracy–time tradeoff. The dashed line represents equal weighted cost ∆A + λ∆T ,where λ > 0 sets the relative weight on time. The arrows show changes that lower or raise this cost. 
+
+## E How well additive KL tracks joint quality 
+
+The additive estimate ranks 27 Llama-3.2-1B-Instruct [Meta, 2024] configurations well, with Spear-man correlation 0.86 against measured joint KL on WikiText [Merity et al., 2017] (Fig. 11). It 12 overestimates the absolute error, so its usefulness for ranking does not establish an absolute accuracy guarantee. 0.00 0.05 0.10 0.15 0.20 0.25 Sum of per-tensor KL 0.00 0.02 0.04 0.06 0.08 Measured joint KL 27 configurations; Spearman 0.86 
+
+> Additive = joint Median ratio: 0.027
+
+Figure 11: Additive per-tensor accuracy cost versus measured joint KL for 27 fixed configurations, each counted once. Gray shows equality; orange shows the median joint-to-additive ratio. The two measures rank configurations similarly but differ in absolute scale. 
+
+## F Accuracy-budget schedule with a quantized cache 
+
+Llama-3.2-1B-Instruct [Meta, 2024] runs on the Radeon 780M with llama.cpp’s flash-attention option enabled [Gerganov and llama.cpp contributors, 2023]. Scheduled policies keep Q4_0 keys and values throughout, while weights can use Q8, Q6, or Q4. The quality reference uses Q8 weights and an F16 cache. Weight switches retain the existing cache. 
+
+Calibrating the accuracy budget. We measure tensor sensitivities at 16 token positions, with the remaining weights at Q8; Q6/Q4 variants are prepared from F16. Separately, we compare Q8-weight runs with quantized and F16 caches on two WikiText passages [Merity et al., 2017], scoring 16 positions at each context. Table 8 shows how this cache-error estimate changes the budget left for weights. If the cache alone exceeds the budget, both allocators fall back to Q8 weights. Table 8: Cache-error calibration and the resulting schedule. Negative remaining budget means that even Q8 weights cannot meet the additive constraint. Weight shares count parameters.                                    
+
+> Context Cache KL Weight KL budget Q8 (%) Q6 (%) Q4 (%) 512 0.0325 0.0175 1.4 35.6 63.0 2048 0.0308 0.0192 1.0 29.1 69.9 4096 0.0755 -0.0255 100.0 0.0 0.0 8192 0.1355 -0.0855 100.0 0.0 0.0 12288 0.0366 0.0134 3.0 49.4 47.6 16384 0.0361 0.0139 3.0 46.5 50.5
+
+The cache curve need not increase smoothly: it measures next-token divergence on particular text. At 8K, one token contributes 75% of the calibration KL, explaining much of the peak. All sampled positions are retained. Both allocators use 20,000 accuracy-budget levels with upward rounding. 
+
+Calibrating time. Configurations that change one weight group are timed between Q8 runs at 8K with the same quantized cache. The fitted changes in Table 9 are distributed by tensor weight count and reused across contexts. Cost allocation minimizes their sum; byte-aware minimizes stored bytes under the same remaining accuracy budget. 
+
+Comparison. Figure 12 adds Q8 weights with a quantized cache and the F16-cache reference. These comparisons show what raising weight precision can recover while the cache stays quantized. Table 10 summarizes two WikiText passages excluded from calibration and six contexts, with 32 timed steps and 16 token positions per context for quality. Every timed step and switch is retained. 13 Table 9: Time changes ∆Tg (p) with the Q4 cache, relative to Q8 weights. Negative values predict faster execution. All entries are ms. 
+
+Group Q6 Q4 Attention weights −0.147 −4.296 
+
+Feed-forward weights −6.986 −11 .610 
+
+Embedding/output +0 .265 −3.151 
+
+The F16-cache run supplies the quality reference; timed policies share the same stored weight copies. The prediction gap can reflect interactions between weight and cache errors, as well as uncertainty from the small calibration sample. This experiment does not isolate their effects. Table 10: Accuracy-budget results. The last column counts measurements with mean joint KL at most 0.05 across six context lengths in each of two passages. Mean latency is in ms. 
+
+Policy Mean ms Joint KL Perplexity Within budget Cost schedule 35.10 0.0923 12.958 3/12 Byte-aware 33.59 0.0947 13.297 2/12 Fixed initial mix 28.74 0.1065 12.896 1/12 Q8, Q4 cache 44.45 0.0404 12.025 9/12 Q8, F16 cache – 0.0000 11.199 12/12 25 30 35 40 45 50 55 Mean decode latency (ms)  Our schedule Byte-aware Fixed initial mix         
+
+> Our schedule Q8 weights
+> 04812 16 Context (K tokens) 0.000 0.025 0.050 0.075 0.100 0.125 0.150 Joint KL
+> 04812 16 Context (K tokens)
+
+Figure 12: Accuracy-budget comparisons at matching contexts. Left: our schedule and its fixed initial configuration. Right: our schedule and Q8 weights with the same Q4 cache. The dashed line marks the KL budget; the F16-cache reference has zero KL by definition. 
+
+## G Predictor calibration and evaluation 
+
+When fewer bits are slower. The native-format comparison in Figure 1 uses Q4_K or Q8_0 for all 113 quantizable weight units of Llama-3.2-1B-Instruct [Meta, 2024]. Each format processes the same three 2048-token WikiText passages [Merity et al., 2017], with six timed prefills per passage after warmup. Mean prefill time is 1.94 s for Q8 and 2.13 s for Q4. Q8 is faster for each passage, despite its larger weight storage. 14 Distributing group costs. To estimate each tensor’s share of a measured group cost, the predictor uses the roofline work estimate [Williams et al., 2009] 
+
+C(u, p ) = max 
+
+ 2W (u)Mu
+
+reff (u, p ) , W (u)b(p)BW 
+
+
+
+. (8) Here W (u) counts weights, Mu counts token rows, b(p) is bytes per weight including metadata, reff 
+
+is effective throughput, and BW is effective bandwidth. We sum work over 512-token prefill chunks and count the rows actually executed: one row for the final feed-forward and output projections, and the chunk length elsewhere. Decode uses one row throughout. The rate is reff (u, p ) = (1 −ηu)r(F16)+ ηur(p) with ηu = Mu/(Mu +M1/2). A separate calibration with fixed-precision models gives BW = 67 .634 GB/s, r(F16) = 1 .2414 TFLOP/s, r(Q8) = 2.8797 TFLOP/s, and M1/2 = 0 .0675 rows. These effective values determine the proportions within a group. Measured group changes determine its total timing effect, including dequantization and overhead: 
+
+∆T (u, F16) = du
+
+P 
+
+> v∈g
+
+dv
+
+∆Tg (F16) , du = C(u, F16) − C(u, Q8) . (9) For single-token decode, this distributes each group’s change by weight count, as in Eq. 2. 
+
+Calibration and evaluation. Four controls—Q8 throughout, only attention at F16, only feed-forward weights at F16, and F16 throughout—give reference time and the three group changes (Table 11). We calibrate separately for prefill and decode at 512 and 2048 tokens in each program run, then freeze all predictors before evaluation. The byte estimate fits an intercept and a weight-byte coefficient to the same controls by minimizing squared relative error. A constant estimate uses those controls but ignores precision. All configurations share the same 2.997 GB alternate-weight bank. Six new configurations and two WikiText passages are excluded from calibration. Configurations 1 and 2 put F16 on key/value and query/output projections, respectively. Configurations 3, 5, and 6 randomly select units for F16, targeting a quarter, a half, and three-quarters of the units. Configuration 4 puts F16 on attention in the first half of layers and feed-forward in the second half. All remaining units use Q8. Each case has two warmups and three timed requests, with decode averaged over eight steps. Curves show mean latency across the two runs on different passages. Bars show the mean of their absolute percentage errors. These tests evaluate new configurations at the workloads used for calibration. Table 11: Predictor calibration in ms. Columns give reference time T0 and group changes ∆Tg (F16) 
+
+relative to Q8. Each program run is calibrated before its evaluation.                                                       
+
+> Process Phase Context T0Attention FFN Output 1prefill 512 476.455 47.044 556.637 -2.066 1prefill 2048 2211.277 110.744 2176.390 65.986 1decode 512 31.444 4.679 6.572 -2.569 1decode 2048 33.461 1.620 6.536 1.109 2prefill 512 447.866 39.177 593.509 -15.915 2prefill 2048 2124.196 92.931 2237.679 120.492 2decode 512 32.710 1.129 6.837 0.666 2decode 2048 37.648 -0.770 3.082 3.873
+
+Table 12: Mean absolute percentage error (%) across all evaluation configurations and both prompt lengths. All predictors use the same four calibration controls.          
+
+> Phase Calibrated costs Byte estimate Constant estimate Prefill 3.51 5.92 17.62 Decode 2.71 2.24 5.16
+
+15 0.4 0.6 0.8                      
+
+> Prefill time (s)
+> 512 input tokens
+> 123456
+> Configuration
+> 010
+> Error (%)  234
+> Prefill time (s)
+> 2048 input tokens
+> 123456
+> Configuration
+> 010
+> Error (%)
+> 30 35 40
+> Decode time (ms)  512 input tokens
+> 123456
+> Configuration
+> 010
+> Error (%)
+> 35 40
+> Decode time (ms)  2048 input tokens
+> 123456
+> Configuration
+> 010
+> Error (%) Measured Predicted
+
+Figure 13: Prediction at both calibrated prompt lengths, with configurations numbered as in Figure 1. Solid lines are measured, dashed lines predicted, and gray bands mark ±10% of measurement. Gray bars give mean absolute percentage error. 
+
+## References 
+
+Peter Belcak, Greg Heinrich, Shizhe Diao, Yonggan Fu, Xin Dong, Saurav Muralidharan, Yingyan Ce-line Lin, and Pavlo Molchanov. Small language models are the future of agentic AI, 2025. Hao Mark Chen, Fuwen Tan, Alexandros Kouris, Royson Lee, Hongxiang Fan, and Stylianos I. Venieris. Progressive mixed-precision decoding for efficient LLM inference. In International Conference on Learning Representations (ICLR) , 2025. arXiv:2410.13461. Zhen Dong, Zhewei Yao, Amir Gholami, Michael W. Mahoney, and Kurt Keutzer. HAWQ: Hessian aware quantization of neural networks with mixed-precision. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV) , 2019. arXiv:1905.03696. Haojie Duanmu, Xiuhong Li, Zhihang Yuan, Size Zheng, Jiangfei Duan, Xingcheng Zhang, and Dahua Lin. MxMoE: Mixed-precision quantization for MoE with accuracy and performance co-design. In Proceedings of the 42nd International Conference on Machine Learning (ICML) ,2025. arXiv:2505.05799. Abhinav Dutta, Sanjeev Krishnan, Nipun Kwatra, and Ramachandran Ramjee. Accuracy is not all you need, 2024. URL https://arxiv.org/abs/2407.09141 .Giuseppe Franco, Ian Colbert, Pablo Monteagudo-Lago, Felix Marty, and Nicholas Fraser. dMX: Differentiable mixed-precision assignment for low-precision floating-point formats, 2026. Georgi Gerganov and llama.cpp contributors. llama.cpp: LLM inference in C/C++. https:// github.com/ggml-org/llama.cpp , 2023. 16 Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. KVQuant: Towards 10 million context length LLM inference with KV cache quantization, 2025. URL https://arxiv.org/abs/2401.18079 .Jason Kong, Nilesh Prasad Pandey, Flavio Ponzina, and Tajana Rosing. A KL lens on quantization: Fast, forward-only sensitivity for mixed-precision SSM-Transformer models, 2026. URL https: //arxiv.org/abs/2604.13440 .Shuxing Li, Huanrong Liu, Zelin Wang, Ruoyang Du, S H Lee, Chunlin Tian, and Qingbiao Li. QAQ: Query-adaptive mixed-precision quantization for large language models. In ML for Systems Workshop at NeurIPS , 2025. URL https://mlforsystems.org/assets/papers/ neurips2025/paper68.pdf .Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. In Proceedings of the 41st International Conference on Machine Learning (ICML) , 2024. arXiv:2402.02750. Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher. Pointer sentinel mixture models. In International Conference on Learning Representations (ICLR) , 2017. Meta. Llama 3.2: Model card. https://huggingface.co/meta-llama/Llama-3. 2-1B-Instruct , 2024. Shishir G Patil, Huanzhi Mao, Fanjia Yan, Charlie Cheng-Jie Ji, Vishnu Suresh, Ion Stoica, and Joseph E. Gonzalez. The berkeley function calling leaderboard (BFCL): From tool use to agentic evaluation of large language models. In Aarti Singh, Maryam Fazel, Daniel Hsu, Simon Lacoste-Julien, Felix Berkenkamp, Tegan Maharaj, Kiri Wagstaff, and Jerry Zhu, editors, Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 48371–48392. PMLR, 13–19 Jul 2025. URL https://proceedings. mlr.press/v267/patil25a.html .Qwen Team. Qwen2.5-3B-Instruct: Model card. https://huggingface.co/Qwen/Qwen2. 5-3B-Instruct , 2024. Zhaoyuan Su, Zeyu Zhang, Tingfeng Lan, Zirui Wang, Haiying Shen, Juncheng Yang, and Yue Cheng. MorphServe: Efficient and workload-aware LLM serving via runtime quantized layer swapping and KV cache resizing, 2026. URL https://arxiv.org/abs/2506.02006 .Kuan Wang, Zhijian Liu, Yujun Lin, Ji Lin, and Song Han. HAQ: Hardware-aware automated quantization with mixed precision. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) , 2019. arXiv:1811.08886. Samuel Williams, Andrew Waterman, and David Patterson. Roofline: an insightful visual performance model for multicore architectures. Commun. ACM , 52(4):65–76, April 2009. ISSN 0001-0782. doi: 10.1145/1498765.1498785. URL https://doi.org/10.1145/1498765.1498785 .Juntao Zhao, Borui Wan, Yanghua Peng, Haibin Lin, and Chuan Wu. LLM-PQ: Serving LLM on heterogeneous clusters with phase-aware partition and adaptive quantization. In Proceedings of the 29th ACM SIGPLAN Annual Symposium on Principles and Practice of Parallel Programming (PPoPP), Poster , 2024. arXiv:2403.01136. 
+
+## NeurIPS Paper Checklist 
+
+1. Claims 
+
+Question: Do the main claims made in the abstract and introduction accurately reflect the paper’s contributions and scope? Answer: [Yes] Justification: The paper reports measured context schedules, comparisons with byte-aware and fixed configurations, accuracy-budget tests, and tool-use turns with the same conver-sation context. The paper also measures a lower-bit format running slower and evaluates latency prediction on configurations excluded from calibration. 17 2. Limitations 
+
+Question: Does the paper discuss the limitations of the work performed by the authors? Answer: [Yes] Justification: The paper explains extra weight storage, calibration for the device and software, and limits of the additive accuracy estimate. The agent section states the evaluation size and distinguishes decode time from full response time. 3. Theory assumptions and proofs 
+
+Question: For each theoretical result, does the paper provide the full set of assumptions and a complete (and correct) proof? Answer: [N/A] Justification: The paper reports no formal theorems requiring proof; the allocator is a standard multiple-choice knapsack solved by an exact dynamic program, whose exactness for the discretized additive model is stated in Section 3.2. 4. Experimental result reproducibility 
+
+Question: Does the paper fully disclose all the information needed to reproduce the main ex-perimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)? Answer: [No] Justification: The appendix gives calibration values and evaluation protocols. The shared core-code supplement provides prediction, allocation, and calibration routines, but omits GPU experiment runners and the scheduling runtime. 5. Open access to data and code 
+
+Question: Does the paper provide open access to the data and code, with sufficient instruc-tions to faithfully reproduce the main experimental results, as described in supplemental material? Answer: [No] Justification: The shared code supplement documents the core implementation and CPU examples. It does not reproduce every GPU or agent experiment. 6. Experimental setting/details 
+
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperpa-rameters, how they were chosen, type of optimizer) necessary to understand the results? Answer: [Yes] Justification: The calibration configurations, coefficients, separate evaluation passages, formats, context lengths, and timing and accuracy targets are described in the main text and appendices. 7. Experiment statistical significance 
+
+Question: Does the paper report error bars suitably and correctly defined or other appropriate information about the statistical significance of the experiments? Answer: [No] Justification: Context figures report mean latency and quality at matching context lengths; the agent evaluation reports median and 95th-percentile response times and correctness counts. All measured steps are retained. These summaries and small test sets do not establish statistical significance. 8. Experiments compute resources 
+
+Question: For each experiment, does the paper provide sufficient information on the com-puter resources (type of compute workers, memory, time of execution) needed to reproduce the experiments? Answer: [No] 18 Justification: The paper identifies the Radeon 780M platform and reports storage for alternate weights, preparation and switching costs, but does not give complete resource accounting for every experiment and development run. 9. Code of ethics 
+
+Question: Does the research conducted in the paper conform, in every respect, with the NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines ?Answer: [Yes] Justification: The research conforms with the NeurIPS Code of Ethics; it uses only publicly available models and text corpora and involves no human subjects or sensitive data. 10. Broader impacts 
+
+Question: Does the paper discuss both potential positive societal impacts and negative societal impacts of the work performed? Answer: [Yes] Justification: Positive: the method improves the efficiency of language-model serving, supporting lower-cost, lower-energy, and private on-device inference. Negative: we identify no direct negative societal impacts specific to this precision-allocation method. 11. Safeguards 
+
+Question: Does the paper describe safeguards that have been put in place for responsible release of data or models that have a high risk for misuse (e.g., pre-trained language models, image generators, or scraped datasets)? Answer: [N/A] Justification: The paper releases no models or datasets with high misuse potential; it studies the serving efficiency of existing, publicly released models. 12. Licenses for existing assets 
+
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in the paper, properly credited and are the license and terms of use explicitly mentioned and properly respected? Answer: [Yes] Justification: The model releases, llama.cpp, WikiText, and BFCL are cited. The supplement records source provenance and does not redistribute model weights or text corpora. 13. New assets 
+
+Question: Are new assets introduced in the paper well documented and is the documentation provided alongside the assets? Answer: [Yes] Justification: The code supplement documents setup, inputs, a CPU example, sources, checks, and omitted runtime components. 14. Crowdsourcing and research with human subjects 
+
+Question: For crowdsourcing experiments and research with human subjects, does the paper include the full text of instructions given to participants and screenshots, if applicable, as well as details about compensation (if any)? Answer: [N/A] Justification: The paper involves no crowdsourcing or research with human subjects. 15. Institutional review board (IRB) approvals or equivalent for research with human subjects 
+
+Question: Does the paper describe potential risks incurred by study participants, whether such risks were disclosed to the subjects, and whether Institutional Review Board (IRB) approvals (or an equivalent approval/review based on the requirements of your country or institution) were obtained? Answer: [N/A] 19 Justification: The paper involves no research with human subjects. 16. Declaration of LLM usage 
+
+Question: Does the paper describe the usage of LLMs if it is an important, original, or non-standard component of the core methods in this research? Note that if the LLM is used only for writing, editing, or formatting purposes and does not impact the core methodology, scientific rigor, or originality of the research, declaration is not required. Answer: [N/A] Justification: LLMs are the models evaluated in this work, rather than a separate component of the method. 20
