@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-19</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-20</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-19 19:53:56 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-20 19:52:53 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦 16 篇 AI 系统与训练论文，精选 5 篇深读、11 篇速览。</p>
-<p>最值得关注的是万卡级 MoE 训练中的动态内存波动治理，以及 AI-RAN 的弹性 GPU 资源运行时管理。</p>
-<p>建议优先精读 BaGuaLu-2 与 ScaleRAN，再按需补看 KV-Cache 修复和 Grace-Blackwell 统一内存测评。</p>
+<p>今日筛选17篇前沿论文，精读聚焦异构地理分布式训练与联邦学习，速读覆盖消费级GPU微调、LLM推理和流式视频问答。</p>
+<p>最值得关注的是：GeoTrain将能耗纳入跨地域异构资源的基础模型并行训练优化；联邦学习则尝试用谱方法统一压缩通信与本地更新。</p>
+<p>建议普通读者优先读GeoTrain把握“算力调度+能耗”趋势，再按需求跟进低成本LoRA微调与自适应推理实践。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="BaGuaLu-2: Taming Dynamic Memory Fluctuation for Efficient MoE Model Training over 10,000 GPUs">BaGuaLu-2: Taming Dynamic Memory Fluctuation for Efficient MoE Model Training over 10,000 GPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ScaleRAN: A Runtime for Elastic GPU Resource Management in AI-RAN">ScaleRAN: A Runtime for Elastic GPU Resource Management in AI-RAN</span></li><li><span class="dpr-home-dashboard-paper-title" title="Accelerated Dataflow: scaling inference in streaming data analytics with efficiency">Accelerated Dataflow: scaling inference in streaming data analytics with efficiency</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="GeoTrain: Energy-Aware Automatic Parallelism for Foundation Model Training on Heterogeneous Geo-Distributed Resources">GeoTrain: Energy-Aware Automatic Parallelism for Foundation Model Training on Heterogeneous Geo-Distributed Resources</span></li><li><span class="dpr-home-dashboard-paper-title" title="Bridging Compressed Communication and Local Steps via Spectral Method in Federated Learning">Bridging Compressed Communication and Local Steps via Spectral Method in Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="MLOps-Bench: Benchmarking AI Agents on Production ML Engineering in Real Repositories">MLOps-Bench: Benchmarking AI Agents on Production ML Engineering in Real Repositories</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Budgeted KV-Cache Repair for Evolving Contexts">Budgeted KV-Cache Repair for Evolving Contexts</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Large-Dimensional Analysis of Least-Squares Federated Learning via Generalized Total Variation Minimization">A Large-Dimensional Analysis of Least-Squares Federated Learning via Generalized Total Variation Minimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Understanding NVIDIA Grace-Blackwell Unified Memory Through Placement-Controlled Microbenchmarks">Understanding NVIDIA Grace-Blackwell Unified Memory Through Placement-Controlled Microbenchmarks</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PACT: NVFP4 Data-Flow LoRA Fine-Tuning on Consumer GPUs">PACT: NVFP4 Data-Flow LoRA Fine-Tuning on Consumer GPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ATEST: Adaptive Resource-Aware Test-Time Scaling for LLM Inference">ATEST: Adaptive Resource-Aware Test-Time Scaling for LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="StreamAhead: Real-Time Streaming Video Question Answering via Adaptive Precomputation">StreamAhead: Real-Time Streaming Video Question Answering via Adaptive Precomputation</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

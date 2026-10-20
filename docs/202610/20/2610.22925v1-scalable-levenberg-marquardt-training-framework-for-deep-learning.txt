@@ -1,0 +1,1616 @@
+Scalable Levenberg-Marquardt Training Framework
+for Deep Learning
+Xianghao Wang
+School of Computing
+Australian National University
+Canberra, Australia
+xianghao.wang@anu.edu.au
+Johan Barth´elemy
+NVIDIA
+CA, United States
+jbarthelemy@nvidia.com
+John Taylor
+School of Computing
+Australian National University
+Canberra, Australia
+john.taylor@anu.edu.au
+Abstract—The Levenberg-Marquardt (LMA) algorithm is a
+widely used nonlinear least-squares solver in scientific computing,
+known for its rapid convergence. Recent studies show that for
+small-scale neural networks, LMA provides better convergence
+and architectural robustness than first-order optimizers like
+Adam. However, as a second-order method, LMA imposes
+prohibitive memory and computational costs. These costs are
+primarily from the Jacobian matrix, whose dimensions scale with
+both the number of samples and parameters. This bottleneck
+limits LMA in its traditional applications and prevents its use in
+large-scale neural networks.
+Recent efforts scale LMA using preconditioned conjugate
+gradient (PCG) solvers to avoid materializing the Jacobian.
+However, PCG only approximates the solution, and an accurate
+approximation requires many network propagations and a task-
+specific preconditioner. Other studies optimize LMA to reduce
+costs, but they restrict their methods to specific tasks or network
+architectures. As a result, LMA remains impractical for training
+general large-scale neural networks.
+In this paper, we propose LeMA, a distributed LMA algorithm
+for large-scale neural network training on multi-GPU platforms.
+The contributions of LeMA are twofold. First, an exact dual
+formulation of LMA removes the memory dependence on the
+parameter dimension. Second, a Jacobian sharding strategy
+computes Jacobian shards on the fly and in parallel to avoid
+materializing the full Jacobian.
+For large-scale neural networks, LeMA reduces the memory
+footprint of LMA from quadratic in the number of parameters
+to quadratic in the batch size. This advancement makes exact
+LMA steps feasible for billion-parameter models without approx-
+imate PCG solves. Furthermore, for a convolutional neural net-
+work with 1,000,022,632 parameters on an 8-GPU node, LeMA
+achieves a 7.97× speedup over a single GPU, corresponding to
+a 99.7% strong scaling efficiency.
+Index Terms—Levenberg-Marquardt algorithm, distributed
+training, deep learning, multi-GPU
+I. INTRODUCTION
+The Levenberg-Marquardt (LMA) algorithm [1], [2] is a
+standard solver for nonlinear least-squares problems in sci-
+entific computing [3], [4]. Each LMA step solves a damped
+Gauss-Newton system. A damping factor λ moves the step
+between the Gauss-Newton method and gradient descent,
+allowing LMA to converge quickly near a minimum while
+remaining robust far from it. Since Hagan and Menhaj [5]
+applied LMA to neural networks, many studies have used
+it to train small models containing up to several thousand
+parameters [6]–[13].
+Despite its fast convergence, LMA is difficult to scale to
+large neural networks. The bottleneck lies in the linear system
+solved at each step, which involves an M × M coefficient
+matrix JT J+λ diag(JT J) and an N ×M Jacobian matrix J,
+where N is the batch size and M is the number of parameters.
+This formulation creates an O(MN +M 2) memory footprint.
+For a model with only one million parameters, the coefficient
+matrix alone contains a trillion elements. The computational
+cost is equally high. Evaluating J requires N backward
+propagations, computing the coefficient matrix takes O(M 2N)
+time, and solving the linear system takes O(M 3) time. These
+extreme memory and computation demands prevent the exten-
+sion of LMA to large-scale training.
+To address these memory bottlenecks, several studies and li-
+braries [14]–[18] use preconditioned conjugate gradient (PCG)
+solvers [19] to avoid materializing the large matrices. PCG
+computes an approximate solution to the linear system Ax =
+b using only matrix-vector products Av, without explicitly
+constructing A. For instance, both the optimization toolkit
+PETSc [17] and the Python library JAXopt [14] provide
+LMA implementations with a PCG option. However, applying
+PCG to LMA requires numerous network propagations to
+ensure a robust approximation. Additionally, PCG relies on a
+suitable preconditioner matrix, and selecting an effective one
+is highly task-specific [20].
+As an exact alternative to PCG, Bilski et al. [21] decompose
+LMA into independent tasks where each neuron computes its
+own Jacobian and weight updates. However, this approach
+assumes each neuron produces a single output. It is therefore
+incompatible with convolutional layers, which share parame-
+ters to generate multiple spatial outputs.
+Our goal is to design an exact LMA framework for general
+deep learning tasks, without relying on PCG approximations or
+specific network architectures. We focus strictly on the systems
+engineering challenges to make each exact LMA step feasible
+and fast at scale, as the numerical convergence properties of
+LMA fall beyond the scope of this work. Di Marco [12],
+[13] utilizes a dual form of the simpler Levenberg method,
+which applies λI as the damping term. This approach suc-
+cessfully reduces the memory footprint from O(MN + M 2)
+to O(MN + N 2), making it feasible to train large neural
+networks where M ≫N. Inspired by this, we derive and
+arXiv:2610.22925v1  [cs.LG]  16 Oct 2026
+
+
+implement an exact dual formulation specifically for LMA. To
+further reduce memory consumption, we design a partitioning
+strategy that avoids storing the full Jacobian J. This design
+allows us to parallelize LMA and accelerate training across
+multiple GPUs.
+We present LeMA, a multi-GPU Levenberg-Marquardt train-
+ing framework for neural networks. We summarize our main
+contributions as follows:
+• We derive an exact dual formulation for LMA, which
+shifts the linear system from the parameter dimension to
+the batch dimension (Section III-A).
+• We provide guidelines for designing robust residual func-
+tions tailored for LMA (Section III-B).
+• We design a partitioning and parallelization strategy to
+further reduce the memory footprint and accelerate com-
+putation (Sections IV-B and IV-C).
+In addition to these core contributions, we introduce several
+supplementary optimizations detailed in Sections III and IV.
+We evaluate LeMA on image classification tasks across
+various neural networks. LeMA scales LMA to models with
+up to 1,000,022,632 parameters and achieves a 99.7% strong
+scaling efficiency on 8 GPUs. For LeNet-5, which is small
+enough for the standard LMA form to fit in GPU memory,
+LeMA achieves an 8.3× speedup and a 33× reduction in
+memory footprint on a single GPU compared to a standard
+LMA implementation. When running on 8 GPUs, it delivers a
+37.8× speedup and a 41× memory reduction over a standard
+multi-GPU LMA baseline.
+The rest of this paper is organized as follows. Section II
+reviews LMA and Jacobian computation within deep learning
+frameworks. Section III derives the exact dual formulation and
+provides residual representations for common loss functions.
+Section IV details the distributed implementation of LeMA
+and analyzes its associated costs. Finally, Section V evaluates
+the performance of LeMA.
+II. BACKGROUND
+This section reviews the Levenberg-Marquardt algorithm
+(Section II-A) and the computation of Jacobian matrices within
+deep learning frameworks (Section II-B).
+A. The Levenberg-Marquardt Algorithm
+The Levenberg-Marquardt (LMA) algorithm solves nonlin-
+ear least-squares problems [1]–[4]. Consider a model f(·; θ)
+with parameters θ ∈RM and a batch of N samples with inputs
+X ∈RN×din and targets Y ∈RN×dout, where the i-th rows
+correspond to xi and yi. LMA minimizes the sum of squared
+residuals ∥r∥2
+2, where r ∈RN contains one scalar residual
+per sample. In classical curve fitting, the model output is a
+scalar, making the residual simply ri = f(xi; θ)−yi. However,
+neural networks typically produce vector outputs, such as a
+probability distribution over classes. Following Hagan and
+Menhaj [5], recent works [6], [7], [9]–[12] therefore define
+each residual as ri = r(f(xi; θ); yi), where the residual
+function r maps the dout-dimensional output of a sample and
+Algorithm 1 The Levenberg-Marquardt Algorithm
+Input: Model f(·; θ), initial parameters θ0, data (X, Y),
+initial damping factor λ0, adjustment factors λ↑> 1,
+0 < λ↓< 1, maximum iterations T
+Output: Trained parameters θ
+1: θ ←θ0, λ ←λ0
+2: for t = 1 to T do
+3:
+r ←r(f(X; θ); Y) {residuals}
+4:
+J ←∂r/∂θ {Jacobian}
+5:
+D ←diag(JT J)
+6:
+repeat
+7:
+Solve (JT J + λD)∆θ = −JT r for ∆θ
+8:
+θ′ ←θ + ∆θ
+9:
+r′ ←r(f(X; θ′); Y)
+10:
+if ∥r′∥2
+2 < ∥r∥2
+2 then
+11:
+θ ←θ′, λ ←λ · λ↓{accept step}
+12:
+else
+13:
+λ ←λ · λ↑{reject step}
+14:
+end if
+15:
+until step accepted
+16: end for
+17: return θ
+its target to a scalar. Section III-B derives r for common loss
+functions.
+Each LMA step computes the parameter update ∆θ by
+solving
+(JT J + λD)∆θ = −JT r,
+D = diag(JT J)
+(1)
+where J = ∂r/∂θ ∈RN×M is the Jacobian with its i-th
+row defined as (∇θri)T , and λ > 0 is the damping factor.
+Decreasing λ moves LMA towards the Gauss-Newton method
+for faster convergence, whereas increasing λ moves it towards
+gradient descent for robustness.
+Implementations of LMA differ in their update criteria,
+damping strategies, and iteration logic. We adopt the logic
+of torch-levenberg-marquardt [12], a Python library
+for training neural networks using LMA, as detailed in Al-
+gorithm 1. A step is accepted only if it reduces the sum of
+squared residuals, specifically when ∥r′∥2
+2 < ∥r∥2
+2. In this
+case, λ is decreased; otherwise, λ is increased and the step
+is recomputed.
+Many studies [5], [10], [21] and applications [6], [7], [9],
+[12] confuse LMA with the earlier Levenberg algorithm [1],
+which damps all parameters equally with the identity matrix
+IM:
+(JT J + λIM)∆θ = −JT r
+(2)
+Marquardt [2] replaced IM with D = diag(JT J), which
+scales the damping of each parameter according to its cur-
+vature.
+B. Jacobian Matrix Computation
+Deep learning frameworks [22]–[24] provide two primitives
+to compute products involving the Jacobian without explicitly
+
+
+materializing the full matrix: the vector-Jacobian product
+(VJP) and the Jacobian-vector product (JVP). A VJP computes
+JT v for a vector v ∈RN; setting v to the standard basis
+vector ei extracts the i-th row of J. A JVP computes Jv
+for a vector v ∈RM; setting v = ej extracts the j-th
+column. Equation (3) illustrates both operations. Internally, a
+VJP relies on reverse-mode automatic differentiation, requiring
+a forward pass that stores intermediate activations followed
+by a backward pass. A JVP instead relies on forward-mode
+automatic differentiation, requiring only a single forward pass
+without storing activations.
+J =
+
+
+∂r1
+∂θ1
+· · ·
+∂r1
+∂θj
+· · ·
+∂r1
+∂θM
+...
+...
+...
+...
+∂ri
+∂θ1
+· · ·
+∂ri
+∂θj
+· · ·
+∂ri
+∂θM
+←VJP
+...
+...
+...
+...
+∂rN
+∂θ1
+· · ·
+∂rN
+∂θj
+· · ·
+∂rN
+∂θM
+↑
+JVP
+
+
+∈RN×M
+(3)
+Our framework assumes that each sample in a batch is
+processed independently, which excludes intra-batch opera-
+tions such as Batch Normalization. Under this assumption, ri
+depends only on the i-th sample. Therefore, one single-sample
+VJP yields one row of J, and assembling the full Jacobian
+requires N single-sample VJPs. In contrast, a column involves
+all N samples, meaning its extraction requires N single-
+sample JVPs, or equivalently, one N-sample JVP. Assembling
+the full Jacobian column-wise thus requires MN single-
+sample JVPs. Consequently, we always construct the Jacobian
+row-wise using VJPs.
+III. ALGORITHM DESIGN
+This section introduces the core algorithm of LeMA. Specif-
+ically, Section III-A derives an exact dual formulation of LMA
+to bypass the M × M matrix JT J. Section III-B formulates
+residuals for common loss functions, and Section III-C outlines
+the complete LeMA algorithm.
+A. Dual Transformation
+When training large-scale models where M > N, the dense
+M × M Gram matrix JT J in (1) dominates the memory
+footprint. We therefore transform the LMA equation into its
+dual form, which only involves the N×N matrix JD−1JT and
+thus moves the linear system from the parameter dimension
+to the batch dimension:
+(JD−1JT + λIN)v = −r,
+∆θ = D−1JT v
+(4)
+where D = diag(JT J) as in (1). We assume that D is
+invertible. Section IV-B1 describes how we ensure this in
+practice.
+We now prove that (4) yields the same update as (1). Since
+λ > 0 and D has a positive diagonal, both JT J + λD
+and JD−1JT + λIN are positive definite and thus invertible.
+Expanding the products shows that
+(JT J + λD)D−1JT = JT JD−1JT + λJT
+= JT (JD−1JT + λIN)
+Multiplying both sides by (JT J + λD)−1 on the left and by
+−(JD−1JT + λIN)−1r on the right turns the update of (1)
+into that of (4):
+∆θ = −(JT J + λD)−1JT r
+= −D−1JT (JD−1JT + λIN)−1r = D−1JT v
+Notably,
+the
+dual
+formulation
+in
+recent
+implementa-
+tions [12], [13] corresponds to the Levenberg algorithm (2),
+i.e., D = IM in (4), and thus lacks Marquardt’s defining
+modification D = diag(JT J) [2]. In contrast, we derive
+and prove an exact dual formulation of the complete LMA
+algorithm.
+B. Residual Formulation
+Deep learning models minimize a standard loss L
+=
+1
+N
+PN
+i=1 ℓi, whereas LMA minimizes the sum of squared
+residuals ∥r∥2
+2 = PN
+i=1 r2
+i [5]. As a practical heuristic to
+guide the migration of existing code to the LMA framework,
+Equation (5) formulates the exact residual representations for
+three common loss functions. Here, ˆyi denotes the network
+output for the i-th sample, while ˆyi,c and yi,c correspond to
+the c-th of C classes:
+Loss
+ℓi
+ri
+MSE
+(ˆyi −yi)2
+ˆyi −yi
+CE
+−PC
+c=1 yi,c log ˆyi,c
+√ℓi + ϵ
+MAE
+|ˆyi −yi|
+sign(ˆyi −yi)√ℓi + ϵ
+(5)
+The Mean Squared Error (MSE) directly yields a residual.
+For the Cross-Entropy (CE) loss, the natural residual would
+be √ℓi. However, the derivative of √x is
+1
+2√x, so a perfectly
+predicted sample (ℓi = 0) causes a division by zero in the
+Jacobian computation. A small constant ϵ > 0 inside the
+square root prevents this singularity.
+The Mean Absolute Error (MAE) requires ϵ > 0 for the
+same reason, and additionally the sign of the error ei = ˆyi−yi.
+Without the sign, the derivative of
+p
+|ei| + ϵ with respect to ei
+is
+sign(ei)
+2√
+|ei|+ϵ, which jumps between −
+1
+2√ϵ and
+1
+2√ϵ as ei crosses
+zero. These values are large for a small ϵ, so the Jacobian
+becomes discontinuous, and the optimizer oscillates around
+the minimum. Multiplying the residual by sign(ei) cancels the
+sign in the derivative, which becomes
+1
+2√
+|ei|+ϵ, i.e., strictly
+positive and continuous at ei = 0.
+In summary, matching a loss to the LMA objective often
+introduces a square root into the residual and hence into
+the denominator of its derivative. Residual functions must
+therefore avoid near-zero denominators and sign oscillations
+as the error approaches zero.
+
+
+Algorithm 2 The Levenberg-Marquardt Algorithm of LeMA
+Input: Model f(·; θ) with M parameters, per-sample residual
+function r, initial parameters θ0, data (X, Y) with N
+samples, initial damping factor λ0, adjustment factors
+λ↑> 1, 0 < λ↓< 1, maximum iterations T
+Output: Trained parameters θ, loss value L
+1: θ ←θ0, λ ←λ0
+2: r ←r(f(X; θ); Y) {residuals, Sec. III-B}
+3: for t = 1 to T do
+4:
+J ←∂r/∂θ {Jacobian}
+5:
+D ←diag(JT J)
+6:
+if M > N then
+7:
+G ←JD−1JT {dual form, N × N}
+8:
+else
+9:
+G ←JT J, g ←JT r {standard form, M × M}
+10:
+end if
+11:
+repeat
+12:
+if M > N then
+13:
+Solve (G + λIN)v = −r for v
+14:
+∆θ ←D−1JT v
+15:
+else
+16:
+Solve (G + λD)∆θ = −g for ∆θ
+17:
+end if
+18:
+θ′ ←θ + ∆θ
+19:
+r′ ←r(f(X; θ′); Y)
+20:
+if ∥r′∥2 < ∥r∥2 then
+21:
+θ ←θ′, r ←r′, λ ←λ · λ↓{accept step}
+22:
+else
+23:
+λ ←λ · λ↑{reject step}
+24:
+end if
+25:
+until step accepted
+26: end for
+27: L ←1
+N ∥r∥2
+2
+28: return θ, L
+C. The LeMA Algorithm
+Algorithm 2 presents the complete LeMA procedure. We
+collectively refer to JT J in the standard form (1) and JD−1JT
+in the dual form (4) as the Gram matrix G. LeMA se-
+lects the dual form when M > N and the standard form
+otherwise, so G has min(M, N)2 elements. The memory
+footprint thus drops from O(MN + M 2) in Algorithm 1 to
+O(MN + min(M, N)2), and Section IV-B further eliminates
+the O(MN) term of the Jacobian. In addition, LeMA forms
+G once per iteration and reuses it across rejected steps, which
+only change λ, and carries the residuals of an accepted step
+over to the next iteration.
+IV. LEMA IMPLEMENTATION
+This section describes how LeMA executes Algorithm 2
+on P GPUs. Section IV-A covers the distributed setup, Sec-
+tion IV-B the partitioned computation of both forms, Sec-
+tion IV-C the evaluation of Jacobian shards, and Section IV-D
+the resulting cost.
+A. Distributed Setup
+LeMA runs P processes in the Single Program, Multiple
+Data (SPMD) model [25], one per NVIDIA GPU, and commu-
+nicates through torch.distributed [22]. Each process
+belongs to two communication groups. Large tensors move
+between GPUs over NCCL [26], NVIDIA’s collective com-
+munication library, and small scalars such as local loss values
+move between hosts over Meta’s Gloo library [27]. Keeping
+the scalars on the host avoids many small host-to-device and
+device-to-host copies that would otherwise interrupt the GPU
+streams.
+All parameters are stored in one flat tensor, and the weights
+of each layer are mapped to their positions in it. A VJP
+therefore returns a single M-dimensional gradient, and no per-
+layer gradients need to be concatenated.
+Each process loads its own mini-batch of N/P samples
+instead of receiving part of a scattered global batch, and the
+P mini-batches together form the global batch. PyTorch’s
+DistributedSampler [22] keeps the mini-batches dis-
+joint. The dual form also needs the global batch on every
+process (Section IV-B2).
+B. Partition and Parallelization
+The N×M Jacobian dominates the memory of Algorithm 2,
+so we never store it in full. We split J by rows into N/S
+shards J = [JT
+1 , . . . , JT
+N/S]T , where Jk ∈RS×M and rk ∈
+RS correspond to the k-th group of S samples. Each shard
+is computed on the fly, added to the Gram matrix G, and
+freed, so the Jacobian occupies O(SM) memory instead of
+O(NM). We split by rows because a row shard needs only S
+single-sample VJPs. The subroutine JAC evaluates a shard and
+returns Jk and rk, and we drop rk from the notation when
+it is not used. Internally, JAC works on slices of L samples
+(Section IV-C). On process p, (Xp,i, Yp,i) and Jp,i denote
+the i-th of the N/(PS) shards of its mini-batch (Xp, Yp).
+We assume that PS divides N and L divides S.
+1) Standard Form: Under the row partition, both terms
+of (1) become sums over shards:
+JT J =
+N/S
+X
+k=1
+JT
+k Jk,
+JT r =
+N/S
+X
+k=1
+JT
+k rk
+(6)
+The summands are independent, so each process sums the
+shards of its own mini-batch locally. An NCCL all-reduce then
+gives every process JT J and JT r, and a Gloo all-reduce gives
+∥r∥2
+2. Parameters without curvature, such as those of inactive
+ReLU units, have a zero diagonal entry and would make D
+singular. We therefore clamp each (JT J)jj in D to at least
+1% of the mean diagonal entry, and the dual form uses the
+same clamp. Every process then solves the M × M system
+on its own. Algorithm 3 lists the steps on process p. If LeMA
+rejects a step, only the final solve is redone with the new λ.
+2) Dual Form: The dual form (4) first solves (JD−1JT +
+λIN)v = −r and then sets ∆θ = D−1JT v. To avoid
+forming any M × M matrix, we keep only the diagonal
+of D−1 as a vector d ∈RM with dj
+= 1/(JT J)jj.
+
+
+Algorithm 3 Distributed Standard Form Solve on Process p
+Input: Local mini-batch (Xp, Yp) with shards (Xp,i, Yp,i)
+of S samples, parameters θ, damping factor λ
+Output: Parameter update ∆θ, loss ∥r∥2
+2
+1: Gp ←0M×M, gp ←0M, ρp ←0
+2: for i = 1 to N/(PS) do
+3:
+Jp,i, rp,i ←JAC(Xp,i, Yp,i) {Jp,i ∈RS×M}
+4:
+Gp ←Gp + JT
+p,iJp,i
+5:
+gp ←gp + JT
+p,irp,i
+6:
+ρp ←ρp + rT
+p,irp,i
+7: end for
+8: JT J ←ALLREDUCE(Gp), JT r ←ALLREDUCE(gp)
+{NCCL}
+9: ∥r∥2
+2 ←ALLREDUCE(ρp) {Gloo}
+10: D ←diag(JT J)
+11: Solve (JT J + λD)∆θ = −JT r for ∆θ
+12: return ∆θ, ∥r∥2
+2
+Multiplying by D−1 on the right then scales column j by
+dj, so ˜Jk = JkD−1 = Jk ⊙dT , where ⊙is element-wise
+multiplication and dT is broadcast across rows. Under the
+row partition, the Gram matrix splits into S × S blocks:
+JD−1JT =
+
+
+˜J1JT
+1
+· · ·
+˜J1JT
+N/S
+...
+...
+...
+˜JN/SJT
+1
+· · ·
+˜JN/SJT
+N/S
+
+
+(7)
+Algorithm 4 computes the dual form on process p in three
+phases. The first phase computes d. Because (JT J)jj is
+the squared norm of column j of J, the vector d can be
+accumulated shard by shard and all-reduced in the same way as
+JT J in Algorithm 3. The diagonal entries are clamped as in the
+standard form before taking reciprocals. In the second phase,
+process p computes the N/P rows of (7) that belong to its
+mini-batch. For each local shard ˜Jp,i, it evaluates every global
+shard Jj and the block ˜Jp,iJT
+j , and the global residuals rj
+come out of the same evaluation. An all-gather then assembles
+the full Gram matrix on every process. In the third phase,
+every process solves for v, and VJP computes JT v slice by
+slice over the local mini-batch without forming the Jacobian
+again. Here vp,l is the part of v for the l-th local slice. An
+all-reduce of the partial sums, followed by scaling with d,
+gives ∆θ. If LeMA rejects a step, only the solve and the
+third phase are repeated with the new λ. The standard form
+evaluates each Jacobian row once, whereas the dual form re-
+evaluates every global shard for each local shard and thus
+spends extra computation to save memory (Section IV-D).
+Each block product ˜Jp,iJT
+j multiplies two S × M shards
+and produces an S ×S block. A general matrix multiplication
+(GEMM) usually maps one output tile to one thread block.
+When S ≪M, the output has few tiles, so only a few thread
+blocks run, each looping over the full inner dimension M, and
+most streaming multiprocessors (SMs) of the GPU sit idle. We
+address this with split-K [28]. LeMA cuts the inner dimension
+into chunks, multiplies matching chunks of the two shards into
+Algorithm 4 Distributed Dual Form Solve on Process p
+Input: Global batch (X, Y) with shards (Xj, Yj) of S sam-
+ples, local mini-batch (Xp, Yp) with shards (Xp,i, Yp,i)
+of S samples and slices (Xp,l, Yp,l) of L samples, pa-
+rameters θ, damping factor λ
+Output: Parameter update ∆θ, loss ∥r∥2
+2
+1: dp ←0M
+2: for i = 1 to N/(PS) do
+3:
+Jp,i ←JAC(Xp,i, Yp,i)
+4:
+dp ←dp + 1T
+S(Jp,i ⊙Jp,i)
+5: end for
+6: d ←1 ⊘ALLREDUCE(dp) {NCCL}
+7: Gp ←0(N/P )×N {local rows of JD−1JT }
+8: for i = 1 to N/(PS) do
+9:
+˜Jp,i ←JAC(Xp,i, Yp,i) ⊙dT
+10:
+for j = 1 to N/S do
+11:
+Jj, rj ←JAC(Xj, Yj)
+12:
+Gp[i, j] ←˜Jp,iJT
+j
+13:
+end for
+14: end for
+15: JD−1JT ←ALLGATHER(Gp) {NCCL}
+16: r ←[r1; . . . ; rN/S]
+17: Solve (JD−1JT + λIN)v = −r for v
+18: up ←0M
+19: for l = 1 to N/(PL) do
+20:
+up ←up + VJP(Xp,l, Yp,l, vp,l)
+21: end for
+22: ∆θ ←d ⊙ALLREDUCE(up) {NCCL}
+23: return ∆θ, ∥r∥2
+2
+partial S × S blocks with one batched GEMM, and sums the
+partial blocks. The number of chunks is a multiple of the SM
+count, so the batched GEMM keeps all SMs busy. The chunks
+are strided views of the shards, so no data is copied, and the
+partial blocks are small. Shards with more rows already give
+the GEMM enough parallelism, so LeMA uses split-K only
+for shards with few rows.
+C. Jacobian Shard Computation
+This section describes the functions JAC and VJP used in
+Algorithms 3 and 4. Samples are independent, so the S rows
+of a shard come from S single-sample VJPs. Running them
+one after another sends a single sample through the network at
+a time and leaves most of the GPU idle. JAC instead vectorizes
+the VJPs of a slice of L samples with vmap [22] and obtains
+an L×M Jacobian slice per call (Algorithm 5). The per-sample
+function also returns the residual as an auxiliary output, so
+the residuals need no extra forward pass. Vectorizing L VJPs,
+however, also stores L times as many activations, so the slice
+size L trades execution speed against memory.
+We slice the computation of JT v in the dual form in
+the same way. One VJP over all N/P local samples would
+compute it, but its forward pass would keep the activations
+of all of them at once. VJP therefore handles one slice of L
+samples per call, and Algorithm 4 sums the results. Unlike
+
+
+Algorithm 5 Jacobian Shard Evaluation JAC(Xk, Yk)
+Input: Shard (Xk, Yk) of S samples with slices (Xk,l, Yk,l)
+of L samples, model f(·; θ), residual function r
+Output: Jacobian shard Jk ∈RS×M, residuals rk ∈RS
+1: g(x, y) ←
+ ∇θr(f(x; θ); y), r(f(x; θ); y)
+
+2: for l = 1 to S/L do
+3:
+Jk,l, rk,l ←vmap(g)(Xk,l, Yk,l) {Jk,l ∈RL×M}
+4: end for
+5: return [Jk,1; . . . ; Jk,S/L], [rk,1; . . . ; rk,S/L]
+Algorithm 6 Vector-Jacobian Product VJP(Xl, Yl, vl)
+Input: Slice (Xl, Yl) of L samples, vector vl ∈RL, model
+f(·; θ), residual function r
+Output: JT
+l vl ∈RM
+1: rl ←r(f(Xl; θ); Yl) {forward pass}
+2: return ∇θ(vT
+l rl) {backward pass}
+JAC, VJP does not build a Jacobian slice. A single backward
+pass on the scalar vT
+l rl gives the vector JT
+l vl ∈RM directly
+(Algorithm 6).
+D. Memory Footprint and Performance Analysis
+We now analyze the per-device cost of the standard form
+(Algorithm 3) and the dual form (Algorithm 4). Let A be
+the number of activation elements stored for one sample
+in a forward pass, and F the FLOPs of one single-sample
+VJP, which consists of one forward and one backward pass.
+Because samples are independent, a vectorized pass over L
+samples in JAC or VJP stores LA activation elements and costs
+LF FLOPs. We leave out the input mini-batch, which every
+training method needs. Table I lists the remaining components.
+In the asymptotic bounds below, we drop a term only if a
+retained term strictly dominates it.
+1) Memory Footprint: The memory of both forms has three
+main parts. The first is the Gram matrix, which is JT J with
+M 2 elements in the standard form and the gathered JD−1JT
+with N 2 elements in the dual form. LeMA keeps the Gram
+matrix for reuse after a rejected step, so the solver applies
+damping to a separate copy and factorizes it into LU, which
+triples this cost. The second part is the Jacobian shards. JAC
+computes the per-sample gradients slice by slice and then
+assembles them into the rows of the shard, so the gradients and
+their assembled copy briefly coexist and take 2SM elements.
+The standard form evaluates one shard at a time. The nested
+loop of the dual form also holds ˜Jp,i while evaluating Jj,
+which raises this part to 3SM elements. The third part is the
+activations of one slice, LA elements, since JAC and VJP never
+run at the same time. The remaining vectors, such as θ, d, and
+r, are bounded by SM and N 2. Algorithm 2 selects the dual
+form only when M > N, so the memory per device is
+O
+ min(M, N)2 + SM + LA
+
+(8)
+The first term is quadratic in the smaller of M and N. The
+other two grow linearly with the model size and are set by the
+TABLE I
+PER-DEVICE COST OF ALGORITHMS 3 AND 4
+Component
+Standard Form
+Dual Form
+Memory (elements)
+Gram matrix
+3M2
+3N2
+Jacobian shards
+2SM
+3SM
+Slice activations
+LA
+LA
+Vectors
+O(M)
+O(M + N)
+Computation (FLOPs)
+Forward and backward passes
+NF/P
+(3 + N/S) NF/P
+Shard products
+2NM2/P
+2N2M/P
+Linear solve
+O(M3)
+O(N3)
+Communication (elements)
+NCCL collectives
+M2 + M
+N2 + 2M
+shard size S and the slice size L, regardless of the batch size
+N. Algorithm 1, by contrast, stores the full N × M Jacobian.
+2) Computation: In the standard form, each Jacobian row
+is evaluated exactly once, so each device runs N/P single-
+sample VJPs. Accumulating JT
+p,iJp,i costs 2SM 2 FLOPs per
+shard, or 2NM 2/P FLOPs over the N/(PS) local shards.
+In the dual form, the inner loop re-evaluates all N/S global
+shards for each of the N/(PS) local shards. This amounts to
+N 2/(PS) single-sample VJPs and outweighs the 3N/P VJPs
+spent on d, ˜Jp,i, and JT v. The N 2/(PS2) block products
+˜Jp,iJT
+j cost 2S2M FLOPs each and 2N 2M/P FLOPs in total.
+Solving the M×M or N×N system by LU factorization costs
+O(M 3) or O(N 3) FLOPs. This term does not shrink with P,
+since every device solves the same system. The remaining
+matrix-vector and element-wise operations, such as JT
+p,irp,i
+and Jp,i ⊙dT , cost O(NM/P) FLOPs and are bounded by
+the shard products. The per-device computational complexities
+are therefore
+Standard:
+O
+NF
+P
++ NM 2
+P
++ M 3
+Dual:
+O
+N 2F
+PS + N 2M
+P
++ N 3
+(9)
+When M > N, the block products of the dual form cost
+a factor of M/N less than the accumulation of JT J in the
+standard form. The extra cost of the dual form comes from
+evaluating the Jacobian N/S times, which is what it pays to
+remove the O(M 2) memory.
+3) Communication: The standard form all-reduces JT J and
+JT r. The dual form all-gathers JD−1JT and all-reduces the
+two M-dimensional vectors d and JT v. As with memory, the
+Gram matrix dominates the communication volume, which is
+O(min(M, N)2+M) elements. The scalar loss sent over Gloo
+is negligible.
+Besides the model size M and the batch size N, the shard
+size S and the slice size L decide the balance between memory
+and speed. A larger S reduces the Jacobian re-evaluation of
+the dual form but costs O(SM) memory. A larger L improves
+the utilization of vectorized VJPs at a cost of O(LA) memory,
+with the same FLOP count. S and L should therefore be tuned
+
+
+together to fill the device memory that the Gram matrix leaves
+free.
+V. EVALUATION
+LeMA changes how an LMA step is computed, not which
+step is taken. As long as it computes the same update as
+LMA, it inherits the convergence behavior of LMA, which
+prior work has studied for neural networks [5], [6], [12]. We
+therefore evaluate correctness and performance rather than
+training accuracy. We first verify numerically that the dual
+form matches an FP64 reference update (Section V-B). We
+then measure how far LeMA extends the model size on one
+GPU (Section V-C), compare the two forms (Section V-D), and
+evaluate strong scaling (Section V-E). Finally, we study the
+shard and slice sizes (Section V-F) and split-K (Section V-G).
+Although LeMA implements both the standard and dual
+forms of LMA, we treat the standard form as the baseline for
+most experiments because the number of parameters typically
+exceeds the batch size in practice.
+A. Experiment Setup
+1) Hardware and Software: All experiments are conducted
+on a server equipped with two Intel Xeon Platinum 8275CL
+CPUs and eight NVIDIA A100-SXM4 GPUs. Each GPU
+features 80 GB of memory, a peak memory bandwidth of
+2,039 GB/s, and a peak FP32 performance of 19.5 TFLOPS.
+The GPUs are fully connected via NVLink 3.0, providing
+600 GB/s of bidirectional bandwidth per GPU.
+We implement LeMA in Python 3.14 using PyTorch 2.14,
+CUDA 12.6, and NCCL 2.29. All computations are performed
+in single precision (FP32).
+2) Datasets and Models: We use MNIST [29], which has
+60,000 training and 10,000 test images of 28 × 28 pixels. The
+whole dataset is pinned in host memory [30].
+To reach the billion-parameter scale on MNIST, we take a
+convolutional neural network (CNN) with two 3 × 3 convo-
+lutional layers of 32 and 64 channels, a 2 × 2 max pooling,
+and two fully connected layers, with ReLU after each hidden
+layer, and widen its hidden fully connected layer to h neurons.
+The model has M = 18,826+9,227h parameters. We call the
+models with h = 10,836 and 108,378 CNN-100M and CNN-
+1B, with 100,002,598 and 1,000,022,632 parameters. Experi-
+ments that need the standard LMA form use smaller models:
+LeNet-5 [31] with ReLU and max pooling (M = 61,706)
+and a 784-16-10 MLP (M = 12,730). All models use the CE
+residual in (5) with ϵ = 10−9.
+3) Measurements: We split the step time into four phases:
+Jacobian shard evaluation (JAC), the Gram block products
+˜Jp,iJT
+j , the NCCL and Gloo collectives including the wait
+for the slowest process, and the rest, such as VJP, the linear
+solve, and the loss evaluation of the trial step. To analyze
+the peak memory footprint, we track all memory allocations
+during execution. At the exact moment of maximum memory
+usage, we categorize every live tensor as the Gram matrix, the
+Jacobian or its shards, M-dimensional vectors, activations, or
+other buffers.
+TABLE II
+RELATIVE ERROR OF THE UPDATE AGAINST AN FP64 REFERENCE
+Model
+N
+λ
+Standard form
+Dual form
+LeNet-5 1,024
+10−3
+2.8
+8.8×10−6
+1
+3.7×10−3
+5.9×10−6
+103
+4.3×10−6
+3.6×10−7
+8,192
+10−3
+2.0
+2.4×10−4
+1
+2.3×10−3
+1.6×10−5
+103
+4.4×10−6
+3.2×10−7
+MLP
+4,096
+10−3
+0.67
+2.3×10−3
+1
+2.8×10−3
+2.7×10−5
+103
+4.3×10−6
+2.6×10−7
+16,384 10−3
+0.21
+1.3×10−2
+1
+2.0×10−3
+1.5×10−5
+103
+3.4×10−6
+2.2×10−7
+B. Exactness of the Dual Form
+Section III-A proves that the dual form yields the same
+update as the standard form in exact arithmetic. To verify this
+equivalence in FP32, we execute a single LeMA step with
+each form across different models and damping factors.
+As a reference independent of LeMA, we explicitly form
+the full Jacobian J and JT J, clamp D with the same rule as
+both forms (Section IV-B1), and solve the standard form (1)
+directly in FP64 to obtain ∆θref. We evaluate LeNet-5 with
+batch sizes N = 1,024 and 8,192 (both smaller than M), and
+an MLP with N = 4,096 < M and N = 16,384 > M. For
+each setup, we test damping factors λ = 10−3, 1, and 103.
+Table
+II
+reports
+the
+relative
+error
+∥∆θ −∆θref∥2 / ∥∆θref∥2. For λ
+=
+103, the errors of
+both forms are at most 4.4 × 10−6. As λ decreases, the
+linear systems become ill-conditioned, and the standard form
+degrades rapidly. At λ = 10−3, its error reaches 21% to
+280%, rendering the update unusable. In contrast, the error of
+the dual form stays within 1.3×10−2. To check the reference
+itself, we also run the dual form of LeMA in FP64. It differs
+from the reference by at most 5.3 × 10−9, and mostly by
+10−15 to 10−12, so the FP64 reference stays accurate even at
+λ = 10−3, and the dual transformation introduces no error
+beyond rounding. We conclude that the errors in Table II
+arise from the limited FP32 precision, to which the standard
+form is far more sensitive than the dual form.
+C. Memory Footprint
+We next evaluate the maximum number of parameters
+each variant supports on a single GPU. We compare four
+configurations: the standard and dual forms of LMA, each
+implemented with either a full or a sharded Jacobian. By
+increasing h from 1 to 108,378, we scale the parameter count
+M from 2.8×104 to 1.0×109 until each configuration exhausts
+the GPU memory. All configurations use N = 256 and L = 4,
+while the sharded implementations additionally set S = 4.
+Figure 1 shows the peak memory and its breakdown. The
+standard forms encounter the M 2 bottleneck first. For the im-
+plementation with the full Jacobian, JT J and the intermediate
+data for LU factorization consume all but 0.02 GB of the
+
+
+105
+106
+107
+108
+109
+Number of parameters M
+0.1
+1
+10
+100
+Peak memory (GB)
+GPU memory capacity
+(a) Peak memory
+Standard, full J
+Standard, sharded J
+Dual, full J
+Dual, sharded J (LeMA)
+0
+20
+40
+60
+80
+Peak memory (GB)
+Standard, full J, M = 1.0 × 105
+Standard, sharded J, M = 2.8 × 104
+Dual, full J, M = 3.0 × 107
+Dual, sharded J, M = 3.0 × 107
+Dual, sharded J, M = 1.0 × 109
+83.1
+9.5
+61.6
+1.8
+60.0
+(b) Breakdown
+Jacobian
+Gram matrix
+Vectors
+Activations
+Other
+Fig. 1. Peak memory of one trial step on one GPU with N = 256 and S = L = 4. (a) Crosses mark the first model that runs out of memory. (b) Breakdown
+of each variant at its largest model.
+1
+2
+4
+8
+Number of GPUs P
+0.3
+1
+3
+10
+Step time (s)
+1.28× (16.0%)
+5.84× (73.0%)
+(a) Step time
+Standard form
+Dual form
+Ideal
+1
+2
+4
+8
+Number of GPUs P
+0
+20
+40
+Peak memory per GPU (GB)
+45.8
+1.4
+(b) Memory
+Fig. 2.
+Standard and dual forms for LeNet-5 with N = 8,192 < M =
+61,706. Dashed lines show ideal scaling.
+83.1 GB footprint at M ≈105. As a result, the solver exhausts
+memory at M ≈3×105. The sharded standard form fails even
+earlier at M ≈105 because it retains JT J for reuse after a
+rejected step, requiring a third M × M matrix. The dual form
+with the full Jacobian avoids the M 2 memory limit, but its
+N × M Jacobian footprint grows linearly with M, reaching
+61.6 GB at M = 3.0 × 107.
+LeMA resolves both of these memory bottlenecks. At
+M = 3.0 × 107, it requires only 1.82 GB, achieving a 34×
+reduction compared to the dual form with the full Jacobian.
+For the CNN-1B model, the peak memory of 60.0 GB consists
+of 48.0 GB for shards and 12.0 GB for vectors. The shards
+exactly match the 3SM = 12M elements predicted in Table I,
+and the vectors amount to three M-dimensional vectors, giving
+15M elements in total. Consequently, LeMA successfully
+trains a model on a single GPU that is 33× larger than
+the maximum capacity of the full-Jacobian dual form, and
+approximately 104× larger than that of the standard LMA.
+D. Standard Form vs. Dual Form
+We compare the memory footprint and execution perfor-
+mance of the standard and dual forms. We use LeNet-5 with
+N = 8,192 < M. Both forms use S = 1,024 and L = 256 on
+identical samples.
+Figure 2 shows that the dual form achieves a smaller mem-
+ory footprint and faster execution. It outperforms the standard
+form across all P configurations, delivering an 8.3× speedup
+1
+2
+4
+8
+Number of GPUs P
+25
+50
+100
+200
+400
+Step time (s)
+7.97× (99.7%)
+7.96× (99.5%)
+(a) Step time
+CNN-1B
+CNN-100M
+Ideal
+1
+2
+4
+8
+Number of GPUs P
+0
+20
+40
+60
+80
+100
+Share of step time (%)
+(b) Breakdown of CNN-1B
+Communication
+Other
+Gram product
+Jacobian
+Fig. 3.
+Strong scaling of LeMA with a fixed global batch. (a) Step time,
+labeled with the speedup and efficiency on 8 GPUs. (b) Phase breakdown of
+CNN-1B.
+on a single GPU and a 37.8× speedup on 8 GPUs. The
+standard form exhibits poor scaling efficiency. Specifically,
+on a single GPU it spends 9.23 s of its 12.65 s step time
+solving the M × M linear system. Because every GPU solves
+this system redundantly without parallelization, this 73% share
+bounds the speedup to 1.37×, and the standard form reaches
+only 1.28× on 8 GPUs. The dual form scales significantly
+better. Even on 8 GPUs, it requires only 0.05 s to solve the
+N ×N system out of a 0.26 s step time, so this unparallelized
+overhead limits scaling far less, and the dual form reaches
+5.84× on 8 GPUs.
+The dual form achieves a 33× reduction in memory foot-
+print compared to the standard form. The standard form
+consumes 45.8 GB per GPU regardless of P, dominated by
+three M × M matrices: JT J, its damped copy, and the LU
+factors. In contrast, the dual form requires only 1.37 GB on
+a single GPU and 1.11 GB on 8 GPUs, which is 33× to
+41× less. This footprint decreases as P increases because each
+GPU computes only N/P rows of the Gram matrix before the
+all-gather operation.
+E. Strong Scaling
+We scale CNN-100M and CNN-1B from 1 to 8 GPUs with
+a fixed global batch. Both use the dual form, with N = 2,048
+and S = L = 32 for CNN-100M and N = 256 and S = L =
+
+
+2
+4
+8
+16
+32
+64
+Shard size S
+3
+10
+30
+100
+Step time (s)
+(a) Step time
+L = 1
+L = min(S, 8)
+L = S
+∝1/S
+2
+4
+8
+16
+32
+64
+Shard size S
+3
+10
+30
+80
+Peak memory (GB)
+(b) Memory
+3SM + 3M
+Measured, all L
+Fig. 4. Effect of the shard size S and the slice size L for CNN-100M with
+N = 256 on one GPU.
+4 for CNN-1B. These settings are the same for every P, so
+each GPU processes N/P samples.
+LeMA scales almost ideally (Figure 3(a)). On 8 GPUs,
+the step time of CNN-1B drops from 317.2 s to 39.8 s, a
+speedup of 7.97× and a parallel efficiency of 99.7%. CNN-
+100M reaches 7.96× (99.5%), and the efficiency stays at or
+above 99.4% for every P. The peak memory per GPU stays at
+60.0 GB for CNN-1B and 39.7 GB for CNN-100M, since (8)
+does not depend on P.
+Figure 3(b) shows the reason. The Jacobian evaluation and
+the Gram block products take 68% and 29% of the CNN-1B
+step, and both are split evenly across GPUs. Communication
+takes only 0.06 s on 8 GPUs, 0.16% of the step, although
+it all-reduces two 4 GB vectors. The dual form re-evaluates
+each Jacobian row N/S times but communicates its N 2+2M
+elements only once per step (Section IV-D). The redundant
+linear solve takes less than 0.03% of the step.
+F. Shard and Slice Sizes
+Section IV-D predicts that S trades Jacobian re-evaluation
+against memory, while L only affects hardware utilization. We
+train CNN-100M with N = 256 on one GPU for S from 2 to
+64 and L from 1 to S (Figure 4).
+The step time falls almost in proportion to 1/S. With L =
+S, it drops from 77.1 s at S = 2 to 4.75 s at S = 32, 16.2×
+for a 16× larger shard, and S = 64 with L = 8 reaches 3.70 s.
+Larger shards help both dominant phases: the Jacobian is re-
+evaluated fewer times, and larger blocks raise the arithmetic
+intensity of the block products at the same FLOP count. The
+slice size matters much less. At S = 32, raising L from 1 to
+32 speeds up the step by only 1.5×.
+The peak memory matches 3SM + 3M elements, i.e.,
+the 3SM Jacobian shard elements of Table I plus three M-
+dimensional vectors, within 0.05 GB and does not depend on
+L, because the activations of a slice are negligible for this
+model. The only exception is S = L = 64, which runs out of
+memory although it needs the same amount as S = 64 with
+smaller L, because about 24 GiB of the reserved memory are
+too fragmented for its large slice allocations. Since the time
+scales with 1/S and the memory with S, S should be as large
+as the GPU memory allows.
+1
+2
+4
+8
+16
+32
+64
+Shard size S
+1
+10
+100
+Time (ms)
+(a) One block product
+torch.mm
+Split-K
+M ≈108
+M ≈109
+0
+50
+100
+Step time (s)
+torch.mm
+Split-K
+95.0 s
+39.8 s (2.39×)
+(b) Step of CNN-1B, P = 8
+Jacobian
+Gram product
+Other
+Communication
+Fig. 5.
+Gram block products with torch.mm and with split-K. (a) One
+product of two S × M shards on one GPU. The shaded range is where
+LeMA applies split-K. (b) Step time of CNN-1B on 8 GPUs.
+G. Split-K of the Gram Block Products
+We evaluate split-K (Section IV-B2) on a single block
+product and on a full step. The baseline computes each block
+product with one torch.mm call, which uses cuBLAS. In
+the microbenchmark, we multiply two random S × M shards
+with M ≈108 or 109, matching CNN-100M and CNN-
+1B, and S from 1 to 64, skipping shapes that do not fit in
+memory. Both variants write into a strided block of a larger
+matrix, as in Algorithm 4, and split-K uses its default of 16
+chunks per SM (1,728 chunks on an A100). After two warm-
+up runs, we repeat each product for at least 0.5 s and report the
+mean time from CUDA events. A block product reads 8SM
+bytes in FP32, so a bandwidth-bound kernel should take time
+proportional to S.
+A plain GEMM does not (Figure 5(a)). From S = 2 to 8,
+the time of torch.mm stays at 12.9–13.6 ms for M ≈108
+and 130–135 ms for M ≈109 while the data grow 4×, so
+the GEMM is limited by its parallelism. Split-K follows the
+data volume and is 1.27–11.0× faster for S ≤8. For the
+CNN-1B shards with S = 4, it cuts the time from 131.3 ms to
+22.9 ms (5.7×), which corresponds to 1.40 TB/s, or 69% of the
+peak memory bandwidth. For S ≥16, the GEMM already has
+enough parallelism and split-K is up to 9.8× slower, so LeMA
+applies split-K only for S ≤8. The result is not sensitive to the
+chunk count, which changes the time by at most 12% beyond
+8 chunks per SM. Split-K changes the products by a relative
+difference of at most 4.5×10−5 because of the different FP32
+summation order.
+For the full step, we train CNN-1B on 8 GPUs with the con-
+figuration of Section V-E. Each GPU computes N 2/(PS2) =
+512 block products per step. Without split-K, they take 66.9 s,
+70% of the 95.0 s step, which matches 512 products of 131 ms
+each in the microbenchmark. Split-K reduces them by 5.7× to
+11.8 s and speeds up the step by 2.39× to 39.8 s (Figure 5(b)).
+The peak memory stays at 60.0 GB per GPU.
+VI. CONCLUSION AND FUTURE WORK
+We presented LeMA, a multi-GPU neural network train-
+ing framework based on the Levenberg-Marquardt (LMA)
+algorithm. By utilizing an exact dual formulation that shifts
+the linear system from the parameter dimension to the batch
+
+
+dimension, alongside efficient partitioning strategies and Split-
+K optimizations, we successfully scale LMA to train models
+with billions of parameters. Consequently, LeMA achieves
+significant speedups over standard LMA implementations.
+We identify several limitations in the current design of
+LeMA, which direct our future work. First, our assumption
+that each input sample is processed independently prohibits
+the use of intra-batch operations like Batch Normalization. We
+plan to extend LeMA to support these layers without intro-
+ducing significant overhead. Second, the dual form repeatedly
+evaluates all global Jacobian shards for each local block of
+the Gram matrix JD−1JT . This re-evaluation makes Jacobian
+computation a primary bottleneck. Since inter-process commu-
+nication time is currently negligible, future implementations
+could exchange evaluated shards across GPUs via fast NVLink
+to avoid this redundant computation. Third, LeMA gathers the
+full coefficient matrix on every GPU and solves the linear
+system redundantly. Integrating a distributed solver, such as
+NVIDIA cuSOLVERMp [32], would allow us to partition the
+coefficient matrix and solve the system in parallel, yielding
+further memory and speed improvements. Finally, this work
+focuses strictly on systems engineering to optimize memory
+and execution time. We use a basic damping strategy and
+acceptance criterion, and leave refining them and evaluating
+convergence on practical deep learning tasks to future work.
+ACKNOWLEDGMENT
+This work was supported by the NVIDIA Academic Grant
+Program. The authors used generative AI tools, including
+Claude and Gemini, to check grammar, improve clarity, and
+place figures near the text that discusses them. The authors
+reviewed all changes and take full responsibility for the
+content.
+REFERENCES
+[1] K. Levenberg, “A method for the solution of certain non-linear
+problems
+in
+least
+squares,”
+Quarterly
+of
+Applied
+Mathematics,
+vol.
+2,
+no.
+2,
+pp.
+164–168,
+July
+1944.
+[Online].
+Available:
+http://dx.doi.org/10.1090/qam/10666
+[2] D. W. Marquardt, “An algorithm for least-squares estimation of
+nonlinear parameters,” Journal of the Society for Industrial and Applied
+Mathematics, vol. 11, no. 2, pp. 431–441, June 1963. [Online].
+Available: http://dx.doi.org/10.1137/0111030
+[3] J. Nocedal and S. J. Wright, “Least-squares problems,” in Numerical
+Optimization, 2nd ed.
+New York, NY: Springer, 2006, pp. 245–269.
+[Online]. Available: https://doi.org/10.1007/978-0-387-40065-5 10
+[4] H. P. Gavin, “The levenberg-marquardt algorithm for nonlinear least
+squares curve-fitting problems,” Department of Civil and Environmental
+Engineering Duke University, Tech. Rep., 2019. [Online]. Available:
+https://people.duke.edu/∼hpgavin/ce281/lm.pdf
+[5] M. Hagan and M. Menhaj, “Training feedforward networks with
+the marquardt algorithm,” IEEE Transactions on Neural Networks,
+vol.
+5,
+no.
+6,
+pp.
+989–993,
+1994.
+[Online].
+Available:
+http:
+//dx.doi.org/10.1109/72.329697
+[6] S. Ali, S. Riaz, Safoora, X. Liu, and G. Wang, “A levenberg-marquardt
+based neural network for short-term load forecasting,” Computers,
+Materials & Continua, vol. 75, no. 1, pp. 1783–1800, 2023. [Online].
+Available: http://dx.doi.org/10.32604/cmc.2023.035736
+[7] J. Zhang, J. Tian, A. M. Alcaide, J. I. Leon, S. Vazquez, L. G.
+Franquelo,
+H.
+Luo,
+and
+S.
+Yin,
+“Lifetime
+extension
+approach
+based on the levenberg-marquardt neural network and power routing
+of
+dc-dc
+converters,”
+IEEE
+Transactions
+on
+Power
+Electronics,
+vol. 38, no. 8, pp. 10 280–10 291, Aug. 2023. [Online]. Available:
+http://dx.doi.org/10.1109/tpel.2023.3275791
+[8] J. A. Taylor, W. Wang, B. Bala, and T. Bednarz, “Optimizing
+the optimizer for data driven deep neural networks and physics
+informed neural networks,” CoRR, vol. abs/2205.07430, 2022. [Online].
+Available: https://doi.org/10.48550/arXiv.2205.07430
+[9] M. Revanesh, S. S. Gundal, J. R. Arunkumar, P. J. Josephson,
+S.
+Suhasini,
+and
+T.
+K.
+Devi,
+“Artificial
+neural
+networks-based
+improved levenberg-marquardt neural network for energy efficiency
+and
+anomaly
+detection
+in
+wsn,”
+Wireless
+Networks,
+vol.
+30,
+no.
+6,
+pp.
+5613–5628,
+Mar.
+2023.
+[Online].
+Available:
+http:
+//dx.doi.org/10.1007/s11276-023-03297-6
+[10] M.
+Troiano,
+E.
+Nobile,
+F.
+Mangini,
+M.
+Mastrogiuseppe,
+C. Conati Barbaro, and F. Frezza, “A comparative analysis of
+the bayesian regularization and levenberg-marquardt training algorithms
+in neural networks for small datasets: A metrics prediction of neolithic
+laminar artefacts,” Information, vol. 15, no. 5, p. 270, May 2024.
+[Online]. Available: http://dx.doi.org/10.3390/info15050270
+[11] S. S. Koshy and L. J. Anbarasi, “Lmhistnet: Levenberg-marquardt based
+deep neural network for classification of breast cancer histopathological
+images,” IEEE Access, vol. 12, pp. 52 051–52 066, 2024. [Online].
+Available: http://dx.doi.org/10.1109/access.2024.3385011
+[12] F. Di Marco, “Pytorch levenberg-marquardt,” 2025. [Online]. Available:
+https://github.com/fabiodimarco/torch-levenberg-marquardt
+[13] ——, “Tensorflow levenberg-marquardt,” 2025. [Online]. Available:
+https://github.com/fabiodimarco/tf-levenberg-marquardt
+[14] M. Blondel, Q. Berthet, M. Cuturi, R. Frostig, S. Hoyer, F. Llinares-
+Lopez, F. Pedregosa, and J.-P. Vert, “Efficient and modular implicit
+differentiation,” in Advances in Neural Information Processing Systems
+35, ser. NeurIPS 2022.
+Neural Information Processing Systems
+Foundation, Inc. (NeurIPS), 2022, pp. 5230–5242. [Online]. Available:
+http://dx.doi.org/10.52202/068431-0378
+[15] S. Kandel, S. Maddali, Y. S. G. Nashed, S. O. Hruszkewycz,
+C. Jacobsen, and M. Allain, “Efficient ptychographic phase retrieval
+via a matrix-free levenberg-marquardt algorithm,” Optics Express,
+vol. 29, no. 15, p. 23019, July 2021. [Online]. Available: http:
+//dx.doi.org/10.1364/oe.422768
+[16] L.
+H¨ollein,
+A.
+Boˇziˇc,
+M.
+Zollh¨ofer,
+and
+M.
+Nießner,
+“3dgs-
+lm: Faster gaussian-splatting optimization with levenberg-marquardt,”
+in 2025 IEEE/CVF International Conference on Computer Vision
+(ICCV).
+IEEE, Oct. 2025, pp. 26 740–26 750. [Online]. Available:
+http://dx.doi.org/10.1109/iccv51701.2025.02482
+[17] S. Balay, S. Abhyankar, M. F. Adams, S. Benson, J. Brown,
+P. Brune, K. Buschelman, E. M. Constantinescu, L. Dalcin, A. Dener,
+V. Eijkhout, J. Faibussowitsch, W. D. Gropp, V. Hapla, T. Isaac,
+P. Jolivet, D. Karpeev, D. Kaushik, M. G. Knepley, F. Kong, S. Kruger,
+D. A. May, L. C. McInnes, R. T. Mills, L. Mitchell, T. Munson,
+J. E. Roman, K. Rupp, P. Sanan, J. Sarich, B. F. Smith, S. Zampini,
+H. Zhang, H. Zhang, and J. Zhang, “PETSc Web page,” 2026. [Online].
+Available: https://petsc.org/
+[18] B. Symoens, M. Rahimi, and M. Ahookhosh, “Inexact levenberg-
+marquardt methods under h¨older metric subregularity,” 2025. [Online].
+Available: https://arxiv.org/abs/2507.16461
+[19] M. R. Hestenes and E. Stiefel, “Methods of conjugate gradients for
+solving linear systems,” Journal of research of the National Bureau
+of Standards, vol. 49, no. 6, pp. 409–436, 1952. [Online]. Available:
+https://nvlpubs.nist.gov/nistpubs/jres/049/6/v49.n06.a08.pdf
+[20] S. Agarwal, N. Snavely, S. M. Seitz, and R. Szeliski, “Bundle
+adjustment in the large,” in Computer Vision - ECCV 2010, 11th
+European Conference on Computer Vision, Heraklion, Crete, Greece,
+September 5-11, 2010, Proceedings, Part II, ser. Lecture Notes
+in Computer Science, K. Daniilidis, P. Maragos, and N. Paragios,
+Eds., vol. 6312.
+Springer, 2010, pp. 29–42. [Online]. Available:
+https://doi.org/10.1007/978-3-642-15552-9\ 3
+[21] J.
+Bilski,
+B.
+Kowalczyk,
+A.
+Marchlewska,
+and
+J.
+M.
+Zurada,
+“Local levenberg-marquardt algorithm for learning feedforwad neural
+networks,” Journal of Artificial Intelligence and Soft Computing
+Research, vol. 10, no. 4, pp. 299–316, June 2020. [Online]. Available:
+http://dx.doi.org/10.2478/jaiscr-2020-0020
+
+
+[22] J. Ansel, E. Yang, H. He, N. Gimelshein, A. Jain, M. Voznesensky,
+B. Bao, P. Bell, D. Berard, E. Burovski, G. Chauhan, A. Chourdia,
+W. Constable, A. Desmaison, Z. DeVito, E. Ellison, W. Feng, J. Gong,
+M. Gschwind, B. Hirsh, S. Huang, K. Kalambarkar, L. Kirsch, M. Lazos,
+M. Lezcano, Y. Liang, J. Liang, Y. Lu, C. Luk, B. Maher, Y. Pan,
+C. Puhrsch, M. Reso, M. Saroufim, M. Y. Siraichi, H. Suk, M. Suo,
+P. Tillet, E. Wang, X. Wang, W. Wen, S. Zhang, X. Zhao, K. Zhou,
+R. Zou, A. Mathews, G. Chanan, P. Wu, and S. Chintala, “PyTorch
+2: Faster Machine Learning Through Dynamic Python Bytecode
+Transformation and Graph Compilation,” in 29th ACM International
+Conference on Architectural Support for Programming Languages and
+Operating Systems, Volume 2 (ASPLOS ’24).
+ACM, Apr. 2024.
+[Online]. Available: https://docs.pytorch.org/assets/pytorch2-2.pdf
+[23] J. Bradbury, R. Frostig, P. Hawkins, M. J. Johnson, Y. Katariya,
+C. Leary, D. Maclaurin, G. Necula, A. Paszke, J. VanderPlas,
+S. Wanderman-Milne, and Q. Zhang, “JAX: composable transformations
+of Python+NumPy programs,” 2018. [Online]. Available: http://github.
+com/jax-ml/jax
+[24] M. Abadi, A. Agarwal, P. Barham, E. Brevdo, Z. Chen, C. Citro,
+G.
+S.
+Corrado,
+A.
+Davis,
+J.
+Dean,
+M.
+Devin,
+S.
+Ghemawat,
+I. Goodfellow, A. Harp, G. Irving, M. Isard, Y. Jia, R. Jozefowicz,
+L. Kaiser, M. Kudlur, J. Levenberg, D. Mane, R. Monga, S. Moore,
+D. Murray, C. Olah, M. Schuster, J. Shlens, B. Steiner, I. Sutskever,
+K. Talwar, P. Tucker, V. Vanhoucke, V. Vasudevan, F. Viegas,
+O. Vinyals, P. Warden, M. Wattenberg, M. Wicke, Y. Yu, and X. Zheng,
+“Tensorflow: Large-scale machine learning on heterogeneous distributed
+systems,” 2016. [Online]. Available: https://arxiv.org/abs/1603.04467
+[25] F. Darema, “SPMD computational model,” in Encyclopedia of Parallel
+Computing, D. Padua, Ed.
+Boston, MA: Springer US, 2011, pp. 1933–
+1943. [Online]. Available: https://doi.org/10.1007/978-0-387-09766-4
+26
+[26] Z. Hu, S. Shen, T. Bonato, S. Jeaugey, C. Alexander, E. Spada,
+J. Dinan, J. Hammond, and T. Hoefler, “Demystifying nccl: An in-depth
+analysis of gpu communication protocols and algorithms,” in 2025
+IEEE Symposium on High-Performance Interconnects (HOTI).
+IEEE,
+Aug. 2025, pp. 48–59. [Online]. Available: http://dx.doi.org/10.1109/
+hoti66940.2025.00024
+[27] Gloo Contributors, “Gloo: Collective communications library with
+various
+primitives
+for
+multi-machine
+training,”
+2026.
+[Online].
+Available: https://github.com/pytorch/gloo
+[28] V. Thakkar, P. Ramani, C. Cecka, A. Shivam, H. Lu, E. Yan,
+J. Kosaian, M. Hoemmen, H. Wu, A. Kerr, M. Nicely, D. Merrill,
+D. Blasig, A. Atluri, F. Qiao, P. Majcher, P. Springer, M. Hohnerbach,
+J. Wang, and M. Gupta, “CUTLASS,” Jan. 2023. [Online]. Available:
+https://github.com/NVIDIA/cutlass
+[29] L. Deng, “The mnist database of handwritten digit images for
+machine learning research [best of the web],” IEEE Signal Processing
+Magazine, vol. 29, no. 6, pp. 141–142, Nov. 2012. [Online]. Available:
+http://dx.doi.org/10.1109/msp.2012.2211477
+[30] M. Harris. (2012) How to optimize data transfers in CUDA C/C++.
+NVIDIA Technical Blog. [Online]. Available: https://developer.nvidia.
+com/blog/how-optimize-data-transfers-cuda-cc/
+[31] Y. Lecun, L. Bottou, Y. Bengio, and P. Haffner, “Gradient-based
+learning
+applied
+to
+document
+recognition,”
+Proceedings
+of
+the
+IEEE, vol. 86, no. 11, pp. 2278–2324, 1998. [Online]. Available:
+http://dx.doi.org/10.1109/5.726791
+[32] NVIDIA Corporation, cuSOLVERMp, 2026, accessed: October 19,
+2026. [Online]. Available: https://docs.nvidia.com/cuda/cusolvermp/

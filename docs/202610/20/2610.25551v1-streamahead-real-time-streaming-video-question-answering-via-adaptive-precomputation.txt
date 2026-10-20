@@ -1,0 +1,1655 @@
+StreamAhead: Real-Time Streaming Video
+Question Answering via Adaptive Precomputation
+Haoyang Fan1
+Dhruv Parikh1
+Rajgopal Kannan2
+Viktor Prasanna1
+1University of Southern California (USC), Los Angeles, CA, USA
+2DEVCOM Army Research Office
+{haoyangf,dhruvash,prasanna}@usc.edu
+rajgopal.kannan.civ@army.mil
+Abstract—Real-time streaming video question answering with
+vision–language models must answer queries that arrive at any
+time with low latency while sustaining the video-processing rate
+required by the application. Existing systems construct key–value
+(KV) caches for the entire video as it arrives, although a query
+typically uses only a few of the preceding frames as evidence.
+This highlights a fundamental trade-off: performing more com-
+putation as video arrives reduces query-time computation but
+can increase processing lag, whereas deferring computation can
+increase the video-processing rate but requires additional query-
+time computation for retrieved content.
+We present StreamAhead, an algorithm–system co-design
+that exploits this trade-off through adaptive precomputation:
+dynamically controlling how much computation to complete for
+each video segment before a query arrives. StreamAhead encodes
+video segments independently and lets each remain at a different
+representation level, from inexpensive visual features to costly KV
+caches, completing KV caches only for the retrieved segments
+when a query arrives. StreamAhead profiles offline the cost of
+advancing a segment to each representation level. Its runtime
+uses these profiles to schedule segment computation concurrently
+with query execution, pipelining it across heterogeneous CPU and
+GPU resources while maintaining the required video-processing
+rate. StreamAhead achieves accuracy competitive with state-
+of-the-art methods with up to 10.4× lower time-to-first-token
+(TTFT), and up to 5.9× lower TTFT than state-of-the-art
+streaming systems. It sustains 30 FPS with P95 TTFT under 0.5 s,
+and up to 57 FPS with P95 TTFT under 2 s. To our knowledge,
+StreamAhead is the first real-time streaming video QA system
+with competitive accuracy, setting a new Pareto frontier between
+video-processing rate and TTFT.
+I. INTRODUCTION
+Streaming video question answering with vision–language
+models (VLMs) considers a continuously arriving video stream
+in which users may issue questions at arbitrary times [1]–
+[6]. An application specifies the video sampling rate and
+resolution that the system is expected to process. The system
+must sustain this processing rate; otherwise, a growing backlog
+creates processing lag, i.e., a delay between video arrival
+and completion of the required processing [7], making recent
+video unavailable when a query needs it. In this paper, we
+therefore study a fundamental question for streaming video
+question answering: how can we sustain the required video-
+processing rate while simultaneously minimizing time-to-first-
+token (TTFT), measured from query arrival to the first gener-
+ated token? We call a system real-time when it achieves both:
+it keeps pace with the incoming video and answers queries
+with low latency.
+Existing streaming video QA systems reduce query-time
+computation by precomputing reusable video representations,
+such as visual features or key–value (KV) caches, that can later
+be reused when relevant historical content is retrieved [2], [8]–
+[12]. For example, ReKV [2] incrementally constructs reusable
+KV states for incoming video and retrieves query-relevant
+cached states for answer generation. However, constructing
+deeper representations such as video KV caches requires
+substantial computation before the relevance of that content to
+a future query is known. A particular query typically depends
+on only a small subset of the retained video history, which
+can be identified through retrieval mechanisms [2], [9], [13],
+[14]. Fully constructing deep representations for the remaining
+history therefore spends processing capacity on content that
+may never be used by that query. This extra computation
+can cause the system to fall behind the incoming stream and
+accumulate processing lag, without benefiting the query.
+Rather than constructing full KV caches for the entire
+stream as video arrives, a system can retain intermediate
+results and postpone the remaining computation [15]–[17].
+This exposes a fundamental trade-off: performing more com-
+putation as video arrives reduces query-time computation but
+can increase processing lag, whereas deferring computation
+increases the video-processing rate but requires additional
+computation at query time if that content is later retrieved. This
+motivates what we call adaptive precomputation: deciding at
+runtime how much computation to complete before a query
+arrives, based on the current workload and available resources.
+Exploiting this trade-off, however, raises two challenges.
+First, the system must be able to complete different amounts
+of computation for different parts of the video. Many existing
+systems build the KV caches of new frames from the cached
+states of earlier frames [2], [9], [10], [18], [19]. Under this
+temporal dependency, completing one retrieved segment at
+query time first requires completing every earlier segment.
+The query-time cost then grows with the length of the video
+history, not with the retrieved content required as evidence
+for that query. Second, the system must decide at runtime
+which segments to precompute and how much computation to
+complete for each. It must also decide when to run this work,
+arXiv:2610.25551v1  [cs.DC]  18 Oct 2026
+
+
+StreamAhead motivation: adaptive precomputation sustains high video-processing rate while minimizing TTFT
+L1: selected frames       L2: visual features       L3: query-independent KV
+(a) Deep precomputation for each segment
+Build L3 for every incoming segment
+Incoming video stream (required rate)
+s1
+L3
+s2
+L3
+s3
+L3
+s4
+L3
+Wastes compute + memory on segments query does not need
+Query retrieves only s2 and s4
+s2
+s4
+L3 retained for s2 and s4
+Retrieved representation
+composition
+Answer
+High ingestion cost can cause processing lag under load
+Query construction fast, but lag can still delay answers
+(b) Deferral with temporal dependencies
+Retain intermediate states and postpone work
+Incoming video stream (required rate)
+s1
+L3
+s2
+L1
+s3
+L2
+s4
+L1
+Completion depends on preceding segment states
+Query retrieves s2 and s4
+s1
+s2
+s3
+s4
+Complete unfinished history through s4
+Retrieved representation
+composition
+Answer
+Remaining work grows with dependent history
+Deferred dependencies increase query-time work and TTFT
+(c) Ours: StreamAhead (adaptive precomputation)
+Independent, resumable segments at mixed depths
+Incoming video stream (required rate)
+s1
+L3
+s2
+L1
+s3
+L2
+s4
+L1
+Runtime adaptively advances segments independently
+Query retrieves s2 and s4
+s2
+s4
+Complete s2 and s4 only, independently and compose
+Retrieved representation
+composition
+Answer
+Sustain required stream progress
+while reducing query-time work
+Fig. 1. (a) Building KV caches for every segment, (b) deferring computation under temporal dependencies, and (c) adaptive precomputation in StreamAhead.
+since video processing, query answering, and precomputation
+share the same compute. Finally, it must place the results
+across CPU and GPU memory, as GPU memory is limited
+and loading results back from CPU memory delays the query.
+Throughout, the system must not fall behind the incoming
+video stream.
+To address these challenges, we present StreamAhead, an
+algorithm–system co-design for adaptive precomputation in
+streaming video QA (Figure 1). StreamAhead divides the
+incoming video into fixed-duration segments and precomputes
+each segment independently, without any temporal dependency
+on other segments’ KV caches. Each segment retains results at
+one of three representation levels, corresponding to successive
+stages of processing that segment: raw frames and a retrieval
+key (L1), visual features (L2), or a query-independent KV
+cache (L3). Later processing continues from the stored results
+without repeating completed stages. Before a query arrives,
+different segments can remain at different levels according to
+the available resources. At query time, StreamAhead retrieves
+relevant segments, reuses existing KV caches, and completes
+KV construction for retrieved segments still at L1 or L2.
+StreamAhead then combines the retrieved KV caches through
+retrieved representation composition, placing them in video
+order with continuous positions to form a single context [20],
+[21]. Because segments never attend to one another, we also
+propose a lightweight mechanism to recompute each segment’s
+short text suffix in this context, adding cross-segment interac-
+tion without rebuilding visual KV states.
+To address the second challenge, StreamAhead first profiles
+offline the compute and memory cost of advancing a segment
+to each representation level. It also profiles query TTFT
+over segments at each level, and uses both profiles to select
+the processing configuration and required representation level
+for the target workload [7], [22]. Online, a shared segment
+table tracks each segment’s completed representation level and
+whether its results are in CPU or GPU memory. It also tracks
+ongoing work on the segment, such as advancing it to a deeper
+level or moving it between CPU and GPU. With this table,
+video processing and query execution run concurrently: a
+query that needs a segment already being advanced reuses that
+work instead of repeating it. The runtime pipelines segment
+computation across heterogeneous CPU and GPU resources,
+overlapping CPU preparation and data movement with GPU
+execution. It also places representations across CPU and GPU
+memory [23]–[25]. Its scheduler keeps pace with the incoming
+video, gives priority to query work when a query arrives,
+and uses spare capacity for additional precomputation. While
+a query runs, processing of newly arriving video may fall
+behind. After the query, the runtime first clears this backlog
+and only then resumes additional precomputation. We make
+the following contributions:
+• Algorithm. We process video as independent segments
+with three reusable representation levels, so that different
+amounts of computation can be completed for each
+segment before a query arrives. We combine retrieved
+segments through retrieved representation composition,
+with a lightweight mechanism that adds cross-segment
+interaction.
+• Scheduling. We design profile-guided scheduling for
+adaptive precomputation. Offline profiling selects the
+required representation level. Online scheduling keeps
+pace with the incoming video, prioritizes queries, and
+uses spare capacity for additional precomputation.
+• Runtime. We build a runtime that executes video process-
+ing and queries concurrently. It uses a shared segment
+table, pipelining across heterogeneous CPU and GPU
+resources, and a CPU–GPU memory hierarchy.
+StreamAhead achieves accuracy competitive with state-of-
+the-art methods with up to 10.4× lower TTFT, and up to 5.9×
+lower TTFT than state-of-the-art streaming systems. It sustains
+30 FPS with P95 TTFT under 0.5 s, and up to 57 FPS with P95
+TTFT under 2 s. To our knowledge, StreamAhead is the first
+real-time streaming video QA system with competitive accu-
+racy, setting a new Pareto frontier between video-processing
+
+
+rate and TTFT.
+II. RELATED WORK
+A. Streaming Video Question Answering
+Streaming video question answering requires a model to
+retain information from a continuously arriving video and
+answer questions issued at arbitrary times [3], [4]. Early
+work trains online video assistants that learn when to re-
+spond and what to remember as frames arrive [1], [19], [26],
+[27]. Memory-based designs summarize the video history into
+compact visual features, events, or text [8], [28]–[30], while
+retrieval-based approaches select the parts of a long video that
+are relevant to a question [13], [14], [31]. Closest to our work,
+several methods retain the video history as KV caches, so
+that language-model computation can be reused when relevant
+content is retrieved [2], [9]–[11], or maintain a bounded KV
+cache within a fixed memory budget [12], [18], [32], [33].
+These works show that precomputing reusable video rep-
+resentations substantially reduces query-time computation. In
+most of them, however, the KV caches of new frames are
+constructed from the cached states of earlier frames. The
+computation completed as video arrives is also fixed by design:
+every incoming frame is encoded into the KV cache whether or
+not a later query uses it. Moreover, many of these methods are
+evaluated on answer quality with the video processed offline,
+without requiring that the incoming video be processed as fast
+as it arrives. Under real-time streaming, this fixed computation
+can fall behind the incoming video and accumulate processing
+lag, making recent video unavailable when a query needs it.
+StreamAhead instead processes video segments independently
+and decides at runtime how much computation to complete
+for each segment before a query arrives, i.e., adaptive pre-
+computation. It thereby keeps pace with the incoming video
+while completing KV caches only for the retrieved segments
+at query time.
+B. Efficient Streaming Video Inference
+A complementary line of work reduces the cost of pro-
+cessing each frame so that a system can keep pace with
+the incoming video. Token pruning and compression methods
+reduce the number of visual tokens processed by the lan-
+guage model [34]–[37], and streaming variants apply similar
+reductions as frames arrive [38], [39]. Other work invokes
+the language model only when relevant events occur [40], ac-
+celerates KV retrieval during streaming prefill with dedicated
+hardware [41], or reuses computation across overlapping video
+windows [42]. Recent systems also treat video-processing
+throughput and query latency as explicit goals: one pipelines
+model stages to sustain high frame rates, evaluating TTFT
+separately [43], and another precomputes only the first layers
+of the language model as video arrives and completes the
+remaining layers at query time [17]. Evaluation protocols
+have likewise begun to measure latency under realistic video
+arrival [44].
+These advances make each unit of computation cheaper
+or better overlapped. They either reduce the visual evidence
+processed by the model or fix how much computation is
+completed before a query arrives, such as a full KV cache for
+every video chunk or a fixed number of layers. StreamAhead
+keeps the visual evidence unchanged and adapts the amount of
+precomputation to the current workload: when spare capacity
+is available, segments advance to KV caches before a query
+arrives, and under heavier load they remain at earlier represen-
+tation levels so that processing lag does not accumulate. Token
+reduction is orthogonal to this decision and can be applied
+within each segment.
+C. Scheduling Under Rate and Latency Requirements
+Systems for live video analytics have long scheduled com-
+putation to keep pace with incoming streams. They adapt pro-
+cessing configurations to bound processing lag under limited
+resources [7], [22], schedule inference across GPUs to meet
+latency targets [45], and share accelerators between work that
+must keep pace with the stream and background work [46].
+Video query systems split computation between inexpensive
+processing as video arrives and expensive processing when
+a query is issued [15], [16]. In LLM serving, systems meet
+latency targets through iteration-level batching, paged KV
+memory, chunked prefill, and disaggregated prefill and de-
+coding [47]–[51], and multimodal serving systems separate
+or overlap visual encoding and language-model prefill [52]–
+[54]. Related techniques keep KV caches across CPU and
+GPU memory [23]–[25], use idle GPU capacity for deferrable
+work [55], or overlap the arrival of streaming input with
+prefill [56].
+StreamAhead builds on these ideas with two differences.
+Unlike video analytics systems, its precomputation produces
+reusable model states, and how much work is completed
+as video arrives versus at query time is decided at runtime
+for each segment rather than fixed in advance. Unlike LLM
+serving systems, its input is a continuously arriving video
+that must be processed at the required rate while queries
+are answered concurrently. StreamAhead’s scheduler therefore
+gives priority to keeping pace with the incoming video and
+answering queries, and uses spare capacity to precompute KV
+caches for segments that future queries may retrieve.
+III. PROBLEM DEFINITION
+Streaming input. We consider the incoming video as a
+sequence of fixed-duration segments s1, s2, . . . of duration ∆,
+where segment si becomes available at time ti = i∆. The
+application specifies the video sampling rate and resolution.
+Each segment therefore contains K frames to be processed,
+and the required video-processing rate is r = K/∆frames per
+second.
+Processing lag. As segments arrive, the system performs their
+required processing, which takes time Treq per segment. The
+system keeps pace with the incoming video if Treq ≤∆. Oth-
+erwise, each new segment adds Treq−∆to the processing lag,
+i.e., the delay between a segment’s arrival and the completion
+of its required processing. The lag then keeps accumulating
+as the stream continues.
+
+
+Query latency. A query q is issued at time tq, unknown in
+advance. A VLM answers it from the segments that have
+arrived by tq, and the answer may depend on any of them.
+Its time-to-first-token, TTFT(q), is measured from tq to the
+first generated token. It includes the computation still needed
+for the segments the query uses. Processing lag increases
+TTFT, because segments whose processing has fallen behind
+need more computation when a query uses them. As lag
+accumulates, more of the arrived video is affected. Existing
+streaming video QA methods typically measure TTFT on
+video that has already been processed, and therefore do not
+account for processing lag.
+Real-time streaming video QA. We call a system real-
+time at rate r with TTFT target τ if it keeps pace with
+the incoming video, Treq ≤∆, and answers every query
+with TTFT(q) ≤τ. The goal is to remain real-time at the
+highest video-processing rate, without reducing the sampling
+rate or resolution and without knowledge of future queries. The
+two conditions compete for the same resources: processing
+performed as segments arrive adds to Treq, whereas processing
+deferred until a query arrives adds to its TTFT.
+IV. METHOD
+As defined in Section III, StreamAhead balances Treq
+against TTFT through adaptive precomputation over indepen-
+dent segments at multiple representation levels. Before a query
+arrives, different segments may complete different amounts of
+computation. When a query is issued, StreamAhead retrieves
+a small set of relevant segments, reuses the deepest committed
+representation available for each segment, completes only
+the remaining computation required by those segments, and
+composes the resulting representations for answer generation.
+We use precomputation to denote the computation completed
+for each segment before a query arrives. Figure 2 gives an
+overview of StreamAhead.
+A. Independent Segment Processing
+StreamAhead partitions the continuous video stream into
+fixed-duration segments s1, s2, . . . , sn. Each segment is pro-
+cessed under the same fixed textual prefix, but its visual
+representation and query-independent language-model state
+are constructed without using state from other segments. This
+independence is essential for adaptive precomputation: if a
+segment depends on reusable states constructed from earlier
+video, deferring its computation may also require completing
+the preceding dependent history before the segment can re-
+sume computation. StreamAhead removes this cross-segment
+dependency, allowing each segment to advance, remain at an
+intermediate representation, or resume later without requiring
+neighboring segments to reach the same processing stage.
+Computed segment states therefore serve as the basic units
+of precomputation and runtime scheduling.
+Independent construction is not equivalent to jointly en-
+coding multiple segments because the reusable state of one
+segment has not attended to the visual content of other
+segments. StreamAhead accounts for this distinction when
+retrieved segment representations are combined at query time.
+B. Representation Levels and Precomputation
+For each segment si, StreamAhead maintains one commit-
+ted reusable representation at one of three levels:
+ℓi ∈{L1, L2, L3},
+L1(si)
+C1→2
+−−−→L2(si)
+C2→3
+−−−→L3(si),
+where C1→2 and C2→3 denote the computation required by the
+corresponding representation transitions. L1 contains the video
+frames and their temporal metadata, L2 contains the visual
+features and associated model inputs required to continue
+language-model processing without repeating visual encoding,
+and L3 contains the query-independent KV representation
+together with the token and position metadata required for later
+query-time composition. All three levels correspond to the
+same visual evidence: advancing to a deeper level completes
+additional query-independent computation.
+A retrieval key ki is constructed when L1 becomes available
+and is retained separately. Once L1 and ki are committed, the
+segment becomes available for retrieval, and the key remains
+unchanged as the reusable representation advances through L2
+and L3. The committed representation level therefore records
+how much computation has been completed and determines
+how much computation would remain if the segment were
+later retrieved. Different segments may remain at different
+representation levels before query arrival; the runtime policy
+that determines when these transitions execute is described
+in Section V-C. Precomputation changes only how much
+computation is completed for each segment. It never changes
+the total frames the model sees or their resolution.
+C. Query-Time Completion and Retrieved Representation
+Composition
+For a query q issued at time tq, let Iq denote the segments
+whose retrieval keys have been committed by tq, and let
+Rq ⊆Iq denote the segments selected by retrieval. Retrieved
+segments are ordered by their original video timestamps. For a
+retrieved segment si, the remaining representation construction
+is
+Cremain(si) =
+
+
+
+
+
+C1→2(si) + C2→3(si),
+ℓi = L1,
+C2→3(si),
+ℓi = L2,
+0,
+ℓi = L3.
+StreamAhead therefore reuses the deepest committed repre-
+sentation available for each retrieved segment and performs
+only Cremain(si) on the query critical path. Precomputation
+performed for segments outside Rq does not enter the current
+query’s critical path.
+Once the retrieved segments are available at L3, StreamA-
+head constructs a temporary context from their independently
+computed representations. The segments are placed in tem-
+poral order, their segment-local token positions are remapped
+to the composed sequence, and the cached keys are adjusted
+according to the resulting positional encoding. StreamAhead
+then combines the retrieved states and can recompute each
+
+
+1. Continuous Video Processing
+Incoming
+video stream
+Fixed-duration
+segmentation
+(e.g., 0.5 or 1 s)
+s₁
+s₂
+s₃
+Representation Construction
+L1: selected frames
+retrieval-ready
+L2: visual-feature
+representation
+L3: query-independent
+KV representation
+query-ready
+Segments 
+may remain 
+at different
+representation
+levels
+Segment State and Storage
+Shared Segment Table
+control metadata for each retained segment
+temporal metadata
+retrieval key
+committed representation level
+representation placement
+in-flight transition / pin
+CPU-GPU Representation
+Memory Hierarchy
+CPU
+representation
+store
+GPU
+representation
+cache
+migrate
+level and placement are independent
+Concurrency rules
+only committed
+representations visible
+pinned representations
+stay valid
+Online Representation Scheduling
+Heterogeneous Pipelined Execution
+cross-segment pipeline + CPU-GPU overlap
+commit representation
+profiling 
+input
+schedule representation construction
+schedule query processing
+lookup & pin
+2. Query Processing
+User
+Query
+Retrieve
+Segments
+Representation
+Completion
+Retrieved
+Representation
+Composition
+Answer
+Generation
+Answer
+Continuous video processing
+Query processing
+Shared state and
+storage
+CPU-GPU memory
+hierarchy
+Scheduler and
+execution control
+Concurrency
+rules
+Data flow
+Control / scheduling
+Fig. 2. Overview of StreamAhead: continuous video processing, shared segment state and storage, and query processing.
+Algorithm 1 StreamAhead Segment and Query Processing
+1: procedure INDEXSEGMENT(si)
+2:
+Construct L1(si) and retrieval key ki
+3:
+Commit L1(si), ki, and temporal metadata
+4: end procedure
+5: procedure ADVANCESEGMENT(si)
+6:
+if ℓi = L1 then
+7:
+Construct and commit L2(si) from L1(si)
+8:
+else if ℓi = L2 then
+9:
+Construct and commit L3(si) from L2(si)
+10:
+end if
+11: end procedure
+12: procedure ANSWERQUERY(q, tq)
+13:
+Rq ←RETRIEVE(q, tq)
+14:
+Order Rq by video time
+15:
+for all si ∈Rq do
+16:
+Reuse the deepest committed representation of si
+17:
+Complete si to L3 if necessary
+18:
+end for
+19:
+Remap positions and compose retrieved L3 represen-
+tations
+20:
+Append q and generate the answer
+21: end procedure
+segment’s short text suffix to add cross-segment interaction.
+The composed context does not modify the persistent repre-
+sentations retained for future queries. Algorithm 1 summarizes
+segment and query processing. Retrieval and composition
+details are described in Section VI.
+V. SYSTEM DESIGN
+StreamAhead builds on independent segment processing and
+representation levels to support adaptive precomputation. A
+shared segment table maintains each segment’s committed rep-
+resentation, placement, and in-flight state, providing a consis-
+tent view for concurrent video processing and query execution.
+The system combines offline profiling with an online runtime
+(Figure 3). Offline profiling characterizes computation, query-
+time, and memory costs to select a processing configuration
+and required representation level. During online execution,
+the scheduler uses these profiles and the shared segment
+state to select representation transitions and assign execution
+priorities. A heterogeneous CPU–GPU pipeline executes the
+scheduled work through cross-segment pipelining and CPU–
+GPU overlap, while reporting execution progress through the
+shared table. Further, a CPU–GPU representation memory
+hierarchy manages the placement of completed representations
+under bounded memory.
+A. Offline Profiling and Configuration Selection
+StreamAhead profiles continuous video processing and
+query-time execution before online execution. For a fixed
+model, resolution, segment duration, retrieval configuration,
+and composition method, the profiler varies the number of
+frames processed per segment, K (Section III). For each candi-
+date K, the profiler measures the wall-clock latency of L1 and
+retrieval-key construction, L1-to-L2 visual encoding, and L2-
+to-L3 KV construction. It also records the corresponding L2
+and L3 memory footprints. Using representations constructed
+under the same configuration, StreamAhead measures end-
+to-end TTFT over segments at each level, and the major
+
+
+(a) Offline Profiling and Configuration Selection
+1  Candidate Configurations
+1
+Frames per segment
+K (primary profiling)
+2
+Representation paths
+L1  |  L1 → L2  |  L2 → L3
+3
+Execution configurations
+grouping, batching, …
+Offline Profiler / Cost Model
+Configuration
+Stage Time
+Memory
+Sustainable?
+L1
+–
+–
+✓
+L1 → L2
+–
+–
+✓
+L2 → L3
+–
+–
+△
+L1 + L2
+–
+–
+✓
+Selected Operating Configuration (example)
+Incoming segment
+L1 + L2
+committed L2
+L2 → L3
+required path
+(for all segments)
+additional path
+(opportunistic)
+(c) Online Representation Scheduling
+Normal
+•  Serve stream work
+•  Use spare capacity
+for deeper reps
+Query-Priority
+•  Give query work
+higher priority
+•  Stream work continues
+•  Deeper reps run
+opportunistically
+Recovery
+•  Clear required
+stream backlog
+•  Profiling guided
+    batches start 
+query
+arrives
+query
+completes
+(backlog)
+backlog cleared / stream caught up
+(b) Online Pipelined Execution
+Runtime state
+Time
+Normal
+Query-Priority
+Recovery
+Normal
+CPU preparation
+(decode, preprocess, etc.)
+…
+GPU required work
+(e.g., L1 + L2, for all segments)
+…
+GPU additional work
+(e.g., L2 → L3, selective)
+…
+Query work
+(on-demand segments)
+…
+Recovery / catch-up
+(accumulated stream work)
+…
+query arrives
+query completes (with pending work)
+backlog cleared
+prep S1
+prep S2
+prep S3
+prep S4
+prep S5
+prep S6
+prep S7
+S1: L1 + L2
+S2: L1 + L2
+S3: L1 + L2
+S4: L1 + L2
+S5: L1 + L2
+S6: L1 + L2
+S7: L1 + L2
+S1: L2 → L3
+S2: L2 → L3
+S3: L2 → L3 (in progress)
+S4: L2 → L3
+Query-related work
+(complete to L3, compose, generate)
+Catch-up execution
+(profiled batches of executable work)
+= CPU work
+= GPU required work (e.g., L1 + L2)
+= GPU additional work (e.g., L2 → L3)
+= query work
+= recovery / catch-up work
+= runtime state
+= execution flow
+Fig. 3. Offline profiling, online pipelined execution, and runtime scheduling states in StreamAhead.
+query-time costs associated with representation movement
+and composition. These profiles characterize how the visual
+workload affects both continuous processing and subsequent
+query execution. Configuration selection uses these measure-
+ments together with the required video-processing rate, TTFT
+target, available memory, and answer-quality measurements to
+select the processing configuration. The selected configuration
+fixes the visual workload and required representation level for
+incoming segments. The required level must be maintained for
+every incoming segment, while advancement beyond this level
+remains an online scheduling decision.
+B. Shared Segment Table
+StreamAhead maintains a shared record for every retained
+video segment. Each record contains the segment’s temporal
+metadata and retrieval key, its committed representation level
+(the latest completed level) and representation placement (CPU
+or GPU memory), any in-flight transition (work currently
+advancing or moving the segment), and whether the com-
+mitted representation is currently in use. Video processing,
+precomputation, query execution, and memory management
+consult the same record when operating on a segment. Only
+committed representations are visible to other tasks. When
+a representation transition begins, the previously committed
+representation remains available until the new representation
+has been fully constructed. For example, a segment undergoing
+an L2-to-L3 transition remains committed at L2 until the
+transition completes, after which the new L3 representation
+becomes visible. Model execution and data movement occur
+outside the table update, so no task sees a partially constructed
+representation. The table also records in-flight transitions so
+that concurrent tasks do not duplicate the same representation
+construction. If a query requires a transition that is already
+in progress, it can reuse or wait for that work. Represen-
+tations used by an active query are pinned until the query
+releases them, preventing migration or reclamation during use.
+Retrieval keys remain unchanged as representation level and
+placement change, keeping retrieval independent of runtime
+representation management.
+C. Online Representation Scheduling
+After the processing configuration is fixed, StreamAhead
+schedules representation transitions to keep pace with the
+incoming video while using available capacity for additional
+precomputation. For the selected configuration, transitions
+needed to reach the required representation level constitute
+required video processing, while transitions beyond this level
+are additional precomputation. The scheduler uses offline
+execution profiles and the shared segment table to select
+transitions and assign execution priorities. Required video
+processing takes precedence over additional precomputation,
+limiting interference with the processing of newly arriving seg-
+ments. StreamAhead operates in three runtime states: Normal,
+Query-Priority, and Recovery.
+1) Normal: Newly arriving segments are prioritized to keep
+pace with the incoming video and prevent processing lag from
+accumulating. When the required work is caught up, available
+execution capacity is used to advance segments toward deeper
+representations. The scheduler selects transitions according
+to their committed and in-flight states, avoiding duplicate
+computation.
+2) Query-Priority: When a query arrives, computation re-
+quired to complete the retrieved segments and generate the
+answer becomes latency-critical and runs first. Newly arriving
+video continues to be processed, while additional precompu-
+tation receives lower priority. Already executing transitions
+are not explicitly aborted or restarted, and compatible in-
+flight computation remains reusable. Query execution may
+temporarily reduce the resources available for incoming video
+processing.
+3) Recovery: If required video processing accumulates dur-
+ing query execution, StreamAhead enters Recovery to clear
+
+
+this backlog. Rather than simply resuming normal execution,
+the scheduler uses the current backlog and offline profiles
+to select an efficient batch size. When multiple compatible
+transitions are already ready, it may select batched execution
+to improve backlog processing throughput under the avail-
+able resource constraints. No additional waiting is introduced
+solely to form a batch. Once the required backlog is cleared,
+StreamAhead returns to Normal execution and resumes addi-
+tional precomputation.
+D. Heterogeneous Pipelined Execution
+StreamAhead executes scheduled representation transitions
+through a heterogeneous CPU–GPU pipeline. The scheduler
+selects the work and its execution priority, while the pipeline
+provides concurrent execution across segments and processing
+stages. Execution progress is recorded in the shared segment
+table and made available for subsequent scheduling decisions.
+1) Cross-segment pipelining: Segment independence al-
+lows different segments to occupy different stages, such as
+L1→L2 and L2→L3, concurrently. A segment does not need
+to reach the deepest representation level before subsequent
+segments begin processing. This enables incoming video pro-
+cessing and additional precomputation to overlap while pre-
+serving the required computation order within each segment.
+2) CPU–GPU overlap: StreamAhead pipelines CPU-side
+frame preparation, metadata processing, and data movement
+with GPU model execution across segments. Preparation and
+data movement for one segment can overlap with GPU com-
+putation for another, reducing GPU idle time.
+3) Concurrent execution support: The execution pipeline
+supports concurrent GPU work at different priorities and
+batched execution of compatible representation transitions.
+The scheduler assigns priorities and selects batch sizes from
+the execution profiles, while the pipeline executes the sched-
+uled work and reports completion through the shared segment
+table.
+E. CPU–GPU Representation Memory Hierarchy
+StreamAhead manages representation level and represen-
+tation placement independently. For segment si, let ℓi ∈
+{L1, L2, L3} and pi ∈{CPU, GPU} denote its committed
+representation level and current placement, respectively. The
+representation level records completed computation, whereas
+placement records where the committed representation is
+stored. StreamAhead uses a CPU representation store for
+retained representations and a bounded GPU representation
+cache for representations needed on the GPU. Migration
+changes placement without changing the committed level. For
+example, (L3, GPU) →(L3, CPU) preserves the completed
+L3 representation, which can later be loaded back to the
+GPU without repeating visual encoding or KV construction.
+Each segment keeps one committed representation. A tran-
+sition or migration may temporarily require both the current
+representation and a destination allocation until the operation
+completes. Representations pinned by active queries cannot be
+migrated or reclaimed until those queries release them. Before
+admitting new work, StreamAhead accounts for committed
+representations, transition outputs, data movement, and tem-
+porary execution workspace. When the GPU representation
+cache reaches its capacity, unpinned representations, least
+recently used first, can migrate to the CPU representation store
+while retaining their committed levels. Query-time position
+remapping, representation composition, and answer generation
+operate on temporary per-query state and do not modify the
+persistent representation stored for a segment.
+VI. IMPLEMENTATION
+This section presents the implementation of StreamAhead’s
+algorithmic components and CPU–GPU runtime.
+A. Algorithmic Realization
+For each fixed-duration segment, L1 retains the frames
+and temporal metadata, L2 stores visual-encoder outputs and
+the inputs to the language model, and L3 stores query-
+independent KV states and position metadata. A SigLIP image
+encoder [57] constructs the retrieval key alongside L1. At
+query time, the SigLIP text encoder produces a question
+embedding, and retrieval combines the newest segment with
+semantically ranked historical segments using cosine similar-
+ity. For representation composition, StreamAhead retains one
+shared textual prefix, orders retrieved segments by video time,
+remaps their positions, and applies MRoPE relocation [58]
+to cached keys. Concat directly assembles the positioned
+KV caches, while TailRepair, our lightweight mechanism,
+recomputes each segment’s short text suffix in the composed
+context. Both operate on temporary per-query state without
+modifying persistent representations.
+B. Shared Segment State
+Each retained segment has a CPU-resident record in the
+shared segment table containing its temporal metadata, re-
+trieval key, committed representation level, placement, storage
+handle, in-flight transition, and active-use state. Transitions
+follow a begin–compute–commit sequence: computation and
+data movement occur outside the table update, and the new
+representation becomes visible only after completion. Queries
+reuse or wait for compatible in-flight transitions and pin the
+representations they use to prevent migration or reclamation
+during use.
+C. Representation Storage and Query Access
+StreamAhead uses a bounded GPU representation cache for
+recently used L3 representations and a larger CPU represen-
+tation store for L1 data, persistent L2 representations, and
+evicted L3 representations. Migration preserves the committed
+representation level. Before a transition or migration, the
+runtime reserves memory for the required allocations and
+execution workspace, and previous storage is reclaimed only
+after the new representation is committed and no query still
+uses it. At query time, GPU-resident L3 is reused directly,
+CPU-resident L3 is transferred to the GPU, and shallower
+representations are completed to L3 as needed. Temporary
+
+
+per-query state is released after generation, and the associated
+representations are unpinned.
+D. Concurrent Execution Runtime
+StreamAhead uses asynchronous CPU workers and CUDA
+streams to implement cross-segment pipelining and CPU–GPU
+overlap. GPU work is assigned according to its runtime role
+rather than a fixed representation level: required video process-
+ing and query-critical work use the higher-priority execution
+path, while additional precomputation uses the lower-priority
+path. CUDA stream priority provides preferential scheduling
+at kernel boundaries without explicitly preempting in-flight
+representation transitions. During Recovery, compatible ready
+transitions may use profiled batched execution when benefi-
+cial, without waiting for future segments to form a batch. The
+offline profiler measures costs using the same execution paths
+to support configuration selection and recovery.
+VII. EVALUATION
+A. Experimental Setup
+Benchmarks and models. We evaluate answer quality and
+algorithmic sensitivity on OVO-Bench (Perception and Back-
+ward) and StreamingBench (Real-Time). Videos are tempo-
+rally sampled at the evaluated video-processing rate, with
+source frames repeated when the requested rate exceeds the
+source frame rate. We evaluate Qwen2.5-VL-7B and Qwen3-
+VL-8B, comparing answer quality with published results. For
+system comparisons, we select three representative stream-
+ing video QA methods: ReKV for KV-cache retrieval and
+reuse, StreamingVLM for incremental streaming inference
+with temporally dependent KV states, and OASIS for algo-
+rithmic optimization through hierarchical video memory and
+retrieval. These methods represent complementary approaches
+to streaming video processing and query serving.
+System configuration. Unless specified otherwise, system
+experiments use Qwen3-VL-8B with BF16, FlashAttention-
+2, and 448-pixel visual inputs. Each segment maintains a
+separate retrieval key, and the default retrieval policy selects
+the latest segment plus two semantically ranked historical
+segments. Offline profiling selects the required representation
+level for each rate. In the rate sweep, the required level is L3
+below 30 FPS, L2 from 30 to 80 FPS, and L1 above 80 FPS.
+Beyond the required level, the runtime performs additional
+L3 precomputation when capacity allows. The online replay
+comparison uses L2 as the required level. We use a 16-GiB
+GPU representation cache.
+Hardware and scope. Experiments run on a server with two
+AMD EPYC 9654 CPUs, 1.5 TiB of host memory, and four
+NVIDIA RTX 6000 Ada GPUs (48 GiB each). All experiments
+use just one GPU.
+B. Answer Quality and Sensitivity
+Tables I and II evaluate whether independent segment
+processing and retrieved representation composition preserve
+TABLE I
+ANSWER QUALITY ON OVO-BENCH (ACCURACY, %).
+Method
+Perception
+Backward
+Gemini 1.5 Pro
+69.3
+62.5
+GPT-4o
+64.5
+60.8
+LLaVA-Video-7B
+62.3
+53.7
+LLaVA-OneVision-7B
+62.0
+43.7
+Flash-VStream-7B
+28.4
+27.4
+VideoLLM-online-8B
+22.2
+16.2
+StreamChat
+50.1
+47.4
+Dispider
+54.6
+36.1
+ReKV (LLaVA-OV-7B)
+64.4
+64.6
+StreamingVLM (Qwen2.5-VL-7B)
+61.96
+–
+OASIS (Qwen2.5-VL-7B)
+67.3
+52.6
+OASIS (Qwen3-VL-8B)
+78.1
+57.2
+Qwen2.5-VL-7B
+60.9
+50.2
+StreamAhead (Qwen2.5-VL-7B)
+69.1
+51.5
+Qwen3-VL-8B
+66.8
+51.2
+StreamAhead (Qwen3-VL-8B)
+76.9
+53.5
+TABLE II
+ANSWER QUALITY ON STREAMINGBENCH REAL-TIME (ACCURACY, %).
+EXTERNAL RESULTS ARE FROM PUBLISHED EVALUATIONS;
+STREAMAHEAD USES A RANDOMLY SAMPLED SUBSET.
+Method
+Accuracy (%)
+VideoLLM-online-8B
+35.99
+Dispider
+67.63
+StreamAgent-7B
+74.28
+Think while Watching
+74.40
+SAVEMem
+76.00
+HERMES
+79.44
+ReKV
+69.10
+ReKV + STC
+65.20
+OASIS (Qwen2.5-VL-7B)
+70.59
+OASIS (Qwen3-VL-8B)
+78.22
+StreamAhead (Qwen3-VL-8B)
+79.30
+answer quality. We evaluate StreamAhead on the full OVO-
+Bench Perception and Backward subsets and a randomly sam-
+pled subset of approximately half of StreamingBench Real-
+Time. Audio-dependent Omni-Source questions are excluded.
+External baseline results are taken from the corresponding
+publications, including results compiled in OASIS, rather than
+reproduced by us. The Real-Time results therefore provide
+reference comparisons, not evaluations on identical queries.
+Relative to the corresponding base VLMs, StreamAhead im-
+proves OVO-Bench Perception accuracy from 60.9% to 69.1%
+with Qwen2.5-VL-7B and from 66.8% to 76.9% with Qwen3-
+VL-8B, while maintaining comparable Backward accuracy. On
+StreamingBench Real-Time, StreamAhead achieves 79.30%,
+remaining competitive with published methods. These results
+suggest that reusable segment representations preserve com-
+petitive answer quality without reducing the frames the model
+sees.
+Table III examines the trade-off between the frames and
+segments used, answer accuracy, and query latency. Processing
+too few frames can miss useful evidence, while increasing the
+number of frames or retrieved segments does not consistently
+
+
+TABLE III
+SENSITIVITY TO ALGORITHMIC SETTINGS.
+Setting
+Accuracy (%)
+Mean TTFT (ms)
+Bwd.
+RT
+Bwd.
+RT
+Segmentation
+0.5 s / 15 frames
+53.5
+79.3
+146.1
+204.3
+0.5 s / 8 frames
+52.5
+78.8
+123.1
+154.2
+0.5 s / 4 frames
+52.0
+78.5
+90.1
+117.9
+1.0 s / 30 frames
+52.0
+78.0
+275.2
+334.4
+1.0 s / 4 frames
+49.5
+77.5
+89.9
+98.4
+Retrieval
+Semantic Top-3
+48.0
+63.0
+158.9
+376.6
+Latest + Sem. Top-1
+51.0
+80.0
+120.8
+164.4
+Latest + Sem. Top-2
+53.5
+79.3
+146.1
+204.3
+Latest + Sem. Top-5
+52.0
+78.5
+296.2
+357.7
+Composition
+Concat
+53.5
+79.3
+146.1
+204.3
+TailRepair
+54.0
+79.5
+266.1
+344.5
+improve accuracy and substantially increases TTFT. Latest
++ Semantic Top-2 achieves the highest Backward accuracy
+among the evaluated retrieval policies, whereas Top-1 per-
+forms slightly better on Real-Time. This suggests that many
+Real-Time questions can be answered using recent evidence
+without extensive historical retrieval. TailRepair provides mod-
+est accuracy gains at considerably higher latency. We therefore
+select 0.5-s segments with 15 frames, Latest + Semantic Top-2
+retrieval, and Concat as a balanced default for the subsequent
+system evaluation.
+C. Video Processing Rate vs. Query Latency
+We evaluate the rate–latency trade-off through mean TTFT
+across video-processing rates and the highest rate satisfying
+each P95 TTFT target. For StreamAhead’s rate and TTFT-
+target sweeps, each replay processes 20 s of video as 40
+segments of 0.5 s. One query is issued at the end of the trace,
+and video input stops when the query arrives. Section VII-D
+evaluates queries while video continues to arrive. Figure 4(a)
+shows three operating regions selected by offline profiling.
+Below 30 FPS, L3 is required, so incoming segments complete
+their KV representations before queries arrive, enabling low
+TTFT through direct reuse. From 30 to 80 FPS, L2 is required
+to maintain the video-processing rate, while additional L3
+precomputation uses available capacity. As the input rate
+increases, fewer segments can reach L3 before query arrival,
+increasing the remaining query-time computation and TTFT.
+Above 80 FPS, L1 becomes the required level, further re-
+ducing mandatory processing per segment while deferring
+visual encoding and KV construction until needed. This allows
+StreamAhead to process up to 100 FPS, although query latency
+increases under the higher workload. Figure 4(b) quantifies
+this trade-off under P95 TTFT targets: StreamAhead supports
+28, 30, 38, 57, and 90 FPS under targets of 0.2, 0.5, 1, 2,
+and 5 s, respectively, with P95 processing lag within 1 s. At
+100 FPS, P95 TTFT exceeds the 5-s target, highlighting the
+need to consider processing rate and query latency jointly.
+TABLE IV
+MEAN TTFT UNDER ONLINE REPLAY (MS).
+Method
+2 FPS
+8 FPS
+16 FPS
+StreamAhead
+176.6
+273.1
+360.8
+ReKV
+191.6
+771.3
+–
+StreamingVLM
+294.4
+678.7
+2140.5
+OASIS
+1830.4
+1557.2
+–
+Table IV provides a separate online replay comparison. At
+8 FPS, StreamAhead achieves 2.5× and 2.8× lower mean
+TTFT than StreamingVLM and ReKV, respectively. At 16
+FPS, its TTFT is 5.9× lower than StreamingVLM, while at 2
+FPS it achieves 10.4× lower TTFT than OASIS. Together,
+these results show how adaptive precomputation balances
+continuous video processing against query-time computation
+across different workload intensities.
+D. Online Representation Scheduling
+We evaluate how StreamAhead accumulates and clears
+temporary processing lag under continuous video arrival. We
+use 0.5-s segments at 30 and 40 FPS, containing 15 and 20
+frames, respectively, with L2 as the required representation
+level. Generation budgets of 1, 16, 60, and 128 tokens produce
+different Query-Priority durations, while video continues to
+arrive throughout query execution and recovery. During Query-
+Priority, StreamAhead continues L1 construction for incoming
+segments while prioritizing query-critical work on shared
+resources, so required L2 processing can temporarily fall
+behind. After query execution, Recovery prioritizes pending
+L2 work and pipelines it with the processing of newly arriving
+segments. Once the required backlog is cleared, the runtime
+returns to Normal and resumes additional L3 precomputation.
+Figure 5 reports StreamAhead’s peak processing lag and
+recovery time as functions of Query-Priority duration. At both
+input rates, longer Query-Priority durations lead to higher peak
+lag and longer recovery in the measured runs. StreamAhead
+then catches up with the incoming video while new segments
+continue to arrive. These results characterize the temporary
+lag and subsequent catch-up behavior of online representation
+scheduling under continuous input.
+E. Runtime Ablation Study
+Table V evaluates three runtime mechanisms over 180 seg-
+ments at 30, 40, and 50 FPS. All other settings, including the
+16-GiB GPU cache and GPU execution optimizations, remain
+unchanged. Required-Only disables additional L3 precompu-
+tation and maintains only the required L2 level. No Query
+Task Priority equalizes software task priorities while retaining
+CUDA streams. No Pipeline disables CPU–GPU stage overlap.
+Required-Only substantially increases TTFT due to query-time
+L3 completion, while removing query priority causes smaller
+latency increases. More importantly, No Pipeline meets the
+0.5-s P95 processing lag target at 30 FPS but exceeds it
+at 40 and 50 FPS, reaching 1.0 and 1.5 s, respectively. In
+
+
+(a) Mean TTFT across video-processing rates.
+(b) Video-processing rate under P95 TTFT targets.
+Fig. 4. Video-processing-rate–TTFT trade-off. (a) Mean TTFT across video-processing rates, showing three required representation levels selected by offline
+profiling: L3 below 30 FPS, L2 from 30 to 80 FPS, and L1 above 80 FPS. (b) Highest video-processing rate satisfying each P95 TTFT target. External
+methods are shown at their measured TTFT for reference.
+(a) Peak processing lag
+(b) Recovery time
+Fig. 5. Processing lag and recovery for StreamAhead at 30 and 40 FPS under
+continuous video arrival. (a) Peak processing lag and (b) recovery time versus
+Query-Priority duration.
+TABLE V
+RUNTIME ABLATION AT 30, 40, AND 50 FPS. TTFT IS REPORTED IN
+MILLISECONDS. P95 L2 LAG IS REPORTED IN SECONDS. THE TARGET LAG
+IS 0.5 S. ALL CONFIGURATIONS USE A 16-GIB GPU CACHE.
+Configuration
+Mean TTFT
+P95 TTFT
+P95 L2 Lag
+L3-ready
+30 FPS
+Full StreamAhead
+198
+330
+0.5
+96.2%
+Required-Only
+1181
+1283
+0.5
+0.0%
+No Query Task Priority
+238
+530
+0.5
+94.8%
+No Pipeline
+295
+453
+0.5
+93.7%
+40 FPS
+Full StreamAhead
+622
+830
+0.5
+62.7%
+Required-Only
+1586
+1732
+0.5
+0.0%
+No Query Task Priority
+682
+851
+0.5
+61.3%
+No Pipeline
+859
+1068
+1.0
+58.2%
+50 FPS
+Full StreamAhead
+1011
+1769
+0.5
+33.5%
+Required-Only
+2201
+2393
+0.5
+0.0%
+No Query Task Priority
+1074
+1810
+0.5
+32.2%
+No Pipeline
+1216
+1952
+1.5
+31.5%
+contrast, Full StreamAhead maintains the lag target across
+all rates while achieving the lowest TTFT, demonstrating the
+importance of pipeline overlap for sustaining video processing
+under higher workloads.
+F. Representation Reuse and Memory Placement
+We evaluate the memory hierarchy by separating represen-
+tation level, which determines remaining query computation,
+from placement, which determines whether completed states
+must be transferred. L3 representations require 33.6 MiB per
+TABLE VI
+TTFT UNDER DIFFERENT HISTORICAL REPRESENTATION STATES (MS).
+Historical state
+Evict D2H L3 H2D L2→L3 TTFT
+0/2 L3 on GPU
+86.1
+59.9
+0.0
+254.5
+1/2 L3 on GPU
+39.8
+29.9
+0.0
+176.1
+2/2 L3 on GPU
+0.0
+0.0
+0.0
+90.1
+1 CPU L2 + 1 GPU L3
+36.6
+0.0
+339.3
+490.1
+segment with one frame and 841.3 MiB with 30 frames, moti-
+vating a bounded 16-GiB GPU cache backed by CPU storage.
+Under Latest + Semantic Top-2 retrieval, approximately 35%
+of retrieved historical L3 states are served directly from GPU
+memory. Table VI holds the retrieved segments fixed while
+varying their states: when both are GPU-resident L3, TTFT
+is 90.1 ms, compared with 254.5 ms when neither historical
+L3 is in GPU memory; when one is only at L2, query-time
+completion increases TTFT to 490.1 ms. These results show
+why reusable computation and its CPU–GPU placement must
+be managed separately under a fixed GPU memory budget.
+VIII. CONCLUSION
+This paper presented StreamAhead, an algorithm–system
+co-design for real-time streaming video QA. StreamAhead
+processes video segments independently at three representation
+levels and decides at runtime how much computation to
+complete for each segment before a query arrives. Its profile-
+guided scheduler and concurrent CPU–GPU runtime keep pace
+with the incoming video while completing KV caches only
+for retrieved segments. StreamAhead maintains competitive
+accuracy with up to 10.4× lower TTFT than state-of-the-
+art methods, and sustains 57 FPS with P95 TTFT under 2 s,
+setting a new Pareto frontier between video-processing rate
+and TTFT. These results show that how much computation to
+complete before a query arrives should be a runtime decision.
+StreamAhead has limitations. Because segments are encoded
+independently, they do not attend to one another, and suffix
+recomputation adds only limited cross-segment interaction.
+
+
+Our system evaluation uses a single GPU, and rates above the
+source frame rate repeat source frames. Offline profiles also
+assume a stable workload; extending StreamAhead to multiple
+GPUs and changing workloads is future work.
+ACKNOWLEDGMENT
+AI assistants (ChatGPT and Claude) were used to draft and
+edit text, write code, and manage experiments. The authors
+take full responsibility for all content.
+REFERENCES
+[1] J. Chen, Z. Lv, S. Wu, K. Q. Lin, C. Song, D. Gao, J.-W. Liu,
+Z. Gao, D. Mao, and M. Z. Shou, “Videollm-online: Online video large
+language model for streaming video,” in 2024 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR).
+IEEE, 2024, pp.
+18 407–18 418.
+[2] S. Di, Z. Yu, G. Zhang, H. Li, H. Cheng, B. Li, W. He, F. Shu,
+and H. Jiang, “Streaming video question-answering with in-context
+video kv-cache retrieval,” in International Conference on Learning
+Representations, vol. 2025, 2025, pp. 42 115–42 127.
+[3] J. Niu, Y. Li, Z. Miao, C. Ge, Y. Zhou, Q. He, X. Dong, H. Duan,
+S. Ding, R. Qian et al., “Ovo-bench: How far is your video-llms from
+real-world online video understanding?” in 2025 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR).
+IEEE, 2025, pp.
+18 902–18 913.
+[4] J. Lin, Z. Fang, C. Chen, H. Cheng, Z. Wan, F. Luo, Z. Wang, P. Li,
+Y. Liu, and M. Sun, “Streamingbench: Assessing the gap for mllms to
+achieve streaming video understanding,” in ICASSP 2026-2026 IEEE
+International Conference on Acoustics, Speech and Signal Processing
+(ICASSP).
+IEEE, 2026, pp. 12 147–12 151.
+[5] J. Yang, S. Liu, H. Guo, Y. Dong, X. Zhang, S. Zhang, P. Wang,
+Z. Zhou, B. Xie, Z. Wang et al., “Egolife: Towards egocentric life
+assistant,” in 2025 IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR).
+IEEE, 2025, pp. 28 885–28 900.
+[6] F. Ragusa, M. Mazzamuto, R. Forte, I. D’Ambra, J. Fort, J. Engel,
+A. Furnari, and G. M. Farinella, “Ego-extra: video-language egocentric
+dataset for expert-trainee assistance,” in Proceedings of the IEEE/CVF
+Winter Conference on Applications of Computer Vision, 2026, pp. 4438–
+4450.
+[7] H. Zhang, G. Ananthanarayanan, P. Bodik, M. Philipose, P. Bahl, and
+M. J. Freedman, “Live video analytics at scale with approximation and
+Delay-Tolerance,” in 14th USENIX Symposium on Networked Systems
+Design and Implementation (NSDI 17), 2017, pp. 377–392.
+[8] H. Zhang, Y. Wang, Y. Tang, Y. Liu, J. Feng, and X. Jin, “Flash-
+vstream: Efficient real-time understanding for long video streams,” in
+2025 IEEE/CVF International Conference on Computer Vision (ICCV).
+IEEE, 2025, pp. 21 059–21 069.
+[9] Y. Chen, X. Bai, Z. Wang, C. Bai, Y. Dai, and M. Lu, “Streamkv:
+Streaming video question-answering with segment-based kv cache re-
+trieval and compression,” in Proceedings of the AAAI Conference on
+Artificial Intelligence, vol. 40, no. 4, 2026, pp. 3120–3128.
+[10] Z. Ning, G. Liu, Q. Jin, C. Li, W. Ding, M. Guo, and J. Zhao, “Livevlm:
+Efficient online video understanding via streaming-oriented kv cache and
+retrieval,” arXiv preprint arXiv:2505.15269, 2025.
+[11] J. Xiao, J. Chen, T. Sun, X. Yang, and A. Yao, “Mukv: Multi-grained kv
+cache compression for long streaming video question-answering,” arXiv
+preprint arXiv:2605.22269, 2026.
+[12] H. Zhang, S. Yang, J. Fu, S. K. Ng, and X. Qiu, “Hermes: Kv cache
+as hierarchical memory for efficient streaming video understanding,”
+in Proceedings of the 64th Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers), 2026, pp. 8411–
+8430.
+[13] K. Ataallah, X. Shen, E. Abdelrahman, E. Sleiman, M. Zhuge, J. Ding,
+D. Zhu, J. Schmidhuber, and M. Elhoseiny, “Goldfish: Vision-language
+understanding of arbitrarily long videos,” in European Conference on
+Computer Vision.
+Springer, 2024, pp. 251–267.
+[14] Y. Luo, X. Zheng, G. Li, S. Yin, H. Lin, C. Fu, J. Huang, J. Ji,
+F. Chao, J. Luo et al., “Video-rag: Visually-aligned retrieval-augmented
+long video comprehension,” Advances in Neural Information Processing
+Systems, vol. 38, pp. 168 008–168 033, 2026.
+[15] K. Hsieh, G. Ananthanarayanan, P. Bodik, S. Venkataraman, P. Bahl,
+M. Philipose, P. B. Gibbons, and O. Mutlu, “Focus: Querying large video
+datasets with low latency and low cost,” in 13th USENIX Symposium
+on Operating Systems Design and Implementation (OSDI 18), 2018, pp.
+269–286.
+[16] N. Agarwal and R. Netravali, “Boggart: Towards General-Purpose ac-
+celeration of retrospective video analytics,” in 20th USENIX Symposium
+on Networked Systems Design and Implementation (NSDI 23), 2023, pp.
+933–951.
+[17] J. Hao, K. Yang, Q. Huang, and J. Yu, “Shallowstream: Index shallow
+then answer deep for streaming video understanding,” arXiv preprint
+arXiv:2609.02780, 2026.
+[18] R. Xu, G. Xiao, Y. Chen, L. He, K. Peng, Y. Lu, and S. Han,
+“Streamingvlm: Real-time understanding for infinite video streams,” in
+International Conference on Learning Representations, vol. 2026, 2026,
+pp. 61 463–61 475.
+[19] R. Qian, X. Dong, P. Zhang, Y. Zang, S. Ding, D. Lin, and J. Wang,
+“Streaming long video understanding with large language models,” Ad-
+vances in Neural Information Processing Systems, vol. 37, pp. 119 336–
+119 360, 2024.
+[20] D. Ma, Y. Wang, and T. Lan, “Block-attention for efficient prefilling,” in
+International Conference on Learning Representations, vol. 2025, 2025,
+pp. 63 774–63 788.
+[21] X. Yang, T. Chen, and B. Chen, “Ape: Faster and longer context-
+augmented generation via adaptive parallel encoding,” in International
+Conference on Learning Representations, vol. 2025, 2025, pp. 82 887–
+82 907.
+[22] J. Jiang, G. Ananthanarayanan, P. Bodik, S. Sen, and I. Stoica,
+“Chameleon: scalable adaptation of video analytics,” in Proceedings
+of the 2018 conference of the ACM special interest group on data
+communication, 2018, pp. 253–266.
+[23] W. Lee, J. Lee, J. Seo, and J. Sim, “InfiniGen: Efficient generative
+inference of large language models with dynamic KV cache manage-
+ment,” in 18th USENIX symposium on operating systems design and
+implementation (OSDI 24), 2024, pp. 155–172.
+[24] B. Gao, Z. He, P. Sharma, Q. Kang, D. Jevdjic, J. Deng, X. Yang, Z. Yu,
+and P. Zuo, “Cost-Efficient large language model serving for multi-turn
+conversations with CachedAttention,” in 2024 USENIX annual technical
+conference (USENIX ATC 24), 2024, pp. 111–126.
+[25] S. Gao, Y. Chen, and J. Shu, “Fast state restoration in llm serving
+with hcache,” in Proceedings of the Twentieth European Conference
+on Computer Systems, 2025, pp. 128–143.
+[26] R. Qian, S. Ding, X. Dong, P. Zhang, Y. Zang, Y. Cao, D. Lin,
+and J. Wang, “Dispider: Enabling video llms with active real-time
+interaction via disentangled perception, decision, and reaction,” in 2025
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR).
+IEEE, 2025, pp. 24 045–24 055.
+[27] H. Wang, B. Feng, Z. Lai, M. Xu, S. Li, W. Ge, A. Dehghan,
+M. Cao, and P. Huang, “Streambridge: Turning your offline video large
+language model into a proactive streaming assistant,” Advances in Neural
+Information Processing Systems, vol. 38, pp. 132 332–132 359, 2026.
+[28] H. Xiong, Z. Yang, J. Yu, Y. Zhuge, L. Zhang, J. Zhu, and H. Lu,
+“Streaming video understanding and multi-round interaction with
+memory-enhanced knowledge,” in International Conference on Learning
+Representations, vol. 2025, 2025, pp. 69 332–69 351.
+[29] Z. Liang, J. Li, W. Chen, Y. Zhang, H. Lu, and G. Li, “Oasis: On-
+demand hierarchical event memory for streaming video reasoning,”
+arXiv preprint arXiv:2604.17052, 2026.
+[30] H. Lu, N. Zhang, W. Tao, X. Qu, G. Li, J. Wan, and J. Wang, “Vista:
+Scene-aware optimization for streaming video question answering under
+post-hoc queries,” in Proceedings of the AAAI Conference on Artificial
+Intelligence, vol. 40, no. 9, 2026, pp. 7539–7547.
+[31] X. Tang, J. Qiu, L. Xie, Y. Tian, J. Jiao, and Q. Ye, “Adaptive keyframe
+sampling for long video understanding,” in 2025 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR).
+IEEE, 2025, pp.
+29 118–29 128.
+[32] M. Kim, K. Shim, J. Choi, and S. Chang, “Infinipot-v: Memory-
+constrained kv cache compression for streaming video understanding,”
+Advances in Neural Information Processing Systems, vol. 38, pp.
+138 983–139 013, 2026.
+[33] Z. Pang, D. Chatterjee, F. Sener, and A. Yao, “Decouple and cache: Kv
+cache construction for streaming video understanding,” arXiv preprint
+arXiv:2605.01858, 2026.
+
+
+[34] L. Chen, H. Zhao, T. Liu, S. Bai, J. Lin, C. Zhou, and B. Chang,
+“An image is worth 1/2 tokens after layer 2: Plug-and-play inference
+acceleration for large vision-language models,” in European Conference
+on Computer Vision.
+Springer, 2024, pp. 19–35.
+[35] S. Yang, Y. Chen, Z. Tian, C. Wang, J. Li, B. Yu, and J. Jia, “Visionzip:
+Longer is better but not necessary in vision language models,” in 2025
+IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR).
+IEEE, 2025, pp. 19 792–19 802.
+[36] X. Shen, Y. Xiong, C. Zhao, L. Wu, J. Chen, C. Zhu, Z. Liu, F. Xiao,
+B. Varadarajan, F. Bordes et al., “Longvu: Spatiotemporal adaptive
+compression for long video-language understanding,” arXiv preprint
+arXiv:2410.17434, 2024.
+[37] Y. Shu, Z. Liu, P. Zhang, M. Qin, J. Zhou, Z. Liang, T. Huang, and
+B. Zhao, “Video-xl: Extra-long vision language model for hour-scale
+video understanding,” in 2025 IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR).
+IEEE, 2025, pp. 26 160–
+26 169.
+[38] X. Chen, K. Tao, K. Shao, and H. Wang, “Streamingtom: Streaming
+token compression for efficient video understanding,” in Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition,
+2026, pp. 24 675–24 685.
+[39] Y. Wang, X. Liu, X. Gui, X. Lin, B. Yang, C. Liao, T. Chen, and
+L. Zhang, “Accelerating streaming video large language models via
+hierarchical token compression,” in Proceedings of the IEEE/CVF Con-
+ference on Computer Vision and Pattern Recognition, 2026, pp. 18 523–
+18 533.
+[40] X. Ding, H. Wu, Y. Yang, S. Jiang, Q. Zhang, D. Bai, Z. Chen, and
+T. Cao, “Streammind: Unlocking full frame rate streaming video dia-
+logue through event-gated cognition,” in 2025 IEEE/CVF International
+Conference on Computer Vision (ICCV).
+IEEE, 2025, pp. 13 448–
+13 459.
+[41] D. Kim, S. Yang, W. Shin, and J.-Y. Kim, “V-rex: Real-time streaming
+video llm acceleration via dynamic kv cache retrieval,” in 2026 IEEE
+International Symposium on High Performance Computer Architecture
+(HPCA).
+IEEE, 2026, pp. 1–14.
+[42] Y. Zou, Y. Chen, W. Chen, J. Park, S. Nitin, L. Tao, F. Romero, and
+D. Ustiugov, “Codecsight: Leveraging video codec signals for efficient
+streaming vlm inference,” arXiv preprint arXiv:2604.06036, 2026.
+[43] Y. Tan, J. Tong, L. Yue, H. Wu, P. Fang, and X. Shen, “Vicostream:
+Streaming videollms can run beyond 100 fps with stage-wise coordi-
+nated inference,” arXiv preprint arXiv:2606.19849, 2026.
+[44] G. Tang, T. Qian, H. Zheng, Y. Wang, and X. Wang, “Streamingeval:
+A unified evaluation protocol towards realistic streaming video under-
+standing,” arXiv preprint arXiv:2603.21493, 2026.
+[45] H. Shen, L. Chen, Y. Jin, L. Zhao, B. Kong, M. Philipose, A. Krishna-
+murthy, and R. Sundaram, “Nexus: A gpu cluster engine for accelerating
+dnn-based video analysis,” in Proceedings of the 27th ACM Symposium
+on Operating Systems Principles, 2019, pp. 322–337.
+[46] R. Bhardwaj, Z. Xia, G. Ananthanarayanan, J. Jiang, Y. Shu, N. Kar-
+ianakis, K. Hsieh, P. Bahl, and I. Stoica, “Ekya: Continuous learning
+of video analytics models on edge compute servers,” in 19th USENIX
+Symposium on Networked Systems Design and Implementation (NSDI
+22), 2022, pp. 119–135.
+[47] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, and B.-G. Chun, “Orca: A
+distributed serving system for Transformer-Based generative models,” in
+16th USENIX symposium on operating systems design and implementa-
+tion (OSDI 22), 2022, pp. 521–538.
+[48] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. Gonzalez,
+H. Zhang, and I. Stoica, “Efficient memory management for large
+language model serving with pagedattention,” in Proceedings of the 29th
+symposium on operating systems principles, 2023, pp. 611–626.
+[49] A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani,
+A. Tumanov, and R. Ramjee, “Taming Throughput-Latency tradeoff in
+LLM inference with Sarathi-Serve,” in 18th USENIX symposium on
+operating systems design and implementation (OSDI 24), 2024, pp. 117–
+134.
+[50] Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, and H. Zhang,
+“DistServe: Disaggregating prefill and decoding for goodput-optimized
+large language model serving,” in 18th USENIX symposium on operating
+systems design and implementation (OSDI 24), 2024, pp. 193–210.
+[51] P. Patel, E. Choukse, C. Zhang, A. Shah, ´I. Goiri, S. Maleki, and
+R. Bianchini, “Splitwise: Efficient generative llm inference using phase
+splitting,” in 2024 ACM/IEEE 51st Annual International Symposium on
+Computer Architecture (ISCA).
+IEEE, 2024, pp. 118–132.
+[52] H. Qiu, A. Biswas, Z. Zhao, J. Mohan, A. Khare, E. Choukse, ´I. Goiri,
+Z. Zhang, H. Shen, C. Bansal et al., “Modserve: Modality-and stage-
+aware resource disaggregation for scalable multimodal model serving,”
+in Proceedings of the 2025 ACM Symposium on Cloud Computing, 2025,
+pp. 817–830.
+[53] G. Singh, X. Wang, Y. Hu, T. Yu, L. Xing, W. Jiang, Z. Wang, X. Bai,
+Y. Li, Y. Xiong et al., “Efficiently serving large multimodal models
+using epd disaggregation,” arXiv preprint arXiv:2501.05460, 2024.
+[54] T. Guo, T. Xu, X. Chen, J. Chen, N. Xiao, and X. Zhang, “Rserve:
+Overlapping encoding and prefill for efficient lmm inference,” arXiv
+preprint arXiv:2509.24381, 2025.
+[55] Y. Qiao, S. Anzai, S. Yu, H. Ma, S. Yang, Y. Wang, M. Kim, Y. Wu,
+Y. Zhou, J. Xing et al., “Conserve: Fine-grained gpu harvesting for llm
+online and offline co-serving,” arXiv preprint arXiv:2410.01228, 2024.
+[56] R. Bachkaniwala, C. Luo, R. So, D. Mahajan, and K. Rong,
+“Stream2llm: Overlap context streaming and prefill for reduced time-
+to-first-token (ttft),” arXiv preprint arXiv:2604.16395, 2026.
+[57] X. Zhai, B. Mustafa, A. Kolesnikov, and L. Beyer, “Sigmoid loss
+for language image pre-training,” in 2023 IEEE/CVF International
+Conference on Computer Vision (ICCV).
+IEEE, 2023, pp. 11 941–
+11 952.
+[58] S. Bai, Y. Cai, R. Chen, K. Chen, X. Chen, Z. Cheng, L. Deng,
+W. Ding, C. Gao, C. Ge et al., “Qwen3-vl technical report,” arXiv
+preprint arXiv:2511.21631, 2025.
