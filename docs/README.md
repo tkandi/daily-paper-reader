@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-20</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-22</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 17 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-20 19:52:53 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-22 19:53:55 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日筛选17篇前沿论文，精读聚焦异构地理分布式训练与联邦学习，速读覆盖消费级GPU微调、LLM推理和流式视频问答。</p>
-<p>最值得关注的是：GeoTrain将能耗纳入跨地域异构资源的基础模型并行训练优化；联邦学习则尝试用谱方法统一压缩通信与本地更新。</p>
-<p>建议普通读者优先读GeoTrain把握“算力调度+能耗”趋势，再按需求跟进低成本LoRA微调与自适应推理实践。</p>
+<p>聚焦异构 GPU 集群调度与长上下文 LLM 推理，完成 17 篇论文筛选，其中 6 篇精读。</p>
+<p>最值得关注的是：用就绪感知调度识别并缓解异构 GPU 的无效占用，以及 TideKV 通过分层分块预填充延迟 KV 淘汰以节省长上下文推理内存。</p>
+<p>建议先读两篇精读论文，再结合速读中的 DNN 部署容量协同、实时调度与多精度映射，建立端到端优化视角。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="GeoTrain: Energy-Aware Automatic Parallelism for Foundation Model Training on Heterogeneous Geo-Distributed Resources">GeoTrain: Energy-Aware Automatic Parallelism for Foundation Model Training on Heterogeneous Geo-Distributed Resources</span></li><li><span class="dpr-home-dashboard-paper-title" title="Bridging Compressed Communication and Local Steps via Spectral Method in Federated Learning">Bridging Compressed Communication and Local Steps via Spectral Method in Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="MLOps-Bench: Benchmarking AI Agents on Production ML Engineering in Real Repositories">MLOps-Bench: Benchmarking AI Agents on Production ML Engineering in Real Repositories</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Ineffective Occupancy in Heterogeneous GPU Clusters: Prediction, Contribution Analysis, and Readiness-Aware Scheduling">Ineffective Occupancy in Heterogeneous GPU Clusters: Prediction, Contribution Analysis, and Readiness-Aware Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="TideKV: Delayed KV Eviction via Layer-Wise Chunked Prefill for Memory-Efficient Long-Context LLM Inference">TideKV: Delayed KV Eviction via Layer-Wise Chunked Prefill for Memory-Efficient Long-Context LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="AdamPM: Memory-Efficient LLM Optimization via Moment Pooling">AdamPM: Memory-Efficient LLM Optimization via Moment Pooling</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PACT: NVFP4 Data-Flow LoRA Fine-Tuning on Consumer GPUs">PACT: NVFP4 Data-Flow LoRA Fine-Tuning on Consumer GPUs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ATEST: Adaptive Resource-Aware Test-Time Scaling for LLM Inference">ATEST: Adaptive Resource-Aware Test-Time Scaling for LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="StreamAhead: Real-Time Streaming Video Question Answering via Adaptive Precomputation">StreamAhead: Real-Time Streaming Video Question Answering via Adaptive Precomputation</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="From Partitioning to Provisioning: Co-Designing DNN Deployment and Infrastructure Capacity">From Partitioning to Provisioning: Co-Designing DNN Deployment and Infrastructure Capacity</span></li><li><span class="dpr-home-dashboard-paper-title" title="Hard and Soft Real-Time DNN Inference Scheduling on Heterogeneous Multi-Accelerator Systems via Reinforcement Learning">Hard and Soft Real-Time DNN Inference Scheduling on Heterogeneous Multi-Accelerator Systems via Reinforcement Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="qGAMMA: A Framework for Optimal DNN Mapping on Multi-Precision Accelerators">qGAMMA: A Framework for Optimal DNN Mapping on Multi-Precision Accelerators</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>

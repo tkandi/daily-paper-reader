@@ -1,0 +1,958 @@
+Title: TideKV: Delayed KV Eviction via Layer-Wise Chunked Prefill for Memory-Efficient Long-Context LLM Inference
+
+URL Source: https://arxiv.org/pdf/2610.24499v1
+
+Published Time: Tue, 20 Oct 2026 00:40:42 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# TideKV: Delayed KV Eviction via Layer-Wise Chunked Prefill for Memory-Efficient Long-Context LLM Inference 
+
+## Yu Wang a, Zhu Wang a,∗, Ning Hu b, Yifan Guo a, Xiu Ma b, Bin Guo a and Zhiwen Yu a,c 
+
+> a
+
+Northwestern Polytechnical University, No. 127 West Youyi Road, Xian, 710129, Shaanxi, China 
+
+> b
+
+Xi’an Aeronautics Computing Technique Research Institute, AVIC, No. 15 Jinye 2nd Road, Xi’an, 710065, Shaanxi, China 
+
+> c
+
+College of Computer Science and Technology, Harbin Engineering University, No. 145 Nantong Street, Harbin, 150001, Heilongjiang, China 
+
+A R T I C L E I N F O 
+
+Keywords :Large language model inference key-value cache compression long-context inference chunked prefill memory management inference scheduling 
+
+A B S T R A C T 
+
+Long-context large language model (LLM) inference is important for modern intelligent applications but remains constrained by peak memory during prompt prefill. Existing KV cache compression reduces decoding memory but typically requires full-prompt prefill to preserve global context, retaining a high construction peak. Online chunk-level eviction lowers memory earlier but selects before each layer has observed the complete prompt, potentially degrading cache construction and decoding. We present TideKV, an on-GPU cache-construction architecture using layer-major delayed eviction. TideKV processes all prompt chunks within each Transformer layer, retains full-prompt KV only for the active layer, and evicts at layer end. This schedule preserves full-prompt-aware selection while reducing activation and temporary memory. Experiments across multiple computing platforms show that TideKV preserves the inference quality and final cache size of the evaluated compression methods. At 64K on A100, it reduces the construction-time transient footprint by 83.89%. On RTX 4090, it increases time to first token by only 1.06% at 64K and enables 128K prefill. TideKV also completes 128K on Jetson, whereas matched post-prefill compression runs out of memory on both resource-constrained platforms. These results show that delayed layer-end eviction substantially expands feasible context lengths without sacrificing cache utility. 
+
+## 1. Introduction 
+
+Recent advances in large language models (LLMs) have extended supported context windows to 128K tokens and beyond [1–3], enabled in part by positional-encoding exten-sions such as rotary embeddings [4–6]. This expansion is also driven by applications that require sustained reasoning over long horizons, including retrieval-augmented genera-tion [7], multi-turn autonomous agents [8], long-form code synthesis [9], and extended document comprehension. Such applications routinely require tens of thousands of input tokens in a single inference session and have motivated dedicated long-context benchmarks [10, 11]. At the same time, due to requirements related to data privacy, communi-cation latency, and regulatory compliance, the deployment of LLMs is undergoing a structural shift from centralized cloud infrastructure to edge computing platforms [12–14], such as mobile robots, embodied intelligent systems [15, 16], and in-vehicle autonomous driving modules [17]. However, resource-constrained edge accelerators oper-ate under fixed and often severely limited device mem-ory, creating a fundamental tension with the memory de-mands of long-context inference. During inference, memory is consumed by multiple concurrent components: the key– value (KV) cache accumulating per-layer attention states, the full-sequence hidden-state tensor propagated through Trans-former blocks [18], intermediate MLP activation tensors, 
+
+> ∗
+
+Corresponding author  
+
+> wangyu23@mail.nwpu.edu.cn
+
+(Y. Wang); wangzhu@nwpu.edu.cn (Z. Wang); hnhawk@163.com (N. Hu); guoyf@mail.nwpu.edu.cn (Y. Guo);  
+
+> 2750162952@qq.com
+
+(X. Ma); guob@nwpu.edu.cn (B. Guo);  
+
+> zhiwenyu@nwpu.edu.cn
+
+(Z. Yu) 
+
+> ORCID
+
+(s): 0009-0006-4754-164X (Y. Wang) 
+
+and per-layer attention score matrices. As input sequence length increases, each of these components grows corre-spondingly, with the KV cache scaling linearly with both sequence length and layer count [19]. The aggregate mem-ory pressure renders long-context inference on resource-constrained edge devices increasingly infeasible without systematic memory management. The memory pressure is most acute during the prefill phase, when the entire input prompt must be processed to construct the initial KV cache before decoding begins [20]. For a representative Trans-former model such as Llama-3.1-8B [1], a single 128K-token prompt generates approximately 16 GiB of uncom-pressed KV cache. During prefill, hidden states and tem-porary activations coexist in device memory with the KV cache [21]. The cumulative footprint routinely exceeds the physical memory capacity of edge accelerators, resulting in out-of-memory (OOM) errors that render the service unavailable. Therefore, to enable long-context reasoning on resource-constrained devices, it is necessary not only to control the final KV cache retained during decoding but also to limit the peak memory consumption during the construction of the KV cache. Existing KV cache compression approaches fall into two paradigms, each exposing a distinct limitation under tight memory budgets, as illustrated in Figure 1. Post-prefill selectors such as SnapKV [22] score and compress each layer’s cache after processing the complete prompt at that layer. While this preserves full visibility of the prompt dur-ing the selection process, it still results in high construction-memory peaks because each layer still processes the whole prompt at once before compressing its cache. In contrast, online methods such as KeyDiff [23] evict KV during prompt 
+
+Wang et al.: Preprint submitted to Elsevier Page 1 of 15 arXiv:2610.24499v1 [cs.LG] 17 Oct 2026 Delayed KV Eviction via Layer-Wise Chunked Prefill (a) Full prefill  
+
+> peak
+> highest peak
+> all layers full KV + activation
+> visibility ✓
+
+(b) Chunk-major 
+
+> high peak
+> KV still fills up (no evict)
+
+(c) Online eviction                  
+
+> low peak
+> later chunks see compressed history
+> visibility ✗(myopic)
+> active compute block full KV resident full KV resident compressed KV compressed KV not yet computed not yet computed
+> L1
+> L2
+> L3
+> c1 c2 c3
+> L1 L2 L3 c1 c2 c3
+> L1
+> L2
+> L3
+> c1 c2 c3
+> L1 L2 L3 c1 c2 c3
+> peak
+> visibility ✓
+> L1
+> L2
+> L3
+> c1 c2 c3
+> L1
+> L2
+> L3 c1 c2 c3
+> peak
+
+(d) Layer-major (ours)       
+
+> peak bar width = relative peak memory
+> low peak
+> peak
+> L1
+> L2
+> L3
+> c1 c2 c3
+> L1 L2 L3 c1 c2 c3
+> visibility ✓(within layer)
+
+Figure 1: Four schedules for constructing a compressed KV cache during prefill. (a) Full prefill without intermediate cache release retains uncompressed KV across all layers until the prompt has been processed, preserving full-prompt visibility at a high construction peak. (b) Chunked prefill without eviction processes the prompt chunk by chunk, yet every chunk’s KV stays resident, so memory still grows with prompt length. (c) Chunked prefill with online eviction evicts after each chunk to cap memory, but it decides what to keep before the full prompt is seen, which can degrade quality through myopic eviction. (d) TideKV (ours) streams the prompt chunk by chunk in a layer-major order and defers eviction to each layer’s boundary, so every layer scores against the full prompt while full-prompt KV is confined to one active layer and temporary activations to one chunk, alongside the hidden-state bridge and retained caches. 
+
+processing to control memory usage. Because these methods evict tokens before observing the complete prompt, they may prematurely remove tokens whose importance depends on later context. This myopic eviction can reduce compression quality. This creates a central visibility-residency trade-off: current methods either spend substantial memory to preserve full-prompt information, or bound memory by evicting be-fore the prompt is fully observed, which can compromise cache quality. Full-prompt visibility can be preserved while lowering construction-time peak memory by reordering prefill execu-tion. When a Transformer layer is driven to completion over the whole prompt before the next layer begins, and eviction is deferred to that layer’s boundary, every layer scores its tokens against the uncompressed causal history of the entire prompt, so selection is not preceded by eviction of the layer’s causal prompt history. At the same time, full-prompt KV is resident for only one layer at a time. Streaming the prompt in chunks limits temporary attention/MLP activations to one chunk, which bounds the activation workspace that domi-nates the prefill peak. Relative to an uncompressed cache spanning all 𝑁 layers, this schedule reduces uncompressed KV residency from 𝑂 (𝑁𝑆 ) to 𝑂 (𝑆 ) while preserving full-prompt visibility. We present TideKV, a prefill execution architecture that realizes this principle through layer-major delayed eviction. For each layer, TideKV streams the prompt chunk by chunk against that layer’s accumulated, uncompressed KV history; only after the layer has consumed the whole prompt does it compress the layer’s KV to the target budget and release the full KV before advancing. The compression step uses a two-pass blockwise streaming top-𝑘 procedure: a first pass accumulates log-sum-exp normalization statistics over key blocks, and a second pass derives the retained-token selec-tion, so that scoring never materializes the full observation-by-prefix attention matrix. This scoring step is a replace-able component: because the schedule is decoupled from the token-importance rule, existing KV-cache compression selectors can be used in its place. TideKV further supports layer- and head-adaptive budget allocation within the same delayed-eviction invariant, enabling fine-grained memory– quality control across heterogeneous attention configura-tions. All state remains on the GPU, and the output is a compressed initial decode cache. The main contributions of this work are as follows: • We propose layer-major delayed eviction , which pre-serves full-prompt visibility for KV selection while confining uncompressed KV to one active layer and temporary attention/MLP activations to one chunk. Eviction occurs only after the layer finishes prompt encoding. • We separate construction scheduling from prefix-based selectors compatible with layer-end selection and delayed eviction, and evaluate four selector fam-ilies within this framework. To keep the compression step itself within budget, we design a memory-controlled two-pass blockwise streaming top-𝑘 
+
+procedure whose temporary footprint is independent of prompt length. • We evaluate TideKV on Llama and Mistral models over the LongBench and RULER benchmarks to-gether with the memory and feasibility of long-context 
+
+Wang et al.: Preprint submitted to Elsevier Page 2 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill 
+
+prefill. At matched budgets it preserves downstream quality and final-cache size. At 64K on A100, TideKV reduces the construction-time transient footprint by 83.89%; on the RTX 4090, the time-to-first-token increase is 1.06% at 64K. It completes 128K-token prefill on both resource-constrained platforms where matched post-prefill compression is out of memory. The remainder of this paper is organized as follows. Sec-tion 2 reviews related work. Section 3 defines the problem setting. Sections 4 and 5 present the TideKV framework and implementation. Section 6 reports the evaluation, and Section 7 concludes the paper. 
+
+## 2. Related work 
+
+In this section, we review the relevant research in the following three aspects: 
+
+2.1. KV-cache selection and compression 
+
+KV-cache compression methods differ in which entries they retain and when they make eviction decisions. Heavy-hitter eviction keeps tokens with high accumulated attention together with recent tokens [24, 25]; StreamingLLM retains a few initial attention-sink tokens plus a sliding window so that a bounded cache supports streaming beyond the nominal context [26]; SnapKV predicts from a prompt-final observation window which positions generation will attend to and compresses per head [22]; and FastGen profiles the per-head attention structure to choose a per-head com-pression policy [27]. A parallel line refines the granularity of the budget: PyramidKV allocates a pyramidal per-layer budget [28]; Ada-KV distributes budget across heads [29]; CAKE casts eviction as adaptive layer-preference budgeting with time-varying token importance [30]; ChunkKV retains semantic chunks rather than isolated tokens [31]. In contrast, query-aware methods load only the KV pages required by the query during the decoding phase [32]. Beyond hard eviction, several methods modify or complement it: KeepKV merges KV entries to limit output perturbation [33]; KVzip targets query-agnostic caches reusable across queries [34]; a recent direction reconstructs KV on demand from a stored residual stream [35]; and, orthogonally to eviction, low-bit quanti-zation compresses each retained entry rather than removing it [36]. Surveys catalog these directions [37]. Post-prefill selectors preserve full-prompt visibility with a compact retained cache; layer- and head-adaptive alloca-tion also informs TideKV’s adaptive variants. Their bot-tleneck is cache construction. Even if layer-wise eviction confines uncompressed KV to one layer, whole-prompt exe-cution still produces full-sequence hidden states and MLP activations, driving the prefill peak (Section 2.3). Thus, constructing a compact cache can exceed device memory (Fig. 1a). TideKV retains the selector and changes compres-sion scheduling to reduce this construction peak. 
+
+2.2. Chunked construction with online eviction 
+
+Online construction processes prompts in chunks and evicts before full-prompt observation (Fig. 1c). InfiniPot dis-tills history as the cache fills, processing later input against compressed history under a fixed budget [38]; KeyDiff uses key similarity for FlashAttention-compatible eviction under a fixed cache budget [23]; EpiCache clusters conversational history into episodes with layer-budgeted eviction and high-lights the peak cost of full-context prefill [39]. Related de-signs use look-once multimodal eviction [40] and trained re-taining heads [41]. Early eviction lowers construction peaks, but later tokens see compressed history and may lose entries relevant to subsequent context. TideKV delays eviction until each layer finishes, preserving uncompressed causal history during prompt encoding and full-prompt visibility for selec-tion. 
+
+2.3. Prefill peak-memory reduction and KV offloading 
+
+A third group of methods targets peak prefill memory by reducing intermediate MLP activations, which can dom-inate the memory footprint [42] (Fig. 1b). Chunked prefill splits the prompt into segments processed sequentially. For prompt length 𝑆 and chunk size 𝐶 , chunking reduces the corresponding temporary activation term to approximately 
+
+𝐶 ∕𝑆 of its full-sequence size, while introducing kernel-launch and latency overheads [43–45]; MST partitions the MLP and LM-head inputs into mini-sequences during train-ing [46], and MOM brings mini-sequence MLP processing to inference while offloading the full KV cache to CPU [42]; PyramidInfer instead computes fewer KV entries in deeper layers during prefill [47]. Offloading-centric systems keep the full KV but relocate it: HeadInfer fetches KV head-group by head-group between CPU and GPU so that an entire layer’s KV never co-resides on the GPU, at a substantial decode-speed cost [48]; FlexGen aggregates GPU, CPU, and disk memory to run inference under tight GPU budgets [49]. Collectively, these methods reduce the peak load during the prefill phase but either retain the uncompressed decoding cache or incur the cost of data transfer between the GPU and CPU. TideKV reduces peak memory usage through chunk-inner execution while keeping execution on the GPU and generating a compressed decoding cache. The approaches differ in prompt visibility and memory use during construction. Post-prefill selectors preserve full-prompt visibility but mainly reduce retained KV; online eviction also lowers the construction peak while exposing later chunks to compressed history. Activation partition-ing and offloading reduce prefill residency but may retain the uncompressed decode cache or move KV to the CPU. TideKV combines layer-major execution with delayed layer-end eviction: full-prompt KV is confined to one active layer, temporary activations to one chunk, and selection observes the complete prompt. Construction stays on the GPU. 
+
+## 3. Problem formulation 
+
+This section formalizes the compressed-cache construc-tion problem that TideKV addresses. Our concern is not                       
+
+> Wang et al.: Preprint submitted to Elsevier Page 3 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill
+> Table 1
+> Notation. Symbol Meaning
+> 𝑁 number of Transformer layers
+> 𝐵 batch size
+> 𝑆 prompt (sequence) length
+> 𝐶 chunk size used during prefill
+> 𝐻 𝑞 , 𝐻 𝑘𝑣 number of query heads, KV heads
+> 𝐷 head dimension
+> 𝑏 element size in bytes
+> 𝑊 observation-window size used for scoring
+> 𝐾 𝑙 retained cache budget for layer 𝑙 𝑑 model model hidden dimension ( =𝐻 𝑞 ⋅𝐷 )̂
+> compressed initial decode cache (the output)
+> Πconstruction procedure with a specified schedule, selector, and budget
+> 𝑑 ff MLP intermediate width ( =𝑂 (𝑑 model ))
+
+the design of a particular token-importance rule, but the 
+
+execution setting in which a compressed initial decode cache is constructed from a long prompt under a device memory budget. The formulation deliberately separates two questions that prior work often couples: which KV entries to retain (the 
+
+selection problem), and in what order prefill is executed and 
+
+when eviction takes effect (the scheduling problem). TideKV specifies the construction schedule and leaves the selector configurable. 
+
+3.1. Notation and setting 
+
+We consider a pretrained decoder-only Transformer (Ta-ble 1) processing one prompt 𝑥 1∶ 𝑆 in chunks of size 𝐶 .Prefill constructs each layer’s KV; decoding uses the retained cache. We fix the model weights and treat selection as replaceable to isolate cache-construction cost. 
+
+3.2. Memory quantities in cache construction 
+
+A prompt KV cache occupies 2𝑁𝐵𝐻 kv 𝑆𝐷𝑏 bytes. This expression counts stored KV alone; it does not describe either the final compressed cache or the peak memory re-quired to construct it. We therefore distinguish three memory quantities. 1. Final compressed cache size : 𝑆 final (Π) , the number of retained KV positions after compression; under a per-layer budget 𝐾 𝑙 it equals the total nominal budget 
+
+𝐾 tot ≜ ∑𝑙 𝐾 𝑙 , while its byte footprint follows after adjustment for the number of KV heads and the cache layout. 2. Construction-time live-tensor peak : the part of the prefill footprint directly controlled by the cache con-struction procedure, 
+
+𝑀 live (Π) = max 
+
+> 𝑙
+
+[KV res (𝑙 ) + Hidden( 𝑙 )+ Act( 𝑙 ) + Temp( 𝑙 )].
+
+(1) Here, KV res is resident prompt KV, Hidden ∝
+
+𝐵𝑆𝑑 model is the hidden-state bridge, Act is the active attention/MLP workspace, and Temp contains transient scoring, selection, and cache-packing tensors. The observed process peak additionally contains terms not determined solely by Π:
+
+𝑀 proc ≈ 𝑀 model + 𝑀 live (Π) + 𝑀 backend 
+
++ 𝑀 allocator + 𝑀 external . (2) where 𝑀 backend includes kernel workspaces, masks, and attention buffers; 𝑀 allocator includes reserved-but-inactive blocks and fragmentation; and 𝑀 external cov-ers CUDA-context, page-table, runtime-metadata, and direct allocations not attributed to active PyTorch ten-sors. Together, Eqs. (1) and (2) separate the schedule-dependent working set from runtime memory con-tributed by the model, kernels, and memory manager. Equation (2) is a schematic accounting relation; com-ponent peaks need not coincide. This decomposition underlies the live-allocation and process-level mea-surements in Section 6. 3. Temporary compression memory Temp(Π) : score matrices, selection buffers, and attention intermedi-ates. A naive layer-end compression that materializes a 𝑊 × 𝑆 observation-by-prefix score matrix can make 
+
+Temp dominate 𝑀 live .Bounding KV res alone does not bound the construction peak because Hidden and Act also grow with 𝑆 . Allo-cator retention and backend workspaces further determine how a smaller live working set appears in reserved and process-level memory. TideKV therefore bounds 𝑀 live and 
+
+Temp while retaining the same 𝑆 f inal as its underlying selec-tor. Section 6 reports allocated, reserved, and process-level memory under multiple allocators, attention backends, and persistent workloads. 
+
+3.3. Construction objective 
+
+A construction procedure Π takes a tokenized prompt 
+
+𝑥 1∶ 𝑆 , the fixed model, a chunk size 𝐶 , and a selector with its cache-budget specification. It returns a compressed ini-tial decode cache ̂  and the prefill output needed to start generation. For a fixed selector 𝐹 and layer/head budget allocation, our objective is to lower construction memory while preserving the prompt information available to 𝐹 .The reference procedure applies 𝐹 after uncompressed causal prefill. Let 𝑄 full , 𝑄 𝐹 , and 𝑄 Tide denote downstream scores for full-cache decoding, the selector-matched refer-ence, and TideKV, respectively. On the same evaluation, 
+
+𝑄 full − 𝑄 Tide = ( 𝑄 full − 𝑄 𝐹 ) + ( 𝑄 𝐹 − 𝑄 Tide ). (3) The first term reflects selector compression; the second measures the additional change associated with construction scheduling. Algorithm 1 implements layer-major execution and delayed eviction with explicit residency properties. Sec-tion 4 analyzes its prompt dependencies and working set; Section 6 evaluates fidelity and selector-matched task qual-ity.   
+
+> Wang et al.: Preprint submitted to Elsevier Page 4 of 15
+
+Delayed KV Eviction via Layer-Wise Chunked Prefill active layer l                     
+
+> —full KV
+> Active layer l −chunk-inner loop
+> hidden states bridge layers (l →l+1) −not KV
+> Attention + MLP
+> per chunk j = 1 …m
+> Attention MLP (FFN)
+> input hidden
+> chunks
+> output hidden chunks
+> ⋮
+> chunk j attends
+> to 1 …j
+> softmax
+> one-chunk activation
+> append KV[j]
+> 12••• j−1j
+> full prompt KV (chunks 1 …j)
+> Layer-end Compress (Alg. 2)
+> evict only after
+> all chunks
+> compressed
+> cache Ĉ[l]
+> store for decode
+> decode cache
+> full KV
+> release
+> ⋮⋮
+> 12⋯j
+> 1
+> 2
+> ⋮
+> j
+> 12⋯j12
+> ⋮
+> j
+> single-active-layer stack
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> completed:
+> compressed
+> future: none
+> active advances l→l+1
+> only one full layer at any instant (1) 1
+
+h h lm−
+
+…ff dff O(C d )ff 
+
+C = chunk size m = number of chunks d = FFN width ( ) 1h h lm…
+
+> …
+> …
+
+Figure 2: Layer-major delayed eviction and the corresponding tensor lifetimes. Left: full prompt KV is resident only for the active layer 𝑙 ; completed layers hold compressed caches and future layers hold none. Right: chunk 𝑗 attends to the accumulated uncompressed KV of chunks 1, … , 𝑗 , while output hidden chunks form the bridge to layer 𝑙 +1 . After all 𝑚 chunks complete, TideKV gathers the retained KV and absolute-position metadata into ̂ [𝑙 ] and releases the full KV. Hidden-state write/read and retained-KV gather are the principal added data movements; the layer-end commit is the synchronization boundary before layer 
+
+𝑙 +1 .
+
+## 4. The TideKV framework 
+
+Compressed-cache construction requires an execution schedule that bounds the live working set 𝑀 live and compres-sion workspace Temp without sacrificing the full-prompt visibility needed for accurate selection. TideKV enforces a layer-major residency discipline : it streams the complete prompt through one layer before advancing and delays evic-tion until the layer boundary. This schedule is governed by the single-active-layer residency invariant :At every instant of prefill, full-prompt KV is resident for at most one layer (the active layer), temporary attention/MLP activations are limited to one chunk alongside a prompt-wide hidden-state bridge, and every completed layer holds only its compressed cache. This invariant confines uncompressed KV to one active layer and temporary activations to one chunk, while the hidden-state bridge and completed layers’ compressed caches re-main on the GPU. Delaying eviction until the layer boundary preserves full-prompt visibility for selection. The framework rests on three mechanisms, detailed below and illustrated in Figs. 2 and 3: layer-major chunked prefill that gives each layer full causal visibility (4.1), delayed layer-end eviction that confines full KV to the active layer (4.1), and a memory-controlled compression step that keeps the eviction tempo-raries bounded (4.2). 
+
+4.1. Layer-major delayed eviction 
+
+As shown in Fig. 2, TideKV recasts prefill as a layer-sequential execution schedule: a standard forward pass prop-agates each chunk through all 𝑁 layers, whereas TideKV advances a single layer over all chunks, moving to the next layer only after the current one has consumed the entire prompt. During prefill it maintains three classes of state: completed layers hold compressed caches, the active layer holds full prompt KV for the chunks processed so far (the only full prompt KV resident anywhere), and future layers hold none . Hidden states bridge the layers: after the active layer processes chunk 𝑗 , its output hidden chunk ℎ𝑙 𝑗 replaces the consumed input chunk in the bridge; the resulting 𝐻 𝑙 
+
+becomes the chunked input to layer 𝑙 +1 . Because only the hidden outputs, not the KV, are needed to continue the forward computation, the active layer’s full KV can be compressed and released at the layer boundary .For layer 𝑙 with input chunks 𝐻 𝑙 −1 = { ℎ𝑙 −1 1 , … , ℎ 𝑙 −1  
+
+> 𝑚
+
+},
+
+𝑚 = ⌈𝑆 ∕𝐶 ⌉, TideKV processes chunks in causal order; when chunk 𝑗 is processed, its queries attend to the KV produced by chunks 1, … , 𝑗 of the same layer, so later chunks see the same uncompressed layer-local history a full-prompt execution would provide. Only after all 𝑚 chunks are processed does TideKV compress the layer’s KV to its budget 𝐾 𝑙 , store the compressed cache, and release the full KV. Eviction therefore never alters the hidden states the layer has already produced, decoupling what is retained for decoding from what is visible during prompt encoding .The pseudocode separates the schedule from both the se-lector inside L AYER END COMPRESS and the budget sched-ule {𝐾 𝑙 }. A SnapKV-style observation-window selector, a recent-token selector, or a head-adaptive selector can be used within the same scheduling framework; the budget can be uniform ( 𝐾 𝑙 = 𝐾 tot ∕𝑁 ) or allocated adaptively across layers (more capacity to harder-to-compress layers) or heads. These choices preserve the uncompressed-KV residency invariant; 
+
+Wang et al.: Preprint submitted to Elsevier Page 5 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill 
+
+Algorithm 1 Layer-major chunked prefill with delayed evic-tion 
+
+Require: hidden chunks 𝐻 0 = {ℎ01, … , ℎ 0
+
+> 𝑚
+
+}; layers 
+
+𝐿 1, … , 𝐿 𝑁 ; budgets 𝐾 1, … , 𝐾 𝑁 ; window 𝑊 
+
+Ensure: compressed initial decode cache ̂ ; final hidden chunks 𝐻 
+
+> 1:
+
+̂  ← ∅; 𝐻 ← 𝐻 0 
+
+> 2:
+
+for 𝑙 = 1 to 𝑁 do  
+
+> 3:
+
+KV full ← ∅; 𝑄 obs ← ∅ 
+
+> 4:
+
+for 𝑗 = 1 to 𝑚 do ⊳ causal chunk order  
+
+> 5:
+
+𝐻 [𝑗 ], KV full ← 𝐿 𝑙 .FORWARD (𝐻 [𝑗 ], KV full ) ⊳
+
+replace the consumed hidden chunk  
+
+> 6:
+
+retain the latest 𝑊 queries in 𝑄 obs  
+
+> 7:
+
+end for 
+
+> 8:
+
+̂ [𝑙 ] ← LAYER END COMPRESS (KV full , 𝑄 obs , 𝐾 𝑙 ) 
+
+> 9:
+
+release KV full ⊳ delayed eviction  
+
+> 10:
+
+end for  
+
+> 11:
+
+return ̂ , 𝐻 
+
+they change only which entries are retained and how the re-tained cache is laid out, with a head-adaptive budget yielding a variable-length cache stored in a flattened layout with per-head offsets. The selector and budget schedule are configurable within this layer-end interface. Direct integration requires preserv-ing full layer-local history until selection; compression al-gorithms with other execution or cache-representation re-quirements need additional adaptation. Reordering execu-tion confines full-prompt KV to one active layer and tempo-rary attention/MLP activations to one chunk, without chang-ing the active layer’s 𝑂 (𝑆 ) KV term or its causal attention computation. Section 4.3 quantifies the resulting working set, and Section 6 evaluates the selector and allocation variants. 
+
+4.2. Memory-controlled layer-end compression 
+
+As shown in Fig. 3, the layer-end step must itself re-spect the invariant: a naive selector that scores 𝑊 observa-tion queries against all 𝑆 prefix keys materializes a tensor of shape [𝐵, 𝐻 𝑞 , 𝑊 , 𝑆 ], whose 𝑂 (𝐵𝐻 𝑞 𝑊 𝑆 ) footprint can dominate 𝑀 live . TideKV avoids it with a two-pass block-wise procedure that streams over key blocks and never stores the full score tensor. Partition the prefix keys into blocks 
+
+1, … , 𝑇 of size up to 𝑏 𝑠 . For observation query 𝑞 and prefix key 𝑖 , the attention logit is 
+
+𝓁 𝑞,𝑖 = 𝑄 𝑞 ⋅ 𝐾 𝑖 
+
+√𝐷 . (4) For each observation query, logits for keys beyond its causal position are set to −∞ . Both passes use the same absolute positions and causal mask. 
+
+Pass 1 (normalization) uses an online running-maximum recurrence to accumulate normalization statistics without 
+
+Algorithm 2 LAYER END COMPRESS (two-pass blockwise scoring) 
+
+Require: full layer KV (𝐾, 𝑉 ); observation queries 𝑄 (size 
+
+𝑊 ); budget 𝐾 𝑙 ; block size 𝑏 𝑠 ; mandatory indices mand 
+
+Ensure: retained index set 𝑙 and gathered (̂𝐾,̂ 𝑉 ) 
+
+> 1:
+
+initialize 𝑚 𝑞 ← −∞ , 𝑍 𝑞 ← 0 for all 𝑞  
+
+> 2:
+
+for each key block 𝑡 do ⊳ Pass 1: streaming log-sum-exp, (4)–(6)  
+
+> 3:
+
+update running max 𝑚 𝑞 and normalizer 𝑍 𝑞 for all 𝑞  
+
+> 4:
+
+end for  
+
+> 5:
+
+𝑘 ← 𝐾 𝑙 − |mand |; heap ← ∅ 
+
+> 6:
+
+for each key block 𝑡 do ⊳ Pass 2: streaming top-𝑘 ,(7)–(8)  
+
+> 7:
+
+compute 𝑎 𝑞,𝑖 with (𝑀 𝑞 , 𝑍 𝑞 ); pool to 𝑝 𝑖 for 𝑖 ∈ 𝑡  
+
+> 8:
+
+retain top-𝑘 candidates with 𝑖 ∉ mand in heap  
+
+> 9:
+
+end for  
+
+> 10:
+
+𝑙 ← indices(heap) ∪ mand  
+
+> 11:
+
+return 𝑙 , GATHER (𝐾, 𝑉 , 𝑙 )
+
+retaining logits from previous blocks: 
+
+𝑚 (𝑡 ) 
+
+> 𝑞
+
+= max (𝑚 (𝑡 −1)  
+
+> 𝑞
+
+, max 
+
+> 𝑖 ∈𝑡
+
+𝓁 𝑞,𝑖 
+
+), (5) 
+
+𝑍 (𝑡 ) 
+
+> 𝑞
+
+= 𝑍 (𝑡 −1)  
+
+> 𝑞
+
+𝑒 𝑚 (𝑡 −1)   
+
+> 𝑞 −𝑚 (𝑡 )
+> 𝑞
+
++ ∑
+
+> 𝑖 ∈𝑡
+
+𝑒 𝓁 𝑞,𝑖 −𝑚 (𝑡 ) 
+
+> 𝑞
+
+. (6) After 𝑇 blocks, 𝑀 𝑞 = 𝑚 (𝑇 ) 
+
+> 𝑞
+
+and 𝑍 𝑞 = 𝑍 (𝑇 ) 
+
+> 𝑞
+
+; Pass 1 stores 
+
+𝑂 (𝑊 ) scalars per batch and attention head. 
+
+Pass 2 (scoring + streaming top-𝑘 ) revisits the blocks, forms normalized weights, pools them into per-key impor-tance, and keeps the top 𝑘 = 𝐾 𝑙 − |mand | nonmandatory entries: 
+
+𝑎 𝑞,𝑖 = 𝑒 𝓁 𝑞,𝑖 −𝑀 𝑞 
+
+𝑍 𝑞 
+
+, 𝑝 𝑖 =
+
+> 𝑊
+
+∑
+
+> 𝑞 =1
+
+𝑤 𝑞 𝑎 𝑞,𝑖 , (7) 
+
+𝑙 = Top 𝑘 
+
+({𝑝 𝑖 ∶ 𝑖 ∉ mand }) ∪ mand ,
+
+|𝑙 | = 𝐾 𝑙 . (8) where 𝑤 𝑞 are pooling weights and mand is the set of always-retained token indices, such as recent tokens and attention sinks, counted within the budget 𝐾 𝑙 rather than added on top, so the physical cache size equals the stated budget. The retention count assumes a feasible budget |mand | ≤ 𝐾 𝑙 ≤
+
+𝑆 . The compressed cache ̂ [𝑙 ] gathers the rows indexed by 
+
+𝑙 (or per-head 𝑙,ℎ ). The procedure leaves causal attention unchanged and bounds the temporary compression memory to Temp =
+
+𝑂 (𝐵𝐻 𝑞 (𝑊 𝑏 𝑠 + 𝐾 𝑙 )), independent of 𝑆 , compared with 
+
+𝑂 (𝐵𝐻 𝑞 𝑊 𝑆 ) for the dense tensor. The second blockwise pass recomputes the logits in Eq. (4) instead of storing them, and this work is included in the prefill overhead reported in Section 6. The running maximum 𝑚 𝑞 keeps the streaming log-sum-exp numerically stable in BF16 by rescaling every block to a common reference. Because each pass holds only one key block of size 𝑏 𝑠 , the compression workspace is 
+
+Wang et al.: Preprint submitted to Elsevier Page 6 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill avoided:     
+
+> W· S memory one block in flight replaces the full W × S tensor
+> Pass 1
+> normalization scan
+> ••• •••
+> numerically-stable streaming normalizer
+> running max
+> only W-length state
+> normalizers
+> feed Pass 2
+> Pass 2
+> scoring +selection scan
+> normalized
+> weights pool
+> per-key scores
+> streaming top-k heap
+> recent/sink
+> ∪
+> retained indices gather from K,V
+> compre ssed
+> naive W· S
+
+↓ 
+
+> streaming memory usage independent of
+> S grows 1
+
+B2BtBTB
+
+> 1
+> 2
+> 3
+> ⋮
+> W
+> •••
+> W
+> Ws
+
+b        
+
+> 1
+> 2
+> 3
+> S
+> 123S
+> •••
+> 12K••• 12K••• lK
+> size
+> 12K••• 12K•••   ,K V
+> independent of S
+> S prefix keys
+
+W observation queries   
+
+> •••
+> ••• W S 
+> score tensor 1B2BtBTB
+> prefix split into blocks of keys prefix split into blocks of keys
+
+( , )q qm Z( , )q qm Z( , )q qm Z( , )q qm Z( , )q qm Z( , )q qm Z( , )q qm Z( , )q qm Z1B1B2BtB
+
+> log-sum-exp normalizer
+> 1
+> 2
+> 3
+> ⋮
+> W
+> log-sum-exp normalizer 123
+> ⋮
+> W
+
+Figure 3: Memory-controlled two-pass blockwise scoring. Instead of materializing the dense 𝑊 × 𝑆 observation-by-prefix score tensor, the prefix keys are split into blocks. Pass 1 scans the blocks to build the numerically stable log-sum-exp normalizers 
+
+(𝑚 𝑞 , 𝑍 𝑞 ), keeping only 𝑊 -length state. Pass 2 rescans to form normalized weights, pools them into per-key scores, and keeps the top 𝐾 𝑙 − |mand | nonmandatory entries together with the mandatory recent/sink set before gathering the retained (̂ 𝐾,̂ 𝑉 ). The temporary footprint Temp = 𝑂 (𝑊 𝑏 𝑠 + 𝐾 𝑙 ) is independent of 𝑆 .
+
+governed by 𝑏 𝑠 rather than prompt length. The parameter 
+
+𝑏 𝑠 therefore trades arithmetic efficiency against temporary memory. Under grouped-query attention, per-key scores are aggregated at KV-head granularity before selection, so re-tained indices are shared within each KV group and the gathered (̂ 𝐾,̂ 𝑉 ) remain in the compact KV-head layout. 
+
+4.3. Memory and complexity analysis 
+
+TideKV changes the residency schedule rather than the causal attention computation: the prompt still passes through all 𝑁 layers, with an additional 𝑂 (𝑊 𝑆 ) layer-end scoring pass. At the largest working set of layer 𝑙 ,
+
+𝑀 TideKV live ≈ 2 𝐵𝐻 kv 𝑆𝐷𝑏 ⏟⏞⏞⏞⏞⏟⏞⏞⏞⏞⏟ 
+
+> active KV
+
++ 𝐵𝑆𝑑 model 𝑏 ⏟⏞⏞⏞⏟⏞⏞⏞⏟ 
+
+> hidden
+
++ 𝑐𝐵𝐶𝑑 f f 𝑏 ⏟⏞⏟⏞⏟ 
+
+> chunk act.
+
++ ∑
+
+> 𝑙 ′<𝑙
+
+2𝐵𝐻 kv 𝐾 𝑙 ′ 𝐷𝑏 ⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟ 
+
+> compressed caches
+
++ 𝑂 (𝐵𝐻 𝑞 (𝑊 𝑏 𝑠 + 𝐾 𝑙 )) 𝑏 ⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏞⏟ 
+
+> compression temp
+
+.
+
+(9) where 𝑑 ff = 𝑂 (𝑑 model ) is the MLP intermediate width, 
+
+𝑐 counts co-resident MLP activation buffers, and the expression assumes a FlashAttention backend. Only the compressed-cache sum accumulates across layers. The active-layer KV and hidden bridge each remain linear in 
+
+𝑆 , with footprints of 2𝐵𝐻 kv 𝑆𝐷𝑏 and 𝐵𝑆𝑑 model 𝑏 bytes. Reusing hidden chunk slots avoids a separate bridge per layer. These remaining linear terms limit scaling; layer-specific workspace and allocation behavior also affect the measured peak. A layer-end post-prefill compressor has the same active-layer KV and hidden terms. Whole-prompt execution gives an activation term of 𝑐𝐵𝑆𝑑 ff 𝑏 and a dense compression workspace of 𝐵𝐻 𝑞 𝑊 𝑆𝑏 . TideKV reduces these terms by 𝑆 ∕𝐶 and from 𝑂 (𝑊 𝑆 ) to 𝑂 (𝑊 𝑏 𝑠 ),respectively. The activation term provides most of the reduction because it scales with the MLP width and the full context in whole-prompt execution. Chunk size 𝐶 and score block size 𝑏 𝑠 control these memory–latency trade-offs; Section 6.6 evaluates the chunk-size choice. 
+
+4.4. Prompt fidelity and scope 
+
+Layer-major delayed eviction preserves each layer’s prompt path up to compression. Consider deterministic causal layers with token-local normalization and MLPs, identical weights, tokens, positions and masks, and exact arithmetic. Assume that the input hidden sequence to layer 
+
+𝑙 matches uncompressed causal prefill. Each chunk then has the same queries and complete causal KV history, with the within-chunk mask excluding future tokens. Its output agrees with the reference, so induction over chunks gives the same complete hidden sequence 𝐻 𝑙 and pre-compression KV. Layer-end compression affects only the retained decode cache, leaving 𝐻 𝑙 unchanged; induction over layers completes the argument. Finite-precision kernels and operation order can introduce numerical differences. We evaluate hidden-state relative-𝐿 2 error and cosine similarity, together with next-token top-1 agreement and Jensen–Shannon divergence, across full, standard-chunked, no-eviction layer-major, and 
+
+Wang et al.: Preprint submitted to Elsevier Page 7 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill for each layer l= 1…N   
+
+> A.layer-major scheduler
+> ⋯layer l
+> per chunk (1…m) stream chunks within a layer one active layer at a time
+> B. Layer-end compressor
+> ⋮
+> two-pass blockwise scoring Alg. 2
+> C. Cross-layer cache manager
+> 123456
+> completed compressed active: full KV future: none
+> release full KV at layer boundary
+> same active layer l hidden chunks → next layer
+> after all layers
+> decode D. Decode adapter
+> ⋯decoding
+> compressed initial cache
+> → decoding
+
+Memory accountant 
+
+> attributes peak memory to KV / hidden / act / temp; audits cache bytes
+
+Figure 4: Logical architecture of the TideKV reference implementation. The layer-major scheduler coordinates the layer-end compressor and cross-layer cache manager to transform each layer’s full KV into a compact retained cache at the layer boundary. After all layers complete, the decode adapter exposes the assembled initial cache to generation. The memory accountant records component residency and allocator/process-level peaks. 
+
+compressed TideKV paths (Section 6.5). Selector-matched downstream scores assess the utility of the retained cache separately from this prompt-encoding property. 
+
+## 5. System implementation 
+
+We implement TideKV as an on-GPU prefill subsys-tem in Hugging Face Transformers. It reuses the pretrained weights and configured Transformer operators, but replaces the standard whole-model prompt traversal with a layer-by-chunk loop. Figure 4 summarizes the four logical compo-nents and the cross-cutting memory accountant. 
+
+Layer-major scheduler and hidden-state bridge. At layer 𝑙 , TideKV stores output chunks 𝐻 𝑙 = { ℎ𝑙 
+
+> 1
+
+, … , ℎ 𝑙 𝑚 }
+
+as the hidden-state bridge to layer 𝑙 + 1 and reuses the same chunk slots as execution advances. The bridge contains 
+
+𝑂 (𝐵𝑆𝑑 model ) elements, whereas temporary attention and MLP activations remain bounded by one chunk. The active layer separately accumulates its uncompressed KV. Causal masks and absolute token positions are maintained for every chunk. 
+
+Layer-end compression and cache management. Af-ter the last chunk, the compressor scores the complete layer-local history, gathers the retained K/V entries and their origi-nal positions, and commits the compressed cache. The cross-layer cache manager then releases the full active-layer KV. It supports rectangular per-layer caches and a variable-length layout for head-adaptive budgets. The layer-end commit is the synchronization point before the scheduler advances to layer 𝑙 + 1 .
+
+Decode adapter and accounting. The decode adapter exposes the compressed initial cache in the structure ex-pected by generation and resumes from true absolute po-sitions rather than the shortened cache length. Throughout cache construction, the memory accountant tracks active allocation, allocator-reserved memory, final physical-cache bytes, and process-level device memory. These signals con-nect the component lifetimes in Fig. 4 to the end-to-end memory behavior evaluated in Section 6. The layer-major order changes orchestration rather than the numerical definition of attention, normalization, or MLP operators, and therefore remains compatible with intra-layer fused kernels such as FlashAttention-2. Its overhead includes chunk dispatch, blockwise scoring, hidden-state bridge traffic, KV gathering and packing, and layer-boundary synchronization; these costs are included in the measured TTFT and quantified in Section 6.6. The components interact at each layer boundary: after the complete prompt is processed, the scheduler triggers compression, the cache manager commits retained KV and releases the full active-layer KV, and the next layer receives the hidden-state bridge. The memory accountant tracks these lifetimes. This coordination preserves full-prompt selection while limiting uncompressed KV residency to one active layer. 
+
+## 6. Evaluation 
+
+We evaluate cache utility, memory savings, runtime and device robustness, and latency through selector-matched measurements, allocator/backend and persistent-request tests, cross-device experiments, and fidelity and timing analyses. 
+
+Wang et al.: Preprint submitted to Elsevier Page 8 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill       
+
+> Table 2
+> Principal experimental configuration. Platform-specific soft-ware is held fixed within every matched comparison.
+> Item Configuration Models Llama-3.1-8B-Instruct; Mistral-7B-Instruct-v0.2; BF16 Accelerators A100 PCIe 40 GB; RTX 4090 24 GB; Jetson AGX Orin 64 GB (MODE_50W) A100 stack CUDA 11.8; PyTorch 2.3.1; Transformers 4.44.2; FlashAttention 2.7.4.post1 Inference Batch 1; chunk 2,048; physical KV budget 4,096 unless stated otherwise
+
+6.1. Evaluation setup 
+
+Models and platforms. We evaluate Llama-3.1-8B-Instruct and Mistral-7B-Instruct-v0.2 in BF16 on an NVIDIA A100 PCIe 40-GB GPU, a 24-GB GeForce RTX 4090, and a 64-GB Jetson AGX Orin in MODE-50W. Unless stated otherwise, batch size is one, the chunk size is 2,048, the physical KV budget is 4,096 tokens, and the main attention path uses FlashAttention-2. Table 2 summarizes the principal configuration; every matched pair uses the same software stack. 
+
+Benchmarks and metrics. LongBench [10] contains 16 English tasks and 3,750 examples. RULER [11] contains 13 controlled retrieval and aggregation tasks; we use 100 examples per task at 4K–128K and report both mean score and completion status. Memory measurements distinguish peak allocated, peak reserved, and process-level NVML memory on discrete GPUs. On Jetson, we report CUDA-managed allocation because the CPU and GPU share phys-ical memory. Time to first token (TTFT) includes prefill, cache selection, and the first generated token. 
+
+Baselines and matched controls. The baselines span token selection (SnapKV, PyramidKV, AdaKV, and ChunkKV), online eviction (KeyDiff [23]), KV quantization (KIVI [36]), and CPU–GPU head offloading (HeadIn-fer [48]). Each schedule-level comparison holds model weights, prompt tokens, precision, selector parameters, physical KV budget, decode settings, attention backend, allocator, synchronization, and measurement procedure fixed. The detailed construction analysis uses a 4,096-token budget, which produces a 512-MiB compact GQA cache for both methods. 
+
+6.2. Selector-matched quality and memory 
+
+We first examine whether TideKV lowers the memory required to construct a cache without changing its utility or final size. Each selector is paired with its TideKV counter-part at physical KV budgets of 256, 1,024, and 4,096 tokens and evaluated on LongBench and RULER. Across both benchmarks, the paired variants remain close. Table 3 shows that TideKV preserves the selector-specific LongBench quality profile. Table 4 reports the cor-responding A100 RULER results from 4K to 128K. Across the 12 selector–budget pairs, the five-length mean score changes by −0 .46 to +1 .14 points under TideKV. Differ-ences at individual lengths range from −2 .41 to +2 .61 
+
+points. At 64K and 128K, all four selector families remain close to their matched baselines, with differences of −0 .41 
+
+to +2 .61 points across 24 comparisons. At budget 1,024, the mean absolute difference over these two lengths is 0.19 points. Thus, the agreement between each selector and its TideKV counterpart persists across both cache budgets and context lengths. The matched memory accounting in Fig. 5 identifies where the saving occurs. After prefill, both methods con-verge to the same 15.466-GiB steady allocation, which com-prises the loaded model, the identical 512-MiB compact cache, and the remaining persistent runtime tensors; it is not the model-weight footprint alone. During cache construc-tion, TideKV-Snap lowers peak allocation from 22.748 to 16.639 GiB and the NVML process peak from 24.096 to 17.283 GiB. Subtracting the common steady state isolates a transient footprint of 7.281 GiB for SnapKV and 1.173 GiB for TideKV-Snap, an 83.89% reduction. TideKV therefore reduces the temporary memory required to build the same final cache rather than shrinking the cache used for decoding. 
+
+6.3. Runtime-memory robustness 
+
+We next examine whether the active-memory saving depends on the allocator or attention implementation, and whether repeated mixed-length requests cause allocator growth. The allocator sweep uses the A100, Llama-3.1-8B-Instruct in BF16, batch size one, a 4,096-token physical budget, 𝐶 = 2048 , and FlashAttention-2. “Native” denotes PyTorch’s default caching allocator; “Async” denotes the CUDA stream-ordered cudaMallocAsync backend selected through PyTorch’s allocator configuration. The method pair and all other settings are unchanged between these runs. 
+
+Allocator sensitivity. At 128K, Fig. 5(b,c) shows the same 41.26% allocated-peak reduction under Native and Async, while reserved and NVML reductions range from 12.47% to 42.09%. Thus, changing the allocator leaves the active-memory reduction unchanged but alters how much of it appears at the process level. 
+
+Attention-backend sensitivity. The backend stress tests in Table 5(a) support the same distinction. Under FlashAttention-2, allocated-peak savings increase from 3.74% at 8K to 26.85% at 64K, while reserved and NVML peaks also decrease. With SDPA, allocated-peak savings increase from 3.55% to 21.94% over the same range. At 64K, however, SDPA raises the reserved and NVML peaks by 23.39% and 22.94%, respectively, showing that backend workspaces can mask lower active residency at process level. Eager attention further exposes the feasibility boundary: SnapKV is OOM at both 8K and 16K, whereas TideKV-Snap completes both contexts. 
+
+Persistent-workload stability. To test whether alloca-tor history causes memory to accumulate across sequential requests, we executed a 150-request mixed-length trace for each allocator–method configuration in a persistent process. Stability requires the post-warm-up reserved-memory tra-jectory to reach a plateau rather than grow across repeated   
+
+> Wang et al.: Preprint submitted to Elsevier Page 9 of 15
+
+Delayed KV Eviction via Layer-Wise Chunked Prefill 
+
+Table 3 
+
+Detailed results of Llama-3.1-8B-Instruct and Mistral-7B-Instruct-v0.2 on LongBench. Bold scores indicate the higher average within each selector pair. Single-Doc. QA Multi-Doc. QA Summarization Few-shot Learning Synthetic Code NrtvQA Qasper MF-en HotpotQA 2WikiMQA Musique GovReport QMSum MultiNews TREC TriviaQA SAMSum PCount PRe Lcc RB-P Ave. Score Full Cache 29.69 44.92 55.78 54.68 47.26 30.89 35.09 23.55 27.23 73.0 90.23 44.22 10.38 99.5 64.58 58.97 49.37 Llama-3.1-8B-Instruct, 𝐵𝑢𝑑𝑔𝑒𝑡 = 256 
+
+snap 26.9 31.93 52.54 54.55 43.2 28.41 22.19 23.81 22.22 55.6 85.27 40.94 6.75 99 61.69 54.93 44.37 
+
+tidekv-snap 26.83 32.99 53.25 54.99 43.6 28.72 21.91 23.75 22.55 55.5 86.72 41.3 5.28 99.5 62.32 55.67 44.68 
+
+pyramidkv 29.17 36.12 52.84 54.72 43.8 29.87 23.13 22.87 22.6 54.5 76.42 41.64 6.78 99.5 60.54 51.97 44.15 tidekv-pyramidkv 29.31 35.86 53.86 53.9 43.32 30.19 23.08 23.27 22.28 54 76.77 40.91 5.28 99 60.66 52.66 44.02 adakv 26.05 32.78 52.78 55.77 43.46 27.55 22.62 23.43 22.67 58.5 86.87 40.91 6.78 99.5 62.56 57.09 44.96 
+
+tidekv-adakv 25.22 33.98 54.74 54.98 42.87 29.37 21.97 24.04 22.4 59.5 87.86 41.28 5.28 99.5 62.36 56.47 45.11 
+
+chunkkv 25.61 28.66 52.28 53.78 43.63 27.46 20.34 22.9 21.39 47.5 89.54 41.27 5.69 99 61.14 54.65 43.43 
+
+tidekv-chunkkv 25.25 30.22 53.6 54.22 41.74 29.47 20.37 23.37 21.82 47 88.16 41.45 5.36 98 62.6 54.82 43.59 
+
+Llama-3.1-8B-Instruct, 𝐵𝑢𝑑𝑔𝑒𝑡 = 1024 
+
+snap 29.4 42.61 53.43 55.79 44.78 29.16 27.81 24.37 25.99 67.5 89.62 42.91 6.83 99.5 64.25 58.01 47.62 
+
+tidekv-snap 29.51 43.27 54.65 55.49 44.24 31.4 27.11 24.61 25.57 69 90.61 42.23 5.25 99.5 64.19 58.18 47.8 
+
+pyramidkv 29.32 43.27 55.26 55.56 44.08 31.39 28.53 23.92 25.9 70.5 90.17 42.13 6.75 99 63.25 57 47.88 
+
+tidekv-pyramidkv 29.25 43.48 55.87 55.22 44.05 31.65 28.01 24.14 25.88 70.5 90.98 43.67 5.25 99.5 64.02 55.97 47.96 
+
+adakv 30.13 43.33 55.25 56.17 44.75 29.54 27.58 24.57 25.89 68.5 90.37 42.03 6.75 99.5 64.04 58.43 47.93 tidekv-adakv 30.31 43.1 55.31 55.63 44.36 30.62 27.43 24.94 25.66 70 89.94 42.35 5.25 99.5 64.07 58.3 47.92 chunkkv 28.65 43.66 54.54 56.35 45.61 31.54 26.84 23.91 25.66 67 90.41 42.29 6.78 98.5 64.55 58.24 47.78 
+
+tidekv-chunkkv 28.63 43.77 55.81 55.45 44.45 31.02 27.04 24.46 25.67 68.5 91 42.85 5.28 99.5 65.08 58.55 47.94 
+
+Llama-3.1-8B-Instruct, 𝐵𝑢𝑑𝑔𝑒𝑡 = 4096 
+
+snap 29.72 44.45 55.3 56.51 45.14 29.89 32.27 25.28 26.95 71.5 91.48 43.62 6.75 99.5 64.61 58.95 48.87 
+
+tidekv-snap 30.2 44.64 56.4 55.34 44.63 31.65 32.29 24.96 27.12 72.5 90.98 43.41 5.25 99.5 64.81 58.66 48.9 
+
+pyramidkv 30.4 44.25 55.43 56.47 45.14 29.88 31.55 24.53 27.03 72.5 91.65 43.77 6.75 99.5 64.49 58.9 48.89 tidekv-pyramidkv 29.59 44.64 56.5 55.39 45.14 31.03 32.57 24.83 27.05 72.5 90.98 43.62 5.25 99.5 64.59 58.45 48.85 adakv 30.16 45.04 55.5 56.23 45.04 29.5 32.38 25.41 26.79 71.5 91.48 43.59 6.75 99.5 64.68 59.11 48.92 
+
+tidekv-adakv 30.32 44.68 56.03 55.53 44.98 31.2 32.6 25.22 26.99 72.5 90.98 43.55 5.25 99.5 64.73 59.19 48.95 
+
+chunkkv 29.13 44.43 55.56 56.07 44.65 29.77 32.3 24.36 26.93 72.5 91.65 43.04 6.75 99.5 64.52 58.35 48.72 
+
+tidekv-chunkkv 29.83 44.81 56.37 55.1 44.59 31.31 32.47 25.7 27.05 72.5 90.68 43.4 5.25 99.5 64.86 59.25 48.92 
+
+Mistral-7B-Instruct-v0.2, 𝐵𝑢𝑑𝑔𝑒𝑡 = 256 
+
+snap 17.74 21.85 43.26 26.6 16.48 12.43 22.16 22.57 22.92 57.5 85.79 40.05 2.96 76.82 54.28 51.67 35.94 tidekv-snap 18.32 20.33 42.42 26.89 16.27 11.93 22.44 22.1 22.55 57 85.51 39.49 2.95 76.33 54.09 50.95 35.6 pyramidkv 18.01 19.64 41.65 27.52 15.38 12.12 22.75 21.71 22.38 68 84.81 40.31 2.36 77.44 52.68 49.23 36 
+
+tidekv-pyramidkv 17.97 21.26 41.89 30.28 15.97 12.44 22.76 22.03 22.08 66.5 84.22 39.72 1.96 77.73 52.98 47.29 36.07 
+
+chunkkv 16.98 19.97 44.88 27.05 16.6 14 22.2 22.08 21.96 65 86.35 38.92 3.22 53.69 53.58 48.29 34.67 tidekv-chunkkv 18.61 20.05 45.47 27.51 15.95 13.29 20.47 21.29 21.64 64.5 85.19 39.47 4.06 53.06 54.24 49.53 34.64 Mistral-7B-Instruct-v0.2, 𝐵𝑢𝑑𝑔𝑒𝑡 = 1024 
+
+snap 20.3 27.75 45.78 32.72 19.04 16.74 26.87 23.82 25.74 68 86.34 40.93 3.29 88.56 57.59 53.41 39.8 tidekv-snap 20.33 26.84 45.95 33.54 18.97 16.59 26.7 23.5 25.71 67 86.28 41.37 3.08 87.29 56.91 53.67 39.61 pyramidkv 20.39 27.13 45.21 32.34 19.01 15.42 26.4 23 25.64 69.5 85.96 41.28 4.36 86.08 55.67 52.57 39.37 tidekv-pyramidkv 19.78 27.55 45.23 32.32 19.94 14.73 26.5 22.83 25.49 68 85.64 41.64 3.6 87.33 56.07 52.25 39.31 chunkkv 19.02 26.76 45.94 32.39 18.75 14.81 25.95 21.5 25.44 66 86.34 40.82 3.53 82.6 57.14 53.61 38.79 
+
+tidekv-chunkkv 20.13 27.86 46.56 33.98 19.19 16.67 26.78 23.39 25.79 68 86.34 40.37 2.72 85.92 57.08 53.2 39.62 
+
+Mistral-7B-Instruct-v0.2, 𝐵𝑢𝑑𝑔𝑒𝑡 = 4096 
+
+snap 21.6 29.27 47.03 35.64 21.78 19 31.2 23.67 26.87 70 86.24 41.74 4.04 89.17 57.23 54.4 41.18 tidekv-snap 21.68 30.02 46.91 35.6 21.84 19.42 31.31 23.68 26.84 70.5 86.23 41.82 3.41 87.96 57.2 54.27 41.17 pyramidkv 21.34 29.28 46.28 34.54 21.66 18.66 30.86 23.89 26.78 71 86.17 41.89 3.11 88.21 57.41 54.45 40.97 tidekv-pyramidkv 21.18 29.38 46.18 34.18 21.02 19.1 30.5 23.94 26.92 71 86.28 41.68 3.66 87.12 57.25 53.64 40.81 chunkkv 21.08 29.33 46.99 36.05 21.16 18.86 30.96 23.27 26.87 71 86.24 41.85 2.79 87.94 57.37 54.8 41.04 
+
+tidekv-chunkkv 21.63 29.31 46.98 35.82 21.27 19.39 31.5 23.76 26.84 71 86.25 42.23 3.05 88.06 57.31 54.11 41.15 Table 4 
+
+RULER performance (%) of Llama-3.1-8B-Instruct on A100 under different physical KV budgets and context lengths. Avg equally weights the five displayed lengths. SnapKV and PyramidKV denote selector-matched controls. Higher is better. 
+
+Method Budget = 256 Budget = 1024 Budget = 4096 4K 16K 32K 64K 128K Avg 4K 16K 32K 64K 128K Avg 4K 16K 32K 64K 128K Avg SnapKV 68.47 65.68 62.97 60.20 43.31 60.13 88.56 78.78 74.46 68.96 58.92 73.94 95.18 89.50 81.12 76.72 65.90 81.68 
+
+TideKV-Snap 69.70 67.88 64.62 59.95 42.94 61.02 88.25 78.57 74.28 69.14 59.07 73.86 95.00 90.47 82.07 78.07 68.51 82.82 PyramidKV 61.64 61.35 58.61 53.93 39.24 54.95 80.58 73.66 70.97 65.72 56.09 69.40 95.18 87.71 77.34 71.73 63.29 79.05 
+
+TideKV-PyramidKV 61.70 61.11 59.48 54.29 40.68 55.45 80.21 73.50 70.09 65.60 56.17 69.11 95.00 85.30 77.66 71.66 63.35 78.59 AdaKV 70.05 68.21 63.98 59.38 41.43 60.61 88.50 79.90 75.42 68.85 58.46 74.23 95.09 90.05 81.93 77.25 65.70 82.00 
+
+TideKV-AdaKV 70.20 68.10 64.14 59.22 41.12 60.56 89.80 79.67 75.02 69.10 58.24 74.37 95.00 90.74 83.31 77.87 68.19 83.02 ChunkKV 73.23 73.57 72.32 66.68 34.97 64.15 91.53 84.78 81.88 80.14 65.62 80.79 95.18 89.22 85.85 82.35 73.11 85.14 
+
+TideKV-ChunkKV 73.59 73.23 72.41 66.27 34.63 64.03 91.83 84.25 82.57 80.07 66.07 80.96 95.00 89.56 84.66 83.35 75.14 85.54 
+
+Wang et al.: Preprint submitted to Elsevier Page 10 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill Post-prefill steady Transient (SnapKV) Transient (TideKV-Snap) NVML process peak SnapKV TideKV-Snap 
+
+SnapKV TideKV-Snap 0510 15 20 25 
+
+> Memory (GiB)
+> 15.47
+> 7.28
+> 24.10
+> 15.47
+> 1.17
+> 17.28
+> Transient −83.89%
+> Final physical KV: 512 MiB for both
+
+0 10 20 30 40 
+
+Peak memory (GiB) 
+
+Allocated Reserved NVML 
+
+> 30.0 17.6
+> −41.3%
+> 36.4 31.8
+> −12.6%
+> 36.9 32.3
+> −12.5%
+
+0 10 20 30 40 
+
+Peak memory (GiB) 
+
+> 30.0 17.6
+> −41.3%
+> 33.8 19.6
+> −42.1%
+> 34.3 20.1
+> −41.5%
+
+(a) Construction-memory components (b) Native (c) Async 
+
+Figure 5: Matched construction-memory accounting on A100. (a) At 64K, both methods reach the same 15.466-GiB post-prefill allocation and retain the same 512-MiB physical cache; TideKV-Snap reduces the transient construction footprint from 7.281 to 1.173 GiB. Diamonds mark the NVML process peaks. (b,c) At 128K, the allocated-peak reduction is identical under Native and Async, while allocator retention changes the reserved and process-level realization. Percentages denote reductions from SnapKV to TideKV-Snap. 
+
+Table 5 
+
+Backend and persistent-workload robustness on A100. Positive values in panel (a) denote reductions from SnapKV to TideKV-Snap; negative values denote increases. Panel (b) reports 150 requests per configuration (600 total).                                                                
+
+> (a) Attention-backend stress tests
+> Backend Context Alloc. Reserved NVML FA2 8K 3.74% 5.41% 5.26% FA2 16K 8.08% 11.08% 10.79% FA2 32K 15.53% 21.38% 20.89% FA2 64K 26.85% 24.59% 24.13% SDPA 8K 3.55% 4.81% 4.68% SDPA 16K 7.04% 9.97% 9.70% SDPA 32K 12.96% 6.70% 6.54% SDPA 64K 21.94% −23 .39 %−22 .94 %
+> (b) Persistent mixed-length traces
+> Allocator Method Completed Max reserved Slope Cycle ΔInactive / retries Async SnapKV 150 33.781 GiB ≈ 0 0 MiB – / – Async TideKV-Snap 150 19.625 GiB 00 MiB – / – Native SnapKV 150 36.828 GiB ≈ 0 0 MiB 7.234 GiB / 1 Native TideKV-Snap 150 32.154 GiB 00 MiB 1.326 GiB / 0
+
+cycles. As shown in Table 5 (b), all 600 requests com-plete, the fitted reserved-memory slopes are approximately zero after warm-up, and the first-to-last cycle change is 0 MiB. These time-domain measures show that the reserved-memory peaks do not accumulate with request history. With Native, TideKV-Snap further reduces maximum inactive split memory from 7.234 to 1.326 GiB (81.67%) and reduces allocation retries from one to zero. Thus, the lower con-struction footprint remains stable under the tested persistent single-request workload while also reducing native-allocator fragmentation. 
+
+6.4. Device feasibility and long-context quality 
+
+We then measure whether the lower construction peak extends feasible prompt length on memory-constrained hardware while retaining long-context accuracy. The first-token capacity sweep measures prefill feasibility on the RTX 4090 and Jetson; the independent 32-token protocol is analyzed with the latency results in Section 6.6. 
+
+Cross-device capacity. 
+
+Table 6 
+
+First-token capacity on resource-constrained platforms. Entries are peak memory in GiB: NVML process memory on the RTX 4090 and CUDA-managed allocation on Jetson. OOM denotes prefill failure. Every completed method retains a 512-MiB final physical KV cache. 
+
+Platform Context SnapKV peak TideKV-Snap peak RTX 4090 32K 20.027 16.771 RTX 4090 64K 23.447 17.240 RTX 4090 128K OOM 18.529 Jetson AGX Orin 32K 19.099 16.131 Jetson AGX Orin 64K OOM 16.631 Jetson AGX Orin 128K OOM 17.632 
+
+On the RTX 4090, TideKV-Snap reduces the 64K pro-cess peak from 23.447 to 17.240 GiB (26.47%) and com-pletes 128K at 18.529 GiB, whereas SnapKV is OOM (Ta-ble 6). At 32K, the matched capacity measurement gives a 15.53% allocated-peak reduction and matches the inde-pendent 32-token protocol. For batch-one BF16 Llama-3.1-8B, the hidden bridge occupies 0.25, 0.50 and 1.00 GiB 
+
+Wang et al.: Preprint submitted to Elsevier Page 11 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill 
+
+Table 7 
+
+LongBench averages and RULER scores of Llama-3.1-8B-Instruct on RTX 4090. Paired RULER columns indicate context lengths. The 64K matched SnapKV score uses completed examples only.                   
+
+> Method LongBench 4K/8K 16K/32K 64K/128K TideKV-Snap 48.90 95.14/93.44 90.63/82.17 76.65/65.93 Matched SnapKV 48.87 95.03/93.60 89.55/80.98 74.82/OOM KeyDiff 47.29 95.06/84.05 73.54/64.38 56.32/33.07 KIVI 48.69 94.04/93.31 91.01/84.55 OOM/OOM HeadInfer 49.08 95.16/94.36 90.89/85.93 84.89/OOM
+
+at 32K, 64K and 128K; active-layer KV adds 0.50 GiB at 128K. Doubling context from 64K to 128K increases the measured process peak by 1.289 GiB. The bridge and active KV remain linear in prompt length, but their storage is manageable through 128K in the tested setting. Section 6.6 quantifies the associated latency. On Jetson, TideKV-Snap reduces CUDA-managed al-location from 19.099 to 16.131 GiB at 32K (15.54%). It remains feasible at 64K and 128K, with peaks of 16.631 and 17.632 GiB, respectively, whereas SnapKV is OOM at both lengths (Table 6). TideKV-Snap therefore extends the feasible context boundary from 32K to 128K on the tested unified-memory platform. 
+
+Very-long-context quality. Table 7 reports quality and completion outcomes on RTX 4090. TideKV-Snap completes all evaluated RULER lengths, scoring 76.65 at 64K and 65.93 at 128K. Matched SnapKV is close through 32K, partially completes the 64K evaluation, and is OOM at 128K. At the same 4,096-token budget, TideKV-PyramidKV scores 71.50/60.16 and TideKV-AdaKV scores 76.87/66.03 at 64K/128K. Available RULER logs show similar peak allocated memory: 16.495–16.510 GiB for all three variants at 64K and 17.494–17.509 GiB for Snap/Pyramid at 128K. All five logged configurations complete without OOM. These generation-run allocated peaks are distinct from the NVML measurements in Table 6. 
+
+Cross-paradigm comparison. The same table com-pares representative resource-management paradigms: SnapKV is the matched post-prefill selector, KeyDiff performs online KV eviction, KIVI quantizes the retained cache, and HeadInfer offloads attention heads between CPU and GPU. LongBench averages range from 47.29 to 49.08, with TideKV-Snap scoring 48.90. At 128K, KeyDiff completes but scores 33.07, while KIVI and HeadInfer are OOM; HeadInfer’s higher 64K score of 84.89 therefore does not extend to 128K. KeyDiff maintains a fixed retained-KV budget, whereas TideKV preserves the full layer-local history during prompt encoding. The observed scores illustrate the memory–quality trade-off between these construction strategies. TideKV’s lower construction peak expands the feasible context length while retaining the quality profile of its underlying selector. 
+
+6.5. Prompt fidelity of delayed eviction 
+
+We isolate whether layer-major execution and delayed layer-end eviction alter the prompt representation used to 
+
+Table 8 
+
+Prompt-encoding fidelity and representation drift relative to Full-OneShot (Llama-3.1-8B, 𝑆 =16 K, 𝐶 =512 , budget 1024 ,20 prompts). Columns: hidden-state relative-𝐿 2 and cosine similarity; logit top-1 agreement and Jensen–Shannon (JS) divergence between the prefill next-token distributions. Top: layer-major scheduling and delayed eviction stay at the bf16 chunking floor. Bottom: with the same SnapKV selector, im-mediate eviction drifts an order of magnitude more. Standard post-prefill SnapKV coincides with the Full-OneShot row, as its prefill forward is uncompressed.                               
+
+> hidden logit Mode (selector, eviction) rel-𝐿 2cos top-1 JS Full-OneShot (ref.) 01.000 1.00 0
+> Full-Chunked (no evict) 0.012 0.9999 0.95 3 × 10 −5
+> Tide-NoEvict 0.012 0.9999 0.95 3 × 10 −5
+> TideKV (SnapKV, del.) 0.012 0.9999 0.95 3 × 10 −5
+> Block-SnapKV (SnapKV, imm.) 0.122 0.990 0.55 0.002
+> Block-Recent (recent, imm.) 1.169 0.439 0.00 0.219
+
+construct the cache. The comparison includes an unchunked reference (Full-OneShot), BF16 chunking without eviction (Full-Chunked), the layer-major scheduler without eviction (Tide-NoEvict), TideKV with delayed compression, and two immediate-eviction controls using SnapKV or recent-token retention. At 16K with 𝐶 = 512 , Full-Chunked, Tide-NoEvict, and TideKV all yield hidden relative-𝐿 2 0.012, cosine similarity 0.9999, top-1 agreement 0.95, and JS divergence 3 × 10 −5 
+
+relative to Full-OneShot (Table 8). These results place the layer-major schedule and delayed eviction at the numerical floor introduced by ordinary BF16 chunking. Immediate eviction produces substantially larger drift. Block-SnapKV raises relative-𝐿 2 to 0.122 and lowers top-1 agreement to 0.55; recent-token eviction lowers cosine similarity to 0.439 and top-1 agreement to zero (Table 8). This lower prompt drift is consistent with the selector-matched quality results. 
+
+6.6. Latency and memory–time trade-off 
+
+Finally, we quantify the latency cost of lowering the con-struction peak, verify decoding with the resulting same-size cache, and identify a practical chunk-size operating point. Each latency run generates 32 tokens. We report TTFT, peak memory, and subsequent-token throughput. 
+
+Prefill cost and memory benefit. Table 9 gives repre-sentative matched memory–latency points: at A100 128K, the process peak falls by 43.86% for a 4.17% TTFT increase; at RTX 4090 64K, it falls by 26.47% for a 1.06% increase. 
+
+Decode behavior and timing composition. The detailed measurements in Table 10 show that the additional work is concentrated before generation. Across all six re-ported platform–length pairs, subsequent-token rates remain comparable or higher for TideKV-Snap; representative SnapKV/TideKV-Snap rates are 30.50/37.06 token/s on A100 at 64K, 27.13/31.59 token/s on RTX 4090 at 64K, and 2.64/3.45 token/s on Jetson at 32K. These paired 
+
+Wang et al.: Preprint submitted to Elsevier Page 12 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill 0 5 10 15 20 25 30   
+
+> Chunk index
+> 0.01 0.1 1Mean hidden relative L2 (log)
+> bf16 chunking floor TideKV & no-evict refs (floor) Block-SnapKV Block-Recent
+
+(a) Drift vs. chunk index. 256 1024 4096    
+
+> KV budget
+> 0.01 0.1 1Mean hidden relative L2 (log)  TideKV & no-evict refs (floor) Block-SnapKV Block-Recent
+
+(b) Drift vs. KV budget. 
+
+Figure 6: Representation drift relative to Full-OneShot. Immediate Block-SnapKV drift grows with chunk index and decreases with a larger budget, whereas TideKV remains at the no-eviction chunking floor. 
+
+Table 9 
+
+Matched 32-token latency and memory results. Values are medians; memory is the NVML process peak on A100/RTX 4090 and CUDA-managed allocation on Jetson. Each completed method starts decoding from a 512-MiB compressed KV cache. 
+
+Platform Context SnapKV TTFT / peak TideKV-Snap TTFT / peak TTFT change Peak change A100 64K 12.390 s / 24.096 GiB 14.464 s / 17.283 GiB +16.74% −28 .28 %A100 128K 42.037 s / 33.080 GiB 43.791 s / 18.572 GiB +4.17% −43 .86 %RTX 4090 32K 5.500 s / 20.027 GiB 6.191 s / 16.771 GiB +12.55% −16 .26 %RTX 4090 64K 15.698 s / 23.447 GiB 15.865 s / 17.240 GiB +1.06% −26 .47 %RTX 4090 128K OOM 47.110 s / 18.529 GiB – feasible Jetson 32K 116.659 s / 19.099 GiB 126.492 s / 16.131 GiB +8.43% −15 .54 %Jetson 64K OOM 320.467 s / 16.631 GiB – feasible 
+
+Table 10 
+
+Decode rate and layer-end compression share. Decode entries are SnapKV/TideKV-Snap in token/s. Compression share is the median per-run ratio of compression time to TTFT from separate profiling runs (five on A100/RTX 4090; three on Jetson).               
+
+> Platform, context Decode rate Compression share A100, 16K 29.77 / 36.58 21.92% A100, 64K 30.50 / 37.06 13.38% RTX 4090, 32K 26.86 / 32.45 17.96% RTX 4090, 64K 27.13 / 31.59 13.73% Jetson, 16K 2.67 / 3.46 7.16% Jetson, 32K 2.64 / 3.45 5.89%
+
+measurements confirm that decoding from the matched compact cache remains intact. In separate profiling runs, layer-end scoring and compression account for 5.89%– 21.92% of TideKV TTFT. These shares are medians of per-run ratios. They describe prefill composition, whereas Table 9 reports the TTFT increase over SnapKV. 
+
+Chunk-size operating point. Chunk size controls the memory–latency operating point. The cross-platform sweep in Table 11 identifies 𝐶 = 2048 as a robust default: A100 gains modest latency at 𝐶 = 4096 , whereas RTX 4090 and Jetson consume more memory without improving TTFT. A separate chunk-size sweep used Llama-3.1-8B-Instruct with a 4,096-token budget. As 𝐶 varied from 512 to 4,096, TideKV-Snap’s 16-task LongBench mean ranged from 48.90 to 49.09. Overall, TideKV provides substantial construction-memory headroom with acceptable prefill overhead across 
+
+Table 11 
+
+TideKV-Snap chunk-size Pareto sweep. Each entry is TTFT in seconds / peak memory in GiB (NVML on A100/RTX 4090; CUDA-managed on Jetson). RTX 4090 and Jetson timings were measured independently of Table 9.                
+
+> Platform and context 𝐶 = 1024 𝐶 = 2048 𝐶 = 4096
+> A100, 64K 16.783 / 17.125 14.464 / 17.283 13.899 / 17.713 RTX 4090, 64K 17.181 / 17.080 15.804 / 17.240 15.981 / 17.670 Jetson, 32K 128.27 / 16.037 125.66 / 16.131 128.62 / 16.320
+
+the tested platforms. Near device limits, this headroom enables much longer prompts while preserving the final cache size and stable decode-stage behavior. 
+
+## 7. Conclusion 
+
+TideKV constructs a compressed initial KV cache by streaming prompt chunks within each layer and delaying eviction until the layer has processed the complete prompt. This layer-major schedule preserves full-prompt-aware cache selection while limiting full-prompt KV residency to one active layer and transient activations to one chunk. Matched experiments show that TideKV preserves the underlying selector’s quality profile and final cache size while reducing the memory required to construct that cache. TideKV-Snap cuts the 64K transient construction footprint by 83.89% on A100 and completes 128K inference on both an RTX 4090 and a Jetson AGX Orin; its RTX 4090 RULER score is 65.93. The allocator, backend, and persistent work-load results further show that the active-memory reduction holds across the tested runtime configurations. These results 
+
+Wang et al.: Preprint submitted to Elsevier Page 13 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill 
+
+make layer-major delayed eviction a practical way to lower the prefill construction peak and extend feasible context length without reducing the final decode-cache budget. The remaining linear bridge and active-layer KV costs warrant further evaluation at larger batch sizes and beyond 128K. Future work will integrate the layer-aware scheduler and layer-end cache transformation with continuous batching, prefix reuse, graph execution, and distributed serving, while exploring adaptive chunk sizing and backend-aware memory management. 
+
+## CRediT authorship contribution statement 
+
+Yu Wang: Writing - review & editing, Writing - origi-nal draft, Validation, Software, Methodology, Investigation, Formal analysis.. Zhu Wang: Writing-review & editing, Writing – original draft, Methodology, Formal analysis, Data curation.. Ning Hu: Supervision, Project administra-tion, Funding acquisition, Conceptualization.. Yifan Guo: 
+
+Methodology, Investigation.. Xiu Ma: Methodology, In-vestigation.. Bin Guo: Supervision, Project administration, Funding acquisition, Conceptualization.. Zhiwen Yu: Su-pervision, Project administration, Funding acquisition, Con-ceptualization.. 
+
+## Acknowledgments 
+
+This work is partially supported by the National Natural Science Foundation of China (No. 62472358, 62322601), and the Fundamental Research Funds for the Central Uni-versities(No. G2026KY06261). 
+
+## Declaration of competing interest 
+
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper. 
+
+## Data availability 
+
+Data will be made available on request. 
+
+## References 
+
+[1] A. Grattafiori, A. Dubey, A. Jauhri, A. Pandey, A. Kadian, A. Al-Dahle, A. Letman, A. Mathur, A. Schelten, A. Vaughan, et al., The llama 3 herd of models, in: Neural Information Processing Systems, Curran Associates, 2024. [2] G. Team, P. Georgiev, V. I. Lei, R. Burnell, L. Bai, A. Gulati, G. Tanzer, D. Vincent, Z. Pan, S. Wang, et al., Gemini 1.5: Unlocking multimodal understanding across millions of tokens of context, arXiv preprint arXiv:2403.05530 (2024). [3] B. Hui, J. Yang, Z. Cui, J. Yang, D. Liu, L. Zhang, T. Liu, J. Zhang, B. Yu, K. Lu, et al., Qwen2. 5-coder technical report, arXiv e-prints (2024) arXiv–2409. [4] J. Su, M. Ahmed, Y. Lu, S. Pan, W. Bo, Y. Liu, Roformer: Enhanced transformer with rotary position embedding, Neurocomputing 568 (2024) 127063. [5] B. Peng, J. Quesnelle, H. Fan, E. Shippole, Yarn: Efficient context window extension of large language models, in: International Con-ference on Learning Representations, volume 2024, 2024, pp. 31932– 31951. [6] Y. Ding, L. L. Zhang, C. Zhang, Y. Xu, N. Shang, J. Xu, F. Yang, M. Yang, Longrope: extending llm context window beyond 2 million tokens, in: Proceedings of the 41st International Conference on Machine Learning, 2024, pp. 11091–11104. [7] P. Lewis, E. Perez, A. Piktus, F. Petroni, V. Karpukhin, N. Goyal, H. Küttler, M. Lewis, W.-t. Yih, T. Rocktäschel, et al., Retrieval-augmented generation for knowledge-intensive nlp tasks, Advances in neural information processing systems 33 (2020) 9459–9474. [8] S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan, Y. Cao, React: Synergizing reasoning and acting in language models, in: International Conference on Learning Representations (ICLR), 2023. [9] B. Roziere, J. Gehring, F. Gloeckle, S. Sootla, I. Gat, X. E. Tan, Y. Adi, J. Liu, R. Sauvestre, T. Remez, et al., Code llama: Open foundation models for code, arXiv preprint arXiv:2308.12950 (2023). [10] Y. Bai, X. Lv, J. Zhang, H. Lyu, J. Tang, Z. Huang, Z. Du, X. Liu, A. Zeng, L. Hou, et al., Longbench: A bilingual, multitask benchmark for long context understanding, in: Proceedings of the 62nd annual meeting of the association for computational linguistics (volume 1: Long papers), 2024, pp. 3119–3137. [11] C.-P. Hsieh, S. Sun, S. Kriman, S. Acharya, D. Rekesh, F. Jia, Y. Zhang, B. Ginsburg, Ruler: What’s the real context size of your long-context language models?, arXiv preprint arXiv:2404.06654 (2024). [12] J. Xu, Z. Li, W. Chen, Q. Wang, X. Gao, Q. Cai, Z. Ling, On-device language models: A comprehensive review, arXiv e-prints (2024) arXiv–2409. [13] K. Alizadeh, S. I. Mirzadeh, D. Belenko, S. Khatamifard, M. Cho, C. C. Del Mundo, M. Rastegari, M. Farajtabar, Llm in a flash: Efficient large language model inference with limited memory, in: Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), 2024, pp. 12562–12584. [14] Y. Song, Z. Mi, H. Xie, H. Chen, Powerinfer: Fast large language model serving with a consumer-grade gpu, in: Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles, 2024, pp. 590–606. [15] D. Driess, F. Xia, M. S. Sajjadi, C. Lynch, A. Chowdhery, B. Ichter, A. Wahid, J. Tompson, Q. Vuong, T. Yu, et al., Palm-e: an embodied multimodal language model, in: Proceedings of the 40th International Conference on Machine Learning, 2023, pp. 8469–8488. [16] B. Zitkovich, T. Yu, S. Xu, P. Xu, T. Xiao, F. Xia, J. Wu, P. Wohlhart, S. Welker, A. Wahid, et al., Rt-2: Vision-language-action models transfer web knowledge to robotic control, in: Conference on Robot Learning, PMLR, 2023, pp. 2165–2183. [17] Y. Zhu, S. Wang, W. Zhong, N. Shen, Y. Li, S. Wang, Z. Li, C. Wu, Z. He, L. Li, A survey on large language model-empowered au-tonomous driving, arXiv e-prints (2024) arXiv–2409. [18] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, I. Polosukhin, Attention is all you need, Advances in neural information processing systems 30 (2017). [19] J. Ainslie, J. Lee-Thorp, M. De Jong, Y. Zemlyanskiy, F. Lebrón, S. Sanghai, Gqa: Training generalized multi-query transformer models from multi-head checkpoints, in: Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing, 2023, pp. 4895–4901. [20] A. Agrawal, N. Kedia, A. Panwar, J. Mohan, N. Kwatra, B. Gulavani, A. Tumanov, R. Ramjee, Taming {Throughput-Latency } tradeoff in 
+
+{LLM } inference with {Sarathi-Serve }, in: 18th USENIX sympo-sium on operating systems design and implementation (OSDI 24), 2024, pp. 117–134. [21] T. Dao, Flashattention-2: Faster attention with better parallelism and work partitioning, in: International Conference on Learning Representations, volume 2024, 2024, pp. 35549–35562. [22] Y. Li, Y. Huang, B. Yang, B. Venkitesh, A. Locatelli, H. Ye, T. Cai, P. Lewis, D. Chen, Snapkv: Llm knows what you are looking for before generation, Advances in Neural Information Processing Systems 37 (2024) 22947–22970. [23] J. Park, D. Jones, M. Morse, R. Goel, M. Lee, C. Lott, Keydiff: Key similarity-based kv cache eviction for long-context llm inference in 
+
+Wang et al.: Preprint submitted to Elsevier Page 14 of 15 Delayed KV Eviction via Layer-Wise Chunked Prefill 
+
+resource-constrained environments, Advances in Neural Information Processing Systems 38 (2026) 5983–6019. [24] Z. Zhang, Y. Sheng, T. Zhou, T. Chen, L. Zheng, R. Cai, Z. Song, Y. Tian, C. Ré, C. Barrett, et al., H2o: Heavy-hitter oracle for efficient generative inference of large language models, Advances in Neural Information Processing Systems 36 (2023) 34661–34710. [25] Z. Liu, A. Desai, F. Liao, W. Wang, V. Xie, Z. Xu, A. Kyrillidis, A. Shrivastava, Scissorhands: Exploiting the persistence of impor-tance hypothesis for llm kv cache compression at test time, Advances in Neural Information Processing Systems 36 (2023) 52342–52364. [26] G. Xiao, Y. Tian, B. Chen, S. Han, M. Lewis, Efficient streaming language models with attention sinks, in: International Conference on Learning Representations, volume 2024, 2024, pp. 21875–21895. [27] S. Ge, Y. Zhang, L. Liu, M. Zhang, J. Han, J. Gao, Model tells you what to discard: Adaptive kv cache compression for llms, in: International Conference on Learning Representations, volume 2024, 2024, pp. 22975–22988. [28] Z. Cai, Y. Zhang, B. Gao, Y. Liu, Y. Li, T. Liu, K. Lu, W. Xiong, Y. Dong, J. Hu, et al., Pyramidkv: Dynamic kv cache compres-sion based on pyramidal information funneling, arXiv preprint arXiv:2406.02069 (2024). [29] Y. Feng, J. Lv, Y. Cao, X. Xie, S. K. Zhou, Ada-kv: Optimizing kv cache eviction by adaptive budget allocation for efficient llm inference, Advances in Neural Information Processing Systems 38 (2026) 113152–113188. [30] Z. Qin, Y. Cao, M. Lin, W. Hu, S. Fan, K. Cheng, W. Lin, J. Li, CAKE: Cascading and adaptive KV cache eviction with layer preferences, arXiv preprint arXiv:2503.12491 (2025). [31] X. Liu, Z. Tang, P. Dong, Z. Li, B. Li, X. Hu, X. Chu, Chunkkv: Semantic-preserving kv cache compression for efficient long-context llm inference, Advances in Neural Information Processing Systems 38 (2026) 28728–28778. [32] J. Tang, Y. Zhao, K. Zhu, G. Xiao, B. Kasikci, S. Han, Quest: query-aware sparsity for efficient long-context llm inference, in: Proceedings of the 41st International Conference on Machine Learning, 2024, pp. 47901–47911. [33] Y. Tian, Z. Wang, Y. Peng, A. Yuan, Z. Wang, B. Yi, X. Liu, Y. Cui, T. Yang, Keepkv: Achieving periodic lossless kv cache compression for efficient llm inference, in: Proceedings of the AAAI Conference on Artificial Intelligence, volume 40, 2026, pp. 33259–33267. [34] J.-H. Kim, J. Kim, S. Kwon, J. W. Lee, S. Yun, H. O. Song, Kvzip: Query-agnostic kv cache compression with context recon-struction, Advances in Neural Information Processing Systems 38 (2026) 167563–167591. [35] K. U. Qasim, J. Zhang, M. K. Shaheen, R. Alharith, H. Zhang, The residual stream is all you need: On the redundancy of the kv cache in transformer inference, arXiv preprint arXiv:2603.19664 (2026). [36] Z. Liu, J. Yuan, H. Jin, S. Zhong, Z. Xu, V. Braverman, B. Chen, X. Hu, Kivi: A tuning-free asymmetric 2bit quantization for kv cache, Proceedings of Machine Learning Research 235 (2024) 32332–32344. [37] L. Shi, H. Zhang, Y. Yao, Z. Li, H. Zhao, Keep the cost down: A review on methods to optimize llm’s kv-cache consumption, arXiv preprint arXiv:2407.18003 (2024). [38] M. Kim, K. Shim, J. Choi, S. Chang, Infinipot: Infinite context processing on memory-constrained llms, in: Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing, 2024, pp. 16046–16060. [39] M. Kim, Epicache: Episodic kv cache management for long con-versational question answering, in: Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics, 2024. [40] Z. Wan, Z. Wu, C. Liu, J. Huang, Z. Zhu, P. Jin, L. Wang, L. Yuan, Look-m: Look-once optimization in kv cache for efficient multimodal long-context inference, in: Findings of the Association for Computa-tional Linguistics: EMNLP 2024, 2024, pp. 4065–4078. [41] Y. Huang, B. Yuan, X. Han, C. Xiao, Z. Liu, Locret: Enhancing eviction in long-context llm inference with trained retaining heads on consumer-grade devices, arXiv preprint arXiv:2410.01805 (2024). [42] J. Zhang, T. Zhu, C. Luo, A. Anandkumar, Mom: Memory-efficient offloaded mini-sequence inference for long context language models, arXiv preprint arXiv:2504.12526 (2025). [43] A. Agrawal, A. Panwar, J. Mohan, N. Kwatra, B. S. Gulavani, R. Ram-jee, Sarathi: Efficient llm inference by piggybacking decodes with chunked prefills, arXiv preprint arXiv:2308.16369 (2023). [44] G.-I. Yu, J. S. Jeong, G.-W. Kim, S. Kim, B.-G. Chun, Orca: A distributed serving system for {Transformer-Based } generative models, in: 16th USENIX symposium on operating systems design and implementation (OSDI 22), 2022, pp. 521–538. [45] Y. Zhong, S. Liu, J. Chen, J. Hu, Y. Zhu, X. Liu, X. Jin, H. Zhang, 
+
+{DistServe }: Disaggregating prefill and decoding for goodput-optimized large language model serving, in: 18th USENIX Sympo-sium on Operating Systems Design and Implementation (OSDI 24), 2024, pp. 193–210. [46] C. Luo, J. Zhao, Z. Chen, B. Chen, A. Anandkumar, Mini-sequence transformers: Optimizing intermediate memory for long sequences training, Advances in Neural Information Processing Systems 37 (2024) 97299–97327. [47] D. Yang, X. Han, Y. Gao, Y. Hu, S. Zhang, H. Zhao, Pyramidinfer: Pyramid kv cache compression for high-throughput llm inference, in: Findings of the Association for Computational Linguistics: ACL 2024, 2024, pp. 3258–3270. [48] C. Luo, Z. Cai, H. Sun, J. Xiao, B. Yuan, W. Xiao, J. Hu, J. Zhao, B. Chen, A. Anandkumar, Headinfer: Memory-efficient llm inference by head-wise offloading, arXiv e-prints (2025) arXiv–2502. [49] Y. Sheng, L. Zheng, B. Yuan, Z. Li, M. Ryabinin, B. Chen, P. Liang, C. Ré, I. Stoica, C. Zhang, Flexgen: High-throughput generative inference of large language models with a single gpu, in: International Conference on Machine Learning, PMLR, 2023, pp. 31094–31116. 
+
+Wang et al.: Preprint submitted to Elsevier Page 15 of 15
