@@ -1,0 +1,1211 @@
+Interflow: Breaking the Offline–Online Barrier for
+Private AI at the Edge
+Hanieh Totonchi Asl, Ebrahim Nouri, Zhuoran Li, Danella Zhao
+Department of Electrical and Computer Engineering, University of Arizona, Tucson, United States
+{haniehta, ebinouri, zli1122, danellazhao}@arizona.edu
+Abstract—Privacy-preserving machine learning (PPML) offers
+a promising path toward bringing powerful AI services to the
+edge without exposing sensitive user data. However, its practical
+deployment remains constrained by the high communication,
+computation, and data-movement costs of secure multi-party
+computation (MPC), particularly during nonlinear inference.
+Existing MPC systems typically decouple input-independent
+correlated randomness generation from online execution, cre-
+ating substantial memory pressure to buffer single-use crypto-
+graphic data. Moreover, limited storage can force a stop-and-
+refill execution pattern that repeatedly stalls the pipeline to
+replenish these buffers, bringing randomness generation back
+onto the critical path. We propose Interflow, an algorithm–
+hardware co-design that rethinks this separation by batch-
+wise processing and pipelining correlated-randomness generation
+with online execution: while the current batch consumes pre-
+generated randomness to execute secure nonlinear operations,
+correlation generation proceeds concurrently for the next batch.
+By leveraging interleaved execution, efficient data movement, and
+hardware acceleration, the design transforms preprocessing from
+a serialized, storage-intensive offline phase into a continuously
+overlapped pipeline that generates correlated randomness closer
+to the point of consumption, reducing memory footprint and
+data movement overhead. Implemented on the Zynq UltraScale+
+ZCU102, Interflow improves nonlinear evaluation throughput by
+up to 1.55× for CNN operators and 1.48× for transformer
+operators. It achieves up to 1.26× speedup for ResNet-50 and up
+to 1.21× speedup for BERT-base, and reduces memory footprint
+by up to 37%, compared with baseline frameworks.
+I. INTRODUCTION
+Machine Learning as a Service (MLaaS) enables users to
+outsource inference to the cloud; however, its deployment in
+sensitive domains such as healthcare, finance, and personal ser-
+vices raises fundamental privacy concerns. Privacy-preserving
+machine learning (PPML) addresses this challenge through
+cryptographic primitives such as homomorphic encryption
+(HE) and secure multi-party computation (MPC), enabling
+computation over encrypted data without exposing raw in-
+puts and model weights [1]–[5]. Practical two-party PPML
+frameworks commonly adopt a hybrid approach, evaluating
+linear layers via HE and nonlinear operations (such as ReLU,
+GELU, MaxPooling, and Softmax) through secret-sharing
+(SS)-based MPC protocols [6]–[10]. Despite their benefits,
+secure nonlinear operations incur substantial computation and
+communication overhead and often require large amounts of
+correlated randomness, making them a critical bottleneck on
+resource-constrained edge devices [11], [12].
+Modern MPC protocols adopt an offline–online paradigm,
+in which input-independent cryptographic correlations such
+as oblivious transfers (OTs) and Beaver triples are generated
+during an offline preprocessing phase, shifting much of the
+expensive computation and communication away from the
+online phase [6], [7]. Pre-generating correlated randomness
+requires substantial storage; in practice, systems maintain only
+a bounded pool of precomputed OTs or Beaver triples (e.g.,
+107 OTs in Cheetah). Once exhausted, regeneration stalls
+execution and introduces significant latency, bringing offline
+preprocessing onto the online critical path. This bottleneck
+becomes especially severe on resource-constrained devices.
+Key Observations. Conventional preprocessing treats cor-
+relation generation as a decoupled phase. Under resource
+constraints, however, correlated randomness becomes a con-
+tinuous lifecycle challenge: fresh values must be generated,
+stored in different representations and widths, converted for
+protocol-specific operations, delivered to their consumption
+points, and discarded after a single use. Our characterization
+of a baseline framework on an edge client shows that re-
+peated correlation regeneration accounts for 43% of client-side
+secure-comparison cycles during ResNet-50 inference. This
+substantial overhead motivates optimizing the entire correla-
+tion lifecycle, as accelerating generation alone may simply
+shift the bottleneck to storage, conversion, or data movement
+rather than eliminating it.
+Design Insights. Based on these observations, we present
+Interflow, an algorithm–hardware co-design for OT-based se-
+cure nonlinear inference that jointly manages the complete
+correlation lifecycle, from generation and representation-aware
+storage to sender/receiver-specific conversion and online con-
+sumption. Our central insight is to split preprocessing at its
+final communication dependency and consumption boundary.
+This allows receiver-local COT generation to be deferred until
+near consumption and integrated directly into the execution
+dataflow. Building on this decomposition, Interflow employs
+batch-wise, role-aware processing to overlap correlation gen-
+eration, conversion, and consumption, avoiding the need to
+generate and store the full set of expanded correlations in
+advance.
+Our main contributions are summarized as follows:
+• System-level characterization. We identify and quantify
+correlation-lifecycle bottlenecks in OT-based nonlinear
+inference on resource-constrained edge devices, includ-
+ing correlation regeneration on the online critical path,
+Accepted to special session track.
+arXiv:2610.27431v1  [cs.AR]  20 Oct 2026
+
+
+wide intermediate representations, and protocol-imposed
+sender–receiver asymmetry.
+• Deferred
+correlation
+processing
+with
+cross-phase
+dataflow. We propose a role-aware COT extension
+design that defers receiver-local computation beyond
+communication-dependent processing and integrates cor-
+relation generation and conversion with online secure ex-
+ecution in a memory-bounded, batch-streaming dataflow,
+reducing critical-path regeneration, memory footprint,
+and data movement.
+• Role-aware
+preprocessing. We design a dual-path
+correlation-processing architecture that coordinates bidi-
+rectional OT for Beaver triple generation to improve
+throughput, reduce intermediate buffering, and enable
+efficient streaming execution. We further reformulate
+sender-side correlation conversion as independent index-
+aligned hash streams to enable parallel execution.
+• Practical edge PPML evaluation. We implement Inter-
+flow on a Zynq UltraScale+ ZCU102 platform and evalu-
+ate secure nonlinear inference for ResNet-50 and BERT-
+base. Interflow improves nonlinear evaluation throughput
+by up to 1.55× for CNN operators and 1.48× for
+transformer operators, achieves up to 1.26× speedup for
+ResNet-50 and 1.21× speedup for BERT-base, and re-
+duces memory footprint by up to 37%, demonstrating the
+practicality of efficient privacy-preserving AI inference
+on resource-constrained edge platforms.
+II. PRELIMINARIES AND BACKGROUND
+A. Fundamental MPC primitives for Nonlinear Evaluation
+MPC-based nonlinear inference can be largely decomposed
+into two fundamental secure primitives: comparison and mul-
+tiplication. Fig. 1 summarizes how representative nonlinear
+operations in Cheetah [7] and BumbleBee [9] are decomposed
+into secure computation primitives. ReLU and MaxPooling
+rely primarily on secure comparisons (∼97%), followed by
+secure multiplication or selection to produce the corresponding
+outputs. More complex nonlinearities, such as GELU and
+Softmax, are typically evaluated via piecewise or polyno-
+mial approximations that similarly decompose their execu-
+tion into secure comparisons (∼56−67%) and multiplications
+(∼29−37%). These two primitives therefore constitute key
+building blocks of secure nonlinear inference: comparison
+resolves signs, ordering, and selection predicates, while multi-
+plication governs arithmetic evaluation and masked selection.
+Their frequent execution makes the associated correlation
+generation and interactive execution major sources of com-
+putation, communication, and storage overhead.
+Despite their different functionality, these primitives rely
+heavily on a common class of input-independent correlated
+randomness to lighten online execution: OTs and Boolean
+triples for secure comparison and secure AND operations, and
+arithmetic triples for secure multiplication.
+Secure comparison. To evaluate 1(x > y), the protocol
+employs the OT-based Millionaires’ protocol with radix de-
+composition [6], [7]. For radix 2r, each w-bit operand is
+54%
+43%
+46 COT
+2 COTReLU
+45%
+53%
+544 COT
+16 COTMaxPool
+27%
+29%
+54 COT
+34%
+6 COTGELU
+33%
+34%
+188 COT
+28%
+4 COTSoftmax
+Secure Comparison
+Comparison (online)
+Secure Multiplication
+Multiplication (online)
+Others
+Offline
+Fig. 1. Breakdown of representative secure nonlinear operators into compar-
+ison, multiplication, and other primitives. Correlation volumes are reported
+per output element. Operators are measured in isolation, x86↔x86 over a 1
+Gbps/0.3 ms link, at nt=4 threads: ReLU and MaxPool under Cheetah at
+ResNet-50 dimensions, GELU and Softmax under BumbleBee at BERT-base
+dimensions. BumbleBee’s multiplications draw a few correlations because
+they are evaluated homomorphically (RLWE) rather than with arithmetic
+Beaver triples.
+partitioned into d = ⌈w/r⌉digits. During online execution,
+the sender evaluates the comparison outcomes (1(x(i) > M))
+for every M ∈[0, 2r) as the messages of a 1-out-of-2r OT,
+while the receiver selects the message indexed by its private
+digit y(i). The resulting digit-level comparison and equality
+shares are subsequently aggregated from the most significant
+digit to the least significant digit, producing an XOR share of
+the comparison result.
+Digit aggregation requires secure AND operations over
+XOR-shared intermediate bits. Given u=u0 ⊕u1 and v=v0 ⊕
+v1, preprocessing supplies an XOR-shared Boolean Beaver
+triple ⟨a⟩, ⟨b⟩, ⟨c⟩satisfying c = a∧b. During online execution,
+each party locally computes ej = uj ⊕aj and fj = vj ⊕bj; the
+parties exchange these shares to reconstruct the masked values
+e and f, and then combine them with their local triple shares
+to obtain an XOR share of u ∧v. Thus, each secure AND
+consumes one fresh Boolean triple and requires one masked
+value exchange followed by local Boolean operations.
+Secure multiplication. Secure multiplication applies a sim-
+ilar Beaver-masking principle as secure AND, over the ring
+Z2w. Preprocessing supplies additive shares of one fresh
+arithmetic Beaver triple (a, b, c) satisfying c=a · b. Given
+additive shares of x and y, the parties form and exchange
+shares of e=x −a and f=y −b, and locally derive shares of
+xy = c + af + be + ef.
+Although correlation generation is independent of the pri-
+vate operands, online comparison cannot proceed until the
+corresponding correlations are available. Across complete non-
+linear operators, repeated comparison and multiplication thus
+create a producer–consumer boundary between correlation
+preprocessing and input-dependent execution, whose storage
+and refill costs are quantified in Section III.
+B. Correlation Processing
+The nonlinear primitives above consume three closely re-
+lated types of correlated randomness as their masking material.
+In our setting, correlated OTs (COTs) serve as the underly-
+ing correlation source that is converted into protocol-specific
+forms, including random OTs (ROTs) and Beaver triples,
+before one-time online consumption. ROTs provide random-
+2
+
+
+$$\text{Online}$$
+$$\text{SecComp}$$
+$$\text{SecMult}$$
+$$\text{Protocol Observation \& Architectural Challenges}$$
+$$\text{Design Insights}$$
+$$\text{Offline}$$
+$$\text{Conversion}$$
+$$\text{Full-epoch Memory}$$
+$$\text{!empty}$$
+$$\text{online}$$
+$$\text{online}$$
+$$\text{offline}$$
+$$\text{offline}$$
+$$\text{Generators}$$
+$$\text{COT}$$
+$$\text{Decoupled-Phase Handler}$$
+$$\text{from pool}$$
+$$\text{Feed COT}$$
+$$\text{Start}$$
+$$\text{for refill}$$
+$$\text{from pool}$$
+$$\text{Read COT}$$
+$$\text{Pause}$$
+$$\text{for refill}$$
+$$\text{Continuous}$$
+$$\text{Correlation}$$
+$$\text{Provisioning}$$
+$$\text{- Cross-phase Batch Streaming}$$
+$$\text{- Protocol-architecture-aligned Batches}$$
+$$\lambda \text{-bit}$$
+$$\lambda \text{-bit}$$
+$$\text{- 56} \times\text{Refill Stalls} (\text{ResNet-50}, n=10^7)$$
+$$\text{- BTG Data Movement } (2\lambda \text{ vs. 3-bit})$$
+$$\text{- BTG Acceleration on Preprocessing}$$
+$$\text{GGM}$$
+$$\text{GGM}$$
+$$\text{LPN}$$
+$$\text{LPN}$$
+$$\text{preparation}$$
+$$\text{local data}$$
+$$\text{preparation}$$
+$$\text{local data}$$
+$$\text{Computational\\ Asymmetry}$$
+$$H(m_b)$$
+$$H(m_i)$$
+$$H(m_i \oplus \Delta)$$
+$$\text{Temporal Asymmetry}$$
+$$\text{- Deferred Receiver Expansion}$$
+$$\text{- Dual-path Correlation Processing}$$
+$$\text{- Split-stream Hash Processing}$$
+$$\text{GGM}$$
+$$\text{LPN}$$
+$$\text{COT2ROT}$$
+$$\text{preparation}$$
+$$\text{local data}$$
+$$\text{to consumption}$$
+$$\text{CRH}_1$$
+$$\text{CRH}_2$$
+$$\text{Sender-side}$$
+$$\text{Produce close}$$
+$$\text{2}$$
+$$\text{1}$$
+$$\text{- Computational Imbalance Dataflow}$$
+$$\text{- Long-lived Wide Intermediate Storage}$$
+$$2n_t \times(\text{Gen + Pool + LPN seed table})$$
+$$\text{- Duplication Cost: }$$
+$$\text{2}$$
+$$\text{1}$$
+$$\text{COT2ROT}$$
+$$C_0$$
+$$C_1$$
+$$C_2$$
+$$C_3$$
+$$\text{3}$$
+$$\text{per-core role switch}$$
+$$\text{each with independent COT set}$$
+$$\text{Software-level balancing:}$$
+$$\text{A dual-path wide COT gen}$$
+$$\text{feeds all cores in parallel}$$
+$$\text{COT2ROT}$$
+$$H(m_b)$$
+$$\text{per-tree transfer}$$
+$$\text{Sender}$$
+$$\text{Receiver}$$
+$$\text{message transfer}$$
+$$\text{Role}$$
+$$\text{Asymmetry}$$
+$$\text{3}$$
+$$\text{(a) Offline Computation on the Online Critical Path}$$
+$$\text{(b) Protocol-Imposed Asymmetries}$$
+Fig. 2. From protocol observations to architectural design principles.
+ized OT instances used by comparison-oriented protocols, and
+Beaver triples provide multiplication-ready correlations.
+Correlated Oblivious Transfer. In one COT instance, the
+sender holds a uniformly distributed λ-bit value COTs and
+a global correlation ∆, while the receiver holds a choice
+bit bi and COTr=COTs ⊕bi∆. Ferret’s silent correlation
+generator produces these COTs in two stages [13], [14]. First,
+a GGM-based protocol expands each tree of height h into
+2h leaves using compact level-wise communication and local
+tree expansion. Second, an element-wise LPN computation
+combines the sparse tree outputs with random publicly indexed
+entries from a seed vector to produce the final COTs, while
+retaining a subset for the next extension epoch.
+Random Oblivious Transfer. Raw COT values retain
+the linear relation induced by ∆and do not directly serve
+as independent message pads. A correlation-robust hash
+(CRH) converts them into ROT outputs [7], [15], using
+the Matyas–Meyer–Oseas (MMO) feed-forward construction,
+H(x)=π(x) ⊕x, where π is commonly instantiated as fixed-
+key AES for λ = 128 security setting.
+Beaver Triple. A Boolean Beaver triple consists of XOR
+shares (aj, bj, cj) satisfying c0 ⊕c1 = (a0 ⊕a1) ∧(b0 ⊕b1).
+Each party computes its same-party product locally, while two
+opposite-direction ROTs provide shares of the cross-products.
+In the first direction, P0 acts as the ROT sender with pads
+(ROT 0
+s , ROT 0
+s ⊕a0), while P1 acts as the receiver and selects
+with b1 to obtain ROT 1
+r =ROT 0
+s ⊕(a0∧b1). The second direc-
+tion reverses the roles to share a1 ∧b0. Each party then locally
+computes its final outputs as: cj = (aj ∧bj)⊕ROT j
+s ⊕ROT j
+r ,
+yielding c0 ⊕c1 = a ∧b. Thus, each party acts once as
+ROT sender and once as ROT receiver. Generating one triple
+consumes two ROTs, one per direction, and requires three
+CRH evaluations at each party: two for its sender-role pad
+pair and one for its receiver-role selected pad.
+III. MOTIVATION AND CHALLENGES
+While secure protocols reduce online execution overhead
+through input-independent preprocessing, their implementa-
+tion on resource-constrained platforms exposes important pro-
+tocol–architecture mismatches. Fig. 2 highlights two bottle-
+necks we observe in secure nonlinear inference. First, finite
+correlation storage couples preprocessing back to online ex-
+ecution, causing regeneration to stall the execution pipeline
+when precomputed correlations are exhausted. Second, the
+asymmetric sender and receiver roles exhibit different com-
+putation and data-lifetime requirements, leading to inefficient
+resource utilization and correlation processing when handled
+uniformly. We quantify their impact and identify correspond-
+ing design opportunities through profiling of Cheetah [7] on
+ResNet-50 inference with 43-bit secure comparisons.
+A. Offline Computation on the Online Critical Path
+Modern
+nonlinear
+protocols
+adopt
+an
+offline–online
+paradigm that moves expensive, input-independent correlation
+generation off the input-dependent execution path, reducing
+online computation and communication. This approach typi-
+cally pre-generates correlations in large batches and buffers
+them for subsequent online consumption, trading online cost
+for storage, buffering, and data movement (Fig. 2 (a)). Our
+profiling of Cheetah, however, reveals a fundamental tension
+between correlation storage and regeneration. Because each
+correlation is consumed only once, the buffer must be contin-
+uously replenished as inference proceeds.
+On resource-constrained edge devices, limited memory
+forces smaller batches, turning correlation processing into a
+continuous lifecycle rather than a one-time offline task: fresh
+COTs must be generated batch-by-batch, stored in interme-
+diate representations, converted into operation-specific forms,
+delivered to their consumption points, and discarded after
+one-time online use. Therefore, correlation exhaustion induces
+a recurring stop-and-refill pattern that brings preprocessing
+directly onto the online critical path, accounting for 43% of
+the client’s secure-comparison cycles (Table I).
+This observation exposes a key design opportunity: rather
+than treating correlation generation, conversion, and consump-
+tion as separate phases, their lifecycle can be reorganized as a
+3
+
+
+TABLE I
+COT REGENERATION OVERHEAD FOR CHEETAH RESNET-50 INFERENCE.
+Platform
+Pool Size Refills Stall/Refill Online Stall Cmp Online Stall Latency
+x86
+1,439.7 MB
+56
+0.33 s
+4.0 %
+17.5 %
+379.6 s
+ZCU102
+118.9 MB
+2,269
+0.165 s
+21.7 %
+43.0 %
+455.0 s
+batch-streaming dataflow that overlaps correlation preparation
+with online secure execution, thereby reducing storage and
+data movement while hiding correlation-processing latency.
+B. Protocol-Imposed Asymmetries
+Secure nonlinear inference processes correlated randomness
+through role-dependent protocol steps. Although correlations
+can be pre-generated, their online production and consumption
+expose three architectural asymmetries: temporal, computa-
+tional, and role assignment (Fig. 2 (b)).
+Temporal Asymmetry. Sender- and receiver-side correla-
+tions are consumed at different points in the protocol execution
+path. As shown in Fig. 2 1⃝, sender-side masking and trans-
+mission must complete before receiver-side payload recovery
+can occur, even under concurrent execution of different OT
+instances and preprocessing batches. A sender pad remains live
+until the application message is masked, whereas a receiver
+pad remains live until the corresponding masked payload
+arrives for recovery. Pre-generating full-epoch correlations
+inflates the memory footprint across execution phases. While
+streaming generation can reduce the buffer size, it cannot
+alter these protocol dependencies; the memory subsystem must
+therefore incorporate decoupled, role-aware, index-aligned
+buffers to manage asymmetric correlation lifespans.
+Computational Asymmetry. As shown in Fig. 2 2⃝, COT-
+to-ROT conversion also assigns imbalanced local computation
+to the two roles. For a given OT index i, the sender evaluates
+the CRH on both correlated branches (Hi(qi) and Hi(qi ⊕
+∆)), whereas the receiver evaluates only the selected branch
+Hi(qi ⊕bi∆). This compute asymmetry manifests after raw
+valid COTs become available, constraining performance re-
+gardless of how the correlation generator is structured, whether
+implemented as a prefilled memory pool, a background refill
+engine, or a streaming generator.
+Role Asymmetry. Composing role-dependent primitives
+into a nonlinear operator creates an application-level dataflow
+asymmetry between the two parties. In the single-core Cheetah
+ResNet-50 profile, the client consumes 416.0 M receiver-role
+COTs and 99.4 M sender-role COTs, establishing a 4.18×
+imbalance. As shown in Fig. 2 3⃝, the baseline software
+implementation covers this imbalance by mirroring party roles
+across alternating worker threads, but at the cost of replicat-
+ing complete generator instances. With nt online consumers,
+each party maintains 2nt independent COT generators, each
+with a dedicated COT buffer and LPN seed table. At nt=4,
+these instances occupy 1, 445.6 MB, or 56.3% of the client’s
+measured peak memory footprint. Concurrent accesses to the
+replicated seed tables further exacerbate the cache pressure
+identified in Section III-A. This state duplication exposes a
+hardware opportunity for memory optimization.
+Together, the three asymmetries highlight potential head-
+room for improvement beyond scaling the cryptographic ker-
+Fig. 3. System architecture of Interflow illustrating the PS–PL partition.
+nel alone. The architecture must coordinate when correlations
+are generated, how role-specific data are buffered, and how
+sender/receiver processing capacity is activated. By exploiting
+these opportunities, Interflow coordinates the downstream life-
+cycle of each correlation from producer output through role-
+specific conversion to online consumption.
+IV. PROPOSED DESIGN
+Throughout, we consider the standard semi-honest (honest-
+but-curious) two-party setting used by CryptFlow2 [6] and
+Cheetah [7], in which both parties follow the specified proto-
+col, and neither misuses correlated primitives.
+A. Design Overview
+Fig. 3 presents the proposed hardware–software architecture
+for secure nonlinear inference. The design partitions execution
+between the processing system (PS) and the programmable
+logic (PL) according to the protocol’s computational and com-
+munication characteristics. The PL accelerates the compute-
+intensive input-independent preprocessing kernels, including
+COT generation, COT-to-ROT conversion, and Beaver triple
+generation. At the same time, the PS executes the interactive
+input-dependent online phase, including protocol coordination,
+communication with the remote party, and lightweight local
+operations. The PS also configures and launches the accelera-
+tor and manages the AXI interface through which it exchanges
+intermediate streaming data with the PL. Correlations are
+tagged by logical OT direction and batch so that subsequent
+stages preserve their protocol association and consumption or-
+der. This organization integrates hardware-accelerated prepro-
+cessing computation, inter-party communication, and shared-
+memory data movement within a unified execution flow.
+To improve pipeline utilization and reduce inter-stage stalls,
+the PL employs a stage-balanced streaming architecture in
+which each stage begins processing as soon as its input
+becomes available. Separate correlation streams are maintained
+for the sender and receiver roles, with correlation generation
+scheduled according to the demands of upcoming nonlinear
+operations. The design further overlaps online processing
+of the current batch with generating and converting corre-
+lated randomness for the next batch. Consequently, succes-
+sive pipeline stages operate concurrently, and the steady-state
+processing rate is governed primarily by the slowest stage
+4
+
+
+Sender
+Receiver
+Sender
+Receiver
+Receiver
+h times OT
+h times OT
+c
+b
+a
+c
+b
+a
+Fig. 4. Decoupling communication and computation on the receiver side to
+defer its COT expansion closer to its consumption step, storing only h selected
+nodes and one-bit child choice per tree instead of all 2h leaves.
+rather than by the sum of their execution times. This producer-
+consumer organization reduces the volume of pending inter-
+mediate state and correlation-generation and refill delays from
+the secure inference pipeline.
+B. Role-aware COT Extension Deferral
+Motivated by the temporal asymmetry identified in Sec-
+tion III-B, we propose Role-Aware Deferred COT Extension,
+which separates interactive preprocessing from receiver-side
+local computation. As shown in Fig. 4, the sender follows the
+conventional expansion flow required to construct the protocol
+messages, whereas the receiver keeps a compact record and
+defers tree reconstruction, LPN combination, and final COT
+generation until a later processing interval. This transformation
+exposes receiver extension as a decoupled, stream-aligned
+stage without modifying the interactive protocol.
+Role-asymmetric expansion dependencies. Expanding the
+full set creates a long-lived intermediate representation: ex-
+panded tree outputs are generated during preprocessing but
+remain unused until their corresponding correlations are con-
+sumed. Deferring this local computation shortens the life-
+time of the expanded representation and allows the compact
+communication-dependent information to be retained instead.
+However, the feasibility of deferral is not the same for sender
+and receiver OT roles. Each COT extension epoch processes
+T GGM trees of height h and combines their outputs with an
+LPN operand derived from the preceding extension state. The
+sender must expand every tree during preprocessing because
+the level-wise protocol messages and per-tree correlation term
+depend on the expanded values. Postponing sender expansion
+would delay the interactive exchange, while discarding and
+regenerating the expanded values would duplicate computa-
+tion. In contrast, once the interactive exchange completes, the
+receiver has all information required for local tree reconstruc-
+tion and requires no further input from the peer. We therefore
+retain the sender’s required expansion but defer receiver-side
+reconstruction and subsequent local processing until closer to
+COT consumption.
+Compact representation. As in the conventional extension,
+the receiver performs the same GGM tree reconstruction and
+LPN computation; our deferral enables retaining the expanded
+intermediate state in a compact form. For a tree of height h
+and correlation width λ, the receiver’s compact record contains
+h selected λ-bit node values, h selection bits, and one λ-bit
+correlation term. Therefore, the retained payload per tree for
+the conventional immediate (I) and our proposed deferred (D)
+expansion is I(h, λ) = 2hλ and D(h, λ) = hλ + h + λ bits,
+respectively. The payload-level reduction is consequently
+I(h, λ)
+D(h, λ) =
+2hλ
+hλ + h + λ.
+For h = 8 and λ = 128, the compact record occupies 152 B,
+compared with 4,096 B for the expanded leaf vector, reducing
+retained tree data by 26.9×.
+C. Cross-Phase Batch-Streaming Architecture
+The index-aligned COT batches exposed by Role-Aware
+Deferred COT Extension enable preprocessing and online ex-
+ecution to be reorganized as a cross-phase streaming dataflow.
+Rather than generating and retaining a complete correlation
+pool, the architecture produces, transfers, and consumes cor-
+relations at batch granularity. While the PS executes the input-
+dependent protocol for the current batch, the PL prepares the
+input-independent correlations required by a future batch. This
+organization introduces concurrency across the conventional
+offline–online boundary while ensuring that each batch is
+complete before its associated online operation begins.
+Architecture-aligned batching. The batch size is derived
+jointly from the GGM-tree structure and the fixed geometry
+of the accelerator datapath, rather than from an arbitrary
+transfer size. A GGM tree of height h yields Lt = 2h leaf
+positions, while the engine delivers correlations in groups of
+Lg = β (cbtg + con) positions, where β is the configured
+number of concurrent online consumers and cbtg, con are the
+per-group triple and online consumption demand. Since neither
+Lt nor Lg divides the other, a batch boundary can fall inside a
+tree. This enforces re-deriving any straddled tree in each batch
+that touches it and incurs repeated GGM work (2.34× the
+ideal number of expansions). We therefore select the smallest
+batch containing an integral number of both trees and delivery
+groups: Lb = LCM(Lt, Lg).
+For the evaluated configuration (n=218, h=8, β = nt=4,
+cbtg=11, con=35), Lt = 256 and Lg = 184, yielding a batch
+of Lb = 5,888 positions, equivalent to 23 trees and 32 delivery
+groups. The selected batch then serves as the common unit
+of expansion, intermediate retention, and online consumption,
+while the cross-party message size remains independently
+configurable.
+Cross-phase pipeline. Because correlation preparation is
+input-independent, the PL can process a future batch while
+the PS executes the input-dependent protocol for the current
+batch. After the initial pipeline fill, online execution of batch
+j overlaps preprocessing of batch j + ℓ, where ℓis the
+bounded lookahead distance. The PS and PL thereby operate
+5
+
+
+as concurrent consumer and producer stages, reducing the
+steady-state interval from the sum of their latencies toward
+that of the slower stage. Preprocessing latency is fully hidden
+only when the future batch completes before its consumption
+point; otherwise, the uncovered portion remains on the online
+critical path.
+The architecture accommodates both full-epoch background
+preprocessing and fine-grained deferred processing through a
+common batch interface, while preserving each batch’s logical
+indices, OT direction, and consumer assignment.
+D. Dual-path Correlation Processing
+Beaver triple generation consumes index-matched correla-
+tions from two opposite OT directions, requiring each party
+to process both sender-view and receiver-view data streams.
+Because time-multiplexing a single engine between roles in-
+troduces serialization stalls and limits throughput, we design a
+dual-path correlation-processing architecture. By provisioning
+dedicated, role-specific processing paths under a common
+delivery control, both OT directions required for Boolean
+triple generation advance concurrently without coarse-grained
+role reconfiguration. This spatial separation enables the sender
+path to construct protocol messages concurrently with deferred
+expansion on the receiver path (Section IV-B), while isolating
+their correlation state.
+Correlation alignment and triple processing. Beaver
+triple processing aligns sender-view and receiver-view cor-
+relations from opposite OT directions by logical generation
+and index. Because the two streams have a fixed generation
+offset, a bounded alignment buffer retains the earlier stream
+until its matching counterpart becomes available. The aligned
+correlations are then combined into local Boolean-triple shares
+within the PL.
+The generated COTs are split among online OT use, Beaver
+triple processing, and correlations required as the LPN seed
+table for the next extension epoch according to public pro-
+tocol parameters. Correlations assigned to triple processing
+remain within the PL, while only completed triple shares and
+correlations required by the online protocol are transferred
+to the PS. This placement removes the need for keeping
+intermediate correlations used exclusively for triple formation
+on the PS while preserving their logical ordering and cross-
+party association.
+E. Dual-CRH Split-stream Reformulation
+Motivated by the computational asymmetry identified in
+Section III-B, we reformulate the sender computation as two
+index-aligned CRH streams. Rather than merely replicating
+the CRH operator, the proposed transformation reorganizes
+the input layout and its processing into two parallel operators,
+thereby preserving branch-level parallelism across the sender
+computation.
+For each OT index i, the sender computes pad0[i] =
+Hκ(s,i)(mi), and pad1[i] = Hκ(s,i)(mi ⊕∆). where s is the
+session seed and κ(s, i) derives the CRH key for index i. Ex-
+isting implementations commonly represent the corresponding
+inputs in a single interleaved layout,
+Layoutinterleaved = [m0, m0 ⊕∆, m1, m1 ⊕∆, . . . ].
+Directly mapping this representation to parallel CRH units
+forces their outputs to converge at a shared FIFO or memory
+port and incur multiple-writer contention. Simultaneous results
+must then be arbitrated, packed into a wider word, or buffered
+before serialization. The shared write boundary can therefore
+limit the aggregate processing rate even when both CRH units
+individually sustain an initiation interval of II = 1.
+We instead transform the interleaved computation into two
+persistent streams:
+Layoutsplit =
+(
+[m0, m1, m2, . . . ],
+[m0 ⊕∆, m1 ⊕∆, m2 ⊕∆, . . . ].
+Each stream is assigned a dedicated CRH unit and an inde-
+pendent output FIFO, eliminating branch arbitration at the
+CRH write boundary. Both CRH units are initialized with
+the same session seed, and advance their local index coun-
+ters synchronously from the same origin. Consequently, the
+two streams preserve the index correspondence between the
+correlated inputs and produce the same indexed pads as the
+reference computation.
+F. Protocol Preservation
+The transformations modify only scheduling and dataflow.
+Deferred extension changes when a receiver-side COT be-
+comes available, while preserving its value, index, order, and
+preprocessing messages. Split-stream processing changes how
+the sender-side branch hashes are performed after availability,
+while preserving the mapping among each OT index, corre-
+lated branch, CRH key, and output pad. Their shared interface
+therefore presents the same indexed outputs to the downstream
+protocol as the reference execution. Reformulations depend
+only on public protocol parameters and the known inference
+sequence, introducing no secret-dependent control flow.
+V. EXPERIMENTS AND RESULTS
+A. Experimental Setup
+1) Platform Setting: We implement our design using Vi-
+tis High-Level Synthesis [16], targeting 170 MHz and the
+Zynq UltraScale+ ZCU102. The server runs on an Intel(R)
+Core(TM) i9-14900K Processor operating at 3.2 GHz. We
+evaluate under two network settings: LAN (1 Gbps, 0.3 ms
+RTT) and WAN (320 Mbps, 4 ms RTT).
+2) Metrics and Evaluation Methodology: We evaluate the
+architecture across four core metrics: execution latency (sec-
+onds), nonlinear operator throughput (ops/s), memory footprint
+via PS peak Resident Set Size (MB), and PL hardware utiliza-
+tion using post-place-and-route reports with 36 Kb BRAM tile
+counts.
+6
+
+
+TABLE II
+COT PARAMETER CONFIGURATIONS COMPARISON FOR A WORKLOAD OF
+5 × 108 COTS, EACH AT A SECURITY LEVEL VERIFIED BY [17].
+LPN/GGM Parameters
+On-Chip
+Execution
+Per COT Cost
+n
+h
+t
+k
+bits
+(MB)
+use/n
+iters
+AES
+bits
+216
+6
+1,024
+6,553
+151.5
+0.21
+0.804
+8,158
+2.45
+29.84
+8
+256
+19,660
+152.0
+0.35
+0.667
+9,840
+2.99
+12.00
+10
+64
+49,152
+149.0
+0.82
+0.238
+27,536
+8.39
+10.49
+218
+8
+1,024
+26,214
+174.9
+0.56
+0.868
+1,890
+2.30
+9.22
+220
+10
+1,024
+104,857
+186.7
+1.86
+0.890
+461
+2.25
+2.81
+107
+13
+1,319
+589,760
+151.8
+9.84
+0.944
+43
+2.16
+0.44
+TABLE III
+MICROBENCHMARK COMPARISON WITH N = 200, 704 ELEMENTS OVER
+LAN. PERCENTAGES SHOW CONTRIBUTION TO TOTAL LATENCY.
+Protocol Execution
+BTG
+Total
+Base
+Ours
+Base
+Ours
+Base
+Ours
+SecComp 5.75 (66%)
+3.69 (95%)
+2.93 (34%) 0.18 (4.7%) 8.68
+3.88 (2.24×)
+SecMult 0.04 (0.4%) 0.05 (0.6%) 11.36 (99%) 8.15 (99%) 11.41 8.20 (1.39×)
+3) Baselines and Comparison Scope: To our knowledge,
+no public FPGA implementation targets the same OT-based
+2PC nonlinear stack, making a direct comparison difficult
+without conflating architectural and protocol differences. We
+therefore use protocol-matched baselines from the same pro-
+tocol family. The FPGA baseline (Table IV) preserves the
+baseline’s bulk execution order while applying standard HLS
+optimizations and the COT generation method from [11].
+For transformer evaluation, we replace BumbleBee’s RLWE-
+based MulOLE paths in GELU and Softmax with functionally
+equivalent OT-derived arithmetic-triple implementations and
+retain all other components.
+B. Design Configuration and Resource Utilization
+We explore the LPN parameter space to reduce off-chip
+seed accesses and fit the seed table within the available on-
+chip memory. The baseline 9 MB table exceeds the client’s
+shared L2 cache, increasing the LPN output-combination cost.
+Unlike the baseline software configuration [7], which allocates
+107 correlation pools totaling 1,440 MB across eight generator
+instances, our selected parameters (n=218, k=26,214, h=8)
+allow the complete LPN seed table to be double-buffered in
+BRAM, using approximately 90% of the available capacity.
+Table IV summarizes the microarchitectural trade-offs be-
+tween the two architectures. On-chip double buffering of the
+LPN seed table, together with deferred-expansion windows
+and per-lane stream buffers, avoids PS-side staging of inter-
+mediate data during each processing pass. The proposed design
+requires only 55 DSPs, mainly for the arithmetic Beaver triple
+generation.
+Protocol Invariant Validation Methodology. We validate
+protocol invariants at four complementary levels. First, un-
+der fixed randomness, deferred receiver expansion reproduces
+immediate extension outputs across all batch sizes. Second,
+multi-epoch execution verifies key state propagation across
+deferred epoch boundaries. Third, an immediate sender seam-
+lessly pairs with a deferred receiver without changing corre-
+lation counts or logical consumption order. Fourth, sender–
+receiver outputs satisfy the required correlation relation at
+TABLE IV
+COMPARISON OF HARDWARE RESOURCE UTILIZATION BREAKDOWN.
+Component
+Baseline Design
+Proposed Design
+BRAM
+FF
+LUT
+BRAM
+FF
+LUT
+COT generator (S)
+94.5
+52,962
+29,997
+289.5
+14,831
+24,546
+COT generator (R)
+98.5
+121,625
+88,298
+289.5
+14,815
+25,120
+Boolean BTG
+on PS
+83.5
+20,396
+17,813
+Arithmetic BTG
+on PS
+73.5
+32,670
+38,092
+COT splitter
+n/a
+0.0
+629
+326
+AXI control
+47.5
+35,055
+19,986
+81.5
+50,274
+31,142
+Total
+240.5
+209,642
+138,281
+817.5
+133,615
+137,039
+TABLE V
+PER-OPERATOR THROUGHPUT IMPROVEMENT ACROSS NETWORK
+SETTINGS WITH N = 200, 704 ELEMENTS.
+Method
+ReLU
+MaxPool
+GELU
+Softmax
+LAN
+WAN
+LAN
+WAN
+LAN
+WAN
+LAN
+WAN
+Base
+33,540
+32,371
+3,028
+3,001
+5,276
+5,076
+2,988
+3,170
+Ours
+51,946
+48,961
+4,494
+4,313
+7,382
+7,046
+4,428
+4,099
+Gain
+1.55×
+1.51×
+1.48×
+1.44×
+1.40×
+1.39×
+1.48×
+1.29×
+every vector index, while the split CRH streams reproduce the
+baseline-indexed pads. Collectively, we establish bit-exact out-
+put equivalence and verify logical indexing, batch alignment,
+branch synchronization, and inter-epoch key propagation.
+C. Microbenchmarks
+1) Secure Comparison: As detailed in Table III, prepro-
+cessing dominates the baseline execution: BTG accounts for
+34% of total latency, and COT generation alongside digit
+comparison consumes the remaining 66%. By offloading COT
+generation and BTG and overlapping with online execution,
+Interflow achieves a 2.24× speedup and reduces PS-side
+preprocessing overhead to a lightweight DDR transfer, which
+contributes only 5% of total execution time. The remaining
+latency is therefore dominated by online protocol execution,
+showing that Interflow successfully hides correlation genera-
+tion from the critical path.
+2) Secure Multiplication: As shown in Table III, arithmetic
+Beaver triple generation accounts for 99.6% of the base-
+line secure-multiplication latency. The offline generator uses
+Gilboa’s OT-based multiplication protocol [18] to construct the
+two cross terms required by each arithmetic triple, consuming
+2ℓcorrelations per general multiplication triple, or 64 COTs at
+ℓ= 32. Interflow achieves a 1.39× speedup at ℓ= 32, rising
+to 1.45× at ℓ= 64 as the correlation demand doubles.
+D. Nonlinear Operation Evaluation
+For the non-linear operators in Table V, Interflow achieves
+throughput speedups of 1.51−1.55× for ReLU, 1.44−1.48×
+for MaxPooling, 1.4× for GELU, and 1.29−1.48× for Soft-
+max, compared to the protocol-matched software baseline
+across the LAN and WAN settings. The gains vary with each
+operator’s correlation demand and the fraction of execution
+exposed to preprocessing. Interflow removes the critical-path
+preprocessing stall present in the baseline and bounds the
+resident correlation footprint at 28.6 MB for all operators. In
+contrast, the baseline retains correlation pools whose capacity
+7
+
+
+SqueezeNet
+ResNet-50
+DenseNet-121
+0
+200
+400
+600
+800
+latency (s)
+1.42×
+1.95×
+1.26×
+1.67×
+1.30×
+1.77×
+SqueezeNet
+ResNet-50
+DenseNet-121
+1.35×
+1.85×
+1.24×
+1.61×
+1.28×
+1.70×
+SqueezeNet
+ResNet-50
+DenseNet-121
+LAN — 1 Gbps, 0.3 ms RTT
+0
+500
+1000
+peak memory (MB)
+−37%
+−36%
+−37%
+−36%
+−35%
+−35%
+SqueezeNet
+ResNet-50
+DenseNet-121
+WAN — 320 Mbps, 4 ms RTT
+−34%
+−35%
+−36%
+−36%
+−34%
+−34%
+stock (PS only)
+V1 (COT unit on PL)
+Interflow
+vs stock
+vs V1
+2.0×
+2.0×
+Fig. 5. Latency and memory comparison of end-to-end secure inference for
+the software baseline, the protocol-matched FPGA baseline, and Interflow.
+grows with the extension-epoch size, from 40.1 MB at n=218
+to 1,440 MB at n=107.
+E. End-to-end Inference
+Fig. 5 summarizes end-to-end secure inference results. Un-
+der the LAN network setting, Interflow achieves speedups of
+1.42×, 1.26×, and 1.30× over the software baseline, and
+1.95×, 1.67×, and 1.77× over the protocol-matched FPGA
+baseline across SqueezeNet, ResNet-50, and DenseNet-121,
+respectively. It also reduces peak client memory by up to
+37% and server memory by 200–300 MB, with consistent
+reductions across network settings due to bounded correlation
+buffering. In contrast, the execution speedup decreases under
+WAN latency. The results also show that the protocol-matched
+baseline executes slower than software (0.73–0.75×) at the
+comparable memory footprint. Accelerating correlation gener-
+ation alone does not prevent refill stalls when complete epochs
+are returned to memory. Interflow instead delivers batch-level
+correlations, keeping correlations available to the online phase.
+Under LAN and WAN settings, Interflow accelerates the
+nonlinear block by 1.44× and 1.34×, respectively, yielding
+end-to-end speedups of 1.21× and 1.17× for a single-layer
+BERT-base model. The smaller end-to-end gains reflect the
+small contribution of nonlinear blocks to the baseline inference
+time.
+VI. CONCLUSION
+This paper presented Interflow, an algorithm–hardware co-
+design that coordinates correlation preprocessing and online
+execution for OT-based secure nonlinear inference. Interflow
+resolves system bottlenecks by decoupling preprocessing at
+its final communication dependency and executing in a uni-
+fied, role-aware datapath. Evaluated on the Zynq UltraScale+
+ZCU102, Interflow improves nonlinear operator throughput by
+up to 1.55× for CNN operators and 1.48× for transformer
+operators, yielding geometric-mean end-to-end speedups of
+1.28× over the protocol-matched software baseline and 1.72×
+over an FPGA baseline without triple generation offload, while
+reducing the client memory footprint by up to 37%. These
+results demonstrate that managing the complete correlation
+lifecycle is essential for efficient secure edge inference.
+REFERENCES
+[1] C. Juvekar, V. Vaikuntanathan, and A. Chandrakasan, “GAZELLE: A
+low latency framework for secure neural network inference,” in 27th
+USENIX security symposium (USENIX security 18), 2018, pp. 1651–
+1669.
+[2] M. S. Riazi, M. Samragh, H. Chen, K. Laine, K. Lauter, and F. Koushan-
+far, “XONN: oblivious deep neural network inference,” in 28th USENIX
+Security Symposium (USENIX Security 19), 2019, pp. 1501–1518.
+[3] B. D. Rouhani, M. S. Riazi, and F. Koushanfar, “Deepsecure: Scalable
+provably-secure deep learning,” in Proceedings of the 55th annual
+Design Automation Conference (DAC), 2018, pp. 1–6.
+[4] P. Mishra, R. Lehmkuhl, A. Srinivasan, W. Zheng, and R. A. Popa,
+“Delphi: A cryptographic inference system for neural networks,” in
+Proceedings of the 2020 Workshop on Privacy-Preserving Machine
+Learning in Practice, 2020, pp. 27–30.
+[5] D. Kim and C. Guyot, “Optimized privacy-preserving cnn inference
+with fully homomorphic encryption,” IEEE Transactions on Information
+Forensics and Security, vol. 18, pp. 2175–2187, 2023.
+[6] D. Rathee, M. Rathee, N. Kumar, N. Chandran, D. Gupta, A. Rastogi,
+and R. Sharma, “CrypTFlow2: Practical 2-party secure inference,” in
+Proceedings of the 2020 ACM SIGSAC Conference on Computer and
+Communications Security (CCS), 2020, pp. 325–342.
+[7] Z. Huang, W.-j. Lu, C. Hong, and J. Ding, “Cheetah: Lean and fast
+secure two party deep neural network inference,” in 31st USENIX
+Security Symposium (USENIX Security 22), 2022, pp. 809–826.
+[8] Q. Pang, J. Zhu, H. M¨ollering, W. Zheng, and T. Schneider, “Bolt:
+Privacy-preserving, accurate and efficient inference for transformers,” in
+2024 IEEE Symposium on Security and Privacy (SP).
+IEEE, 2024, pp.
+4753–4771.
+[9] W.-j. Lu, Z. Huang, Z. Gu, J. Li, J. Liu, C. Hong, K. Ren, T. Wei,
+and W. Chen, “BumbleBee: Secure two-party inference framework for
+large transformers,” Network and Distributed Systems Security (NDSS)
+Symposium, 2025.
+[10] Q. Zhang, T. Xiang, C. Xin, and H. Wu, “From individual computation
+to allied optimization: Remodeling privacy-preserving neural inference
+with function input tuning,” in 2024 IEEE Symposium on Security and
+Privacy (SP).
+IEEE, 2024, pp. 4810–4827.
+[11] Z. Li, H. T. Asl, E. Nouri, Y. Cai, and D. Zhao, “Silentflow: Leveraging
+trusted execution for resource-limited mpc via hardware-algorithm co-
+design,” in 31th Asia and South Pacific Design Automation Conference
+(ASP-DAC), 2026.
+[12] Z. Li, H. T. Asl, Y. Cai, E. Nouri, and D. Zhao, “TAMI-MPC: Trusted
+acceleration of minimal-interaction mpc for efficient nonlinear infer-
+ence,” in Proceedings of the 63rd annual Design Automation Conference
+(DAC), 2026.
+[13] E. Boyle, G. Couteau, N. Gilboa, Y. Ishai, L. Kohl, and P. Scholl,
+“Efficient pseudorandom correlation generators: Silent ot extension and
+more,” in Advances in Cryptology – CRYPTO 2019: 39th Annual
+International Cryptology Conference, Santa Barbara, CA, USA, August
+18–22, 2019, Proceedings, Part III.
+Berlin, Heidelberg: Springer-
+Verlag, 2019, p. 489–518. [Online]. Available: https://doi.org/10.1007/
+978-3-030-26954-8 16
+[14] K. Yang, C. Weng, X. Lan, J. Zhang, and X. Wang, “Ferret: Fast
+extension for correlated ot with small communication,” in Proceedings of
+the 2020 ACM SIGSAC Conference on Computer and Communications
+Security (CCS), 2020, pp. 1607–1626.
+[15] C.
+Guo,
+J.
+Katz,
+X.
+Wang,
+C.
+Weng,
+and
+Y.
+Yu,
+“Better
+concrete
+security
+for
+half-gates
+garbling
+(in
+the
+multi-instance
+setting),” in Advances in Cryptology – CRYPTO 2020: 40th Annual
+International Cryptology Conference, CRYPTO 2020, Santa Barbara,
+CA,
+USA,
+August
+17–21,
+2020,
+Proceedings,
+Part
+II.
+Berlin,
+Heidelberg: Springer-Verlag, 2020, p. 793–822. [Online]. Available:
+https://doi.org/10.1007/978-3-030-56880-1 28.
+[16] AMD, Vitis High-Level Synthesis User Guide (UG1399), 2024, https:
+//docs.amd.com/r/en-US/ug1399-vitis-hls.
+[17] H. Liu, X. Wang, K. Yang, and Y. Yu, “The hardness of lpn over any
+integer ring and field for pcg applications,” in Advances in Cryptology
+– EUROCRYPT 2024, M. Joye and G. Leander, Eds.
+Cham: Springer
+Nature Switzerland, 2024, pp. 149–179.
+[18] N. Gilboa, “Two party RSA key generation,” in Advances in Cryptology
+– CRYPTO ’99, ser. Lecture Notes in Computer Science, M. Wiener,
+Ed., vol. 1666.
+Springer, 1999, pp. 116–129.
+8

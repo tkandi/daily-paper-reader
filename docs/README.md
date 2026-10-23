@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-22</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-23</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 17 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-22 19:53:55 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-23 19:54:44 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>聚焦异构 GPU 集群调度与长上下文 LLM 推理，完成 17 篇论文筛选，其中 6 篇精读。</p>
-<p>最值得关注的是：用就绪感知调度识别并缓解异构 GPU 的无效占用，以及 TideKV 通过分层分块预填充延迟 KV 淘汰以节省长上下文推理内存。</p>
-<p>建议先读两篇精读论文，再结合速读中的 DNN 部署容量协同、实时调度与多精度映射，建立端到端优化视角。</p>
+<p>今日聚焦异构 LLM 推理流水线、深度学习编译器测试与高效模型服务，共完成 17 篇论文筛选、6 篇精读。</p>
+<p>最值得关注的是：异构推理流水线的精确时延边界与 GPipe 偏置，以及面向深度学习编译器的状态化测试；NPU 训练优化和稀疏 LLM 服务也值得跟进。</p>
+<p>建议普通读者优先读懂“流水线如何影响大模型推理速度”，再按需延伸到编译器可靠性与端侧/云端算力优化。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Ineffective Occupancy in Heterogeneous GPU Clusters: Prediction, Contribution Analysis, and Readiness-Aware Scheduling">Ineffective Occupancy in Heterogeneous GPU Clusters: Prediction, Contribution Analysis, and Readiness-Aware Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="TideKV: Delayed KV Eviction via Layer-Wise Chunked Prefill for Memory-Efficient Long-Context LLM Inference">TideKV: Delayed KV Eviction via Layer-Wise Chunked Prefill for Memory-Efficient Long-Context LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="AdamPM: Memory-Efficient LLM Optimization via Moment Pooling">AdamPM: Memory-Efficient LLM Optimization via Moment Pooling</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Exact Makespan Bounds and the GPipe Homogeneity Bias for Heterogeneous LLM Inference Pipelines">Exact Makespan Bounds and the GPipe Homogeneity Bias for Heterogeneous LLM Inference Pipelines</span></li><li><span class="dpr-home-dashboard-paper-title" title="Stateful Testing for Deep Learning Compilers">Stateful Testing for Deep Learning Compilers</span></li><li><span class="dpr-home-dashboard-paper-title" title="FlashRT-PAI: Fast Kernels Are Not Fast Pipelines for Physical AI Inference">FlashRT-PAI: Fast Kernels Are Not Fast Pipelines for Physical AI Inference</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="From Partitioning to Provisioning: Co-Designing DNN Deployment and Infrastructure Capacity">From Partitioning to Provisioning: Co-Designing DNN Deployment and Infrastructure Capacity</span></li><li><span class="dpr-home-dashboard-paper-title" title="Hard and Soft Real-Time DNN Inference Scheduling on Heterogeneous Multi-Accelerator Systems via Reinforcement Learning">Hard and Soft Real-Time DNN Inference Scheduling on Heterogeneous Multi-Accelerator Systems via Reinforcement Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="qGAMMA: A Framework for Optimal DNN Mapping on Multi-Precision Accelerators">qGAMMA: A Framework for Optimal DNN Mapping on Multi-Precision Accelerators</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="On Johnson-Lindenstrauss Transforms for Byzantine-Robust Optimization">On Johnson-Lindenstrauss Transforms for Byzantine-Robust Optimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="TrainBridge: Agentic NPU Training Optimization Guided by GPU Compilation Evidence">TrainBridge: Agentic NPU Training Optimization Guided by GPU Compilation Evidence</span></li><li><span class="dpr-home-dashboard-paper-title" title="UlaCache: Unified Logical Addressing for Sparse LLM Serving">UlaCache: Unified Logical Addressing for Sparse LLM Serving</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
