@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-23</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-24</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 14 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-23 19:54:44 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-24 19:15:48 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦异构 LLM 推理流水线、深度学习编译器测试与高效模型服务，共完成 17 篇论文筛选、6 篇精读。</p>
-<p>最值得关注的是：异构推理流水线的精确时延边界与 GPipe 偏置，以及面向深度学习编译器的状态化测试；NPU 训练优化和稀疏 LLM 服务也值得跟进。</p>
-<p>建议普通读者优先读懂“流水线如何影响大模型推理速度”，再按需延伸到编译器可靠性与端侧/云端算力优化。</p>
+<p>今日筛选 14 篇前沿论文，精读聚焦 GPU 直连存储与计算存储语义闪存两项系统突破。</p>
+<p>最值得关注的是 uGDS 的高性能 GPU Direct Storage 用户态方案，以及 VS-Flash 将向量检索下沉至闪存计算的新路径。</p>
+<p>普通读者可优先了解“数据如何更快靠近 GPU 与存储”，再按需速读联邦多模态、小型语言模型和个性化推荐进展。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Exact Makespan Bounds and the GPipe Homogeneity Bias for Heterogeneous LLM Inference Pipelines">Exact Makespan Bounds and the GPipe Homogeneity Bias for Heterogeneous LLM Inference Pipelines</span></li><li><span class="dpr-home-dashboard-paper-title" title="Stateful Testing for Deep Learning Compilers">Stateful Testing for Deep Learning Compilers</span></li><li><span class="dpr-home-dashboard-paper-title" title="FlashRT-PAI: Fast Kernels Are Not Fast Pipelines for Physical AI Inference">FlashRT-PAI: Fast Kernels Are Not Fast Pipelines for Physical AI Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="uGDS: A User-Space Development Kit for High-Performance GPU Direct Storage">uGDS: A User-Space Development Kit for High-Performance GPU Direct Storage</span></li><li><span class="dpr-home-dashboard-paper-title" title="VS-Flash: Harnessing Vector Search with Computational Memory-Semantic Flash">VS-Flash: Harnessing Vector Search with Computational Memory-Semantic Flash</span></li><li><span class="dpr-home-dashboard-paper-title" title="CANNBot-CAKE: Collaborative Agentic Kernel Evolution for Ascend NPU">CANNBot-CAKE: Collaborative Agentic Kernel Evolution for Ascend NPU</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="On Johnson-Lindenstrauss Transforms for Byzantine-Robust Optimization">On Johnson-Lindenstrauss Transforms for Byzantine-Robust Optimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="TrainBridge: Agentic NPU Training Optimization Guided by GPU Compilation Evidence">TrainBridge: Agentic NPU Training Optimization Guided by GPU Compilation Evidence</span></li><li><span class="dpr-home-dashboard-paper-title" title="UlaCache: Unified Logical Addressing for Sparse LLM Serving">UlaCache: Unified Logical Addressing for Sparse LLM Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FederatedBytes: Tokenizer-Free, Byte-Level Small Language Models for Efficient Multimodal Federated Learning">FederatedBytes: Tokenizer-Free, Byte-Level Small Language Models for Efficient Multimodal Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="JAXtari: High-Throughput and Easy-to-Modify Arcade Learning Environment">JAXtari: High-Throughput and Easy-to-Modify Arcade Learning Environment</span></li><li><span class="dpr-home-dashboard-paper-title" title="DuoLM: Fast and Effective Personalized Recommendation with Language Models">DuoLM: Fast and Effective Personalized Recommendation with Language Models</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
