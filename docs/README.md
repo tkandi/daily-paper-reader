@@ -48,7 +48,7 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-24</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-25</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 14 篇</strong>
@@ -58,7 +58,7 @@
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-24 19:15:48 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-25 19:16:08 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日筛选 14 篇前沿论文，精读聚焦 GPU 直连存储与计算存储语义闪存两项系统突破。</p>
-<p>最值得关注的是 uGDS 的高性能 GPU Direct Storage 用户态方案，以及 VS-Flash 将向量检索下沉至闪存计算的新路径。</p>
-<p>普通读者可优先了解“数据如何更快靠近 GPU 与存储”，再按需速读联邦多模态、小型语言模型和个性化推荐进展。</p>
+<p>今日完成14篇论文筛选，聚焦生成式AI部署、RDMA可观测性与高效多模态模型。</p>
+<p>最值得关注的是FlowMaker对低成本生成式AI工作流部署的优化，以及SigmaTrace对CPU/GPU发起RDMA通信的跨库观测能力。</p>
+<p>建议普通读者优先精读这两篇，再按兴趣速览视觉Token裁剪和语言模型并行推理方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -83,7 +83,7 @@
     <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="uGDS: A User-Space Development Kit for High-Performance GPU Direct Storage">uGDS: A User-Space Development Kit for High-Performance GPU Direct Storage</span></li><li><span class="dpr-home-dashboard-paper-title" title="VS-Flash: Harnessing Vector Search with Computational Memory-Semantic Flash">VS-Flash: Harnessing Vector Search with Computational Memory-Semantic Flash</span></li><li><span class="dpr-home-dashboard-paper-title" title="CANNBot-CAKE: Collaborative Agentic Kernel Evolution for Ascend NPU">CANNBot-CAKE: Collaborative Agentic Kernel Evolution for Ascend NPU</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SigmaTrace: Library-Agnostic Observability for CPU/GPU-Initiated RDMA Communication">SigmaTrace: Library-Agnostic Observability for CPU/GPU-Initiated RDMA Communication</span></li><li><span class="dpr-home-dashboard-paper-title" title="FlowMaker: From Tasks to Cost-Efficient Generative AI Workflow Deployments">FlowMaker: From Tasks to Cost-Efficient Generative AI Workflow Deployments</span></li><li><span class="dpr-home-dashboard-paper-title" title="AgentDP: Towards Automated Model Deployment for Heterogeneous Embedded AI Applications">AgentDP: Towards Automated Model Deployment for Heterogeneous Embedded AI Applications</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
 </section>
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="FederatedBytes: Tokenizer-Free, Byte-Level Small Language Models for Efficient Multimodal Federated Learning">FederatedBytes: Tokenizer-Free, Byte-Level Small Language Models for Efficient Multimodal Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="JAXtari: High-Throughput and Easy-to-Modify Arcade Learning Environment">JAXtari: High-Throughput and Easy-to-Modify Arcade Learning Environment</span></li><li><span class="dpr-home-dashboard-paper-title" title="DuoLM: Fast and Effective Personalized Recommendation with Language Models">DuoLM: Fast and Effective Personalized Recommendation with Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Hierarchical and Query-Aware Visual Token Pruning for High-Resolution LVLMs">Hierarchical and Query-Aware Visual Token Pruning for High-Resolution LVLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Torch-DPhys: A Torch-Native, MOOSE-Compatible Framework for Differentiable Physics Simulation and Hybrid Machine Learning Integration">Torch-DPhys: A Torch-Native, MOOSE-Compatible Framework for Differentiable Physics Simulation and Hybrid Machine Learning Integration</span></li><li><span class="dpr-home-dashboard-paper-title" title="Dual-Slot: From Serial Loops to Parallel Slots in Language Models">Dual-Slot: From Serial Loops to Parallel Slots in Language Models</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
