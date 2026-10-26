@@ -1,0 +1,1148 @@
+Title: NousDB - A Fast Query Engine for Semantic Analytics
+
+URL Source: https://arxiv.org/pdf/2610.28551v2
+
+Published Time: Thu, 22 Oct 2026 00:50:01 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# NousDB - A Fast Query Engine for Semantic Analytics 
+
+# Christos Tsapelas 
+
+Department of Informatics and Telecommunications, National and Kapodistrian University of Athens Archimedes, Athena Research Center Athens, Greece ctsapelas@athenarc.gr ctsapelas@di.uoa.gr 
+
+# Georgia Koutrika 
+
+Archimedes, Athena Research Center Athens, Greece georgia@athenarc.gr 
+
+# Yannis Ioannidis 
+
+Department of Informatics and Telecommunications, National and Kapodistrian University of Athens Archimedes, Athena Research Center Athens, Greece yannis@athenarc.gr yannis@di.uoa.gr 
+
+## Abstract 
+
+Semantic data analytics systems integrate AI-powered operators into query pipelines, enabling declarative queries over structured and unstructured data. However, existing systems rely on per-tuple model invocations, ad hoc operator designs, and lack principled cost models, resulting in poor scalability and limited optimization. We present NousDB, a high-performance semantic analytics engine built on Apache DataFusion[22].Through NousDB we propose an extended relational algebra with three semantic operators and for-mal algebraic properties that enable principled query rewriting and cross-operator optimization. We further propose a token-based cost model using equi-depth token histograms to optimize batch sizing under context-window constraints and provide statistical guaran-tees for safe batching. Experiments show that NousDB achieves up to ×86 speedups with both local and enterprise LLMs, while leading competitors in token efficiency and accuracy. These gains extend to complex JOB and Stack workloads augmented with semantic operators, supporting both traditional and semantic analytics. 
+
+## 1 Introduction 
+
+Foundation models [2, 33, 45] have showcased strong capabilities in processing unstructured data, such as language and images. This new form of data processing has given rise to semantic query en-gines (SQEs), which treat models as query operators and allow users to filter, join, extract information from, and summarize tex-tual content in combination with conventional relational operations. However, they challenge several fundamental assumptions underly-ing database systems, including operator semantics, cost estimation, and parallel execution, among others. 
+
+Motivating example. Consider the query “which actors are men-tioned in movie reviews?” over the IMDB schema extended with a relation of reviews. Figure 1 shows this query, denoted Q11 in our evaluation, expressed in NousDB. Its natural execution plan first extends each review with the actors mentioned in its text, join the result with the name relation on whether the extracted mention and a person’s name refer to the same actor, and projects the re-view, movie title and actor name. A naive execution invokes the model once per review for extraction and once per review-name pair for matching, with each invocation processing only one tu-ple or tuple pair. Avoiding this costly tuple-at-a-time execution requires the planner to reason about semantic operators, for which existing SQEs provide insufficient foundations. Using this query as a running example, we next identify the following problems.              
+
+> 1// Q11: which actors are mentioned in movie reviews?
+> 2let reviews = ctx. nousdb_sql ("SELECT * FROM reviews")
+> 3.extend (("mentioned_actor", Utf8), model,
+> 4"Extract the actor name mentioned in this review", &["review"]);
+> 5let names = ctx. nousdb_sql ("SELECT * FROM name");
+> 6let result = reviews
+> 7.semantic_join (names, &["mentioned_actor"], &["name"], model,
+> 8"Does the extracted actor match this person?")
+> 9.select_columns (&["review", "title", "name"]);
+> 10 result. show (). await ?;
+
+Figure 1: NousDB example program. 
+
+Problem 1: Semantic operators without semantics. Existing SQEs expose semantic operators to the query planner as opaque model invocations that use task-specific prompts [11, 29, 36]. This limitation hinders query optimization in SQEs because it prevents the definition of algebraic properties to reason about result-preserving rewrites. In our example, treating semantic operators as black boxes prevents the planner from determining whether it can safely push a selective filter on name below the semantic join, fuse mention extraction and matching into a single model invocation, or partition the work across threads. Missing such rewrites can incur substan-tial model work, often linear in the input cardinality and far costlier per invocation than conventional tuple comparisons. 
+
+Challenge 1: Defining semantics that enable sound plan transfor-mations . A semantic operator is jointly determined by its model and prompt, may behave stochastically, and may be undefined for some inputs. Classical relational-algebra properties therefore can-not be assumed. The challenge is to define semantics that make these behaviors explicit and identify which properties, and thus which plan transformations, are valid under which assumptions. 
+
+Problem 2: Finite context windows. Singleton calls underutilize the context window. In our running example, invoking the model separately for every review and review–name pair repeatedly pays the fixed cost of the prompt while leaving most of the context window unused. Batching multiple tuples into each invocation amortizes this cost and reduces the number of model calls, but risks exceeding the model’s capacity. Thus, batching must respect a hard token budget determined by the prompt and the model’s context window, and becomes a critical optimization decision. 
+
+Challenge 2: Token-distribution estimation. Enforcing this budget requires estimating the token footprint of the input tuples with-out tokenizing the entire input in advance. The engine therefore needs compact per-column token statistics that can be collected and maintained at negligible time and space overhead. 
+
+Challenge 3: Probabilistic batch sizing. Given these statistics and the available token budget, the engine must select the largest batch that fits with high probability. The sizing algorithm must balance invocation efficiency against the risk of truncation or rejection, particularly under skewed token-length distributions. arXiv:2610.28551v2 [cs.DB] 21 Oct 2026 Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis 
+
+Problem 3: Over-batching can degrade result quality. Although a batch may fit within the model’s context window, batching can change the output produced for each tuple relative to singleton execution due to leakage from neighboring tuples, tuple position in the batch, or formatting errors that misalign inputs and outputs. In our experiments, batching without checking output fidelity reduces F1 by up to 0.42 for a selection query with Qwen3-8B. The engine must therefore determine the largest batch size that preserves fi-delity, meaning agreement with singleton execution, rather than merely the largest batch that fits within the context window. 
+
+Challenge 4: Safe batch sizes cannot be predicted a priori. The batch size at which output quality degrades depends on the model, prompt, and data. At query time, fidelity must be assessed without ground truth or independence assumptions and at a cost substantially lower than the execution being validated. 
+
+Problem 3: Token-skew in row-balanced partitions. Classical engines distribute rows evenly across workers, assuming similar per-row costs. In SQEs, cost depends on token volume, so row-balanced partitions may have highly unequal loads. In our example, a partition containing longer reviews carries several times the token load of its peers, becoming a straggler while other workers sit idle. We call this imbalance token skew . Existing SQEs inherit row-based partitioning from their host engines and do not account for it. 
+
+Challenge 5: Token-aware partitioning. The challenge is to detect token skew and partition tuples by expected processing cost rather than count, while keeping repartitioning overhead below the gains from improved load balance. 
+
+NousDB Contributions. NousDB addresses all four problems. It defines semantic operators declaratively as relation-to-relation functions parameterized by a model and a prompt. These definitions provide engine-independent reference semantics for evaluating im-plementations and reasoning about plan equivalence. We define these semantics at the tuple level, separating what an operator computes from how its inputs are grouped into model invocations. Singleton execution, in which each tuple is evaluated independently, serves as the reference semantics. Batching is therefore a physical execution choice whose fidelity can be evaluated against this ref-erence, rather than an implicit change to the operator’s meaning. NousDB is built as an extension of Apache DataFusion [22] over Apache Arrow’s [3] columnar format (Figure 2). Its semantic op-erators are first-class DataFusion operators, enabling vectorized, columnar, and partition-parallel execution. In a nutshell, NousDB makes the following contributions: 
+
+• An algebra for semantic operators. We define three tuple-level semantic operators (Extend, Selection, Join) under an ex-plicit oracle assumption, which allows us to derive a set of algebraic properties, along with four rewrite rules, two push-downs and two fusions, that NousDB’s optimizer applies. 
+
+• Token-aware batch sizing. We introduce equi-depth token histograms as the catalog statistic of token-priced operators, an iterative algorithm that maximizes 𝑘 subject to an overflow probability 𝛼 , and batched streaming operators that keep a window of packed requests in flight. 
+
+• A fidelity certificate. We define batch fidelity as the probability that a tuple has the same output in a batch as in a singleton                 
+
+> NousDB DataFusion (1) User-Facing API
+> NousDBContext
+> wraps SessionContext
+> (2) Planner
+> NousDBQueryPlanner NousDBPhysicalPlanner
+> DataFusion extension
+> (3) Optimizer (4 rules)
+> ➀SemRewriting ➁TokenRepart
+> ➂HistInjection ➃BatchSizeOpt
+> (4) Executor
+> 𝜀 Extend 𝜎 sSelect
+> ZsJoin TokenRepart Apache DataFusion ·Arrow
+
+Figure 2: NousDB system architecture. 
+
+invocation and certify it at query time with a one-probe-per-batch calibration that restores independent samples and an exact Clopper–Pearson test. In query execution, certified runs agree with singleton execution on at least 86% of the tuples of every query. 
+
+• Token-aware repartitioning. We implement a token repar-tition operator with list-scheduling and zigzag assignment, a corrected balance guarantee, and a wave-barrier protocol that embeds it in DataFusion execution engine. 
+
+• Strong performance. On IMDB and SemBench, against LO-TUS, Palimpzest, Abacus and per-row DataFusion, with a local (Qwen3-8B) and a hosted (GPT-5.4-nano) model, NousDB is the fastest system, up to 86 ×, uses up to 19 × fewer tokens, and lies on the quality–runtime Pareto frontier. On JOB and STACK aug-mented with semantic operators (43 queries, up to 17 relations) it keeps its lead, up to 35 ×.
+
+## 2 Related Work 
+
+SQEs expose LLM-powered operators next to relational ones [1, 4, 10, 11, 14, 17, 20, 25, 27, 29, 36, 42, 44, 47–50, 54, 56]. ThalamusDB [17, 18] answers SQL queries with NL predicates over multi-modal data, WannaDB [14, 15] and ELEET [46, 47] extract structure from text, and ZenDB [27] and DocETL [42] target document analyt-ics. Palimpzest [29], optimized by Abacus [40], and LOTUS [5, 36] offer declarative semantic operators, UQE [9] and BlendSQL [11] embed them in SQL, and GALOIS [41] and XMODE [32] query or orchestrate the LLM itself. Benchmarks remain few [5, 34, 55]; the broadest, SemBench [23], shows that operators sharing a name across systems, such as sem_filter and sem_join , do not share se-mantics. In all of them a semantic operator is an opaque model call. NousDB instead defines semantic operators that compose with the relational ones, establishes the algebraic properties that rewrit-ing requires, and measures cost in tokens rather than rows, which exposes batch sizing , batch fidelity and repartitioning as new opti-mization problems. 
+
+Batching and guarantees. Batch prompting amortizes instruction tokens over the inputs of one prompt [6, 26], at a quality cost reported as discounted output [30] and cross-query interference [51]. Statistical guarantees for LLM-powered operators [19, 36, 53] bound a cheap proxy against an oracle to decide which tuples the expensive model must see. NousDB’s certificate is orthogonal: it bounds the fidelity of batched execution to singleton execution (Theorem 4.6) to decide how many tuples may share one call. NousDB - A Fast Query Engine for Semantic Analytics 
+
+## 3 NousDB Algebra 3.1 NousDB Model 
+
+In the relational model, a relation 𝑅 has a set A of attributes, each 
+
+𝐴 𝑖 ∈ A with a domain 𝐷𝑜𝑚 (𝐴 𝑖 ) (numeric, boolean or categorical); for a tuple 𝑟 , 𝑟 [𝐴 𝑖 ] is the value of 𝐴 𝑖 in 𝑟 , and for B ⊆ A, 𝑟 [B]
+
+denotes the projection of 𝑟 on B. Relational systems also admit unstructured attributes through general-purpose types such as 
+
+TEXT or BLOB , but these remain opaque to query semantics: no relational operator or optimizer can reason about their content. NousDB lifts this limitation by drawing models from a registered pool M of foundation models (LLMs, VLMs) that interpret and execute natural-language instructions over their inputs. A model 𝑚 ∈ M maps input values to output values, 𝑚 :
+
+Î𝑖 𝐷𝑜𝑚 (𝑋 𝑖 ) → Î𝑗 𝐷𝑜𝑚 (𝑌 𝑗 ), and is steered by a prompt. We de-fine a prompt constructor 𝑝𝑐 from an operator-specific instruction template 𝑝𝑡 . Given an input 𝑥 , 𝑝𝑐 instantiates 𝑝𝑡 with the relevant attribute values from 𝑥 , producing the prompt 𝑝 = 𝑝𝑐 (𝑥 ) submit-ted to 𝑚 . Combining a prompt constructor with the model gives a prompted model invocation (simply model invocation hereafter) through which our semantic operators compose model inference with classical query processing. 
+
+Singleton semantics. We define the reference semantics of semantic operators in terms of singleton model invocations : each input tuple, or tuple pair for a join, is evaluated independently. 
+
+Deterministic-oracle assumption. Repeated model invoca-tions with the same prompt and input may produce different out-puts. We abstract away this stochasticity by assuming that, for a fixed model 𝑚 , prompt 𝑝 , and input 𝑥 , every invocation of 𝑚 (𝑝, 𝑥 )
+
+returns the same output. Removing model stochasticity from the logical semantics allows us to reason about semantic operators using standard set-theoretic arguments. It is analogous to simplify-ing assumptions used by relational optimizers, such as uniformity and statistical independence, which enable selectivity estimates to compose across predicates [24]. 1
+
+The logical semantics impose these requirements: 
+
+• Model totality. The invocation 𝑚 (𝑝, 𝑥 ) is defined and produces a well-formed output for every input 𝑥 in the operator’s domain. 
+
+• Tuple-local prompt construction. Under singleton execution, the prompt constructor is deterministic and uses only the declared input attributes of the tuple 𝑟 . Thus, for a fixed template and tuple, it always produces the same prompt. Together, singleton execution, deterministic-oracle evaluation, and tuple-local prompt construction provide input locality : the out-put associated with a tuple depends only on its declared input attributes and not on other tuples, the container relation, its evalu-ation order, or its assigned partition. Consequently, each NousDB semantic operator, Extend , Semantic Selection , and Semantic Join 
+
+that are presented next, defines a well-defined function from rela-tions to relations. Furthermore, NousDB logical semantics allows us to define algebraic properties and rewrite rules. 
+
+> 1Implementations may reduce output variability through deterministic inference con-figurations, such as model temperature settings and constrained decoding strategies, but the assumption remains an abstraction used to define the logical semantics.
+
+## 3.2 NousDB Query Operators 
+
+3.2.1 Extend Operator. The Extend operator, 𝜀 E,B,𝑚,𝑝 (𝑅 ), extends a relation 𝑅 with a set E of attributes that are computed by a model 
+
+𝑚 over R’s attributes, given a task instruction prompt 𝑝 .
+
+Definition 3.1 (Extend Operator). Let R be an input relation, B
+
+a subset of 𝑅 ’s attributes, E = {𝐸 1, . . . , 𝐸 𝑘 } the desired extended attributes , 𝑚 a model and 𝑝 the final prompt to the model. The Extend operator , 𝜀 E,B,𝑚,𝑝 (𝑅 ), is a relation defined as: 
+
+𝜀 E,B,𝑚,𝑝 (𝑅 ) = {( 𝑟, 𝑒 1 . . . , 𝑒 𝑘 ) | ∀ 𝑟 ∈ 𝑅, (𝑒 1, . . . , 𝑒 𝑘 ) = 𝑚 (𝑝, 𝑟 [B])} 
+
+3.2.2 Semantic Selection. In traditional relational algebra, the se-lection operator 𝜎 𝜃 (𝑅 ) returns all tuples in a relation 𝑅 that satisfy a boolean condition 𝜃 defined over 𝑅 ’s attributes. However, 𝜃 is restricted to comparisons between attribute values (e.g., =, <, ≠). NousDB extends the expressive power of selection by allowing a model 𝑚 ∈ M to evaluate the filtering condition. 
+
+Definition 3.2 (Semantic Selection). Let R be an input relation, and B a subset of 𝑅 ’s attributes. Let 𝑚𝑝 𝑚 be a model-based selection predicate defined as a filtering condition in a formal or natural language description, evaluated by a model 𝑚 . 𝑚𝑝 𝑚 is defined as: 
+
+𝑚𝑝 𝑚 : Dom (X) → { 𝑡𝑟𝑢𝑒, 𝑓 𝑎𝑙𝑠𝑒 }, 𝑚𝑝 𝑚 (𝑥 ) = 𝑚 (𝑝, 𝑥 ), 𝑥 ∈ X
+
+The semantic selection of 𝑅 on attributes B, given a model-based selection predicate 𝑚𝑝 𝑚 , is the relation: 
+
+𝜎 sem  
+
+> B, 𝑚, 𝑝
+
+(𝑅 ) =  𝑟 ∈ 𝑅 𝑚𝑝 𝑚 
+
+ 𝑟 [B] = 𝑡𝑟𝑢𝑒 .
+
+3.2.3 Semantic Join Operator. The join operator in relational alge-bra combines tuples from two relations when they satisfy a join condition 𝜃 . This join condition 𝜃 defines the criteria under which tuples from the input relations are matched, involving comparisons in the form of equality, inequality, or ordering relations between the join attributes of each relation. NousDB redefines join seman-tics by replacing traditional predicate evaluation with model-based inference. In NousDB, a join condition is evaluated by a model 
+
+𝑚 ∈ M , enabling joins to capture semantic relationships across both structured and unstructured data. 
+
+Definition 3.3 (Semantic Join). Let 𝑅 and 𝑆 be two input relations. Let 𝑚 be a model with prompt 𝑝 . The model-based join predicate 𝜃 𝑚 
+
+is defined as: 𝜃 𝑚 (𝑥, 𝑦 ) : Dom (X) × Dom (Y) → { 𝑡𝑟𝑢𝑒, 𝑓 𝑎𝑙𝑠𝑒 },𝜃 𝑚 (𝑥, 𝑦 ) = 𝑚 (𝑝, 𝑥, 𝑦 ), 𝑥 ∈ X, 𝑦 ∈ Y
+
+Let B and C be the join attribute sets from 𝑅 and 𝑆 respectively, specifying which attributes from each relation participate in the join condition. The semantic join of 𝑅 and 𝑆 on attribute sets B and 
+
+C given a model-based join condition 𝜃 𝑚 is defined as: 
+
+𝑅 Z𝑠𝑒𝑚  
+
+> B,C,𝑚,𝑝
+
+𝑆 = (𝑟, 𝑠 ) ∀𝑟 ∈ 𝑅, ∀𝑠 ∈ 𝑆, 𝜃 𝑚 
+
+ 𝑟 [B], 𝑠 [C] = 𝑡𝑟𝑢𝑒 .
+
+The model-based join condition 𝜃 𝑚 can be evaluated by any model 𝑚 that decides whether two tuples should be joined. In all cases, the model returns a boolean outcome used to evaluate 𝜃 𝑚 .
+
+Semantic Operator Properties . Under the NousDB model, we can define a set of algebraic properties, emerging from the definitions of the semantic operators. Table 1 summarizes all eighteen prop-erties and marks which ones the current implementation NousDB supports. Three (E1, S1, J1) are premises of the four rewrite rules of Section 4.4, i.e., selection pushdown through Extend and through Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis 
+
+Table 1: Properties of the NousDB operators. Role: Rewrite, premise of a rule of Section 4.4. Exec., justifies an execution mechanism, 
+
+Future , not exploited by the current optimizer. 
+
+# Property Role in NousDB 
+
+E1 sch (𝜀 (𝑅 ) ) = sch (𝑅 ) ∪ E; 𝜋 sch (𝑅 ) (𝜀 (𝑅 ) ) = 𝑅 Rewrite : premise of 4.4.1, 4.4.3, 4.4.4 E2 |𝜀 (𝑅 ) | = |𝑅 | totality: ⌈ | 𝑅 |/ 𝑘 ⌉ calls, |𝑅 | rows E3 𝑅 ⊆ 𝑆 ⇒ 𝜀 (𝑅 ) ⊆ 𝜀 (𝑆 ) Exec. : pipelining; LIMIT early stop E4 𝜀 (𝑅 ∪ 𝑆 ) = 𝜀 (𝑅 ) ∪ 𝜀 (𝑆 ) Exec. : (re)partitioning, batching E5 𝜀 (𝑅 ) = 𝜀 𝜋 (𝑛 ) ◦ · · · ◦ 𝜀 𝜋 (1) (𝑅 ) for any permutation 
+
+𝜋 , where 𝜀 𝑖 = 𝜀 E𝑖 ,B,𝑚,𝑝 𝑖 , E = Ò𝑖 E𝑖 
+
+Future : split or merge multi-attribute Extends S1 sch (𝜎 (𝑅 ) ) = sch (𝑅 ); 𝜎 (𝑅 ) ⊆ 𝑅 Rewrite : premise of 4.4.1, 4.4.2 S2 𝑅 ⊆ 𝑆 ⇒ 𝜎 (𝑅 ) ⊆ 𝜎 (𝑆 ) Exec. : early stop under LIMIT 
+
+S3 𝜎 (𝑅 ∪ 𝑆 ) = 𝜎 (𝑅 ) ∪ 𝜎 (𝑆 ) Exec. : (re)partitioning, batching S4 𝜎 (𝑅 ∩ 𝑆 ) = 𝜎 (𝑅 ) ∩ 𝜎 (𝑆 );
+
+𝜎 (𝑅 \ 𝑆 ) = 𝜎 (𝑅 ) \ 𝑆 = 𝜎 (𝑅 ) \ 𝜎 (𝑆 )
+
+–S5 𝜎 (𝜎 (𝑅 ) ) = 𝜎 (𝑅 ) –S6 𝜎 1 (𝜎 2 (𝑅 ) ) = 𝜎 2 (𝜎 1 (𝑅 ) ) =
+
+{𝑟 ∈ 𝑅 | 𝑃 1 (𝑟 ) ∧ 𝑃 2 (𝑟 ) } 
+
+Future : cost-based ordering of selections J1 sch (𝑅 Zsem 𝑆 ) = sch (𝑅 ) ∪ sch (𝑆 );
+
+𝑅 Zsem 𝑆 ⊆ 𝑅 × 𝑆 
+
+Rewrite : premise of 4.4.2, 4.4.4; 
+
+Cost : ≤ | 𝑅 | | 𝑆 | pairs J2 𝑅 1 ⊆ 𝑅 2, 𝑆 1 ⊆ 𝑆 2 ⇒ 𝑅 1 Zsem 𝑆 1 ⊆ 𝑅 2 Zsem 𝑆 2 Exec. : early stop under LIMIT 
+
+J3 (𝑅 1 ∪ 𝑅 2 ) Zsem 𝑆 = (𝑅 1 Zsem 𝑆 ) ∪ ( 𝑅 2 Zsem 𝑆 ),also in 𝑆 ; so 𝑅 Zsem 𝑆 = Ð𝑖,𝑗 𝑅 𝑖 Zsem 𝑆 𝑗 
+
+Exec. : block nested loop over 
+
+𝑏 𝐿 × 𝑏 𝑅 blocks; repartitioning J4 As J3, for ∩ and \ –J5 𝑅 Zsem B,C,𝑚,𝑝 𝑆 = 𝑆 Zsem C,B,𝑚,𝑝 𝑅 Future : choice of the outer input J6 (𝑅 Zsem 1 𝑆 ) Zsem 2 𝑇 = 𝑅 Zsem 1 (𝑆 Zsem 2 𝑇 ) Future : semantic-join reordering J7 𝜋 X (𝑅 Zsem 𝑆 ) =
+
+𝜋 X∩sch (𝑅 ) (𝑅 ) Zsem 𝜋 X∩sch (𝑆 ) (𝑆 )
+
+Future : projection pushdown below Zsem                     
+
+> 𝜏 sys 𝜏 fixed 𝜏 𝐼 (𝑟 1)𝜏 𝛿 𝜏 𝐼 (𝑟 2)𝜏 𝛿 · · · 𝜏 𝐼 (𝑟 𝑘 )reserved output system and instructions Í𝑘 𝑖 =1𝜏 𝐼 (𝑟 𝑖 ) + ( 𝑘 −1)𝜏 𝛿 𝑘 ·ˆ𝜏 out
+> 𝐶 max (M)
+
+Figure 3: LLM context window decomposition. System 𝜏 sys and user prompt 𝜏 fixed are followed by per-row input tokens 𝜏 𝐼 (𝑟 𝑖 )
+
+Semantic Join, and Extend–Selection and Extend–Join fusion, seven justify the execution and costing mechanisms of Section 4 and the remaining eight are left for future work. 
+
+## 4 NousDB Optimizer 
+
+To bridge DataFusion’s row-oriented execution model with the token-oriented cost and behavior of model inference, NousDB in-troduces four complementary optimizations: ( a) Token-aware batch sizing introducing equi-depth token histograms (Section 4.1) ( b)
+
+Batch-fidelity certification for preserving output fidelity in batched execution (Section 4.2), ( c) token repartition operator for balancing token load across partitions (Section 4.3), and ( d) algebraic rewrite rules to cut model invocations through semantic selection push-down and operator fusion (Section 4.4). 
+
+LLM Context Window . Every model 𝑚 imposes a maximum context window 𝐶 max (𝑚 ) ∈ N, bounding the total input plus output tokens that a single invocation can process. The input prompt comprises fixed overhead, a system prompt ( 𝜏 sys tokens) and an instruction template ( 𝜏 inst (𝑝 ) tokens), followed by the serialized input tuples, each separated by a delimiter of 𝜏 𝛿 tokens (Figure 3). We denote by ˆ 𝜏 out the expected output tokens per processed tuple. 
+
+Definition 4.1 (Batch Input Token Decomposition). The total input tokens for a batch 𝐵 with |𝐵 | = 𝑘 tuples decomposes as: 
+
+𝜏 in (𝐵 ) = 𝜏 sys 
+
+|{z} 
+
+system prompt 
+
++ 𝜏 inst (𝑝 )
+
+| {z }
+
+instruction 
+
++∑︁ 
+
+𝑟 ∈𝐵 
+
+𝜏 𝐼 (𝑟 )
+
+| {z }
+
+data tokens 
+
++ ( 𝑘 − 1) · 𝜏 delim 
+
+| {z }
+
+delimiters 
+
+(1) 
+
+Table 2: Notation for batching and token repartitioning 
+
+Symbol Meaning 
+
+𝜏 𝐼 (𝑟 ) token count of tuple 𝑟 over the input attributes 𝐼 𝐶 max (𝑚 ) context window of model 𝑚 , input plus output tokens of one invocation 
+
+𝜏 sys , 𝜏 inst tokens of the system prompt and the instruction template, paid once per invocation 
+
+𝜏 delim , ˆ𝜏 out delimiter tokens and expected output tokens, per tuple 
+
+𝐻 𝜏 , 𝛽 equi-depth token histogram of the input and its number of buckets ( ?? )
+
+𝜇 𝜏 , 𝑄 𝑝 mean and 𝑝 -quantile of the token count, read from 𝐻 𝜏 
+
+𝛼 overflow probability , the chance that a batch exceeds 𝐶 max (𝑚 )
+
+𝑘 𝐻𝜏 window-safe batch size (Algorithm 1), the largest candidate 
+
+𝑦 ∗ (𝑟 ) per-row output , the output of tuple 𝑟 invoked alone 
+
+𝑦 𝐵 (𝑟 ) output of 𝑟 inside a batch 𝐵 of 𝑘 tuples (pairs, for a join 
+
+𝜑 (𝑘 ) batch fidelity at size 𝑘 , Pr [ 𝑦 𝐵 (𝑟 ) = 𝑦 ∗ (𝑟 ) ] 
+
+𝜂 , 𝛿 tolerance (fraction of tuples that may deviate from 𝑦 ∗) and confidence (1 − 𝛿 )
+
+K, 𝐿 candidate sizes {2𝑗 : 𝑗 ≥ 1, 2𝑗 < 𝑘 𝐻𝜏 } ∪ { 𝑘 𝐻𝜏 } and their number | K | 
+
+𝑟 1, . . . , 𝑟 𝑛 probe tuples , a uniform sample of the input; 𝑛 is the probe budget , Eq. (11) 
+
+𝐵 𝑗 probe batch , a batch that contains the probe tuple 𝑟 𝑗 in a random slot 
+
+𝑋 𝑘 agreement count , the number of probes with 𝑦 𝐵 𝑗 (𝑟 𝑗 ) = 𝑦 ∗ (𝑟 𝑗 )
+
+𝛿 ′ error budget of one candidate, 𝛿 /𝐿 𝜑 𝛿 ′ (𝑋 𝑘 , 𝑛 ) Clopper–Pearson lower confidence bound on 𝜑 (𝑘 ), Eq. (10) 
+
+𝑘 𝑠𝑎𝑓 𝑒 fidelity-certified batch size , the largest certified candidate 
+
+𝑘 ∗ executed batch size, min (𝑘 𝐻𝜏 , 𝑘 𝑠𝑎𝑓 𝑒 )
+
+𝑃 , 𝑅 𝑗 number of partitions and the 𝑗 -th partition of relation 𝑅 𝜌 S 
+
+> 𝜏
+
+token repartition operator with strategy S, greedy or zigzag (Theorem 4.9) 
+
+𝑇 (𝑅 𝑗 ) token load of partition 𝑅 𝑗 , Í𝑟 ∈𝑅 𝑗 𝜏 𝐼 (𝑟 )
+
+𝜆 imbalance ratio , max 𝑗 𝑇 (𝑅 𝑗 )/ min 𝑗 𝑇 (𝑅 𝑗 )
+
+CV 𝜏 token skew, the coefficient of variation 𝜎 𝜏 /𝜇 𝜏 of the per-tuple token counts 
+
+𝑇 avg , 𝜏 max mean partition load and largest token count of a tuple 
+
+Every batch must satisfy the token budget constraint :
+
+𝜏 in (𝐵 ) + 𝑘 · ˆ𝜏 out ≤ 𝐶 max (𝑚 ) (2) Since total output tokens cannot be known a priori, we reserve a fixed fraction of the context window for output predictions, in our case the 30% of the context window. This constraint is the foundation of the batch size optimization: maximizing 𝑘 amortizes the fixed overhead 𝜏 sys + 𝜏 inst (𝑝 ) across more tuples, reducing both the number of LLM invocations and token consumption. 
+
+## 4.1 Token Distributions and Token Histograms 
+
+Since tokens are the fundamental unit of computation for LLMs, to capture the token count distribution , we introduce token histograms ,adopting the abstract partitioning framework of Ioannidis et al. [37]. Let T𝑚 denote the tokenizer of model 𝑚 , and let 𝜏 𝑚 (𝑠 ) = |T 𝑚 (𝑠 )| 
+
+be the number of tokens in string 𝑠 using T𝑚 . When 𝑚 is clear, we write 𝜏 . For a tuple 𝑟 in relation 𝑅 with schema A and input attribute set 𝐼 ⊆ A used for model inference, the tuple token count 
+
+is 𝜏 𝐼 (𝑟 ) = 𝜏 (𝑟 [𝐼 ]) . For attribute 𝐴 in 𝑅 , let 𝑉 𝐴 = {𝑣 1, . . . , 𝑣 𝐷 } be the set of 𝐷 distinct values in 𝐴 , with corresponding frequencies 
+
+𝑓 1, . . . , 𝑓 𝐷 where 𝑓 𝑖 = |{ 𝑟 ∈ 𝑅 : 𝑟 [𝐴 ] = 𝑣 𝑖 }| . The token distribution 
+
+of 𝐴 is T𝐴 = {( 𝜏 (𝑣 1), 𝑓 1), (𝜏 (𝑣 2), 𝑓 2), . . . , (𝜏 (𝑣 𝐷 ), 𝑓 𝐷 )} .
+
+Definition 4.2 (Cumulative Token Distribution). The cumulative token distribution function 𝐶 𝜏 : N → [ 0, 1] gives the fraction of tuples with token count at most 𝑡 :
+
+𝐶 𝜏 (𝑡 ) = 1
+
+𝑁 ∑︁ 𝑖 :𝜏 (𝑣 𝑖 ) ≤ 𝑡 
+
+𝑓 𝑖 (3) where 𝑁 = Í𝐷 𝑖 =1 𝑓 𝑖 = |𝑅 | is the total number of tuples. 
+
+Definition 4.3 (Token Histogram). A token histogram 𝐻 𝜏 on at-tribute 𝐴 has 𝛽 ≥ 1 buckets and is constructed by sorting the token NousDB - A Fast Query Engine for Semantic Analytics 
+
+distribution T𝐴 according to token counts and frequencies, partition-ing it into 𝛽 disjoint buckets {𝐵 1, . . . , 𝐵 𝛽 } subject to a partitioning constraint, and storing summary statistics for each bucket. Each bucket 𝐵 𝑗 stores: ( a) the minimum and maximum token counts, 
+
+𝜏 min (𝐵 𝑗 ) and 𝜏 max (𝐵 𝑗 ), resp. ( b) the number 𝑛 𝑗 of distinct attribute values ( c) the total frequency 𝐹 𝑗 = Í𝑣 𝑖 ∈𝐵 𝑗 𝑓 𝑖 , i.e., the number of tuples represented, and ( d) the frequency-weighted mean token count ¯ 𝜏 𝑗 = 1
+
+> 𝐹 𝑗
+
+Í𝑣 𝑖 ∈𝐵 𝑗 𝑓 𝑖 𝜏 𝐴 (𝑣 𝑖 ).The choice of partition constraint yields different histogram families. For NousDB we adopt equi-depth partitioning, where each bucket is constrained to contain approximately the same number of tuples. 
+
+Definition 4.4 (Equi-Depth Token Histogram). An equi-depth to-ken histogram with 𝛽 buckets partitions the token distribution 
+
+T𝐴 such that each bucket contains approximately 𝑁 /𝛽 tuples, i.e.: 
+
+𝐹 𝑗 ≈ 𝑁 /𝛽, 𝑗 ∈ { 1, . . . , 𝛽 }. The bucket boundaries are defined by the token count quantiles. Let 𝑞 0 = 0 and, for 𝑗 ∈ { 1, . . . , 𝛽 }:
+
+𝑞 𝑗 = min 
+
+n
+
+𝜏 ≥ 0 : 𝐶 𝜏 (𝜏 ) ≥ 𝑗 𝛽 
+
+o
+
+, (4) where 𝐶 𝜏 is the cumulative token distribution from Theorem 4.2. Bucket 𝐵 𝑗 contains all values 𝑣 with 𝑞 𝑗 −1 < 𝜏 𝐴 (𝑣 ) ≤ 𝑞 𝑗 .We chose equi-depth histograms for three reasons: 
+
+a) Quantile access. Batch size optimization (Section 4.2) requires quantile queries of the form “what token count is exceeded by at most 𝛼 % of tuples?” In an equi-depth histogram, the boundary 𝑞 𝑗 
+
+between buckets 𝑗 and 𝑗 + 1 is precisely the ( 𝑗 /𝛽 )-quantile, so these queries reduce to bucket lookups with intra-bucket interpolation. 
+
+(b) Tail estimation. Exceeding the context limit 𝐶 max (𝑚 ) causes runtime failure. Accurate tail-quantile estimates are therefore criti-cal for preventing overflow. Equi-depth histograms support such estimates by isolating high-token-count values in dedicated bins. 
+
+(c) Sum estimation. For a batch of 𝑘 tuples, the cost model es-timates Í𝑘 𝑖 =1 𝜏 𝐼 (𝑟 𝑖 ). Equi-depth histograms enable efficient sum estimation via quantile-based bounds, since each quantile range contributes proportionally to the total token mass. Given an equi-depth histogram, we extract arbitrary quantiles via linear interpolation within the target bucket. 
+
+Definition 4.5 (Quantile Extraction from Equi-Depth Histograms). 
+
+For an equi-depth histogram 𝐻 𝜏 with 𝛽 buckets, the 𝑝 -quantile 𝑄 𝑝 
+
+(for 𝑝 ∈ ( 0, 1]) is estimated as: 
+
+𝑄 𝑝 ≈ 𝜏 min (𝐵 𝑗 ) +  𝑝 · 𝛽 − ( 𝑗 − 1) ·  𝜏 max (𝐵 𝑗 ) − 𝜏 min (𝐵 𝑗 ) (5) where 𝑗 = ⌈𝑝 ·𝛽 ⌉ is the index of the bucket containing the 𝑝 -quantile. The expression 𝑝 · 𝛽 − ( 𝑗 − 1) ∈ [ 0, 1] is the fractional position within bucket 𝐵 𝑗 , and the formula assumes a uniform distribution of token counts within each bucket. 
+
+Histogram Summary Statistics. From the per-bucket statistics stored in 𝐻 𝜏 , we derive two global summary statistics that are consumed directly by the batch sizing algorithm (Section 4.2) and the token repartitioning operator (Section 4.3), namely the mean token count 𝜇 𝜏 and total tokens 𝑇 total :
+
+𝜇 𝜏 = 1
+
+𝑁 
+
+> 𝛽
+
+∑︁ 
+
+> 𝑗 =1
+
+𝐹 𝑗 · ¯𝜏 𝑗 , 𝑇 total = 𝑁 · 𝜇 𝜏 (6) 
+
+Algorithm 1 Iterative Safe Batch Size Computation                                                                   
+
+> Require: 𝐻 𝜏 ;𝐶 max ;𝜏 sys +𝜏 inst ;ˆ𝜏 out ; confidence 1−𝛼
+> Ensure: Safe batch size 𝑘 𝐻𝜏
+> 1: 𝐶 avail ←𝐶 max −𝜏 sys −𝜏 inst
+> 2: 𝜇 𝜏 ←Mean (𝐻 𝜏 )
+> 3: 𝑘 ← ⌊ 𝐶 avail /( 𝜇 𝜏 +ˆ𝜏 out ) ⌋ ⊲mean-based init 4: for 𝑖 =1to MaxIter do
+> 5: 𝑝 ←1−𝛼 /𝑘
+> 6: 𝑞 ←GetQuantile (𝐻 𝜏 , 𝑝 )
+> 7: 𝑘 new ← ⌊ 𝐶 avail /( 𝑞 +ˆ𝜏 out ) ⌋
+> 8: if 𝑘 new =𝑘 then
+> 9: return 𝑘
+> 10: end if
+> 11: 𝑘 ←𝑘 new
+> 12: end for
+> 13: return 𝑘
+
+The mean 𝜇 𝜏 provides the initial batch size estimate (Algorithm 1), while 𝑇 total determines the per-partition token budget for the repar-titioning operator (Theorem 4.9). 
+
+Construction . Histograms are built once per table and text attribute, offline, by one tokenization pass over the attribute, and stored in a catalog that the optimizer loads at planning time. When the input attribute set 𝐼 of an operator has several attributes, 𝜏 𝐼 (𝑟 )
+
+is the token count of the whole rendered row, and the quantile of a sum is not the sum of the per-attribute quantiles. NousDB therefore rebuilds one histogram for 𝐼 by summing the per-attribute bucket profiles per bin, i.e., under a comonotone coupling of the attributes, for which quantiles are additive. 
+
+## 4.2 Batch Size Optimization 
+
+The operator definitions in Section 3.2 assume singleton execution, under which each tuple’s output depends only on that tuple ( input locality ). Batching reduces the |𝑅 | singleton invocations to ⌈| 𝑅 |/ 𝑘 ⌉
+
+invocations of up to 𝑘 tuples, amortizing per-call overhead to reduce token usage and improve throughput [6, 8, 16, 26]. However, a batch must both fit within the context window and preserve singleton outputs. Batching is thus a physical optimization valid only when it preserves the logical operator semantics. To define safe batching, we distinguish the two outputs of a tuple under a fixed operator, model mmm, and prompt template. 
+
+Definition 4.6 (Batched Invocation and Batch-Composition Invari-ance). Let 𝐵 = ⟨𝑟 1, . . . , 𝑟 𝑘 ⟩ be a batch of 𝑘 tuples. The prompt con-structor renders one prompt 𝑝𝑐 (𝐵 ) that holds all 𝑘 tuples, and one invocation 𝑚 (𝑝𝑐 (𝐵 )) returns one output per tuple. We write 𝑦 𝐵 (𝑟 )
+
+for the output returned for 𝑟 ∈ 𝐵 , and 
+
+𝑦 ∗ (𝑟 ) = 𝑚  𝑝𝑐 (𝑟 ) (7) for its per-row output , the value that Definitions 3.1–3.3 assign to 𝑟 .The operator is batch-composition invariant at size 𝑘 if 𝑦 𝐵 (𝑟 ) = 𝑦 ∗ (𝑟 )
+
+for every batch 𝐵 of 𝑘 tuples and every 𝑟 ∈ 𝐵 .The batch size 𝑘 is therefore the central physical decision for a semantic operator, and its choice is governed by two constraints: 
+
+(i) Safe context-window utilization. The 𝑘 tuples and their outputs must fit in the context window 𝐶 max (𝑚 ), since a batch that does not fit is not rejected or truncated, but results to query failure. Because a batch fit depends only on the token lengths of its tuples, the optimizer can determine the maximum feasible batch size at planning time using token histograms, without invoking the model .Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis 
+
+(ii) Safe batching against per-row invocation. A batch can affect per row results: the output a tuple receives inside a batch may differ from the one it receives when invoked alone. This failure is silent ,and it depends on the model, the prompt and the data, so it can only be measured by invoking the model .The two problems are orthogonal. The first concerns the rela-tionship between tuple token lengths and the window capacity, while the second concerns the model behavior. Neither implies the other: batches that fill a small fraction of the window may already lose quality. Figure 4 illustrates this distinction for two cases: IMDB and SemBench reviews. The top row shows the token-length dis-tributions of the review columns, which vary substantially across datasets. For example, the 90th-percentile review length in Sem-Bench is approximately equal to the mean review length in IMDB. In the bottom row, we execute four queries from IMDB under dif-ferent batch size 𝑘 and measure their quality: the candidate batch sizes are 𝑘 ∈ { 1, 2, 4, 8, 16 , 32 , 64 }, starting from singleton execution and doubling at each step, plus two larger settings that utilize the 50% and 75% of the model’s context window. The results are mixed: in some cases batching provides a boost in the total accuracy, like Q1, Q4 , while it can be catastrophic, like in Q2 and Q7. 
+
+Definition 4.7 (Maximum Feasible Batch Size). The maximum feasible batch size 𝑘 𝐻 𝜏 , given a token histogram 𝐻 𝜏 , is the largest 𝑘 
+
+such that the expected batch, based on its estimated token demand, fits within the context window: 𝜏 sys +𝜏 inst +𝑘 · ( 𝜇 𝜏 +𝜏 delim ) + 𝑘 · ˆ𝜏 out ≤
+
+𝐶 max (𝑚 ). Solving for 𝑘 :
+
+𝑘 𝐻 𝜏 =
+
+𝐶 max (𝑚 ) − 𝜏 sys − 𝜏 inst 
+
+𝜇 𝜏 + 𝜏 delim + ˆ𝜏 out 
+
+
+
+(8) Recall that 𝜇 𝜏 is the estimated mean number of input tokens per tuple from 𝐻 𝜏 , 𝜏 delim is the delimeter tokens, and ˆ 𝜏 out is the estimated number of output tokens per tuple. Algorithm 1 computes 𝑘 𝐻 𝜏 in three steps, without invoking the model. It first subtracts the fixed prompt from the window, which leaves the budget 𝐶 avail for the tuples and their outputs, and starts from the mean-based size of Equation (8) (lines 1–3). This start is optimistic: it sizes the batch for the mean tuple, so any batch of longer-than-average tuples overflows. Each iteration therefore sizes the batch for a long tuple instead, the (1 − 𝛼 /𝑘 )-quantile 𝑞 of 𝐻 𝜏 (lines 5–7): a batch of 𝑘 
+
+tuples of at most 𝑞 tokens each fits, and by the union bound one of its 𝑘 tuples exceeds 𝑞 with probability at most 𝑘 · 𝛼 /𝑘 = 𝛼 , whether or not the tuple lengths are independent. Finally, 𝑞 depends on 𝑘 :larger batches are more likely to contain long tuples and therefore require higher quantiles, which in turn reduces the feasible batch size. The algorithm therefore repeats until 𝑘 stops changing (lines 8–11) and returns this fixed point as 𝑘 𝐻 𝜏 , a batch size that overflows the window with probability at most 𝛼 .
+
+4.2.1 Fidelity-Aware Batch Size. Algorithm 1 bounds batch capac-ity, but does not ensure that the model preserves its singleton behavior in the batch. The bottom row of Figure 4 shows that sensi-tivity to batching varies across queries and models . With Qwen3-8B, the F1 score of Q2 falls from 0.89 at 𝑘 = 1 to 0.77 at 𝑘 = 8 and 0.30 at 
+
+𝑘 = 64. In contrast, for Q1, the F1 score stays between 0.87 and 0.90 up to 𝑘 = 32, dropping to 0.70 only at 𝑘 = 64. With GPT-5.4-nano, the F1 scores of both queries remain within 0.05 of their singleton values up to 𝑘 = 64, but collapse at 75% of GPT’s context window 10 0 10 1 10 2 10 3           
+
+> tokens per row (log)
+> 10 4
+> 10 3
+> 10 2
+> density
+> 10 010 110 210 3
+> tokens per row (log)
+> 0.0 0.5 1.0
+> share of rows  x
+> p50 p95
+> 2327
+> 0.00 0.25 0.50 0.75 1.00
+> F1
+> Q1
+> k=12 k=64
+> sentiment
+> 2327
+> Q2
+> actor mention
+> 2327
+> Q4
+> three-way filter
+> 2327
+> Q7
+> cinematography
+> Qwen3-8B GPT-5.4-nano
+> rows per LLM call, k (log 2)
+> IMDB review: n=10,477, p50 213, p95 1,145 SemBench reviewText: n=1,444,786, p50 27, p95 213
+
+Figure 4: Reviews tokens distribution (up) and impact of batching in quality (bottom) 
+
+reaching 0.24 for Q1 and 0.14 for Q2. The top row of Figure 4 re-veals additionally the role of tuple length . an IMDB review spans 213 tokens at the median and 1,145 at the 95th percentile, against 27 and 213 for a SemBench review, so the same 𝑘 packs about eight times more text into one invocation on IMDB, and batches of equal 
+
+𝑘 differ in length even within one column. Estimating the largest batch size such that output quality is close to that of singleton execution, at query time has three challenges. 
+
+(a) Because no ground truth is available, we measure agreement against the engine’s singleton outputs, 𝑦 ∗ (𝑟 ). This follows prior work, which states statistical guarantees for LLM-powered oper-ators relative to a gold algorithm [36, 53] and evaluates batched plans against unbatched execution [30, 38]. (b) The 𝑘 outputs pro-duced by a batch share the same context and may therefore be dependent, hence they cannot be treated as independent samples. 
+
+(c) The solution must be substantially cheaper than the query it protects, and its cost must not grow with |𝑅 |. We therefore ask: given a semantic operator, an error tolerance 𝜂 ∈ ( 0, 1), and a fail-ure probability 𝛿 ∈ ( 0, 1), what is the largest batch size 𝑘 such that, with probability at least 1 − 𝛿 , the batched outputs differ from the corresponding per-row outputs on at most an 𝜂 fraction of tuples? 
+
+Definition 4.8 (Batch Fidelity). Given a batch 𝐵 that ranges over the batches of 𝑘 tuples that the engine forms, the batch fidelity of an operator at size 𝑘 is the probability that a tuple receives its per-row output inside a batch of 𝑘 tuples: 
+
+𝜑 (𝑘 ) = Pr   
+
+> 𝐵, 𝑟 ∼Unif (𝐵 )
+
+ 𝑦 𝐵 (𝑟 ) = 𝑦 ∗ (𝑟 ) , 𝜑 (1) = 1, (9) To measure fidelity, a natural approach is to sample tuples and compare their batched outputs with their singleton outputs. How-ever, outcomes for tuples within the same batch are dependent be-cause the tuples share a context and may influence one another. We therefore evaluate one probe tuple per independently constructed batch. For a fixed batch size 𝑘 , each probe defines a Bernoulli trial that succeeds when its batched output agrees with its singleton output. Assuming that probe batches are sampled independently, the agreement count follows 
+
+𝑋 𝑘 ∼ Binomial (𝑛, 𝜑 𝑜 (𝑘 )) ,
+
+where 𝜑 𝑜 (𝑘 ) is the fidelity of operator 𝑜 at batch size 𝑘 , 𝑛 is the probe budget, and 𝑋 𝑘 ∈ { 0, . . . , 𝑛 } is the number of successful probes. NousDB - A Fast Query Engine for Semantic Analytics 
+
+Algorithm 2 Batch-Fidelity Certification                                                                                                  
+
+> Require: input tuples; 𝑘 𝐻𝜏 ; tolerance 𝜂 ; confidence 1−𝛿
+> Ensure: Fidelity-certified batch size 𝑘 𝑠𝑎𝑓 𝑒
+> 1: K ← { 2𝑗 :𝑗 ≥1,2𝑗 <𝑘 𝐻𝜏 } ∪ { 𝑘 𝐻𝜏 };𝐿 ← | K | ;𝛿 ′←𝛿 /𝐿
+> 2: 𝑛 ←ln (1/𝛿 ′) / ln  1/( 1−𝜂 ) ⊲Eq. (11) 3: draw probes 𝑟 1, . . . , 𝑟 𝑛 and fillers from the input 4: 𝑦 ∗
+> 𝑗 ←𝑚 (𝑝𝑐 (𝑟 𝑗 ) ) for 𝑗 =1, . . . , 𝑛 ⊲𝑛 singleton calls 5: for 𝑘 ∈ K in descending order do
+> 6: 𝐵 𝑗 ←𝑟 𝑗 in a random slot of 𝑘 , rest fillers, 𝑗 =1, . . . , 𝑛
+> 7: 𝑋 𝑘 ← | { 𝑗 :𝑦 𝐵 𝑗 (𝑟 𝑗 )=𝑦 ∗
+> 𝑗 } | ⊲𝑛 batched calls 8: if Beta −1(𝛿 ′;𝑋 𝑘 , 𝑛 −𝑋 𝑘 +1) ≥ 1−𝜂 then
+> 9: return 𝑘
+> 10: end if
+> 11: end for
+> 12: return 1
+
+More specifically, NousDB estimates fidelity through a calibra-tion run over a sample of the operator input. In addition to 𝑦 ∗, 𝑦 𝐵 
+
+(Theorem 4.6), 𝜂 , and 𝛿 , calibration uses: 
+
+• the set of candidate batch sizes 
+
+K = {2𝑞 : 𝑞 ≥ 1, 2𝑞 < 𝑘 𝐻 𝜏 } ∪ { 𝑘 𝐻 𝜏 }, 𝐿 = |K | ,
+
+which doubles from 2 up to the histogram-derived maximum feasible batch size 𝑘 𝐻 𝜏 ;
+
+• the probe tuples 𝑟 1, . . . , 𝑟 𝑛 , sampled uniformly from the operator input, where 𝑛 is the probe budget fixed before calibration; 
+
+• for each probe 𝑟 𝑖 and candidate size 𝑘 ∈ K , an independently constructed probe batch 𝐵 𝑖,𝑘 , which places 𝑟 𝑖 in a uniformly random position and fills the remaining 𝑘 − 1 positions with tuples sampled from the operator input; and 
+
+• the agreement count 𝑋 𝑘 = Í𝑛 𝑖 =1 I𝑦 𝐵 𝑖,𝑘 (𝑟 𝑖 ) = 𝑦 ∗ (𝑟 𝑖 ) .
+
+Certifying a batch size. The fraction 𝑋 𝑘 /𝑛 estimates 𝜑 (𝑘 ) with-out a guarantee, so certification uses a one-sided lower confidence bound : overestimating fidelity certifies a size that silently corrupts outputs, whereas underestimating it merely forfeits speed. The exact Clopper–Pearson bound [7] is the smallest fidelity 𝛿 ′ under which 𝑋 𝑘 or more agreements remain 𝛿 ′-plausible, 
+
+𝜑 𝛿 ′ (𝑋 𝑘 , 𝑛 ) = Beta −1  𝛿 ′; 𝑋 𝑘 , 𝑛 − 𝑋 𝑘 + 1, (10) and satisfies Pr [𝜑 𝛿 ′ ≤ 𝜑 (𝑘 )] ≥ 1 − 𝛿 ′ for every true fidelity. A candidate 𝑘 is certified if 𝜑 𝛿 ′ (𝑋 𝑘 , 𝑛 ) ≥ 1 − 𝜂 , and spending 𝛿 ′ =
+
+𝛿 /𝐿 on each of the 𝐿 candidates bounds the probability that any certificate is wrong by 𝛿 (union bound). We call 𝑘 𝑠𝑎𝑓 𝑒 , the batch size that preserves the fidelity of the batch and Algorithm 2 computes it once per semantic operator inside a query. It obtains the 𝑛 singleton outputs once (line 4) and tries the candidates from the largest down (lines 5–8), starting from the batch size 𝑘 𝐻 𝜏 , provided by Algorithm 1. A candidate is abandoned as soon as its disagreements make a pass impossible, which saves model calls. Finally, we must determine the probe budget 𝑛 , i.e., the number of tuples needed to test to measure engine’s fidelity. If all probes agree ( 𝑋 𝑘 = 𝑛 ), Equation (10) attains 𝜑 𝛿 ′ = (𝛿 ′)1/𝑛 , so a perfect count passes once 
+
+𝑛 ≥ ln (𝐿 /𝛿 )
+
+ln  1/( 1 − 𝜂 ) ≈ ln (𝐿 /𝛿 )
+
+𝜂 ; (11) at (𝜂, 𝛿 ) = (0.05 , 0.05 ) and 𝐿 = 5 this gives 𝑛 = 90. Calibration then costs at most 𝑛 singleton and 𝑛𝐿 batched calls; the budget depends only on (𝜂, 𝛿, 𝐿 ) and not on |𝑅 |, so, like histogram construction, its share of the query cost shrinks as the data grows. 
+
+Final batch size. Since a candidate batch size is at most 𝑘 𝐻 𝜏 , the exe-cuted size 𝑘 ∗ = min (𝑘 𝐻 𝜏 , 𝑘 𝑠𝑎𝑓 𝑒 ) is 𝑘 𝑠𝑎𝑓 𝑒 whenever certification runs (𝑘 𝐻 𝜏 otherwise). The plan thus carries one guarantee per problem of Section 4.2: each batch overflows the window with probability at most 𝛼 , and fidelity is at least 1 − 𝜂 with confidence 1 − 𝛿 .
+
+Example. Consider the sentiment selection of Figure 4 over IMDB reviews, with 𝑝𝑡 rendering “Does {review} express positive sentiment? Answer yes or no.” . The default values for the failure prob-ability 𝛿 and fraction of tuples 𝜂 are 𝜂 = 𝛿 = 0.05, meaning at most a 5% tuple-level deviation from reference semantics, wrong with prob-ability at most 5%. The first step of the optimizer, predicts the his-togram guided batch size from Algorithm 1, which yields 𝑘 𝐻 𝜏 = 32, hence the set if candidate batch sizes are K = {2, 4, 8, 16 , 32 },
+
+𝐿 = 5, 𝛿 ′ = 𝛿 /𝐿 = 0.01, and the probe budget 𝑛 = 90 by Equa-tion (11). The descending scan first tests 𝑘 = 32: calibration returns 
+
+𝑋 32 = 81, an empirical fidelity of 0 .90, and Equation (10) gives 
+
+𝜑 0.01 = Beta −1 (0.01; 81 , 10 ) = 0.803 < 0.95, so the candidate fails. Next, at 𝑘 = 16 every probe agrees, 𝑋 16 = 90, the bound attains its closed form 𝜑 0.01 = 0.01 1/90 = 0.950 ≥ 0.95, and the scan stops. Thus 𝑘 𝑠𝑎𝑓 𝑒 = 16 and 𝑘 ∗ = min (32 , 16 ) = 16: with confidence at least 0 .95, the fidelity at 𝑘 = 16 is at least 0 .95. Calibration requires 90 singleton calls and 180 batched calls, corresponding to the two candidates tested. This cost is independent of |𝑅 |.
+
+## 4.3 Token-Based Repartitioning 
+
+Modern query engines distribute rows uniformly across parallel workers. In semantic query engines, however, cost is driven by token volume, so row-balanced partitions may be token-skewed. We quantify this risk using the coefficient of variation of per-tuple token counts, CV 𝜏 = 𝜎 𝜏 /¯𝜏 , where ¯ 𝜏 and 𝜎 𝜏 are their mean and standard deviation. Larger values indicate greater variation in token load despite equal row counts. 
+
+Definition 4.9 (Token repartition operator). Given a relation 𝑅 , the input attributes 𝐼 of the downstream semantic operator, 𝑃 output partitions and a strategy S, the operator 𝜌 S 
+
+> 𝜏
+
+(𝑅, 𝐼, 𝑃 ) produces a par-tition {𝑅 0, . . . , 𝑅 𝑃 −1 } of 𝑅 (Ð𝑗 𝑅 𝑗 = 𝑅 , 𝑅 𝑖 ∩ 𝑅 𝑗 = ∅) that assigns each tuple by its token count under S, aiming to minimize the imbalance ratio 𝜆 = max 𝑗 𝑇 (𝑅 𝑗 )/ min 𝑗 𝑇 (𝑅 𝑗 ), where 𝑇 (𝑅 𝑗 ) = Í𝑟 ∈𝑅 𝑗 𝜏 𝐼 (𝑟 ).
+
+Strategies (Figure 5). Greedy Bin-Packing (the default) assigns each tuple to the partition with the fewest accumulated tokens, analogous to the Longest Processing Time (LPT) scheduling heuris-tic for identical parallel machines [12]. Zigzag sorts the tuples of each wave by decreasing token count and deals them to the parti-tions in a boustrophedon order ( 𝑃 0, . . . , 𝑃 𝑃 −1, 𝑃 𝑃 −1, . . . , 𝑃 0, . . . ), for downstream operators that want equal row counts. Theorem 4.10 (Balance of Greedy Bin-Packing). With 𝑇 avg =
+
+> 1
+> 𝑃
+
+Í𝑗 𝑇 (𝑅 𝑗 ) and 𝜏 max the largest token count, greedy bn-packing guar-antees max 𝑗 𝑇 (𝑅 𝑗 ) − min 𝑗 𝑇 (𝑅 𝑗 ) ≤ 𝜏 max at every point of the stream and max 𝑗 𝑇 (𝑅 𝑗 ) ≤ 𝑇 avg + 𝜏 max ; hence 𝜆 ≤ 1 + 𝜏 max /( 𝑇 avg − 𝜏 max )
+
+whenever 𝑇 avg > 𝜏 max . Zigzag guarantees that the row counts of the partitions differ by at most one within each wave. 
+
+Proof. A tuple of size 𝜏 ≤ 𝜏 max joins a partition of minimum load 𝐿 min ; the new maximum is either the old one or 𝐿 min +𝜏 , and the Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis                     
+
+> (a) Greedy Bin-Packing
+> 𝜏 =100
+> 𝑟 0
+> 𝜏 =300
+> 𝑟 1
+> 𝜏 =50
+> 𝑟 2
+> 𝜏 =200
+> 𝑟 3
+> 𝜏 =150
+> 𝑟 4
+> 𝜏 =40
+> 𝑟 5
+> 𝑃 0
+> 𝑃 1
+> 𝑃 2
+> 100 300 50 200 150 40 𝑇 0=290
+> 𝑇 1=300
+> 𝑇 2=250
+> (b) Zigzag Assignment
+> 𝜏 =300
+> 𝑟 0
+> 𝜏 =200
+> 𝑟 1
+> 𝜏 =150
+> 𝑟 2
+> 𝜏 =100
+> 𝑟 3
+> 𝜏 =50
+> 𝑟 4
+> 𝜏 =40
+> 𝑟 5
+> 𝑃 0
+> 𝑃 1
+> 𝑃 2
+> 300 200 150 100 50 40 𝑇 0=340
+> 𝑇 1=250
+> 𝑇 2=250
+
+Figure 5: Token-aware partitioning for 𝑃 =3 and 6 rows. (a) Greedy bin-packing assigns each row to the least-loaded partition; 𝜆 =1.20 ,variable row counts (3, 1, 2). (b) Zigzag sorts by descending 𝜏 , sweeps forward then backward; equal rows ( ⌈6/3⌉=2), 𝜆 =1.36 .
+
+new minimum is at least 𝐿 min , so the spread stays at most 𝜏 max by induction. The partition that attains the maximum received its last tuple while it was the least loaded, i.e. at most the average, which gives the second bound and the ratio follows from min 𝑗 𝑇 (𝑅 𝑗 ) ≥ 
+
+max 𝑗 𝑇 (𝑅 𝑗 ) − 𝜏 max ≥ 𝑇 avg −𝜏 max . Zigzag deals the 𝑛 tuples of a wave cyclically, so each partition receives ⌊𝑛 /𝑃 ⌋ or ⌈𝑛 /𝑃 ⌉ of them. □
+
+NousDB inserts a repartition node when the token distribution is sufficiently skewed to justify the overhead. Given a token his-togram 𝐻 𝜏 , it computes CV 𝜏 = 𝜎 𝜏 /𝜇 𝜏 estimating the row-uniform imbalance ratio 𝛼 uniform ≈ 1 + CV 𝜏 ·√︁ 2𝑃 ln 𝑃 /𝑁 via Central Limit Theorem (CLT) bounds on the maximum partition load [39]. Repar-titioning triggers when either (i) 𝛼 uniform > 1+𝛿 (𝛿 ∈ [ 0.10 , 0.15 ]), indicating the slowest partition exceeds ideal load by ≥10%, or (ii) the tail ratio 𝑄 0.95 /𝑄 0.50 > 𝜃 tail (default 5 ×), independently capturing heavy-tail risk where CLT convergence is slow. When triggered, the default strategy is Greedy. ZigZag is chosen, when the downstream operator requires uniform partition cardinality. 
+
+## 4.4 Query Plan Rewrites 
+
+The algebraic properties in Section 3.2 concern individual semantic operators and set operations. We now derive cross-operator equiv-alences that justify two classes of plan rewrites: pushdown rules 
+
+reduce the input to an expensive operator by moving a cheaper op-erator below it, while fusion rules combine multiple operators into a single model invocation and avoid intermediate materialization. 
+
+Property 4.4.1 (Selection Pushdown through Extend). Given an extend 𝜀 𝐸,𝐴,𝑚,𝑝 , and a semantic selection 𝜎 𝐸 ′,𝑚,𝑝 ′ whose predicate depends only on the base attributes 𝐴 . Then: 
+
+𝜎 𝐸 ′,𝑚,𝑝 ′
+
+ 𝜀 𝐸,𝐴,𝑚,𝑝 (𝑅 ) = 𝜀 𝐸,𝐴,𝑚,𝑝 
+
+ 𝜎 𝐸 ′,𝑚,𝑝 ′, (𝑅 ).
+
+Proof. By 3.1, 𝜀 𝐸,𝐴,𝑚,𝑝 (𝑅 ) = {( 𝑟, 𝐸 (𝑟 )) | 𝑟 ∈ 𝑅 } where 𝐸 (𝑟 ) =
+
+𝑚 (𝑝, 𝑟 [𝐴 ]) . The left-hand side applies 𝜎 to these extended tuples: (𝑟, 𝐸 (𝑟 )) 𝑟 ∈ 𝑅, mp 𝑚 (𝑝 ′, (𝑟, 𝐸 (𝑟 )) [ 𝐴 ]) = true . Since mp de-pends only on 𝐴 and not on 𝐸 , we have (𝑟, 𝐸 (𝑟 )) [ 𝐴 ] = 𝑟 [𝐴 ], so the predicate reduces to mp 𝑚 (𝑝 ′, 𝑟 [𝐴 ]) = true. This gives: (𝑟, 𝐸 (𝑟 )) 𝑟 ∈
+
+𝑅, mp 𝑚 (𝑝 ′, 𝑟 [𝐴 ]) = true . On the right-hand side, 𝜎 first filters 
+
+𝑅 to obtain 𝑅 ′ = {𝑟 ∈ 𝑅 | mp 𝑚 ′ (𝑝 ′, 𝑟 [𝐴 ]) = true }, and then 𝜀 
+
+extends 𝑅 ′ to produce {( 𝑟, 𝐸 (𝑟 )) | 𝑟 ∈ 𝑅 ′ } = {( 𝑟, 𝐸 (𝑟 )) | 𝑟 ∈
+
+𝑅, mp 𝑚 (𝑝 ′, 𝑟 [𝐴 ]) = true }. The two expressions are identical. □
+
+Property 4.4.2 (Semantic Selection Pushdown through Seman-tic Join). Let 𝜎 𝐸 ′,𝑚 ′,𝑝 ′ be a Semantic Selection whose predicate mp depends only on attributes of 𝑅 . Then: 
+
+𝜎 𝐸 ′,𝑚 ′,𝑝 ′
+
+ 𝑅 ⊲⊳ sem  
+
+> 𝐴,𝐵,𝑚,𝑝
+
+𝑆  = 𝜎 𝐸 ′,𝑚 ′,𝑝 ′ (𝑅 ) ⊲⊳ sem  
+
+> 𝐴,𝐵,𝑚,𝑝
+
+𝑆. 
+
+Proof. We prove the left-pushdown case and the right case is symmetric. Let 𝑃 (𝑟 ) ≡ mp 𝑚 (𝑟 [𝐴 ]) = true as the model-based se-lection predicate of the semantic selection. By hypothesis, 𝑃 (𝑟 )
+
+depends only on the sch (𝑅 ) of each output tuple (𝑟, 𝑠 ) of the seman-tic join, so the selection predicate will be applied on 𝑃  (𝑟, 𝑠 ) = 𝑃 (𝑟 ).The left-hand side is: (𝑟, 𝑠 ) 𝑟 ∈ 𝑅, 𝑠 ∈ 𝑆, 𝜃 𝑚 (𝑟 [𝐴 ], 𝑠 [𝐵 ]) =
+
+true , 𝑃 (𝑟 ) = true . Since 𝜃 𝑚 and 𝑃 (𝑟 ) are independent predicates and conjunction is commutative, this equals: (𝑟, 𝑠 ) 𝑟 ∈ 𝑅, 𝑃 (𝑟 ) =
+
+true , 𝑠 ∈ 𝑆, 𝜃 𝑚 (𝑟 [𝐴 ], 𝑠 [𝐵 ]) = true . The inner condition {𝑟 ∈ 𝑅 |
+
+𝑃 (𝑟 )} is precisely 𝜎 𝐸 ′,𝑚,𝑝 ′ (𝑅 ), giving 𝜎 (𝑅 ) ⊲⊳ sem  
+
+> 𝐴,𝐵,𝑚,𝑝
+
+𝑆 . Symmetri-cally, we can prove the same for 𝑆 . □
+
+Property 4.4.3 (Extend–Selection Fusion). Let 𝜀 𝐸,𝐴,𝑚,𝑝 (𝑅 ) be an Extend and 𝜎 sem  
+
+> 𝐸,𝑚,𝑝 ′
+
+a Semantic Selection, both using the same oracle model 𝑚 , whose predicate depends only on the extended attributes 𝐸 ,i.e., mp = mp (𝐸 ). Assume 𝐸 is not required by downstream operators (so the final schema is 𝐴 ). Define a composed prompt 𝑝 𝑐 such that for all 𝑟 ∈ 𝑅 : mp 𝑚 (𝑝 𝑐 , 𝑟 [𝐴 ]) = mp 𝑚 
+
+ 𝑝 ′, 𝑚 (𝑝, 𝑟 [𝐴 ]) .. Then: 
+
+𝜋 𝐴 
+
+
+
+𝜎 sem 
+
+> 𝐸, 𝑚, 𝑝 ′
+
+ 𝜀 𝐸,𝐴,𝑚,𝑝 (𝑅 )
+
+= 𝜎 sem  
+
+> 𝐴, 𝑚, 𝑝 𝑐
+
+(𝑅 ).
+
+Proof. By Definition 3.1, 𝜀 𝐸,𝐴,𝑚,𝑝 (𝑅 ) = {( 𝑟, 𝐸 (𝑟 )) | 𝑟 ∈ 𝑅, 𝐸 (𝑟 ) =
+
+𝑚 (𝑝, 𝑟 [𝐴 ])} . Applying the selection yields mp 𝑚 (𝑝 ′, 𝐸 (𝑟 )) = true. Projecting to 𝐴 gives {𝑟 ∈ 𝑅 | mp 𝑚 (𝑝 ′, 𝐸 (𝑟 )) = true }. Since 
+
+𝐸 (𝑟 ) = 𝑚 (𝑝, 𝑟 [𝐴 ]) , we have mp 𝑚 (𝑝 ′, 𝐸 (𝑟 )) = mp 𝑚 (𝑝 ′, 𝑚 (𝑝, 𝑟 [𝐴 ])) .By the definition of 𝑝 𝑐 , this equals mp 𝑚 (𝑝 𝑐 , 𝑟 [𝐴 ]) for all 𝑟 , which yields precisely 𝜎 sem  
+
+> 𝐴, 𝑚, 𝑝 𝑐
+
+(𝑅 ). □
+
+Property 4.4.4 (Extend–Join Fusion). Let 𝑅 and 𝑆 be two input relations. The following three fusion rules eliminate Extend operators whose output attributes are used solely as join keys and are not re-quired in the final output. (a) Left fusion. Let 𝐸 (𝑟 ) = 𝑚 (𝑝 𝑒 , 𝑟 [𝐴 𝑅 ]) be produced by 𝜀 𝐸,𝐴,𝑚,𝑝 𝑒 (𝑅 )
+
+and used only to join with 𝑆 on attributes 𝐵 via prompt 𝑝 𝑗 . If ∃ 𝑝 ′ 
+
+> 𝑗
+
+s.t. 
+
+∀𝑟 ∈ 𝑅 , 𝑠 ∈ 𝑆 : 𝜃 𝑚 
+
+ 𝑟 [𝐴 𝑅 ], 𝑠 [𝐵 ] = 𝜃 𝑚 
+
+ 𝑚 (𝑝, 𝑟 [𝐴 𝑅 ]) , 𝑠 [𝐵 ], then: 
+
+𝜋 𝐴 𝑅 ∪𝐴 𝑆 
+
+
+
+𝜀 𝐸,𝐴,𝑚,𝑝 𝑒 (𝑅 ) ⊲⊳ sem   
+
+> 𝐸,𝐵,𝑚,𝑝 𝑗
+
+𝑆 
+
+
+
+= 𝑅 ⊲⊳ sem 
+
+> 𝑚,𝐵,𝑚,𝑝 ′
+> 𝑗
+
+𝑆. 
+
+(b) Right fusion. Let 𝐸 ′ (𝑠 ) = 𝑚 (𝑝 ′ 
+
+> 𝑒
+
+, 𝑠 [𝐴 𝑆 ]) be produced by 𝜀 𝐸 ′,𝐴,𝑚,𝑝 ′ 
+
+> 𝑒
+
+(𝑆 )
+
+and used only as right-side join attributes. If ∃ 𝑝 ′′  
+
+> 𝑗
+
+s.t. ∀𝑟 ∈ 𝑅 , 𝑠 ∈ 𝑆 :
+
+𝜃 𝑚 
+
+ 𝑟 [𝐴 ], 𝑠 [𝐴 𝑆 ] = 𝜃 𝑚 
+
+ 𝑟 [𝐴 ], 𝑚 (𝑝 ′ 
+
+> 𝑒
+
+, 𝑠 [𝐴 𝑆 ]) , then: 
+
+𝜋 𝐴 𝑅 ∪𝐴 𝑆 
+
+
+
+𝑅 ⊲⊳ sem   
+
+> 𝐴,𝐸 ′,𝑚,𝑝 𝑗
+
+𝜀 𝐸 ′,𝑚,𝑝 ′ 
+
+> 𝑒
+
+(𝑆 )
+
+
+
+= 𝑅 ⊲⊳ sem 
+
+> 𝐴,𝑚,𝑝 ′′
+> 𝑗
+
+𝑆. 
+
+(c) Bilateral fusion. If both input relations are extended ( 𝐸 (𝑟 ) =
+
+𝑚 (𝑝 𝑒 , 𝑟 [𝐴 𝑅 ]) and 𝐸 ′ (𝑠 ) = 𝑚 (𝑝 ′ 
+
+> 𝑒
+
+, 𝑠 [𝐴 𝑆 ]) ) and both sets of extended attributes are used only as join keys, and ∃ a composed prompt 𝑝 ★
+
+> 𝑗
+
+such that for all 𝑟 ∈ 𝑅 , 𝑠 ∈ 𝑆 :
+
+𝜃 𝑚 
+
+ 𝑟 [𝐴 𝑅 ], 𝑠 [𝐴 𝑆 ] = 𝜃 𝑚 
+
+ 𝑚 (𝑝 𝑒 , 𝑟 [𝐴 𝑅 ]) , 𝑚 (𝑝 ′ 
+
+> 𝑒
+
+, 𝑠 [𝐴 𝑆 ]) ,NousDB - A Fast Query Engine for Semantic Analytics          
+
+> 1 User program
+> sql("... reviews") .extend("actor", ...) .semantic_join(...) .select_columns(...)
+> 2 Logical plan
+> 𝜋 review, title, name
+> ⊲⊳ sem actor =name
+> 𝜀 actor (reviews )name
+> 2 LLM calls/row
+> 3 Optimizer
+> Semantic rewriting
+> Extend-join fusion
+> Histogram
+> 𝐻𝜏 (review )
+> Batch size
+> 𝑏 𝐿 =𝑏 𝑅 =6
+> Token repartition
+> Greedy bin-pack
+> 4 Physical plan
+> ProjectionExec SemanticJoinExec
+> fused, 𝑏 𝐿 =𝑏 𝑅 =6
+> TokenRepart
+> bin-pack(reviews)
+> Parquet
+> (name)
+> 1 LLM call/pair
+> 5 Execution
+> Block nested loop vLLM Qwen3-8B
+> Result (review, title, name)
+
+Figure 6: End-to-end system workflow for query Q11. The user program (1) builds a logical plan (2) with separate 𝜀 and ⊲⊳ sem operators requiring two LLM calls per row. The optimizer (3) applies the new rules. 
+
+then: 
+
+𝜋 𝐴 𝑅 ∪𝐴 𝑆 
+
+
+
+𝜀 𝐸,𝑚,𝑝 𝑒 (𝑅 ) ⊲⊳ sem   
+
+> 𝐸,𝐸 ′,𝑚,𝑝 𝑗
+
+𝜀 𝐸 ′,𝑚,𝑝 ′ 
+
+> 𝑒
+
+(𝑆 )
+
+
+
+= 𝑅 ⊲⊳ sem 
+
+> 𝑚,𝑝 ★
+> 𝑗
+
+𝑆. 
+
+Case (c) follows from applying case (a) and then case (b) in sequence. 
+
+Proof. We prove case (a); case (b) is symmetric, and case (c) follows by composing the two. By Definition 3.1, 𝜀 𝐸,𝐴,𝑚,𝑝 𝑒 (𝑅 ) =
+
+{( 𝑟, 𝐸 (𝑟 )) | 𝑟 ∈ 𝑅, 𝐸 (𝑟 ) = 𝑚 (𝑝 𝑒 , 𝑟 [𝐴 𝑅 ])} . By Definition 3.2.3, the left-hand side is:   (𝑟, 𝐸 (𝑟 )) , 𝑠  𝑟 ∈ 𝑅, 𝑠 ∈ 𝑆, 𝜃 𝑚 
+
+ 𝐸 (𝑟 ), 𝑠 [𝐵 ] =
+
+true . Projecting to 𝐴 𝑅 ∪ 𝐴 𝑆 removes the extended attributes 𝐸 ,yielding: (𝑟, 𝑠 ) 𝑟 ∈ 𝑅, 𝑠 ∈ 𝑆, 𝜃 𝑚 
+
+ 𝑚 (𝑝 𝑒 , 𝑟 [𝐴 𝑅 ]) , 𝑠 [𝐵 ] = true . By the hypothesis: 𝜃 𝑚 (𝑟 [𝐴 𝑅 ], 𝑠 [𝐵 ]) = 𝜃 𝑚 (𝑚 (𝑝 𝑒 , 𝑟 [𝐴 𝑅 ]) , 𝑠 [𝐵 ]) for all 
+
+𝑟, 𝑠 . Substituting gives 𝑅 ⊲⊳ sem 
+
+> 𝐴,𝐵,𝑚,𝑝 ′
+> 𝑗
+
+𝑆 . □
+
+Figure 6, shows how NousDB puts in action all the proposed opti-mizations. NousDB applies query rewriting to fuse the two semantic operators and based on input token distribution, it estimates the batch size and whether to insert the token repartition operator. 
+
+## 5 Experiments 
+
+We evaluate NousDB through four research questions: 
+
+RQ1: How does NousDB perform end to end? We compare NousDB with competing systems on IMDB, SemBench [23], and semantic extensions of JOB [24] and STACK [13] (Section 5.2). 
+
+RQ2: How do batching and fidelity constraints affect ex-ecution? We measure the token savings from batching and the effects of fidelity constraints on batch size, runtime, and quality (Section 5.3). 
+
+RQ3: What is the contribution of each optimization? We ab-late histogram-guided batch sizing, fidelity-aware batching, token-aware repartitioning, and algebraic rewrites (Section 5.4). 
+
+RQ4: What are the benefits of the semantic algebra? We evaluate its effects on query performance and output quality and discuss it across all sections. 
+
+## 5.1 Experimental Setup 
+
+All experiments run on a server equipped with two NVIDIA A6000 GPUs (48 GB VRAM each), Intel(R) Xeon(R) Gold 5318Y CPU @ 2.10GHz and 377GB memory. For model serving we used vLLM [21]. For our experiments we use Qwen3-8B [52], a GPT-5.4-nano [43] and a Qwen3-32B for the ablation study only. 10 1 10 2  
+
+> runtime (s, log)
+> 0.50 0.75
+> mean quality  IMDB
+> 10 110 2
+> runtime (s, log)
+> 0.50 0.75
+> SemBench Batched Batched+think Certified Certified+think V. DataFusion V. DataFusion+think LOTUS Palimpzest Abacus
+
+Figure 7: Mean quality against runtime with GPT-5.4-nano: the six NousDB variants and competitors on the Pareto frontier. 
+
+Systems. NousDB default setup is histogram-guided batched ex-ecution ( Batched ), without model reasoning enabled, and when nec-essary, we specify when it computes the batch fidelity ( +Certified )and when it uses model reasoning ( +Thinking ). We compare against two state-of-the-art semantic query processing engines: LOTUS [35] and Palimpzest [28], a declarative system w/o its sample-based cost optimizer Abacus [40]. In our analysis we include a vanilla DataFusion [22] version, with naive semantic operator implemen-tation, processing their input row-by-row. All competitors use the same models (Qwen3-8B via vLLM and GPT-5.4-nano via cloud with 32 𝐾 and 400 𝐾 context each) with 10 parallel workers to ensure a fair comparison of system-level optimizations. 
+
+Workloads. We use 4 different benchmarks in our evaluation: 
+
+IMDB extends the JOB schema [24] with 10.5K reviews [31]. It contains 11 queries in total, having six single operator queries (Q1–Q4, and the extend-to-aggregate Q5 and Q6) and the rest are pipelines of several semantic operators (Q7–Q11), four of which the rewrites target (Q7, Q8, Q10, Q11). SemBench-Movie [23] has ten queries: retrieval with a LIMIT (SB1, SB2), aggregates (SB3, SB4, SB8), self-joins of one movie’s reviews (SB5 and SB6 with a LIMIT, SB7 exhaustive over 13,924 pairs) and ranking (SB9, SB10). Finally, we extend JOB [24] and StackExchange benchmarks (24M rows un-der the STACK schema [13], with semantic operators, augmenting standard benchmarks used in the query optimization literature. 
+
+## 5.2 Comparison against Workloads 
+
+Quality against runtime. With GPT-5.4-nano (Figure 7) only NousDB variants form the Pareto frontier: Batched is the fastest point (7.4s on IMDB, 3.6s on SemBench), and Batched+think , achiev-ing 0.69 at 22s and 0.84 at 12s, dominates every external system, whose best mean quality is Palimpzest’s 0.61 at 132s on IMDB and LOTUS’s 0.62 at 45s on SemBench. Similarly with Qwen3-8B, the IMDB frontier is again NousDB’s alone, from Batched (0.58 at 22 s) to Certified+think (0.72), while on SemBench LOTUS joins it (0.76 at 12s, between Batched’s 0.70 at 6.2 s and V.DataFusion+think’s 0.77 at 638 s), the competitor that no NousDB configuration domi-nates. From our experiments, reasoning multiplies the decode cost of every call, since 90–97% of the thinking arms’ output tokens on Qwen are reasoning tokens, and packing 𝑘 rows per call amortizes exactly that cost, leading to a if you think, batch rule of thumb. 
+
+Runtime. Batched NousDB is the fastest system in every bench-mark and model setting (Figure 8). With GPT-5.4-nano it is 15–19 ×
+
+faster than V. DataFusion, LOTUS and Palimpzest on IMDB and 9–19 × on SemBench, and 59–86 × faster than Abacus, whose plan search dominates its runtime. On Qwen3-8B it is 1 .9× faster than LOTUS, 10 × than Palimpzest and 38–73 × than Abacus, but only 1.08 × faster than V. DataFusion on IMDB, where both run their Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis                                                                                                                                                                                                       
+
+> IMDB (11 queries) SemBench (10 queries) F1 Qual. Wall (s) Tok. M ×F1 Qual. Wall (s) Tok. M ×
+> Qwen3-8B (sf 1000)
+> Batched 0.54 0.58 22 3.0 10.62 0.70 6.2 1.1 1Certified 0.56 0.59 83 7.4 3.79 0.47 0.64 27 28.9 4.42 Row-by-row+think 0.64 0.67 980 18.9 44.6 0.77 0.77 638 61.6 103.3 Batched+think 0.67 0.71 151 4.2 6.90 0.78 0.75 90 5.1 14.6 Certified+think 0.69 0.72 1204 10.3 54.8 0.79 0.74 924 53.8 149.6 V.DataFusion 0.48 0.52 24 9.5 1.08 0.47 0.62 16 29.0 2.59 LOTUS 0.28 0.37 42 4.7 1.91 0.75 0.76 12 5.7 1.94 Palimpzest 0.67 0.69 221 8.7 10.1 0.65 0.61 64 9.5 10.4 Abacus 0.61 0.67 837 2.7 38.1 0.60 0.67 337 0.45 72.6
+> GPT-5.4-nano (sf 1000)
+> Row-by-row 𝑎 0.56 0.61 113 10.2 15.2 0.48 0.49 68 31.8 18.9
+> Batched 0.50 0.58 7.4 2.6 10.63 0.72 3.6 1.8 1Certified 0.64 0.67 95 5.8 12.8 0.50 0.60 71 31.6 19.7 Row-by-row+think 0.68 0.70 197 17.1 26.6 0.78 0.67 114 53.8 31.6 Batched+think 0.66 0.69 22 3.0 2.97 0.85 0.84 12 2.9 3.31 Certified+think 0.69 0.72 221 7.3 29.8 0.79 0.70 152 53.8 41.9 V.DataFusion 0.48 0.52 24 9.5 1.08 0.47 0.62 16 29.0 2.59 LOTUS 0.22 0.34 141 4.3 19.3 0.66 0.62 45 3.1 12.3 Palimpzest 0.57 0.61 131 8.1 17.8 0.62 0.47 34 8.0 9.32 Abacus 0.46 0.56 411 14.0 59.3 0.66 0.60 269 1.4 86.3
+
+Table 3: NousDB variants and competitors: mean F1, mean normal-ized quality over all queries (Qual.), geometric-mean wall clock (s), total tokens (M), and × = paired geometric-mean speedup of NousDB 
+
+semantic operators on ten partitions and vLLM’s continuous batch-ing and prefix cache already make per-row requests cheap. On SemBench, the movie filter leaves only 77–118 rows on five queries, which NousDB, V. DataFusion and LOTUS finish within 1 .5× of one another while Palimpzest and Abacus pay 10–66 s and 205– 400 s of fixed overhead. On the LIMIT-bounded SB1, SB5 and SB6, NousDB answers from a bounded prefix of its input (Ref section 1 of the experimental), 2 .5–38 × faster than V. DataFusion and LOTUS. Doubling the input (dots in Figure 8) grows NousDB’s runtime by 1.26–1 .92 × and that of V. DataFusion, LOTUS and Palimpzest by 1.7–2 .2× (geometric means per benchmark and model), so 14 of the 16 speedups grow, up to 85 × on IMDB and 82 × on SemBench, while the two that shrink are against Abacus, whose fixed-budget plan search takes about as long at either scale. 
+
+Quality and Total Tokens. Focusing on the token consumption reported in Table 3, batching and plan rewrites make NousDB hav-ing the lowest token consumption in total on 40 out of 42 queries. In terms of quality, no system is dominant on every query, with Qwen3-8B Palimpzest and Abacus lead IMDB and LOTUS on Sem-Bench, paying the overhead of 18 − 20 × of NousDB’s runtime. NousDB achieves Pareto frontier optimality primarily through its implementation of the proposed extended algebra, especially the pushdowns and fusions . Pushing Q7’s selection below its Extend operator, reduces the tuples reaching the model from 2000 to 1606 on Qwen3 and to 1166 to GPT, achieving a 20% and 42% reduction on token consumption respectively, while the application of semantic filter before the semantic join on Q8, cuts the 44 − 47% of the tokens to reach the second semantic opertor. In all the cases above the F1 score varied only 0 .01, compared to full execution of the plan. On Q10 the fusion of the Extend-selection halves the total rows sent to the model, while improving the F1 score from 0 .24 to 0 .47 and from 0.13 to 0 .57 for Qwen and GPT respectively. Finally the fused plan on Q11, managed to achieve the best F1 score across all systems. 
+
+JOB and STACK workloads. We augment two well-known benchmarks for query optimization with semantic operators, keep-ing each source query’s join graph, predicates and outputs and adding semantic operators on a text attribute its joins reach: JOB [24] 10 0                          
+
+> 10 2
+> 10 4
+> Qwen3-8B latency (s)  IMDB (sf 1,000)
+> Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q8 Q9 Q10 Q11 10 0
+> 10 2
+> 10 4
+> GPT-5.4-nano latency (s)
+> ×××
+> 10 0
+> 10 2
+> 10 4
+> Qwen3-8B latency (s)  SemBench (sf 1,000)
+> ×
+> SB1 SB2 SB3 SB4 SB5 SB6 SB7 SB8 SB9 SB10 10 0
+> 10 2
+> 10 4
+> GPT-5.4-nano latency (s)
+> ××
+> NousDB V. DataFusion LOTUS Palimpzest Abacus sf 2,000
+
+Figure 8: End-to-end latency per query (log scale) bars indicate at sf 1 ,000, dots at sf 2 ,000 
+
+gets the reviews relation, joined to title , and STACK [13] already exposes question, answer and comment bodies. Each query gets one semantic configuration (a selection, a one- or multi-attribute Extend, a selection–Extend pipeline, or a semantic join), yielding 33 JOB queries and 10 STACK queries. Figure 9 contains the com-parison between the systems on these two benchmarks. In 19 of them the original join predicates drive the intermediate result to zero cardinality before the semantic operator fires, where on this 
+
+relational-dominant subset the three systems fall within 1 .2× of one another, showing that semantic augmentation adds negligible overhead when the operator is inactive. The remaining 14 semantic-active queries trigger between 3 and 1,265 LLM calls. On this subset NousDB achieves a geometric-mean speedup of 3 .3× over LOTUS and 2 .8× over Palimpzest, winning 13 of 14 and 12 of 14 respectively. The advantage peaks on complex-tier queries whose join graphs emit ∼500K intermediate rows: on J8, NousDB finishes in 717 s versus 25,038 s (LOTUS, 35 ×) and 22,204 s (Palimpzest, 31 ×), and consumes 16.1 M tokens versus 29.9 M (1 .86 × fewer), as the shared instruction prefix is amortised across the batch. The regression on J24, where NousDB trails LOTUS by 1 .3× due to a join topology that limits the greedy bin-packing operator. In STACK benchmark, we evaluate NousDB at sf =10 ,000 while LOTUS and Palimpzest run at sf = 1,000. Despite 10 × more data, NousDB achieves geometric-mean latency 4 .9× lower than LOTUS and 5 .3× lower than Palimpzest, winning 8 of 10 and 9 of 10 pairwise comparisons. The two near-parity queries (S1, S10) are relational-dominant, each triggering at most two LLM calls. On the most token-intensive query (S11), NousDB processes 7,146 rows and 2.37 M tokens in 84 s, versus 222 s (LOTUS) and 268 s (Palimpzest). 
+
+## 5.3 Batch Sizing and Batch Fidelity 
+
+Impact on token consumption. Histogram-guided batching alone (C1 in Table 4) cuts model calls to ×0.05–0 .17 and tokens to ×0.15– 0.32 of per-row execution on every model and benchmark. The saving is on the input side: packing 𝑘 rows shares the instruction NousDB - A Fast Query Engine for Semantic Analytics J1 J2 J3 J4 J5 J6 J7 J8 J9 J10 J11 J12 J13 J14 J15 J16 J17 J18 J19 J20 J21 J22 J23 J24 J25 J26 J27 J28 J29 J30 J31 J32 J33 10 1
+
+10 2
+
+10 3
+
+10 4
+
+10 5
+
+> latency (s)
+
+JOB 
+
+> ×
+
+S1 S2 S3 S5 S6 S7 S8 S9 S10 S11 10 1
+
+10 2
+
+10 3
+
+> latency (s)
+
+STACK 
+
+NousDB LOTUS Palimpzest 
+
+Figure 9: JOB (top) and STACK (bottom). NousDB at sf 10,000, rest at sf 1,000) latency per query (log scale). 0.6 0.8 1.0 
+
+agreement with row-by-row 
+
+> Q1 Q2 Q4 Q7 Q9 Q8* SB2 SB9 SB7*
+
+Qwen3-8B   
+
+> 0.6 0.8 1.0
+
+agreement with row-by-row 
+
+GPT-5.4-nano     
+
+> Certified Batched Certified+think Batched+think 1
+
+Figure 10: Share of the input tuples on which Certified and Batched execution return the singleton answer. Batch sizes as in Figure 11a. 
+
+prefix while still the model generates an answer per input row, so the joins, whose per-pair prompts repeat the instructions for every pair, save most (Q3 with Qwen3-8B: 880 K to 91 K tokens). 
+
+Impact on quality. On most queries batching has a small impact o overall quality: over the 36 pairs of Figure 10, a batched variant departs from its per-row counterpart on 15% of the tuples on average (median 10%), with one extreme case, Q7 with Qwen3-8B (45%). Qwen3-8B is the more batch-sensitive model (17% against 12% for GPT-5.4-nano), and its quality degredation comes earlier, as shown in Figure 4. The above behavior is regulated on both models when their reasoning capabilities are enabled. 
+
+What the certificate guarantees and costs. Certified execu-tion returns the per-row answer on 97.5–99.8% of the tuples with Qwen3-8B and 86–99% with GPT-5.4-nano, above 1 −𝜂 in every cell, including where the predicted batch sizes where large ( 𝑘 𝑠𝑎𝑓 𝑒 = 16– 64 with GPT-5.4-nano: 91–95%). At sf 2,000, Batched falls below 1 − 𝜂 on 8 of 16 cells and Certified on none. With Qwen3-8B the certificate returns 𝑘 𝑠𝑎𝑓 𝑒 ≤ 2 on 10 of 11 and on IMDB queries and on every SemBench query. GPT-5.4-nano, is more resistant to batch-ing as a bigger model, where it keeps 𝑘 𝑠𝑎𝑓 𝑒 between 16 and 64 on four queries (Figure 11a). The calibration prologue takes 6–118 s (Qwen3-8B) and 11–97 s (GPT-5.4-nano) per IMDB query, about half of a certified run, and does not grow with the input, whereas Abacus’s plan search takes 157–1,259 s (Figure 11b). 
+
+Quality of the variants. The choice of variant moves F1 as much as the choice of system (Figure 12): on Q3 the variants span 0.11 (Row-by-row) to 0.93 (Row-by-row+think) with Qwen3-8B, and on Q9 0.12 (Batched) to 0.81 (Certified+think) with GPT-5.4-nano. The best variant matches or beats the best external system on 6 of 9 1416 64 
+
+> Qwen3 8B
+
+IMDB (sf 1,000)           
+
+> Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q8 Q9 Q10 Q11 1416 64
+> GPT-5.4 nano
+> 1416 64
+> Qwen3 8B
+
+SemBench (sf 1,000)              
+
+> SB1 SB2 SB3 SB4 SB5 SB6 SB7 SB8 SB9 SB10 1416 64
+> GPT-5.4 nano
+> rows (pairs) per call
+> Batched ( k*)Certified ( k)Certified+think ( k)
+
+(a) Rows per call of Batched ( 𝑘 𝐻 𝜏 ) and of the certificate without and with thinking ( 𝑘 𝑠𝑎𝑓 𝑒 )110 100 1,000              
+
+> Qwen3 8B secs
+> Q1 Q2 Q3 Q4 Q5 Q6 Q7 Q8 Q9 Q10 Q11 110 100 1,000
+> GPT-5.4 nano secs
+> ××
+> Certified: calibration Certified+think: calibration Abacus: plan search
+
+(b) Seconds per IMDB query in the certificate’s calibration prologue, without and with thinking, and in Abacus’s plan search. 
+
+Figure 11: What the fidelity certificate chooses and what it costs, per query at sf 1,000. Q1 Q2 Q3 Q4 Q7 Q8 Q9 Q10 Q11                                              
+
+> Qwen3-8B  .89 .89 .89 .94 .94 .95 .85 .65 .85 .96 .92 .94 .11 .75 .25 .93 .86 .85 .59 .47 .60 .46 .48 .47 .41 .41 .41 .45 .48 .45 .05 .23 .05 .36 .31 .35 .56 .15 .59 .73 .68 .77 .24 .49 .47 .32 .49 .52 .58 .80 .93 .63 .88 .91
+
+IMDB F1                     
+
+> SB1 SB2 SB5 SB6 SB7
+> 1.00 1.00 1.00 1.00 1.00 1.00 .40 .80 .40 .60 .60 .60 .42 .50 .42 .74 .80 .84 .11 .50 .11 .84 .80 .80 .42 .30 .42 .69 .68 .71
+
+SemBench F1 Q1 Q2 Q3 Q4 Q7 Q8 Q9 Q10 Q11                                                                        
+
+> best variant best external
+> RBCR+t B+t C+t Q1 Q2 Q3 Q4 Q7 Q8 Q9 Q10 Q11
+> GPT-5.4-nano  .96 .89 .94 .96 .95 .95 .91 .87 .92 .98 .97 .96 .64 .71 .83 .94 .80 .99 .54 .48 .59 .59 .52 .58 .41 .30 .42 .46 .41 .45 .29 .15 .28 .38 .30 .33 .61 .12 .53 .80 .81 .81 .12 .52 .57 .33 .54 .47 .57 .49 .69 .68 .61 .69
+> RBCR+t B+t C+t SB1 SB2 SB5 SB6 SB7
+> 1.00 1.00 1.00 1.00 1.00 1.00 .60 .80 .60 .60 .60 .60 .00 .60 .21 .74 .90 .70 .21 .60 .11 .84 1.00 .90 .60 .13 .58 .74 .74 .74
+> 0.5 1Q1 Q2 Q3 Q4 Q7 Q8 Q9 Q10 Q11
+
+Figure 12: F1 per query at sf 1,000 of the six NousDB, per IMDB query and the best variant against the best of LOTUS, Palimpzest and Abacus (right). 
+
+IMDB queries with Qwen3-8B and 7 of 9 with GPT-5.4-nano, where it concedes only Q1 and Q7 to Palimpzest, by 0.004 and 0.016. The one large gap is Q8 with Qwen3-8B (0.36 against Palimpzest’s 0.63), which GPT-5.4-nano’s best variant wins by 0.11. Finally on Sem-Bench, Batched is the best variant on SB2 (0.80) with both models, and the thinking variants take the pair queries (Batched+think : 0.90 on SB5 and 1.00 on SB6 with GPT-5.4-nano). 
+
+## 5.4 Ablation Study 
+
+We isolate the three optimizations on queries that cover every operator type on IMDB and SemBench at sf 1,000, adding also Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis 
+
+Table 4: Optimizations benefits. Top: geometric-mean ratio to C0 over each benchmark’s ablation queries (below 1 = better). Bottom: answer quality of every cell (F1; SB3: relative error, lower is better; SB10: Spearman 𝜌 ; bold = best of the six configurations per model).                                                                                                        
+
+> Qwen3-8B Qwen3-32B GPT-5.4-nano C0 C1 C2 C3 C4 C5 C0 C1 C2 C3 C4 C5 C0 C1 C2 C3 C4 C5
+> IMDB: ratio to C0 (geometric mean)
+> calls 0.08 1.00 0.51 0.11 0.07 0.07 1.00 0.49 0.13 0.08 0.05 1.01 0.91 0.11 0.05 tokens 0.26 1.00 0.68 0.35 0.26 0.26 1.00 0.65 0.37 0.29 0.29 1.00 0.99 0.44 0.25 wall 1.39 0.59 0.69 1.08 0.74 1.22 0.95 0.84 0.80 0.57 0.25 0.24 1.06 0.24 0.18
+> SemBench: ratio to C0 (geometric mean)
+> calls 0.14 1.03 0.89 0.16 0.17 0.17 0.84 0.93 0.18 0.18 0.09 1.04 1.00 0.09 0.09 tokens 0.15 1.00 1.00 0.17 0.17 0.17 1.00 1.00 0.18 0.18 0.32 1.06 1.00 0.41 0.41 wall 4.76 0.90 0.89 2.05 1.52 3.77 0.97 0.96 1.49 1.49 0.49 0.33 0.94 0.30 0.31
+> Answer quality
+> Q1 .892 .883 .892 .892 .888 .890 .917 .922 .916 .916 .930 .930 .927 .931 .931 .930 .895 .892 Q3* .114 .484 .114 .396 .370 .759 .776 .846 .783 .792 .796 .818 .677 .537 .608 .900 .800 .718 Q4 .585 .438 .585 .585 .456 .456 .595 .583 .595 .607 .513 .513 .500 .538 .582 .537 .526 .500 Q7 .411 .433 .413 .411 .414 .410 .460 .429 .462 .464 .455 .486 .368 .292 .369 .366 .226 .316 Q11* .582 .421 .582 .611 .435 .789 .686 .568 .686 .909 .495 .835 .525 .421 .571 .819 .500 .467 SB7* .428 .290 .428 .428 .327 .328 .456 .394 .455 .455 .389 .381 .591 .180 .604 .601 .169 .216 SB3 .111 .556 .111 .111 .222 .222 .556 .667 .556 .556 .111 .111 .667 .444 .556 .556 .111 .111
+> SB10 .286 .202 .286 .286 .335 .349 .329 .311 .333 .329 .343 .352 .303 .319 .301 .289 .317 .358
+
+Qwen3-32B. C0 is per-row execution, C1, C2 and C3 each enable one optimization from batching, token repartitioning and rewrites respectively, C4 = C1+C2, and C5 is full NousDB (Table 4). 
+
+Batch sizing leads to significant cost reduction (C1). Batch-ing alone cuts calls to ×0.05–0 .17 and tokens to ×0.15–0 .32 of C0 on every model and benchmark. With GPT-5.4-nano the wall clock follows ( ×0.25 on IMDB, ×0.49 on SemBench): the join Q3 packs 986 per-pair calls into 34, taking 62 K tokens instead of 944 K and 8 s instead of 122 s. The self-hosted models however, get slower (×1.22–4 .76): vLLM’s continuous batching already batches concur-rent per-row requests, so packing mainly lengthens each request (Q4 with Qwen3-8B: 204 s against 97 s on the same ten partitions). 
+
+Token repartitioning as a new shuffling technique (C2). 
+
+Token Repartition shuffles rows, so in terms of tokens and calls is identical to C0. Its gain is the granularity of the shuffle: DataFu-sion’s round-robin partitioning operator shuffles record batches across partitions, while token repartitioning shuffles them based on their tokens. GPT-5.4 shows big gains when the repartitioning is enables, while the exchange already dealt single rows to ten partitions (session batch size of one), and C2 stays within 6% of C0: balance has little to fix. The true gains of this operator come hand-to-hand when paired with batching, as we observe in C5. 
+
+Rewrites change what is computed (C3). From query rewrites only IMDB is affected, since only Q7 applies filter pushdown, and Q11 fusion of semantic operators, leading to 20–36% fewer calls, preserving or boosting F1 score. The rest of the queries remain unchanged, leading to overall gains in all observed axes, hinting that the extended algebra and its properties play a significant role when integrated with traditional query engines. 
+
+Repartitioning smooths batches (C4). On top of batching, repartitioning removes most of C1’s wall-clock penalty on the self-hosted models (with Qwen3-8B, ×1.39 → 1.08 on IMDB and 
+
+×4.76 → 2.05 on SemBench) but returns part of the token consump-tion savings (IMDB: ×0.35–0 .44, from ×0.26–0 .29). The operator deflate the partitions’ token loads ( 𝜆 ≤ 1.14 on row inputs) and this s spread is what produces: ×0.33–0 .84 speedups on the 12 Qwen pairs. Thus, repartitioning operator is valuable only when the engine is capable of processing rows in batches, and 
+
+Putting all together (C5). Full NousDB contains all optimiza-tions leading to the following reductions: ×0.05–0 .18 on model calls, ×0.17–0 .41 on token consumption and ×0.18–0 .31 at wall clock with GPT-5.4-nano and ×0.57–0 .74 on IMDB with Qwen. On SemBench with Qwen, stays slower than C0 ( ×1.5) through SB1 and SB3, which C0 finishes in 2–12 s, but in this setting SB1 has a LIMIT operator on the query and the whole benchmark consists of single semantic operator queries, making the rewrites never ap-plied. On the joins Q3 and Q11, Qwen3-8B reaches its best F1 of the six configurations (0.759 and 0.789, from 0.114 and 0.582 in C0) at ×0.10 and ×0.15 of C0’s tokens. However, C5 is not the quality optimum everywhere: in 64-pair blocks GPT-5.4-nano’s joins fall to 0.467 on Q11 and 0.216 on SB7, from 0.819 (C3) and 0.591 (C0), which is what the certificate guards against. 
+
+## 5.5 Summary of Findings 
+
+From our evaluation we extracted the following findings: RQ1: 
+
+NousDB is the fastest system in every benchmark and model set-ting (up to 86 × and 1 .70–5 .25 × in geometric mean on JOB and STACK), spends the fewest tokens on 40 of 42 query cells, and a NousDB configuration is the most accurate in each. RQ2: Batch sizing cuts tokens to ×0.15–0 .32 of per-row execution without a context overflow, but changes up to 45% of the answers. The certifi-cate keeps at least 86% of them, and reasoning, affordable only when batched, raises quality. RQ3: Batch sizing carries the cost reduction, rewriting reduces the work itself, repartitioning lowers latency by spreading requests over all partitions, and the three compose. All optimizations together smoothen the weaknesses caused from each one separately, making NousDB optimizations work coopera-tively rather than competitively. RQ4: Pushdowns remove 20–47% of the tuples that reach a model and preserve the answers up to run-to-run noise, while fusion improves them (Q10’s F1 doubles with Qwen3-8B and quadruples with GPT-5.4-nano). 
+
+## 6 Conclusions 
+
+We presented an extended algebra for semantic query processing by formalizing semantic operators that compose with relational algebra, enabling semantic query rewriting and a system that im-plements it, NousDB. We showed that semantic analytics funda-mentally departs from classical optimization by shifting the unit of cost from rows to tokens, which introduces new challenges in batch sizing and parallel execution under token skew. We addressed these challenges with a token-based cost model, statistical guarantees for safe and accurate batching, and token-aware repartitioning, inte-grated into a modern query engine. Future work includes extending the algebra with additional semantic operators, incorporating qual-ity into cost models, and query optimization. 
+
+## References 
+
+[1] Eric Anderson, Jonathan Fritz, Austin Lee, Bohou Li, Mark Lindblad, Henry Lindeman, Alex Meyer, Parth Parmar, Tanvi Ranade, Mehul A Shah, et al. 2024. The design of an llm-powered unstructured analytics system. arXiv preprint arXiv:2409.00847 (2024). [2] AI Anthropic. 2024. The claude 3 model family: Opus, sonnet, haiku. Claude-3 Model Card 1, 1 (2024), 4. [3] Apache Software Foundation. 2026. Apache Arrow . https://arrow.apache.org/ [4] Mikhail Beck, Madeleine Knapp Corneli, Torsten Kilias, Marlene Kreß, Christoph Kuhnke, Marco Nätlitz, and Thomas Übensee. 2025. Exasol Text AI: In-Database NousDB - A Fast Query Engine for Semantic Analytics 
+
+Continuous Text Analytics. In INFORMATIK 2025 . Gesellschaft für Informatik eV, 1509. [5] Asim Biswal, Liana Patel, Siddarth Jha, Amog Kamsetty, Shu Liu, Joseph E Gonzalez, Carlos Guestrin, and Matei Zaharia. 2024. Text2sql is not enough: Unifying ai and databases with tag. arXiv preprint arXiv:2408.14717 (2024). [6] Zhoujun Cheng, Jungo Kasai, and Tao Yu. 2023. Batch Prompting: Efficient Infer-ence with Large Language Model APIs. In Conference on Empirical Methods in Nat-ural Language Processing . https://api.semanticscholar.org/CorpusID:256080546 [7] C. J. CLOPPER and E. S. PEARSON. 1934. THE USE OF CONFIDENCE OR FIDUCIAL LIMITS ILLUSTRATED IN THE CASE OF THE BINOMIAL. 
+
+Biometrika 26, 4 (12 1934), 404–413. https://doi.org/10.1093/biomet/26.4. 404 arXiv:https://academic.oup.com/biomet/article-pdf/26/4/404/823407/26-4-404.pdf [8] Peizhuang Cong, Qizhi Chen, Haochen Zhao, and Tong Yang. 2025. BATON: Enhancing Batch-wise Inference Efficiency for Large Language Models via Dy-namic Re-batching. In Proceedings of the ACM on Web Conference 2025 (Sydney NSW, Australia) (WWW ’25) . Association for Computing Machinery, New York, NY, USA, 2309–2318. https://doi.org/10.1145/3696410.3714950 [9] Hanjun Dai, Bethany Wang, Xingchen Wan, Bo Dai, Sherry Yang, Azade Nova, Pengcheng Yin, Mangpo Phothilimthana, Charles Sutton, and Dale Schuurmans. 2024. UQE: A Query Engine for Unstructured Databases. Advances in Neural Information Processing Systems 37 (2024), 29807–29838. [10] Victor Giannakouris. [n.d.]. SwellDB: GenAI-Native Query Processing via On-the-Fly Table Generation. Proceedings of the VLDB Endowment. ISSN 2150 ([n. d.]), 8097. [11] Parker Glenn, Parag Pravin Dakle, Liang Wang, and Preethi Raghavan. 2024. Blendsql: A scalable dialect for unifying hybrid question answering in relational algebra. arXiv preprint arXiv:2402.17882 (2024). [12] R. L. Graham. 1969. Bounds on Multiprocessing Timing Anomalies. SIAM J. Appl. Math. 17, 2 (1969), 416–429. https://doi.org/10.1137/0117039 arXiv:https://doi.org/10.1137/0117039 [13] Yuxing Han, Ziniu Wu, Peizhi Wu, Rong Zhu, Jingyi Yang, Liang Wei Tan, Kai Zeng, Gao Cong, Yanzhao Qin, Andreas Pfadler, Zhengping Qian, Jingren Zhou, Jiangneng Li, and Bin Cui. 2021. Cardinality estimation in DBMS: a comprehensive benchmark evaluation. Proc. VLDB Endow. 15, 4 (dec 2021), 752–765. https://doi.org/10.14778/3503585.3503586 [14] Benjamin Hättasch. 2021. WannaDB: Ad-hoc Structured Exploration of Text Collections Using Queries.. In DESIRES . 179–180. [15] Benjamin Hättasch, Jan-Micha Bodensohn, Liane Vogel, Matthias Urban, and Carsten Binnig. 2023. WannaDB: Ad-hoc SQL Queries over Text Collections. In 
+
+BTW 2023 . Gesellschaft für Informatik eV, 157–181. [16] Zhaoxuan Ji, Xinlu Wang, Zhaojing Luo, Zhongle Xie, and Meihui Zhang. 2025. Optimized Batch Prompting for Cost-Effective LLMs. Proc. VLDB Endow. 18, 7 (March 2025), 2172–2184. https://doi.org/10.14778/3734839.3734853 [17] Saehan Jo and Immanuel Trummer. 2023. Demonstration of thalamusdb: an-swering complex sql queries with natural language predicates on multi-modal data. In Companion of the 2023 International Conference on Management of Data .179–182. [18] Saehan Jo and Immanuel Trummer. 2024. Thalamusdb: Approximate query processing on multi-modal data. Proceedings of the ACM on Management of Data 
+
+2, 3 (2024), 1–26. [19] Daniel Kang, Edward Gan, Peter Bailis, Tatsunori Hashimoto, and Matei Zaharia. 2020. Approximate selection with guarantees using proxies. arXiv preprint arXiv:2004.00827 (2020). [20] Rohit Khoja, Devanshu Gupta, Yanjie Fu, Dan Roth, and Vivek Gupta. 2025. Weaver: Interweaving SQL and LLM for Table Reasoning. arXiv preprint arXiv:2505.18961 (2025). [21] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (Koblenz, Germany) (SOSP ’23) . Association for Computing Machinery, New York, NY, USA, 611–626. https://doi.org/10.1145/3600006.3613165 [22] Andrew Lamb, Yijie Shen, Daniël Heres, Jayjeet Chakraborty, Mehmet Ozan Kabak, Liang-Chi Hsieh, and Chao Sun. 2024. Apache Arrow DataFusion: A Fast, Embeddable, Modular Analytic Query Engine. In Companion of the 2024 International Conference on Management of Data (Santiago AA, Chile) (SIGMOD ’24) . Association for Computing Machinery, New York, NY, USA, 5–17. https: //doi.org/10.1145/3626246.3653368 [23] Jiale Lao, Andreas Zimmerer, Olga Ovcharenko, Tianji Cong, Matthew Russo, Gerardo Vitagliano, Michael Cochez, Fatma Özcan, Gautam Gupta, Thibaud Hottelier, H. V. Jagadish, Kris Kissel, Sebastian Schelter, Andreas Kipf, and Im-manuel Trummer. 2025. SemBench: A Benchmark for Semantic Query Processing Engines. arXiv:2511.01716 [cs.DB] https://arxiv.org/abs/2511.01716 [24] Viktor Leis, Andrey Gubichev, Atanas Mirchev, Peter Boncz, Alfons Kemper, and Thomas Neumann. 2015. How good are query optimizers, really? Proc. VLDB Endow. 9, 3 (Nov. 2015), 204–215. https://doi.org/10.14778/2850583.2850594 [25] Zequn Li, Yuanhao Zhong, Chengliang Chai, Zhaoze Sun, Yuhao Deng, Ye Yuan, Guoren Wang, and Lei Cao. 2025. DocDB: A Database for Unstructured Document Analysis. Proceedings of the VLDB Endowment 18, 12 (2025), 5387–5390. [26] Jianzhe Lin, Maurice Diesendruck, Liang Du, and Robin Abraham. 2024. Batch-prompt: Accomplish more with less. In International Conference on Learning Representations , Vol. 2024. 21590–21612. [27] Yiming Lin, Madelon Hulsebos, Ruiying Ma, Shreya Shankar, Sepanta Zeigham, Aditya G Parameswaran, and Eugene Wu. 2024. Towards accurate and efficient document analytics with large language models. arXiv preprint arXiv:2405.04674 
+
+(2024). [28] Chunwei Liu, Matthew Russo, Michael Cafarella, Lei Cao, Peter Baile Chen, Zui Chen, Michael Franklin, Tim Kraska, Samuel Madden, Rana Shahout, et al. 2025. Palimpzest: Optimizing ai-powered analytics with declarative query processing. In Proceedings of the Conference on Innovative Database Research (CIDR) . 2. [29] Chunwei Liu, Matthew Russo, Michael Cafarella, Lei Cao, Peter Baille Chen, Zui Chen, Michael Franklin, Tim Kraska, Samuel Madden, and Gerardo Vitagliano. 2024. A declarative system for optimizing ai workloads. arXiv preprint arXiv:2405.14696 (2024). [30] Jia-Yi Liu, Tinghan Yang, and Jennifer Neville. 2024. CliqueParcel: An Approach For Batching LLM Prompts That Jointly Optimizes Efficiency And Faithfulness. In SmaLLEXT@CIKM . https://api.semanticscholar.org/CorpusID:267897588 [31] Andrew L. Maas, Raymond E. Daly, Peter T. Pham, Dan Huang, Andrew Y. Ng, and Christopher Potts. 2011. Learning Word Vectors for Sentiment Analysis. In 
+
+Proceedings of the 49th Annual Meeting of the Association for Computational Lin-guistics: Human Language Technologies , Dekang Lin, Yuji Matsumoto, and Rada Mihalcea (Eds.). Association for Computational Linguistics, Portland, Oregon, USA, 142–150. https://aclanthology.org/P11-1015/ [32] Farhad Nooralahzadeh, Yi Zhang, Jonathan Furst, and Kurt Stockinger. 2024. Explainable Multi-Modal Data Exploration in Natural Language via LLM Agent. 
+
+arXiv preprint arXiv:2412.18428 (2024). [33] OpenAI, Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, Red Avila, Igor Babuschkin, Suchir Balaji, Valerie Balcom, Paul Baltescu, Haiming Bao, Mohammad Bavarian, Jeff Belgum, Irwan Bello, Jake Berdine, Gabriel Bernadett-Shapiro, Christopher Berner, Lenny Bog-donoff, Oleg Boiko, Madelaine Boyd, Anna-Luisa Brakman, Greg Brockman, Tim Brooks, Miles Brundage, Kevin Button, Trevor Cai, Rosie Campbell, An-drew Cann, Brittany Carey, Chelsea Carlson, Rory Carmichael, Brooke Chan, Che Chang, Fotis Chantzis, Derek Chen, Sully Chen, Ruby Chen, Jason Chen, Mark Chen, Ben Chess, Chester Cho, Casey Chu, Hyung Won Chung, Dave Cummings, Jeremiah Currier, Yunxing Dai, Cory Decareaux, Thomas Degry, Noah Deutsch, Damien Deville, Arka Dhar, David Dohan, Steve Dowling, Sheila Dunning, Adrien Ecoffet, Atty Eleti, Tyna Eloundou, David Farhi, Liam Fe-dus, Niko Felix, Simón Posada Fishman, Juston Forte, Isabella Fulford, Leo Gao, Elie Georges, Christian Gibson, Vik Goel, Tarun Gogineni, Gabriel Goh, Rapha Gontijo-Lopes, Jonathan Gordon, Morgan Grafstein, Scott Gray, Ryan Greene, Joshua Gross, Shixiang Shane Gu, Yufei Guo, Chris Hallacy, Jesse Han, Jeff Harris, Yuchen He, Mike Heaton, Johannes Heidecke, Chris Hesse, Alan Hickey, Wade Hickey, Peter Hoeschele, Brandon Houghton, Kenny Hsu, Shengli Hu, Xin Hu, Joost Huizinga, Shantanu Jain, Shawn Jain, Joanne Jang, Angela Jiang, Roger Jiang, Haozhun Jin, Denny Jin, Shino Jomoto, Billie Jonn, Heewoo Jun, Tomer Kaftan, Łukasz Kaiser, Ali Kamali, Ingmar Kanitscheider, Nitish Shirish Keskar, Tabarak Khan, Logan Kilpatrick, Jong Wook Kim, Christina Kim, Yongjik Kim, Jan Hendrik Kirchner, Jamie Kiros, Matt Knight, Daniel Kokotajlo, Łukasz Kon-draciuk, Andrew Kondrich, Aris Konstantinidis, Kyle Kosic, Gretchen Krueger, Vishal Kuo, Michael Lampe, Ikai Lan, Teddy Lee, Jan Leike, Jade Leung, Daniel Levy, Chak Ming Li, Rachel Lim, Molly Lin, Stephanie Lin, Mateusz Litwin, Theresa Lopez, Ryan Lowe, Patricia Lue, Anna Makanju, Kim Malfacini, Sam Manning, Todor Markov, Yaniv Markovski, Bianca Martin, Katie Mayer, Andrew Mayne, Bob McGrew, Scott Mayer McKinney, Christine McLeavey, Paul McMil-lan, Jake McNeil, David Medina, Aalok Mehta, Jacob Menick, Luke Metz, Andrey Mishchenko, Pamela Mishkin, Vinnie Monaco, Evan Morikawa, Daniel Mossing, Tong Mu, Mira Murati, Oleg Murk, David Mély, Ashvin Nair, Reiichiro Nakano, Rajeev Nayak, Arvind Neelakantan, Richard Ngo, Hyeonwoo Noh, Long Ouyang, Cullen O’Keefe, Jakub Pachocki, Alex Paino, Joe Palermo, Ashley Pantuliano, Giambattista Parascandolo, Joel Parish, Emy Parparita, Alex Passos, Mikhail Pavlov, Andrew Peng, Adam Perelman, Filipe de Avila Belbute Peres, Michael Petrov, Henrique Ponde de Oliveira Pinto, Michael, Pokorny, Michelle Pokrass, Vitchyr H. Pong, Tolly Powell, Alethea Power, Boris Power, Elizabeth Proehl, Raul Puri, Alec Radford, Jack Rae, Aditya Ramesh, Cameron Raymond, Francis Real, Kendra Rimbach, Carl Ross, Bob Rotsted, Henri Roussez, Nick Ryder, Mario Saltarelli, Ted Sanders, Shibani Santurkar, Girish Sastry, Heather Schmidt, David Schnurr, John Schulman, Daniel Selsam, Kyla Sheppard, Toki Sherbakov, Jessica Shieh, Sarah Shoker, Pranav Shyam, Szymon Sidor, Eric Sigler, Maddie Simens, Jordan Sitkin, Katarina Slama, Ian Sohl, Benjamin Sokolowsky, Yang Song, Na-talie Staudacher, Felipe Petroski Such, Natalie Summers, Ilya Sutskever, Jie Tang, Nikolas Tezak, Madeleine B. Thompson, Phil Tillet, Amin Tootoonchian, Eliza-beth Tseng, Preston Tuggle, Nick Turley, Jerry Tworek, Juan Felipe Cerón Uribe, Christos Tsapelas, Georgia Koutrika, and Yannis Ioannidis 
+
+Andrea Vallone, Arun Vijayvergiya, Chelsea Voss, Carroll Wainwright, Justin Jay Wang, Alvin Wang, Ben Wang, Jonathan Ward, Jason Wei, CJ Weinmann, Akila Welihinda, Peter Welinder, Jiayi Weng, Lilian Weng, Matt Wiethoff, Dave Willner, Clemens Winter, Samuel Wolrich, Hannah Wong, Lauren Workman, Sherwin Wu, Jeff Wu, Michael Wu, Kai Xiao, Tao Xu, Sarah Yoo, Kevin Yu, Qiming Yuan, Wojciech Zaremba, Rowan Zellers, Chong Zhang, Marvin Zhang, Shengjia Zhao, Tianhao Zheng, Juntang Zhuang, William Zhuk, and Barret Zoph. 2024. GPT-4 Technical Report. arXiv:2303.08774 [cs.CL] https://arxiv.org/abs/2303.08774 [34] Liana Patel, Negar Arabzadeh, Harshit Gupta, Ankita Sundar, Ion Stoica, Matei Zaharia, and Carlos Guestrin. 2025. DeepScholar-Bench: A Live Benchmark and Automated Evaluation for Generative Research Synthesis. arXiv preprint arXiv:2508.20033 (2025). [35] Liana Patel, Siddharth Jha, Parth Asawa, Melissa Pan, Carlos Guestrin, and Matei Zaharia. 2024. Semantic Operators: A Declarative Model for Rich, AI-based Analytics Over Text Data. arXiv:2407.11418 [cs.DB] https://arxiv.org/abs/2407. 11418 [36] Liana Patel, Siddharth Jha, Melissa Pan, Harshit Gupta, Parth Asawa, Carlos Guestrin, and Matei Zaharia. 2024. Semantic Operators: A Declarative Model for Rich, AI-based Data Processing. arXiv preprint arXiv:2407.11418 (2024). [37] Viswanath Poosala, Peter J. Haas, Yannis E. Ioannidis, and Eugene J. Shekita. 1996. Improved histograms for selectivity estimation of range predicates. SIGMOD Rec. 25, 2 (June 1996), 294–305. https://doi.org/10.1145/235968.233342 [38] Kangkang Qi, Dongyang Xie, Wenbo Li, Hao Zhang, Yuanyuan Zhu, Jeffrey Xu Yu, and Kangfei Zhao. 2026. Sema: A High-performance System for LLM-based Semantic Query Processing. PVLDB 19, 11 (2026), 3231–3244. https://doi.org/10. 14778/3836663.3836685 [39] Martin Raab and Angelika Steger. 1998. "Balls into Bins" - A Simple and Tight Analysis. In Proceedings of the Second International Workshop on Randomization and Approximation Techniques in Computer Science (RANDOM ’98) . Springer-Verlag, Berlin, Heidelberg, 159–170. [40] Matthew Russo, Sivaprasad Sudhir, Gerardo Vitagliano, Chunwei Liu, Tim Kraska, Samuel Madden, and Michael Cafarella. 2025. Abacus: A Cost-Based Optimizer for Semantic Operator Systems. arXiv preprint arXiv:2505.14661 (2025). [41] Mohammed Saeed, Nicola De Cao, and Paolo Papotti. 2023. Querying large language models with SQL. arXiv preprint arXiv:2304.00472 (2023). [42] Shreya Shankar, Tristan Chambers, Tarak Shah, Aditya G Parameswaran, and Eugene Wu. 2024. Docetl: Agentic query rewriting and evaluation for complex document processing. arXiv preprint arXiv:2410.12189 (2024). [43] Aaditya Singh, Adam Fry, Adam Perelman, Adam Tart, Adi Ganesh, Ahmed El-Kishky, Aidan McLaughlin, Aiden Low, AJ Ostrow, Akhila Ananthram, et al. 2025. Openai gpt-5 system card. arXiv preprint arXiv:2601.03267 (2025). [44] Ji Sun, Guoliang Li, Peiyao Zhou, Yihui Ma, Jingzhe Xu, and Yuan Li. 2025. Agenticdata: An agentic data analytics system for heterogeneous data. arXiv preprint arXiv:2508.05002 (2025). [45] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al. 2023. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 (2023). [46] Matthias Urban and Carsten Binnig. 2024. Efficient learned query execution over text and tables [technical report]. arXiv preprint arXiv:2410.22522 (2024). [47] Matthias Urban and Carsten Binnig. 2024. Eleet: Efficient learned query execution over text and tables. Proceedings of the VLDB Endowment 17, 13 (2024), 4867–4880. [48] Jiayi Wang, Yuan Li, Jianming Wu, Shihui Xu, and Guoliang Li. 2025. Unify: A System For Unstructured Data Analytics. Proceedings of the VLDB Endowment 
+
+18, 12 (2025), 5287–5290. [49] Tianqing Wang, Xun Xue, Guoliang Li, and Yong Wang. 2025. AnDB: Breaking Boundaries with an AI-Native Database for Universal Semantic Analysis. arXiv preprint arXiv:2502.13805 (2025). [50] Jingfei Wu, Chaoyuan Shen, Qiyan Deng, Yuping Wang, Jiajun Li, Yuhao Deng, and Minghe Yu. [n.d.]. TabAgent: A Multi-Agent Table Extraction Framework for Unstructured Documents. Proceedings of the VLDB Endowment. ISSN 2150 ([n. d.]), 8097. [51] Haotian Xu, Kangfei Zhao, and Jiadong Xie. 2026. Towards Cost-effective LLMs Routing with Batch Prompting. ArXiv abs/2605.28268 (2026). https: //api.semanticscholar.org/CorpusID:288701848 [52] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 (2025). [53] Sepanta Zeighami, Shreya Shankar, and Aditya Parameswaran. 2025. Cut Costs, Not Accuracy: LLM-Powered Data Processing with Guarantees. Proc. ACM Manag. Data 3, 6, Article 311 (Dec. 2025), 26 pages. https://doi.org/10.1145/ 3769776 [54] Hengrui Zhang, Yulong Hui, Yihao Liu, and Huanchen Zhang. 2025. ScaleDoc: Scaling LLM-based Predicates over Large Document Collections. arXiv preprint arXiv:2509.12610 (2025). [55] Fuheng Zhao, Divyakant Agrawal, and Amr El Abbadi. 2024. Hybrid query-ing over relational databases and large language models. arXiv preprint arXiv:2408.00884 (2024). [56] Yuanhao Zhong, Yuhao Deng, Chengliang Chai, Ruixin Gu, Ye Yuan, Guoren Wang, and Lei Cao. 2025. Doctopus: A System for Budget-aware Structural Data Extraction from Unstructured Documents. In Companion of the 2025 International Conference on Management of Data . 275–278.

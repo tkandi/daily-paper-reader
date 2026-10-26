@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-25</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-26</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 14 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-25 19:16:08 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-26 19:52:09 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日完成14篇论文筛选，聚焦生成式AI部署、RDMA可观测性与高效多模态模型。</p>
-<p>最值得关注的是FlowMaker对低成本生成式AI工作流部署的优化，以及SigmaTrace对CPU/GPU发起RDMA通信的跨库观测能力。</p>
-<p>建议普通读者优先精读这两篇，再按兴趣速览视觉Token裁剪和语言模型并行推理方向。</p>
+<p>今日精选17篇论文，聚焦大模型训练与服务扩展，其中6篇进入精读。</p>
+<p>最值得关注的是长上下文稀疏注意力训练扩展（HyScale）与边缘端大模型训练普及，KV Cache 存储优化也值得速览。</p>
+<p>建议普通读者先读两篇9分精读把握主线，再按需关注推理服务中的 KV 缓存管理。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SigmaTrace: Library-Agnostic Observability for CPU/GPU-Initiated RDMA Communication">SigmaTrace: Library-Agnostic Observability for CPU/GPU-Initiated RDMA Communication</span></li><li><span class="dpr-home-dashboard-paper-title" title="FlowMaker: From Tasks to Cost-Efficient Generative AI Workflow Deployments">FlowMaker: From Tasks to Cost-Efficient Generative AI Workflow Deployments</span></li><li><span class="dpr-home-dashboard-paper-title" title="AgentDP: Towards Automated Model Deployment for Heterogeneous Embedded AI Applications">AgentDP: Towards Automated Model Deployment for Heterogeneous Embedded AI Applications</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HyScale: Scaling Long-Context Training for Learned Sparse Attention">HyScale: Scaling Long-Context Training for Learned Sparse Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Democratizing LLM Training with the Edge: Challenges, Systems, and the Road Ahead">Democratizing LLM Training with the Edge: Challenges, Systems, and the Road Ahead</span></li><li><span class="dpr-home-dashboard-paper-title" title="InferSlice: A Reference Architecture for SLO-driven LLM Inference over a Telco Wide-Area Network">InferSlice: A Reference Architecture for SLO-driven LLM Inference over a Telco Wide-Area Network</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -96,7 +96,7 @@
     <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Hierarchical and Query-Aware Visual Token Pruning for High-Resolution LVLMs">Hierarchical and Query-Aware Visual Token Pruning for High-Resolution LVLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Torch-DPhys: A Torch-Native, MOOSE-Compatible Framework for Differentiable Physics Simulation and Hybrid Machine Learning Integration">Torch-DPhys: A Torch-Native, MOOSE-Compatible Framework for Differentiable Physics Simulation and Hybrid Machine Learning Integration</span></li><li><span class="dpr-home-dashboard-paper-title" title="Dual-Slot: From Serial Loops to Parallel Slots in Language Models">Dual-Slot: From Serial Loops to Parallel Slots in Language Models</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KVStream: Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving">KVStream: Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="RAFT: Redundancy-Aware Input Filtering for Temporal Graph Neural Network Training">RAFT: Redundancy-Aware Input Filtering for Temporal Graph Neural Network Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Scaling Synthetic Pre-training Data and Evaluation for Indic LLMs">Scaling Synthetic Pre-training Data and Evaluation for Indic LLMs</span></li></ul>
   </div>
   <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
