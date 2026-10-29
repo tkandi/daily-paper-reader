@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-26</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-29</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 17 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-26 19:52:09 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-29 18:41:00 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精选17篇论文，聚焦大模型训练与服务扩展，其中6篇进入精读。</p>
-<p>最值得关注的是长上下文稀疏注意力训练扩展（HyScale）与边缘端大模型训练普及，KV Cache 存储优化也值得速览。</p>
-<p>建议普通读者先读两篇9分精读把握主线，再按需关注推理服务中的 KV 缓存管理。</p>
+<p>今日速读聚焦 Transformer 理论、联邦学习个性化与可扩展稀疏预训练三条主线。</p>
+<p>最值得关注的是 Transformer 的精确编译与注意力聚类机制，以及用支持度自适应统计个性化提升联邦学习全局共识。</p>
+<p>建议普通读者优先从 Transformer 理论和联邦学习两篇入手，结合自身场景判断其对模型效率与协作训练的启发。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">0 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HyScale: Scaling Long-Context Training for Learned Sparse Attention">HyScale: Scaling Long-Context Training for Learned Sparse Attention</span></li><li><span class="dpr-home-dashboard-paper-title" title="Democratizing LLM Training with the Edge: Challenges, Systems, and the Road Ahead">Democratizing LLM Training with the Edge: Challenges, Systems, and the Road Ahead</span></li><li><span class="dpr-home-dashboard-paper-title" title="InferSlice: A Reference Architecture for SLO-driven LLM Inference over a Telco Wide-Area Network">InferSlice: A Reference Architecture for SLO-driven LLM Inference over a Telco Wide-Area Network</span></li></ul>
+<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>6</strong></span></div>
+
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -93,12 +93,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">11 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KVStream: Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving">KVStream: Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="RAFT: Redundancy-Aware Input Filtering for Temporal Graph Neural Network Training">RAFT: Redundancy-Aware Input Filtering for Temporal Graph Neural Network Training</span></li><li><span class="dpr-home-dashboard-paper-title" title="Scaling Synthetic Pre-training Data and Evaluation for Indic LLMs">Scaling Synthetic Pre-training Data and Evaluation for Indic LLMs</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Transformers as Generic Deep Neural Networks: Exact Compilation, the Cost of Removing Activation-Activation Products, and Multi-Agent Attention Clustering">Transformers as Generic Deep Neural Networks: Exact Compilation, the Cost of Removing Activation-Activation Products, and Multi-Agent Attention Clustering</span></li><li><span class="dpr-home-dashboard-paper-title" title="Is High Local Accuracy Enough? Geometric Consensus with Support-Adaptive Statistical Personalization for Federated Learning">Is High Local Accuracy Enough? Geometric Consensus with Support-Adaptive Statistical Personalization for Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Nested Sparsity for Scalable Pretraining and Continual Learning">Nested Sparsity for Scalable Pretraining and Continual Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>7</strong></span></div>
 </section>
 </div>
 

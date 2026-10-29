@@ -1,0 +1,2554 @@
+SPARE: Sparsity Allocation via Routing Entropy for Efficient MoEs
+Yifan Yang
+Hanling Yi
+Dongquan Yang
+Feng Lin
+Rong Xiao
+Aijun Li
+Xiaotian Yu
+Intellifusion Inc.
+Abstract
+Mixture-of-Experts (MoE) architectures scale
+model capacity efficiently, yet their substan-
+tial memory footprint poses a major barrier
+to deployment. Expert pruning reduces this
+footprint, but most methods focus on which ex-
+perts to remove and prune every layer equally.
+We propose SPARE (Sparsity Allocation via
+Routing Entropy), a training-free, selector-
+agnostic method that decides how many ex-
+perts to remove from each layer using routing
+entropy, the entropy of tokens’ normalized Top-
+K gate weights on calibration data. When a
+token’s gate weight is spread evenly, removing
+one active expert discards little of it, so SPARE
+prunes layers with more diffuse routing more
+aggressively. A perturbation bound under ran-
+dom pruning formalizes this intuition, and con-
+trolled interventions with a fixed selector link
+concentrated routing to larger output changes.
+With the same selector and budget, SPARE im-
+proves average accuracy over uniform alloca-
+tion on Mixtral, Qwen3, and DeepSeek mod-
+els, especially at high pruning ratios. At 50%
+expert pruning, it raises the eight-task aver-
+age of Qwen3-30B-A3B from 57.2% to 63.8%,
+and the math, code, and science average of
+DeepSeek-R1 from 80.1 to 82.8.
+1
+Introduction
+The pursuit of stronger reasoning capabilities has
+pushed Large Language Models (LLMs) to the
+trillion-parameter scale, incurring prohibitive com-
+putational costs. The Mixture-of-Experts (MoEs)
+architecture addresses this challenge through con-
+ditional computation, which activates only a sparse
+subset of parameters per input token (Shazeer et al.,
+2017; Lepikhin et al., 2020; Fedus et al., 2022; Dai
+et al., 2024). While conditional computation drasti-
+cally reduces FLOPs, the memory overhead neces-
+sitates loading the full set of experts. Furthermore,
+the requirement to distribute these experts across
+devices complicates the communication topology,
+leading to efficiency bottlenecks. This highlights
+the urgent need for compression techniques capable
+of shrinking pre-trained MoEs.
+To address this, recent research has focused on
+expert pruning, which removes entire experts to
+reduce model size. Existing approaches usually
+estimate an expert-level importance score from
+activation frequency, routing statistics, or recon-
+struction error (Dong et al., 2025; Lasby et al.,
+2025). These scores provide useful criteria for
+selecting experts within a layer. However, using
+expert importance directly for cross-layer pruning
+is less reliable. Scores computed in different lay-
+ers are not necessarily calibrated, since activation
+scales, expert functions, and token distributions
+vary across depth. The calibration domain can fur-
+ther change which experts appear important. As
+a result, globally ranking experts across all layers
+may over-prune sensitive layers (Chowdhury et al.,
+2024; Lasby et al., 2025).
+This limitation comes from conflating two de-
+cisions: inter-layer allocation, which determines
+how many experts to remove from each layer under
+a global budget, and intra-layer selection, which
+determines which experts to remove within a layer.
+Existing criteria such as REAP and EASY-EP ad-
+dress the second; SPARE addresses the first and
+can be paired with any of them. Non-uniform al-
+location has been explored in dense LLMs (Men
+et al., 2025; Yin et al., 2024) and, more recently,
+in MoE expert pruning (Yang et al., 2024; Li et al.,
+2026), using signals such as calibration loss or
+expert-usage frequency. SPARE instead allocates
+budgets by how gate weight is distributed among
+each token’s active experts, a training-free signal
+distinct from usage statistics across inputs.
+To capture these routing dynamics, we use rout-
+ing entropy: the Shannon entropy of each token’s
+normalized Top-K gate weights, averaged over cal-
+ibration tokens. As illustrated in Figure 1, high-
+entropy layers spread gate weight broadly among
+1
+arXiv:2610.29662v1  [cs.LG]  21 Oct 2026
+
+
+the active experts, so removing one active expert
+discards only a small share of each token’s weight,
+which is then reassigned to the remaining experts.
+Low-entropy layers concentrate weight on fewer
+experts, suggesting stronger input-conditioned spe-
+cialization and making aggressive pruning riskier.
+This signal is layer-level rather than expert-level:
+it assumes neither that particular experts are in-
+dispensable nor that the same experts are selected
+across domains. Although expert identities shift be-
+tween web text, code, math, and science, layer-wise
+entropy rankings remain stable across calibration
+domains, making them a robust basis for allocation.
+Leveraging this insight, we introduce SPARE,
+a training-free sparsity allocation framework that
+assigns non-uniform pruning budgets across MoE
+layers. Our main contributions are:
+• Entropy-guided, plug-and-play allocation. We
+formulate MoE expert pruning as an inter-layer
+budget allocation problem and replace uniform
+allocation with entropy-aware budgets. SPARE
+decides how many experts to prune in each layer,
+while existing criteria such as REAP and EASY-
+EP decide which ones, without retraining or mod-
+ifying the router.
+• Theoretical foundation. We derive a perturba-
+tion bound that, under uniform random pruning,
+grows with the routing entropy gap. The analysis
+provides a layer-level sensitivity signal and an
+existence argument for deterministic masks.
+• Empirical validation. With the same selector
+and budget, SPARE improves average accuracy
+over uniform allocation on Mixtral, Qwen3, and
+DeepSeek models, especially at high pruning ra-
+tios. At 50% expert pruning, it raises the eight-
+task average of Qwen3-30B-A3B from 57.2% to
+63.8%, and the math, code, and science average
+of DeepSeek-R1 from 80.1 to 82.8.
+2
+Related Work
+Routing Heterogeneity.
+MoEs scale model ca-
+pacity through conditional computation (Shazeer
+et al., 2017; Fedus et al., 2022). Despite load-
+balancing objectives, expert behavior can remain
+non-uniform: Su et al. (2025) identify “super-
+experts” that produce extreme activation outliers,
+and Lo et al. (2024) examine relationships between
+routing weights and expert outputs. These obser-
+vations motivate studying routing heterogeneity
+across layers.
+Expert Pruning and Compression.
+Expert prun-
+ing reduces the memory footprint of pretrained
+MoEs.
+Selection criteria use routing statis-
+tics (Dong et al., 2025; Koishekenov et al., 2023),
+router-weighted activation saliency (Lasby et al.,
+2025), or reconstruction loss (Lu et al., 2024);
+EEP (Liu et al., 2024) instead uses evolutionary
+search. Shapley-MoE (Huang et al., 2025) ranks
+experts globally across layers via router-guided
+sampling; we exclude it from comparisons under
+fixed layer budgets, which would alter its selec-
+tion rule. Chowdhury et al. (2024) provide a prun-
+ing guarantee for fine-tuned sparse MoEs based on
+changes in router distributions. SEER-MoE (Muzio
+et al., 2024), MoE-SVD (Li et al., 2025), and
+AdaWhiten (Anonymous, 2026) explore further
+pruning and decomposition strategies, alongside
+task-specific pruning (Chen et al., 2022) and bench-
+marks such as MC-Suite (Jaiswal et al., 2025). Ex-
+pert merging, skipping, dynamic Top-K routing,
+and intra-expert pruning (Xie et al., 2024) oper-
+ate at other granularities; SPARE instead targets
+budget allocation.
+Layer-wise Sparsity Allocation.
+In dense LLMs,
+ShortGPT (Men et al., 2025) studies block re-
+moval, whereas OWL (Yin et al., 2024) allocates
+weight sparsity using activation-aware outlier statis-
+tics.
+SlimGPT (Ling et al., 2024) also adopts
+non-uniform pruning schedules. For MoEs, MoE-
+I2 (Yang et al., 2024) estimates layer importance
+from calibration losses after removing individual
+experts, assigns non-uniform pruning ratios, and
+selects experts through genetic and block-wise
+search; its full pipeline additionally includes low-
+rank decomposition and LoRA recovery. C-GNN-
+PRUNE (Li et al., 2026) computes the entropy of
+expert-selection frequencies pooled over calibra-
+tion samples and retains more experts in layers
+with higher usage entropy. Its expert-selection pro-
+cedure uses learned graph embeddings. SPARE
+averages, over tokens, the entropy of each token’s
+normalized Top-K gate weights and prunes more
+experts in layers with higher gate entropy. Usage
+entropy describes how broadly expert identities
+are used across inputs; gate entropy describes how
+evenly weight is spread among the experts active
+for a single token. The rules therefore treat high en-
+tropy in opposite ways without contradiction: they
+measure different distributions. SPARE contributes
+this routing signal and a selector-independent allo-
+cation rule.
+2
+
+
+Figure 1: Visualization of routing heterogeneity and domain sensitivity on Qwen3-30B-A3B. Left: gating dis-
+tributions for two representative tokens at selected layers. These single-token examples illustrate diffuse and
+concentrated routing; quantitative analyses use layer-aggregated statistics. Right: expert selection frequencies
+on C4 and CodeAlpaca. The selected expert identities can differ substantially across domains, which makes
+pruning directly from single-domain expert frequencies brittle. SPARE instead uses layer-wise routing entropy, an
+aggregated concentration statistic, to guide inter-layer sparsity allocation.
+3
+Routing Entropy and Heterogeneity of
+MoE Layers
+We analyze layer-wise routing heterogeneity in
+MoEs and define routing entropy as the signal used
+by SPARE for inter-layer budget allocation.
+3.1
+Problem Formulation
+Consider an MoE layer ℓwith N experts. For token
+x, the router selects the Top-K expert set Tℓ(x) and
+computes the normalized gating distribution
+gℓ,j(x) =
+exp(zℓ,j(x))
+P
+t∈Tℓ(x) exp(zℓ,t(x))1{j ∈Tℓ(x)}.
+(1)
+Let m = [m0, . . . , mL−1]⊤denote the layer-wise
+pruning profile, where mℓis the number of ex-
+perts removed from layer ℓ. Given a global target
+Mtarget, SPARE solves the inter-layer allocation
+problem
+L−1
+X
+ℓ=0
+mℓ= Mtarget,
+0 ≤mℓ≤N −K, (2)
+while leaving the intra-layer choice of removed
+experts to an expert-ranking rule such as EASY-
+EP (Dong et al., 2025) or REAP (Lasby et al.,
+2025).
+3.2
+Routing Entropy Gap
+For each token, we define the Top-K routing en-
+tropy as
+Hℓ(x) = −
+X
+j∈Tℓ(x)
+gℓ,j(x) log gℓ,j(x).
+(3)
+The layer-average entropy and routing entropy gap
+are
+¯Hℓ= Ex∼D[Hℓ(x)],
+Sℓ= log K −¯Hℓ. (4)
+Equivalently,
+Sℓ= Ex∼D
+
+DKL
+ gℓ(x)
+uTℓ(x)
+
+,
+(5)
+where uTℓ(x) is the uniform distribution over the
+active experts. A larger Sℓmeans sharper routing
+concentration and motivates a more conservative
+pruning budget.
+3.3
+Layer-wise Routing Heterogeneity
+Figure 1 shows that gating concentration varies
+across layers (left), while selected expert identities
+vary across domains (right). SPARE therefore allo-
+cates budgets with the layer-level statistic ¯Hℓrather
+than domain-specific expert frequencies. Routing
+entropy indicates how much gate weight a token
+3
+
+
+loses when an active expert is removed, but not
+whether the remaining experts can compensate, so
+we test pruning tolerance directly.
+We divide the 48 layers of Qwen3-30B-A3B into
+entropy terciles and use REAP to prune 50% of
+experts within one tercile at a time, removing about
+16.7% of all routed experts. From an unpruned
+eight-task average of 72.1%, pruning the high-,
+medium-, and low-entropy terciles yields 68.2%,
+67.2%, and 66.4%, respectively, supporting entropy
+as a pruning-tolerance signal in this setting (see
+also Sections 6.3 and 6.6).
+4
+Theoretical Analysis: Routing-Entropy
+Perturbation Bounds
+We analyze how routing entropy can guide the allo-
+cation of a fixed expert-pruning budget across lay-
+ers. Under the stated routing and bounded-output
+assumptions, we first bound the output perturba-
+tion for any fixed pruning mask using the routing
+mass assigned to removed experts. For uniform
+random pruning, this bound takes an explicit form
+involving the routing entropy gap. We then give
+a sufficient condition under which a deterministic
+expert selector inherits the same entropy-dependent
+bound, with an additive term when the condition
+holds approximately. Finally, we describe how lo-
+cal pruning perturbations propagate through the
+network.
+4.1
+Single-Layer Pruning Perturbation
+Consider a layer ℓwith output yℓ(x)
+=
+P
+j gℓ,j(x)fℓ,j(x).
+After
+removing
+P
+⊆
+{1, . . . , N}, |P| = m ≤N −K, we recom-
+pute Top-K among remaining experts with un-
+changed logits and fixed tie-breaking, then apply
+softmax on the new support to obtain g(P)
+ℓ
+. Write
+y(P)
+ℓ
+(x) = P
+j g(P)
+ℓ,j (x)fℓ,j(x) and δℓ(x, P) =
+y(P)
+ℓ
+(x) −yℓ(x).
+The following lemma quantifies the routing
+change.
+Lemma 4.1 (Exact ℓ1 Identity under Top-K
+Rerouting). Let Eℓ(x, P) ≜P
+j∈Tℓ(x)∩P gℓ,j(x)
+be the probability mass assigned to pruned experts.
+The ℓ1 distance between the original and pruned
+gating distributions satisfies:
+g(P)
+ℓ
+(x) −gℓ(x)
+
+1 = 2 Eℓ(x, P).
+(6)
+Proof. The new softmax normalizer cannot in-
+crease, so surviving original Top-K weights can-
+not decrease. Unpruned experts gain exactly the
+removed mass Eℓ, yielding an ℓ1 change of 2Eℓ
+(Appendix C.3).
+We first separate the mask-wise perturbation
+bound from the distribution used to select prun-
+ing masks.
+Proposition 4.2 (Perturbation bound for arbitrary
+selectors). Fix 0 ≤m ≤N −K and let Pℓ,m con-
+tain all size-m pruning masks. Under the rerouting
+rule in Appendix C.1.5 and bounded expert outputs
+∥fℓ,j(x)∥1 ≤Bℓ, every admissible P and x satisfy
+∥δℓ(x, P)∥2
+1 ≤4B2
+ℓEℓ(x, P)2.
+(7)
+Condition on fixed calibration data. For any token-
+independent distribution qℓon Pℓ,m, let Mℓ(qℓ) =
+Ex,P∼qℓ[Eℓ(x, P)2]. Then
+Ex,P∼qℓ[∥δℓ(x, P)∥2
+1] ≤4B2
+ℓMℓ(qℓ).
+(8)
+A deterministic selector has qℓ(P) = 1{P = PA}.
+Uniform random pruning gives a closed-form
+special case of Proposition 4.2.
+Theorem 4.3 (Expected perturbation under random
+pruning). Under Proposition 4.2’s assumptions, let
+P ∼Unif(Pℓ,m) independently of x. Then
+Ex,P
+
+∥δℓ(x, P)∥2
+1
+
+≤4B2
+ℓ
+
+c0(m, N)
++ c1(m, N)
+ 1
+K + 2Sℓ
+
+,
+(9)
+where
+c0(m, N) = m(m −1)
+N(N −1),
+c1(m, N) = m(N −m)
+N(N −1) .
+and Sℓ= log K −¯Hℓis the routing entropy gap.
+The proof combines the uniform-subset sec-
+ond moment with Pinsker’s inequality; see Ap-
+pendix C.3.
+Corollary 4.4 (Entropy bound for deterministic
+selectors). Under the same assumptions, write
+Ψℓ(m) for the bracketed term in Eq. (9) and let
+Uℓ,m = Unif(Pℓ,m). If a deterministic selector
+returns PA satisfying
+Ex[Eℓ(x, PA)2] ≤Mℓ(Uℓ,m)
++ εA,ℓ,
+(10)
+for some εA,ℓ≥0. Then
+Ex[∥δℓ(x, PA)∥2
+1] ≤4B2
+ℓ
+ Ψℓ(m)
++ εA,ℓ
+
+.
+(11)
+4
+
+
+If this second moment is no greater than the uni-
+form random pruning baseline, εA,ℓ= 0 suffices.
+Proofs of Proposition 4.2 and Corollary 4.4 are
+in Appendix C.3. The condition in Eq. (10) is not
+established for REAP or EASY-EP.
+4.2
+End-to-End Propagation as a Weighting
+Factor
+Consider an L-layer residual network with origi-
+nal states hℓ, pruned states ˆhℓ, and identical ini-
+tial states. Assume deterministic Lipschitz con-
+stants λℓhold uniformly over admissible masks
+on a common domain containing both trajectories.
+Unrolling the error recursion gives:
+Proposition 4.5 (Propagation decomposition). For
+any fixed sequence of pruning masks {Pℓ}L−1
+ℓ=0 ,
+∥ˆhL −hL∥1 ≤
+L−1
+X
+ℓ=0
+Γℓ∥δℓ(hℓ, Pℓ)∥1,
+Γℓ= α
+L−1
+Y
+k=ℓ+1
+(1 + αλk).
+(12)
+The proof follows by discrete Gronwall un-
+rolling; see Appendix C.4. Taking expectations
+and applying Proposition 4.2 yields
+E∥ˆhL −hL∥1 ≤2
+L−1
+X
+ℓ=0
+ΓℓBℓ
+p
+Mℓ(qℓ).
+(13)
+Here Mℓuses the original layer-input distribution,
+with masks independent of the evaluation input
+given fixed calibration data. Its bound is Ψℓ(mℓ)
+for uniform random pruning and Ψℓ(mℓ) + εA,ℓ
+under Eq. (10). The decomposition motivates a
+propagation regularizer, without identifying an ex-
+act estimator of Γℓ.
+4.3
+Implications for Pruning Strategy
+For fixed (m, N, K, Bℓ) and selector residual, the
+bound increases with Sℓ= log K −¯Hℓ. SPARE
+does not minimize the summed bound; it uses Sℓ
+as a layer-ranking signal and ignores the layer-
+dependent scale Bℓ. The allocation score in Sec-
+tion 5 is therefore a heuristic.
+Since exact Lipschitz products are intractable
+for large MoEs, SPARE uses a cosine-based proxy
+as an empirical propagation regularizer; entropy
+remains the primary allocation signal.
+5
+Entropy-Aware Sparsity Allocation
+SPARE converts layer-wise routing entropy into
+an integer pruning profile under the global bud-
+get. It uses entropy as the primary signal and an
+optional propagation-aware term as a lightweight
+regularizer.
+5.1
+Entropy-Based Allocation Score
+Since Sℓ= log K −¯Hℓ, smaller entropy gap is
+equivalent to larger routing entropy. We therefore
+define the normalized allocation score
+Rℓ=
+¯Hℓ−mink ¯Hk
+maxk ¯Hk −mink ¯Hk
+.
+(14)
+Layers with larger Rℓare assigned larger pruning
+budgets. A contrast coefficient p controls the sharp-
+ness of allocation:
+W(ℓ)
+base = (Rℓ)p.
+(15)
+5.2
+Propagation-Aware Regularization
+Equation (12) motivates accounting for down-
+stream propagation, but exact Lipschitz products
+are intractable for large MoEs. We use cosine sim-
+ilarity only as a data-dependent proxy. Let ck be
+the average cosine similarity between the input and
+output activations of layer k. We define
+Dℓ=
+L−1
+X
+k=ℓ+1
+(1 −ck),
+ϕ(ℓ)
+stab = exp(−βDℓ).
+(16)
+This term mildly reduces the pruning weight of lay-
+ers whose perturbations pass through more transfor-
+mative downstream blocks. When β = 0, SPARE
+reduces to entropy-only allocation.
+5.3
+Discrete Budget Projection
+The final continuous allocation weight is
+Wℓ= W(ℓ)
+baseϕ(ℓ)
+stab.
+(17)
+We convert {Wℓ} into an integer pruning profile by
+solving for a global scaling factor λ∗:
+L−1
+X
+ℓ=0
+PZ (λ∗Wℓ) = Mtarget,
+(18)
+where PZ(·) rounds to the nearest feasible integer
+under 0 ≤mℓ≤N −K. Since the left-hand side
+is monotone in λ∗, we solve it by bisection and
+obtain the final profile m.
+5
+
+
+6
+Experiments
+We ask three questions: (RQ1) Does entropy-
+guided allocation improve benchmark performance
+over uniform allocation at the same pruning bud-
+get? (RQ2) Does the gain persist across the eval-
+uated expert selectors, and does entropy correlate
+with pruning risk when the selector is fixed? (RQ3)
+How stable are entropy profiles across calibration
+domains, and how does non-uniform allocation af-
+fect throughput in the tested implementation?
+6.1
+Experimental Setup
+Models.
+We
+evaluate
+Mixtral-8x7B-
+Instruct-v0.1,
+Qwen3-30B-A3B,
+Qwen3-235B-A22B, and DeepSeek-R1.
+Benchmarks.
+We assess capabilities across four
+distinct domains:
+(i) Multiple-choice tasks:
+MMLU (Hendrycks et al., 2020), ARC-Challenge
+(ARC-c) / ARC-Easy (ARC-e) (Clark et al.,
+2018), BoolQ (Clark et al., 2019), HellaSwag
+(Hella) (Zellers et al., 2019), OpenBookQA
+(OBQA) (Mihaylov et al., 2018), Recognizing Tex-
+tual Entailment Challenge (RTE) (Bentivogli et al.,
+2009), and WinoGrande (WinG) (Sakaguchi et al.,
+2021); (ii) Reasoning: MATH-500 (Lightman
+et al., 2024); (iii) Science question answering:
+GPQA-Diamond (Rein et al., 2023); and (iv) Code:
+LiveCodeBench (Jain et al., 2025).
+Calibration.
+For Mixtral and Qwen3-30B-A3B,
+we use a calibration set of 1024 randomly sampled
+sequences from C4 to estimate layer-average rout-
+ing entropy ( ¯Hℓ). For large-scale reasoning models
+such as DeepSeek-R1, we sample 25 instances each
+from AIME (math), LiveCodeBench (code), and
+GPQA (science).
+Baselines and Protocols.
+To disentangle the ben-
+efits of sparsity allocation from expert selection,
+we structure our comparison along two orthogo-
+nal dimensions. 1) Intra-layer Expert Ranking:
+Determines expert priority within a layer. We em-
+ploy: (i) Random; (ii) EASY-EP (Dong et al., 2025);
+and (iii) REAP (Lasby et al., 2025). 2) Inter-layer
+Sparsity Allocation: Determines the pruning bud-
+get mℓper layer. We compare: (i) Uniform; (ii)
+OWL (Yin et al., 2024); and (iii) SPARE.
+6.2
+Main Results
+Table 1 shows improvements in macro-average ac-
+curacy in all ten evaluated combinations of model,
+pruning ratio, and intra-layer selector. The largest
+gain occurs on Qwen3-30B-A3B at 50% pruning:
+with EASY-EP fixed, SPARE raises mean accuracy
+from 57.2% to 63.8%, a gain of 6.6 percentage
+points. At the same pruning ratio, gains with Ran-
+dom and REAP are 0.9 and 2.3 points, respectively,
+showing that the benefit depends on the selector.
+Improvements at 25% pruning are smaller, ranging
+from 0.1 to 0.7 points.
+6.3
+Controlled Analysis of Pruning Risk
+Entropy groups with a fixed selector.
+On
+Mixtral-8×7B, we estimate routing entropy us-
+ing 128 C4 samples and divide layers into high-
+, middle-, and low-entropy groups. Within each
+group, we use the same selector, REAP, to prune
+four of the eight experts per layer while retaining
+the expert with the highest REAP score. Table 3
+reports normalized output perturbation on held-out
+samples. The low-entropy group has higher per-
+turbation than the high-entropy group in all three
+domains, although the middle group does not fol-
+low a uniformly monotonic ordering. The point
+estimates indicate an association under this selec-
+tion procedure.
+Single-layer pruning and output-distribution
+changes.
+We next test whether this association
+holds when each layer is pruned in isolation. For
+each MoE layer, we remove its lowest-saliency
+experts under REAP, with saliency estimated on
+C4, while keeping all other layers intact; the prun-
+ing ratios in Table 4 apply only to the intervened
+layer. We measure the resulting output-distribution
+change on C4, Math, Code, and MMLU with KL
+divergence truncated to the unpruned model’s top-
+64 tokens, and summarize each layer by its mean
+over the four domains and by its worst (maxi-
+mum) domain. We define routing concentration
+as Cℓ= 1 −¯Hℓ/ log K = Sℓ/ log K, so a larger
+Cℓcorresponds to lower routing entropy. In both
+models, at both pruning ratios, and under both ag-
+gregations, the correlation between Cℓand pruning-
+induced KL is positive, ranging from 0.26 to 0.45.
+These correlations are moderate: routing concen-
+tration accounts for only part of the layer-to-layer
+variation in pruning risk. We therefore use it to
+rank layers for budget allocation, not to predict the
+perturbation of an individual layer.
+6
+
+
+Table 1: Benchmark accuracy (%) and unweighted eight-task averages under expert pruning. PR denotes the global
+pruning ratio. Inter.: uniform (Uni.) or SPARE budget allocation. Intra.: Random, REAP, or EASY-EP expert
+selection. Bold indicates the best score within each model/PR setting; gains in Avg. compare SPARE with uniform
+allocation using the same selector.
+Model
+PR
+Inter.
+Intra.
+ARC-c ARC-e BoolQ Hella MMLU OBQA RTE WinG
+Avg.↑
+Mixtral-8x7B
+-Instruct-v0.1
+0%
+Baseline
+65.0
+84.2
+88.7
+86.1
+69.1
+49.6
+72.2
+74.0
+73.6
+25%
+Uni.
+Random
+59.6
+81.4
+86.9
+82.9
+62.7
+46.8
+71.1
+75.6
+70.9
+REAP
+60.6
+80.7
+87.5
+83.5
+63.3
+48.6
+71.9
+70.9
+70.9
+SPARE
+Random
+60.1
+81.9
+87.1
+83.2
+63.1
+47.5
+71.9
+75.8
+71.3 (↑0.4)
+REAP
+61.8
+81.5
+87.9
+84.0
+64.5
+49.2
+71.9
+72.1
+71.6 (↑0.7)
+50%
+Uni.
+Random
+51.4
+73.3
+81.5
+75.7
+52.1
+41.0
+70.2
+69.5
+64.3
+REAP
+50.9
+76.2
+85.3
+78.1
+51.9
+44.6
+71.6
+72.5
+66.4
+SPARE
+Random
+50.9
+75.5
+81.7
+77.2
+54.4
+42.0
+70.8
+70.2
+65.3 (↑1.0)
+REAP
+53.6
+78.4
+86.9
+78.2
+53.1
+44.4
+70.4
+74.1
+67.4 (↑1.0)
+Qwen3-30B
+-A3B
+0%
+Baseline
+56.2
+79.1
+88.3
+77.6
+77.9
+44.6
+81.6
+71.1
+72.1
+25%
+Uni.
+Random
+50.8
+75.6
+84.8
+70.7
+69.7
+40.2
+80.5
+68.8
+67.6
+REAP
+55.8
+78.3
+87.1
+75.8
+71.9
+44.6
+79.4
+70.5
+70.4
+Easy-EP
+53.2
+78.0
+88.8
+76.6
+74.2
+44.0
+81.9
+70.7
+70.9
+SPARE
+Random
+50.6
+76.8
+85.5
+70.8
+68.8
+41.2
+79.0
+69.0
+67.7 (↑0.1)
+REAP
+56.0
+78.4
+87.5
+76.0
+72.1
+44.8
+80.1
+70.6
+70.7 (↑0.3)
+Easy-EP
+53.8
+78.4
+89.0
+76.9
+74.4
+44.6
+81.5
+69.4
+71.0 (↑0.1)
+50%
+Uni.
+Random
+40.0
+62.8
+77.9
+55.5
+49.6
+25.4
+74.1
+61.1
+55.8
+REAP
+40.5
+61.2
+82.9
+64.4
+51.1
+36.2
+61.0
+64.5
+57.7
+Easy-EP
+37.2
+58.1
+81.0
+66.7
+49.0
+37.6
+63.2
+64.7
+57.2
+SPARE
+Random
+39.8
+63.1
+77.1
+55.9
+50.6
+31.8
+74.0
+61.2
+56.7 (↑0.9)
+REAP
+43.1
+64.6
+83.3
+64.5
+48.9
+37.0
+74.7
+63.6
+60.0 (↑2.3)
+Easy-EP
+42.5
+65.2
+84.9
+73.2
+59.1
+41.2
+75.8
+68.4
+63.8 (↑6.6)
+Table 2:
+Large-scale MoEs at 50% global expert
+pruning (PR), using EASY-EP for both allocation
+rules. DS-R1: DeepSeek-R1; Qwen3: Qwen3-235B-
+A22B. LCB/Math/GPQA: LiveCodeBench/MATH-
+500/GPQA-Diamond. Avg. is the unweighted three-
+score mean; gains compare with uniform allocation.
+Model
+PR
+Inter.
+LCB
+Math
+GPQA
+Avg.↑
+DS-R1
+–
+Baseline
+84.5
+96.0
+69.7
+83.4
+50%
+Uni.
+79.0
+94.7
+66.7
+80.1
+SPARE
+82.0
+94.3
+72.2
+82.8 (↑2.7)
+Qwen3
+–
+Baseline
+92.5
+96.0
+77.5
+88.7
+50%
+Uni.
+89.0
+95.7
+74.4
+86.4
+SPARE
+93.0
+95.7
+75.1
+87.9 (↑1.5)
+6.4
+Scalability to Large-scale Reasoning
+MoEs
+At 50% global expert pruning, we compare SPARE
+and uniform allocation on Qwen3-235B-A22B and
+DeepSeek-R1, using EASY-EP for both (Table 2).
+On both models, SPARE narrows the gap to the un-
+pruned model in the unweighted three-score mean.
+It raises this mean from 80.1 to 82.8 on DeepSeek-
+R1, compared with 83.4 before pruning, and from
+86.4 to 87.9 on Qwen3-235B-A22B. On DeepSeek-
+R1, GPQA-Diamond improves by 5.5 points and
+Table 3: Normalized output perturbation on Mixtral-
+8×7B under the same REAP selection procedure.
+Columns denote layer entropy groups.
+Domain
+High
+Middle
+Low
+WikiText2
+0.721
+0.641
+0.726
+MATH-500
+0.673
+0.736
+0.728
+HumanEval
+0.726
+0.725
+0.763
+LiveCodeBench by 3.0 points over uniform allo-
+cation, while MATH-500 declines by 0.4 points.
+Deployment efficiency is reported in Appendix A.
+6.5
+Comparison with Layer-wise Allocation
+Baselines
+We compare SPARE with OWL (Yin et al., 2024)
+adapted from weight-sparsity allocation to expert
+pruning, holding EASY-EP fixed for both methods.
+On Qwen3-30B-A3B, average accuracy is compa-
+rable at 12.5% pruning and higher with SPARE
+at 25%, 37.5%, and 50% (Appendix B). Direct
+comparisons with other MoE-specific allocation
+pipelines remain outside the evaluation.
+7
+
+
+Figure 2: Layer-wise allocation profiles on Qwen3-30B-A3B with EASY-EP at 50% global expert pruning. Left:
+varying p with β = 0 changes the contrast between more- and less-pruned layers. Right: varying β ∈[0, 0.6] with
+p = 2.0 produces similar profiles.
+Table 4: Pearson correlation between routing concentra-
+tion Cℓ= 1 −¯Hℓ/ log K and pruning-induced KL un-
+der single-layer REAP pruning, computed over n = 26
+(DeepSeek-V2-Lite) and n = 48 (Qwen3-30B-A3B)
+MoE layers. PR is the pruning ratio of the intervened
+layer; KL is truncated to the teacher’s top-64 tokens.
+Model
+PR
+Mean-domain
+KL
+Worst-domain
+KL
+DeepSeek-V2-Lite
+25%
++0.435
++0.450
+DeepSeek-V2-Lite
+50%
++0.340
++0.272
+Qwen3-30B-A3B
+25%
++0.288
++0.257
+Qwen3-30B-A3B
+50%
++0.314
++0.329
+Table 5: Cross-domain correlations of layer-average
+routing entropy on DeepSeek-R1, using C4 as the refer-
+ence calibration domain.
+Model
+Calibration analysis
+Pearson r
+Spearman ρ
+DeepSeek-R1 C4 vs. MATH-500
+0.988
+0.962
+DeepSeek-R1 C4 vs. LiveCodeBench
+0.991
+0.974
+DeepSeek-R1 C4 vs. GPQA-Diamond
+0.979
+0.958
+6.6
+Calibration Robustness
+We compare DeepSeek-R1 layer-average entropy
+across four calibration domains: C4 (web), MATH-
+500 (math), LiveCodeBench (code), and GPQA-
+Diamond (science). Table 5 reports correlations
+relative to C4. Spearman correlations range from
+0.958 to 0.974, indicating similar layer rankings
+across these domains.
+This analysis measures
+entropy-profile stability; it does not establish iden-
+tical integer budgets or unchanged downstream per-
+formance under every calibration choice.
+6.7
+Ablation on Hyper-parameters
+We run two separate sweeps on Qwen3-30B-A3B
+with EASY-EP at 50% global expert pruning (Ta-
+ble 6). The p sweep fixes β = 0: mean accuracy
+peaks at p = 2.0 (63.2%) and falls to 58.5% at
+p = 2.5, showing that stronger contrast need not
+help. The β sweep fixes p = 2.0: scores range
+Table 6: Hyper-parameter ablation. Qwen3-30B-A3B
+with EASY-EP at 50% global pruning. Unweighted
+eight-task mean accuracy (%); the p sweep fixes β = 0,
+and the β sweep fixes p = 2.0. Bold marks the best
+score within each sweep.
+p
+β
+Param
+0.8
+1.0
+1.5
+2.0
+2.5
+Param
+0.0
+0.2
+0.4
+0.6
+Avg.↑
+61.9
+61.5
+62.8
+63.2
+58.5
+Avg.↑
+63.2
+63.1
+63.1
+63.8
+from 63.1% to 63.8%, peaking at β = 0.6. These
+are separate sweeps, not a joint parameter grid.
+The allocation profiles in Figure 2 show that
+larger p increases the contrast between more- and
+less-pruned layers, while the profiles for β ∈
+[0, 0.6] remain close. We selected p = 2.0 and
+β = 0.6 on the reported Qwen3-30B-A3B eval-
+uation benchmarks and fixed them for all other
+models.
+7
+Conclusion and Future Work
+We introduced SPARE, a training-free method that
+uses token-level routing entropy to allocate expert-
+pruning budgets across MoE language-model lay-
+ers and can be paired with existing intra-layer se-
+lectors. A perturbation analysis and controlled in-
+terventions with a fixed selector associate concen-
+trated routing with greater pruning risk. Under the
+same expert selector and global budget, SPARE
+improves average performance in the evaluated set-
+tings, with larger gains at high pruning ratios: at
+50% expert pruning, it raises the Qwen3-30B-A3B
+eight-task average from 57.2% to 63.8%, and the
+DeepSeek-R1 three-benchmark average from 80.1
+to 82.8, close to the unpruned 83.4. Future work
+includes studying calibration shift and combining
+entropy-guided allocation with quantization and
+expert merging.
+8
+
+
+Limitations
+SPARE yields its largest gains at aggressive prun-
+ing ratios; at moderate ratios such as 25%, its im-
+provements over uniform allocation are small. We
+study SPARE only for expert pruning; combining
+it with quantization or expert merging is left for
+future work.
+References
+Anonymous. 2026. AdaWhiten: Adaptive Factor Se-
+lection for Low-Rank MoE Compression. Under
+review.
+Luisa Bentivogli, Peter Clark, Ido Dagan, and Danilo
+Giampiccolo. 2009. The fifth pascal recognizing
+textual entailment challenge. TAC, 7(8):1.
+Tianyu Chen, Shaohan Huang, Yuan Xie, Binx-
+ing Jiao, Daxin Jiang, Haoyi Zhou, Jianxin Li,
+and Furu Wei. 2022.
+Task-specific expert prun-
+ing for sparse mixture-of-experts. arXiv preprint
+arXiv:2206.00277.
+Mohammed Nowaz Rabbani Chowdhury, Meng Wang,
+Kaoutar El Maghraoui, Naigang Wang, Pin-Yu Chen,
+and Christopher Carothers. 2024. A provably effec-
+tive method for pruning experts in fine-tuned sparse
+mixture-of-experts. In Proceedings of the 41st In-
+ternational Conference on Machine Learning, pages
+8815–8847.
+Christopher Clark, Kenton Lee, Ming-Wei Chang,
+Tom Kwiatkowski, Michael Collins, and Kristina
+Toutanova. 2019. Boolq: Exploring the surprising
+difficulty of natural yes/no questions. arXiv preprint
+arXiv:1905.10044.
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot,
+Ashish Sabharwal, Carissa Schoenick, and Oyvind
+Tafjord. 2018. Think you have solved question an-
+swering? try arc, the ai2 reasoning challenge. arXiv
+preprint arXiv:1803.05457.
+Damai Dai, Chengqi Deng, Chenggang Zhao, RX Xu,
+Huazuo Gao, Deli Chen, Jiashi Li, Wangding Zeng,
+Xingkai Yu, Yu Wu, et al. 2024.
+Deepseek-
+moe:
+Towards ultimate expert specialization in
+mixture-of-experts language models. arXiv preprint
+arXiv:2401.06066.
+Zican Dong, Han Peng, Peiyu Liu, Wayne Xin Zhao,
+Dong Wu, Feng Xiao, and Zhifeng Wang. 2025.
+Domain-specific pruning of large mixture-of-experts
+models with few-shot demonstrations. arXiv preprint
+arXiv:2504.06792.
+William Fedus, Barret Zoph, and Noam Shazeer. 2022.
+Switch transformers: Scaling to trillion parameter
+models with simple and efficient sparsity. Preprint,
+arXiv:2101.03961.
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou,
+Mantas Mazeika, Dawn Song, and Jacob Steinhardt.
+2020. Measuring massive multitask language under-
+standing. arXiv preprint arXiv:2009.03300.
+Weizhong Huang, Yuxin Zhang, Xiawu Zheng, Fei
+Chao, Rongrong Ji, and Liujuan Cao. 2025. Dis-
+covering important experts for mixture-of-experts
+models pruning through a theoretical perspective. In
+The Thirty-ninth Annual Conference on Neural Infor-
+mation Processing Systems.
+Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia
+Yan, Tianjun Zhang, Sida Wang, Armando Solar-
+Lezama, Koushik Sen, and Ion Stoica. 2025. Live-
+codebench: Holistic and contamination free evalua-
+tion of large language models for code. In Interna-
+tional Conference on Learning Representations.
+Ajay Jaiswal, Jianyu Wang, Yixiao Li, Pingzhi Li, Tian-
+long Chen, Zhangyang Wang, Chong Wang, Ruom-
+ing Pang, and Xianzhi Du. 2025. Finding fantastic
+experts in moes: A unified study for expert drop-
+ping strategies and observations.
+arXiv preprint
+arXiv:2504.05586.
+Yeskendir Koishekenov, Alexandre Berard, and Vas-
+silina Nikoulina. 2023. Memory-efficient nllb-200:
+Language-specific expert pruning of a massively mul-
+tilingual machine translation model. In Proceedings
+of the 61st Annual Meeting of the Association for
+Computational Linguistics (Volume 1: Long Papers),
+pages 3567–3585.
+Mike Lasby, Ivan Lazarevich, Nish Sinnadurai, Sean
+Lie, Yani Ioannou, and Vithursan Thangarasa. 2025.
+Reap the experts: Why pruning prevails for one-shot
+moe compression. arXiv preprint arXiv:2510.13999.
+Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu,
+Dehao Chen, Orhan Firat, Yanping Huang, Maxim
+Krikun, Noam Shazeer, and Zhifeng Chen. 2020.
+Gshard: Scaling giant models with conditional com-
+putation and automatic sharding.
+arXiv preprint
+arXiv:2006.16668.
+Lin Li, Yan Wang, and Zhuopeng Wang. 2026.
+C-
+GNN-PRUNE: A unified graph-based framework for
+structure-aware pruning of mixture-of-experts mod-
+els. Proceedings of the AAAI Conference on Artificial
+Intelligence, 40(27):22976–22984.
+Wei Li, Lujun Li, Hao Gu, You-Liang Huang, Mark G
+Lee, Shengjie Sun, Wei Xue, and Yike Guo. 2025.
+Moe-svd: Structured mixture-of-experts llms com-
+pression via singular value decomposition. In Forty-
+second International Conference on Machine Learn-
+ing.
+Hunter Lightman, Vineet Kosaraju, Yura Burda, Harri
+Edwards, Bowen Baker, Teddy Lee, Jan Leike, John
+Schulman, Ilya Sutskever, and Karl Cobbe. 2024.
+Let’s verify step by step. In International Conference
+on Learning Representations.
+9
+
+
+Gui Ling, Ziyang Wang, and Qingwen Liu. 2024.
+Slimgpt: Layer-wise structured pruning for large
+language models. Advances in Neural Information
+Processing Systems, 37:107112–107137.
+Enshu Liu, Junyi Zhu, Zinan Lin, Xuefei Ning,
+Matthew B Blaschko, Shengen Yan, Guohao Dai,
+Huazhong Yang, and Yu Wang. 2024. Efficient ex-
+pert pruning for sparse mixture-of-experts language
+models: Enhancing performance and reducing infer-
+ence costs. arXiv preprint arXiv:2407.00945.
+Ka Man Lo, Zeyu Huang, Zihan Qiu, Zili Wang,
+and Jie Fu. 2024. A closer look into mixture-of-
+experts in large language models. arXiv preprint
+arXiv:2406.18219.
+Xudong Lu, Qi Liu, Yuhui Xu, Aojun Zhou, Siyuan
+Huang, Bo Zhang, Junchi Yan, and Hongsheng Li.
+2024. Not all experts are equal: Efficient expert
+pruning and skipping for mixture-of-experts large
+language models. In Proceedings of the 62nd An-
+nual Meeting of the Association for Computational
+Linguistics, pages 6159–6172.
+Xin Men, Mingyu Xu, Qingyu Zhang, Qianhao Yuan,
+Bingning Wang, Hongyu Lin, Yaojie Lu, Xianpei
+Han, and Weipeng Chen. 2025. Shortgpt: Layers in
+large language models are more redundant than you
+expect. In Findings of the Association for Computa-
+tional Linguistics: ACL 2025, pages 20192–20204.
+Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish
+Sabharwal. 2018. Can a suit of armor conduct elec-
+tricity? a new dataset for open book question answer-
+ing. arXiv preprint arXiv:1809.02789.
+Alexandre Muzio, Alex Sun, and Churan He. 2024.
+Seer-moe: Sparse expert efficiency through regu-
+larization for mixture-of-experts.
+arXiv preprint
+arXiv:2404.05089.
+David Rein, Betty Li Hou, Asa Cooper Stickland,
+Jackson Petty, Richard Yuanzhe Pang, Julien Di-
+rani, Julian Michael, and Samuel R. Bowman. 2023.
+Gpqa: A graduate-level google-proof q&a bench-
+mark. arXiv preprint arXiv:2311.12022.
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavat-
+ula, and Yejin Choi. 2021. Winogrande: An adver-
+sarial winograd schema challenge at scale. Commu-
+nications of the ACM, 64(9):99–106.
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz,
+Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff
+Dean. 2017. Outrageously large neural networks:
+The sparsely-gated mixture-of-experts layer. arXiv
+preprint arXiv:1701.06538.
+Zunhai Su, Qingyuan Li, Hao Zhang, YuLei Qian,
+Yuchen Xie, and Kehong Yuan. 2025. Unveiling
+super experts in mixture-of-experts large language
+models. arXiv preprint arXiv:2507.23279.
+Yanyue Xie, Zhi Zhang, Ding Zhou, Cong Xie, Ziang
+Song, Xin Liu, Yanzhi Wang, Xue Lin, and An Xu.
+2024. Moe-pruner: Pruning mixture-of-experts large
+language model using the hints from its router. arXiv
+preprint arXiv:2410.12013.
+Cheng Yang, Yang Sui, Jinqi Xiao, Lingyi Huang,
+Yu Gong, Yuanlin Duan, Wenqi Jia, Miao Yin,
+Yu Cheng, and Bo Yuan. 2024. Moe-i2: Compress-
+ing mixture of experts models through inter-expert
+pruning and intra-expert low-rank decomposition. In
+Findings of the Association for Computational Lin-
+guistics: EMNLP 2024, pages 10456–10466.
+Lu Yin, You Wu, Zhenyu Zhang, Cheng-Yu Hsieh,
+Yaqing Wang, Yiling Jia, Gen Li, Ajay Jaiswal,
+Mykola Pechenizkiy, Yi Liang, et al. 2024. Outlier
+weighed layerwise sparsity (owl) a missing secret
+sauce for pruning llms to high sparsity. In Proceed-
+ings of the 41st International Conference on Machine
+Learning, pages 57101–57115.
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali
+Farhadi, and Yejin Choi. 2019. Hellaswag: Can a
+machine really finish your sentence? arXiv preprint
+arXiv:1905.07830.
+10
+
+
+A
+Additional results
+To further validate the applicability of SPARE to
+fine-grained MoE architectures, we extend our eval-
+uation to the recent GLM-5. Our main experiments
+already cover representative fine-grained MoEs,
+including Qwen3-30B-A3B, Qwen3-235B-A22B,
+and DeepSeek-R1. As summarized in Table 7,
+these models differ in the number of routed ex-
+perts, the use of shared experts, and the number
+of MoE layers. GLM-5 follows a structure similar
+to DeepSeek-R1, with 256 routed experts, top-8
+routing, and one shared expert, but increases the
+number of layers from 61 to 78.
+Table 7: Architectural configurations of fine-grained
+MoEs. We compare the routed expert count, routing
+top-K, shared expert design, and layer count across the
+evaluated MoE models.
+Model
+Routed Experts
+Top-K
+Shared
+Layers
+DeepSeek-R1 (671B)
+256
+8
+Yes (1)
+61
+Qwen3-30B-A3B
+128
+8
+No
+48
+Qwen3-235B-A22B
+128
+8
+No
+94
+GLM-5
+256
+8
+Yes (1)
+78
+As in Section 6.4, both SPARE and uniform allo-
+cation use EASY-EP at 50% global expert pruning.
+On GLM-5, SPARE improves the average accuracy
+from 87.5% to 89.8%, yielding a +2.3 point gain
+over uniform allocation. This additional result ex-
+tends the observed average improvement to another
+fine-grained MoE architecture.
+Deployment efficiency.
+At the same global prun-
+ing budget, SPARE and uniform allocation remove
+the same total number of experts, giving equal
+routed-expert parameter storage when expert sizes
+and precision match. We use modified fused MoE
+Triton kernels to support variable per-layer expert
+counts. Table 8 reports throughput on a DeepSeek-
+style architecture at 50% pruning. Relative differ-
+ences from uniform allocation range from a 1.16%
+decrease to a 0.56% increase across the tested batch
+sizes. Throughput is similar in these measured con-
+figurations.
+Additionally, non-uniform allocation opens fu-
+ture optimization possibilities: layers retaining
+more experts can use padded expert placement to
+co-locate the most frequently activated experts, po-
+tentially reducing HBM transfer beyond what uni-
+form pruning achieves.
+Table 8: Throughput under different batch sizes.
+Batch size
+1
+16
+32
+64
+Uniform
+8.61
+172.32
+181.54
+162.31
+SPARE
+8.51
+172.57
+182.56
+162.24
+0.125
+0.25
+0.375
+0.5
+Sparsity ratio
+55
+60
+65
+70
+Accuracy (%)
+OWL
+SPARE
+Figure 3: Average benchmark accuracy versus global
+expert-pruning ratio on Qwen3-30B-A3B.
+B
+Comparison with Layer-wise
+Allocation Methods
+We compare SPARE with the adapted OWL alloca-
+tion on Qwen3-30B-A3B, holding EASY-EP fixed
+for both methods. Figure 3 plots average bench-
+mark accuracy against the global expert-pruning ra-
+tio. The methods are comparable at 12.5% pruning;
+SPARE has higher average accuracy at 25%, 37.5%,
+and 50%. OWL uses activation-aware weight out-
+lier statistics, whereas SPARE uses token-level
+routing entropy.
+C
+Proof of Main Theorem
+C.1
+Notation and Mathematical Definitions
+C.1.1
+Data and Tokens
+Let D denote the target token distribution (e.g.,
+pruning-evaluation domain). We write x ∼D for a
+random token representation entering a given MoE
+layer. In practice, D is approximated by a finite
+calibration set of M tokens, D = {x1, . . . , xM}.
+C.1.2
+MoE Layer, Experts, and Router
+Consider a fixed MoE layer ℓwith:
+• N experts indexed by j ∈{1, . . . , N}, each
+mapping token input x to an output vector
+fℓ,j(x) ∈Rd (dimension d depends on the
+model).
+• Router
+logits
+zℓ(x)
+=
+(zℓ,1(x), . . . , zℓ,N(x)) ∈RN.
+11
+
+
+C.1.3
+Top-K Routing and Gating Distribution
+Let K < N be the number of selected experts per
+token. Define the Top-K index set
+Tℓ(x) ≜TopK
+ zℓ(x)
+
+,
+|Tℓ(x)| = K,
+(19)
+where TopK(·) returns indices of the K largest
+components, using a fixed ordering of expert in-
+dices to break ties before and after pruning.
+The Top-K gating distribution gℓ(x) is defined
+by softmax restricted to Tℓ(x):
+gℓ,j(x) ≜
+
+
+
+
+
+ezℓ,j(x)
+P
+t∈Tℓ(x) ezℓ,t(x) ,
+j ∈Tℓ(x),
+0,
+j /∈Tℓ(x).
+(20)
+Thus gℓ,j(x) ≥0 and PN
+j=1 gℓ,j(x) = 1, but only
+K entries are nonzero.
+C.1.4
+Layer Output (MoE Branch)
+The MoE layer output (restricted to the expert mix-
+ture branch) is
+yℓ(x) ≜
+N
+X
+j=1
+gℓ,j(x) fℓ,j(x)
+=
+X
+t∈Tℓ(x)
+gℓ,t(x) fℓ,t(x).
+(21)
+C.1.5
+Pruning Operation and Top-K
+Rerouting
+Let P ⊆{1, . . . , N} denote the removed expert
+set, with |P| = m ≤N −K. Router logits are
+unchanged by pruning. We recompute Top-K over
+the remaining experts, retaining their original in-
+dices:
+Tℓ,P (x) ≜TopKj /∈P
+ zℓ,j(x)
+
+,
+|Tℓ,P (x)| = K.
+This uses the same tie-breaking rule as the original
+routing. The removed experts that were originally
+active and their gate mass are
+Dℓ(x) ≜Tℓ(x) ∩P,
+Eℓ(x, P) ≜
+X
+j∈Dℓ(x)
+gℓ,j(x),
+(22)
+where Eℓ(x, P) is the total probability mass as-
+signed to pruned experts within the original Top-K
+support.
+The post-pruning gating distribution is softmax
+over the recomputed support:
+g(P)
+ℓ,j (x) ≜
+
+
+
+
+
+ezℓ,j(x)
+P
+t∈Tℓ,P (x) ezℓ,t(x) ,
+j ∈Tℓ,P (x),
+0,
+otherwise,
+(23)
+Since N −m
+≥
+K, this remains well de-
+fined even when every originally active ex-
+pert is removed.
+The post-pruning output is
+y(P)
+ℓ
+(x) = P
+j g(P)
+ℓ,j (x)fℓ,j(x), and the perturba-
+tion is δℓ(x, P) = y(P)
+ℓ
+(x) −yℓ(x).
+C.1.6
+Routing Entropy and Concentration
+For a Top-K sparse distribution gℓ(x), define Shan-
+non entropy
+H(gℓ(x)) ≜−
+N
+X
+j=1
+gℓ,j(x) log gℓ,j(x),
+(24)
+where the convention 0 log 0 = 0 is used. Since
+only K entries are nonzero, we have 0
+≤
+H(gℓ(x)) ≤log K.
+Define the layer-average entropy and routing en-
+tropy gap as in Eq. (4). Equivalently, let uTℓ(x)
+denote the uniform distribution on the Top-K sup-
+port Tℓ(x): uTℓ(x)(j) = 1/K if j ∈Tℓ(x) and 0
+otherwise. Then
+KL
+ gℓ(x)
+ uTℓ(x)
+
+= log K −H(gℓ(x)) ,
+Sℓ= Ex
+
+KL
+ gℓ(x)
+ uTℓ(x)
+
+.
+(25)
+Interpretation. Larger Sℓmeans greater routing
+concentration: the gating distribution is further
+from uniform on its active support.
+C.2
+Assumptions
+We state the assumption used to relate routing con-
+centration to pruning perturbation.
+Assumption 1 (Output scale control).
+For each
+layer ℓ, there exists Bℓ> 0 such that
+∥fℓ,j(x)∥1 ≤Bℓ
+∀x, P, j ∈Tℓ(x) ∪Tℓ,P (x),
+(26)
+where P ranges over admissible pruning sets with
+|P| ≤N −K.
+C.3
+Single-Layer Pruning Perturbation
+Proofs for general and deterministic selec-
+tors.
+For Proposition 4.2, the triangle inequality,
+bounded expert outputs, and the routing identity
+12
+
+
+proved below give, pointwise for every admissible
+x and P,
+∥δℓ(x, P)∥1 ≤Bℓ∥g(P)
+ℓ
+(x) −gℓ(x)∥1
+= 2BℓEℓ(x, P).
+Squaring before taking expectations yields Eqs. (7)
+and (8) for any mask distribution qℓ. A determinis-
+tic selector is the special case with all probability
+on its returned mask. All expectations are condi-
+tional on fixed calibration data and are taken over
+the stated evaluation-token distribution.
+For Corollary 4.4, the bracketed term in Eq. (9)
+is
+Ψℓ(m) = c0(m, N)
++ c1(m, N)
+ 1
+K + 2Sℓ
+
+.
+(27)
+Lemmas C.3 and C.4 give
+Mℓ(Uℓ,m) = c0(m, N) + c1(m, N)Ex[Qℓ(x)]
+≤Ψℓ(m).
+Combining this with Eqs. (7) and (10) proves
+Eq. (11). In particular, a selector that minimizes
+Ex[Eℓ(x, P)2] over the finite mask family satisfies
+the condition with εA,ℓ= 0, since its minimum
+cannot exceed the uniform average. This observa-
+tion does not establish the condition for selectors
+optimizing a different saliency criterion. A residual
+measured on calibration samples is an empirical
+estimate and does not by itself certify the condition
+on the evaluation distribution.
+Proof Sketch for Main Theorem.
+Pruning a sub-
+set P changes the Top-K routing distribution from
+gℓ(x) to g(P)
+ℓ
+(x). Let Eℓ(x, P) denote the total gate
+mass assigned to experts that are both pruned and
+originally selected. A key identity shows that the
+routing change is exact: ∥g(P)
+ℓ
+(x) −gℓ(x)∥1 =
+2Eℓ(x, P) (Lemma C.1). Since the MoE output is
+a convex combination of bounded expert outputs,
+the output perturbation satisfies ∥δℓ(x, P)∥2
+1 ≤
+4B2
+ℓEℓ(x, P)2 (Lemma C.2). Under uniform ran-
+dom pruning, EP [Eℓ(x, P)2] decomposes into a
+constant term and a collision term proportional
+to Qℓ(x) = P
+j gℓ,j(x)2 (Lemma C.3). Finally,
+for Top-K sparse routing, the collision probabil-
+ity is upper bounded by the entropy gap Qℓ(x) ≤
+1
+K + 2(log K −H(gℓ(x))) (Lemma C.4), which
+yields the stated bound and establishes monotonic
+dependence on routing entropy gap.
+Lemma C.1 (Exact ℓ1 identity). Fix layer ℓ, token
+x, and pruned set P. Let Dℓ(x) ≜Tℓ(x)∩P be the
+set of pruned experts that were originally in Top-K,
+and define Eℓ(x, P) = P
+j∈Dℓ(x) gℓ,j(x). Then
+g(P)
+ℓ
+(x) −gℓ(x)
+
+1 = 2 Eℓ(x, P).
+(28)
+Proof. For brevity, suppress layer ℓand token x
+in notation. Let T ≜Tℓ(x) and TP ≜Tℓ,P (x).
+Define
+D ≜T ∩P,
+U ≜T \ D,
+R ≜TP \ U.
+Unchanged logits and consistent tie-breaking imply
+U ⊆TP . Thus T = U ∪D and TP = U ∪R, with
+|R| = |D| since both supports have size K.
+Define the Top-K softmax normalizers:
+Z ≜
+X
+t∈T
+ezt,
+ZP ≜
+X
+t∈TP
+ezt.
+For any u ∈U, we have
+gu = ezu
+Z ,
+g(P)
+u
+= ezu
+ZP
+= α gu,
+α ≜Z
+ZP
+.
+The factor α is common to all u ∈U because
+softmax shares the denominator ZP ; if U is empty,
+the statements about its entries are vacuous.
+Next, since T consists of the top-K logits, every
+r ∈R satisfies zr ≤mint∈T zt, while every d ∈D
+satisfies zd ≥mint∈T zt. Because |R| = |D|, it
+follows that
+X
+r∈R
+ezr ≤
+X
+d∈D
+ezd
+⇒
+ZP =
+X
+u∈U
+ezu +
+X
+r∈R
+ezr
+≤
+X
+u∈U
+ezu +
+X
+d∈D
+ezd = Z.
+Hence α = Z/ZP ≥1.
+Now compute the ℓ1 difference by partitioning
+indices into D, U, R and the remainder:
+• For d ∈D, gd > 0 but g(P)
+d
+= 0, so |g(P)
+d
+−
+gd| = gd.
+• For u ∈U, g(P)
+u
+= αgu ≥gu, so |g(P)
+u
+−
+gu| = (α −1)gu.
+• For r ∈R, gr = 0 and g(P)
+r
+> 0, so |g(P)
+r
+−
+gr| = g(P)
+r
+.
+13
+
+
+• All other indices have both weights 0 and con-
+tribute nothing.
+Therefore,
+∥g(P) −g∥1 =
+X
+d∈D
+gd +
+X
+u∈U
+(α−1)gu +
+X
+r∈R
+g(P)
+r
+.
+By definition, we have L ≜P
+d∈D gd. Because
+P
+j gj = 1 and P
+j g(P)
+j
+= 1, and g(P)
+d
+= 0 for
+d ∈D, we have
+X
+i/∈D
+ g(P)
+i
+−gi
+
+=
+ X
+i
+g(P)
+i
+!
+−
+ X
+d∈D
+g(P)
+d
+!
+−
+" X
+i
+gi
+!
+−
+ X
+d∈D
+gd
+!#
+= (1 −0) −(1 −L) = L.
+Moreover, for i /∈D we have g(P)
+i
+≥gi (since U
+entries scale up and R entries become positive), so
+X
+i/∈D
+|g(P)
+i
+−gi| =
+X
+i/∈D
+(g(P)
+i
+−gi) = L.
+Combining with P
+d∈D |g(P)
+d
+−gd| = P
+d∈D gd =
+L yields
+∥g(P) −g∥1 = L + L = 2L,
+which proves the claim.
+Intuition.
+The pruned experts in D lose exactly
+L probability mass (their original total gate mass),
+and because the gating distribution must still sum
+to 1, the remaining indices must gain exactly L
+mass in total. Since the gain occurs only on in-
+dices where g(P) ≥g (common scaling on retained
+Top-K plus newly activated replacements), the ℓ1
+distance equals (loss L) + (gain L) = 2L.
+Lemma C.2 (Perturbation bound: bounded-norm
+variant). Under Assumption 1 in (26), for any
+pruned set P, we have
+Ex[∥δℓ(x, P)∥1] ≤BℓEx
+
+∥g(P)
+ℓ
+(x) −gℓ(x)∥1
+
+= 2BℓEx[Eℓ(x, P)].
+(29)
+Consequently,
+Ex[∥δℓ(x, P)∥2
+1] ≤4B2
+ℓEx[Eℓ(x, P)2].
+(30)
+Proof. By definition,
+δℓ(x, P) =
+N
+X
+j=1
+ g(P)
+ℓ,j (x) −gℓ,j(x)
+
+fℓ,j(x).
+Apply triangle inequality we have:
+∥δℓ(x, P)∥1 ≤
+N
+X
+j=1
+|g(P)
+ℓ,j (x) −gℓ,j(x)| ∥fℓ,j(x)∥1
+Assumption 1 gives the pointwise inequality
+∥δℓ(x, P)∥1
+≤
+Bℓ∥g(P)
+ℓ
+(x) −gℓ(x)∥1
+=
+2BℓEℓ(x, P). Taking expectation over x yields
+Ex[∥δℓ(x, P)∥1] ≤BℓEx[∥g(P)
+ℓ
+(x) −gℓ(x)∥1].
+The equality in (29) follows from Lemma C.1.
+Squaring the pointwise inequality before taking
+expectation yields (30).
+Intuition.
+The MoE output is a convex combina-
+tion of expert outputs. Pruning changes only the
+mixing weights. Thus, the output perturbation is
+controlled by (i) how much the gating distribution
+changes (∥g(P) −g∥), and (ii) the scale of expert
+outputs. Lemma C.1 makes (i) exact in terms of
+the pruned gate mass L.
+Lemma C.3 (uniform random pruning). Fix m ∈
+{1, . . . , N −1}. Let P be drawn uniformly at ran-
+dom from all subsets of size m. Then for any fixed
+x,
+EP
+
+Eℓ(x, P)2  x
+
+= c0(m, N) + c1(m, N) Qℓ(x),
+(31)
+where
+c0(m, N) ≜m(m −1)
+N(N −1),
+c1(m, N) ≜m(N −m)
+N(N −1) ,
+Qℓ(x) ≜
+N
+X
+j=1
+gℓ,j(x)2.
+(32)
+Proof. Let Ij = 1{j ∈P} be the inclusion indica-
+tor. Then
+Eℓ(x, P) =
+N
+X
+j=1
+Ij gℓ,j(x).
+Therefore
+Eℓ(x, P)2 =
+X
+j
+Ijg2
+j + 2
+X
+j<k
+IjIkgjgk,
+where we suppress ℓ, x in g for readability. For
+uniform sampling without replacement, E[Ij] =
+m/N and E[IjIk] = m(m−1)
+N(N−1) for j̸ = k. Taking
+expectation over P conditional on x:
+EP [L2|x] = m
+N
+X
+j
+g2
+j + 2 · m(m −1)
+N(N −1)
+X
+j<k
+gjgk.
+14
+
+
+Note that P
+j<k gjgk = 1
+2
+h
+(P
+j gj)2 −P
+j g2
+j
+i
+=
+1
+2(1 −Q) since P
+j gj = 1. Hence
+EP [L2|x] = m
+N Q + m(m −1)
+N(N −1)(1 −Q)
+= m(m −1)
+N(N −1)
++
+m
+N −m(m −1)
+N(N −1)
+
+Q.
+Simplifying the coefficient yields c1(m, N) =
+m(N−m)
+N(N−1) , proving (31).
+Intuition.
+Randomly pruning m experts is like
+sampling m indices. The second moment of the
+removed probability mass depends on how concen-
+trated g is. Concentration is captured by collision
+mass Q = ∥g∥2
+2.
+Lemma C.4 (Entropy–collision bound for Top-K
+sparse distributions). For any Top-K sparse distri-
+bution gℓ(x) (support size at most K),
+Qℓ(x) =
+X
+j
+gℓ,j(x)2
+≤1
+K + 2
+
+log K −H(gℓ(x))
+
+.
+(33)
+Proof. Let T = Tℓ(x) be the support (Top-K set)
+of g = gℓ(x). Let u be the uniform distribution on
+T, i.e., uj = 1/K for j ∈T. Then
+Q = ∥g∥2
+2
+1= ∥u∥2
+2 + ∥g −u∥2
+2
+= 1
+K + ∥g −u∥2
+2,
+where the equality 1 holds because:
+∥g −u∥2
+2 = ∥g∥2
+2 + ∥u∥2
+2 −2g · u
+= ∥g∥2
+2 + 1
+K −2
+K
+= ∥g∥2
+2 −∥u∥2
+2.
+Using ∥v∥2 ≤∥v∥1 and Pinsker’s inequality
+∥g −u∥2
+1 ≤2KL(g∥u), we have
+∥g −u∥2
+2 ≤∥g −u∥2
+1 ≤2KL(g∥u).
+Finally, KL(g∥u) = log K −H(g) (by direct alge-
+bra, see (25)), which yields (33).
+Intuition.
+Among distributions on K points,
+the uniform distribution minimizes collision mass
+(Q = 1/K). Deviations from uniformity increase
+Q, and the entropy gap log K −H(g) quantifies
+such deviation.
+With these lemmas, we can now prove our main
+theorem.
+Theorem C.5 (Expected perturbation upper bound
+under random pruning). Fix layer ℓwith N experts
+and Top-K rerouting as defined in Section C.1.5.
+Let P be uniformly random among subsets of size
+m ≤N −K, independently of x. Under Assump-
+tion 1, we have:
+Ex,P
+
+∥δℓ(x, P)∥2
+1
+
+≤4B2
+ℓ(c0(m, N) + c1(m, N) Ex[Qℓ(x)])
+≤4B2
+ℓ
+
+c0(m, N) + c1(m, N)
+ 1
+K + 2Sℓ
+
+,
+(34)
+with c0, c1 as in (32) and ¯Hℓ= Ex[H(gℓ(x))].
+Proof. Combine Lemma C.2 with Lemma C.3
+and Lemma C.4. Specifically, for any admissible
+pruned set P, Lemma C.2 gives Ex[∥δℓ(x, P)∥2
+1] ≤
+4B2
+ℓEx[Eℓ(x, P)2]. Taking expectation over ran-
+dom P conditional on x and applying Lemma C.3
+yields dependence on Qℓ(x). Finally, Lemma C.4
+upper bounds Qℓ(x) by a function of log K −
+H(gℓ(x)), and taking expectation over x gives
+log K −¯Hℓ.
+Interpretation.
+For fixed (m, N, K) and layer
+scale Bℓ, the upper bound increases monotonically
+with
+Sℓ= log K −¯Hℓ.
+Thus, for fixed (m, N, K, Bℓ), a larger entropy gap
+increases this upper bound, without establishing an
+ordering of actual perturbations across layers.
+Corollary C.6 (Random-to-deterministic implica-
+tion). For a fixed layer ℓand pruning budget m,
+define the deterministic-mask error
+Eℓ(P) = Ex∼D
+
+∥δℓ(x, P)∥2
+1
+
+,
+P ∈Pℓ,m.
+Then
+min
+P∈Pℓ,m Eℓ(P) ≤EP∼Unif(Pℓ,m)Eℓ(P)
+≤4B2
+ℓ
+
+c0(m, N)
++ c1(m, N)
+ 1
+K + 2Sℓ
+
+.
+(35)
+The minimum over the finite mask family cannot
+exceed its uniform average. This proves the exis-
+tence of at least one deterministic mask satisfying
+the entropy-dependent bound, without identifying
+a particular selector’s output.
+15
+
+
+C.4
+End-to-End Expert Pruning Error Bound
+via Discrete Gronwall
+C.4.1
+Model: Residual Network with MoE
+Blocks
+Let h0 ∈Rd denote the input representation. We
+define a residual network of depth L with residual
+scaling factor α > 0 according to the recursion:
+hℓ+1 = hℓ+ αFℓ(hℓ),
+ℓ= 0, 1, . . . , L −1,
+(36)
+where Fℓrepresents the layer transition map. We
+assume Fℓdecomposes into an unpruned compo-
+nent Aℓ(encapsulating operations such as attention
+and normalization) and a modifiable component
+yℓ(e.g., a Mixture-of-Experts branch). Under a
+pruning policy Pℓ, the original and pruned transfor-
+mations are defined respectively as:
+Fℓ(h) = Aℓ(h) + yℓ(h),
+ˆFℓ(h) = Aℓ(h) + ˜yℓ,Pℓ(h).
+(37)
+Consequently, for any input h, the approximation
+error introduced by pruning is given by:
+ˆFℓ(h) −Fℓ(h) = ˜yℓ,Pℓ(h) −yℓ(h) := δℓ(h, Pℓ).
+(38)
+The dynamics of the pruned network are therefore
+governed by the recursion:
+ˆhℓ+1 = ˆhℓ+ α, ˆFℓ(ˆhℓ),
+ℓ= 0, 1, . . . , L −1,
+(39)
+initialized with the same state ˆh0 = h0.
+Assumption A2 (Local Lipschitz continuity of
+pruned blocks).
+For each layer ℓ, assume there
+is a deterministic constant λℓ≥0 such that the
+following inequality holds for every admissible
+pruning mask. The common domain D ⊆Rd
+contains both the original and pruned layer-input
+trajectories for all masks under consideration:
+ ˆFℓ(u) −ˆFℓ(v)
+
+1 ≤λℓ
+u −v
+
+1,
+∀u, v ∈D.
+(40)
+Remark C.7 (Interpretation and practical scope of
+Assumption A2). Assumption A2 imposes a local
+stability condition: within the relevant trajectory
+domain D (e.g., the set of layer inputs reachable
+under the target data distribution), the pruned block
+ˆFℓdoes not amplify input perturbations by more
+than a factor λℓin the ℓ1-norm. In our subsequent
+error-propagation analysis, λℓdetermines the prop-
+agation factor Q
+k>ℓ(1 + αλk) (or its exponential
+upper bound), which quantifies the extent to which
+upstream perturbations introduced at layer ℓare
+magnified by subsequent layers.
+Assumption A3 (Layer-wise independent ran-
+dom pruning).
+The sequence of pruning masks
+{Pℓ}L−1
+ℓ=0 forms a collection of mutually indepen-
+dent random variables. For each layer ℓ, the mask
+Pℓis uniformly distributed over the set of all sub-
+sets of indices {1, . . . , Nℓ} having cardinality mℓ,
+i.e.,
+Pℓ∼Unif
+
+P ⊆{1, . . . , Nℓ} : |P| = mℓ
+	
+,
+ℓ= 0, 1, . . . , L −1.
+(41)
+Furthermore, the entire sequence {Pℓ}L−1
+ℓ=0 is statis-
+tically independent of the input initialization h0.
+Remark C.8 (Role of Assumption A3 and deter-
+ministic pruning). Assumption A3 permits closed-
+form evaluation of the local second moments under
+uniform random pruning. The error-propagation re-
+cursion and discrete-Gronwall bound remain valid
+for every fixed pruning sequence. Under Assump-
+tion A2, their expected form also applies to an
+arbitrary mask distribution independent of the eval-
+uation input, as in Eq. (13); independence between
+layer masks is not required for that general bound.
+For a deterministic selector, the explicit entropy
+form additionally requires Eq. (10), giving a local
+term Ψℓ(mℓ) + εA,ℓ. The uniform random pruning
+theorem below is the special case with local term
+Ψℓ(mℓ).
+C.4.2
+Key Lemmas: One-step recursion and
+discrete Gronwall bound
+Lemma C.9 (One-step error decomposition). Let
+Eℓ≜∥ˆhℓ−hℓ∥1 denote the ℓ1-norm error at layer
+ℓ. Under the recursion definitions (36)–(39) and
+Assumption A2, the error satisfies the following
+recurrence relation for ℓ= 0, . . . , L −1:
+Eℓ+1 ≤(1 + αλℓ) Eℓ+ α ∥δℓ(hℓ, Pℓ)∥1. (42)
+Proof. Subtracting (36) from (39) and applying the
+triangle inequality yields:
+Eℓ+1 =
+(ˆhℓ+ α ˆFℓ(ˆhℓ)) −(hℓ+ αFℓ(hℓ))
+
+1
+≤∥ˆhℓ−hℓ∥1 + α
+ ˆFℓ(ˆhℓ) −Fℓ(hℓ)
+
+1.
+(43)
+We decompose the functional difference by adding
+and subtracting ˆFℓ(hℓ):
+ ˆFℓ(ˆhℓ) −Fℓ(hℓ)
+
+1 ≤
+ ˆFℓ(ˆhℓ) −ˆFℓ(hℓ)
+
+1
++
+ ˆFℓ(hℓ) −Fℓ(hℓ)
+
+1
+≤λℓ∥ˆhℓ−hℓ∥1
++ ∥δℓ(hℓ, Pℓ)∥1,
+(44)
+16
+
+
+where the second inequality follows from the Lip-
+schitz property (Assumption A2) and the defini-
+tion of the injection error (38). Substituting this
+back into the expression for Eℓ+1 concludes the
+proof.
+Lemma C.10 (Global error bound via Discrete
+Gronwall). Suppose ˆh0 = h0 (i.e., E0 = 0). Then,
+for any fixed sequence of pruning masks {Pℓ}, the
+final layer error satisfies:
+EL ≤α
+L−1
+X
+ℓ=0
+ L−1
+Y
+k=ℓ+1
+(1 + αλk)
+!
+· ∥δℓ(hℓ, Pℓ)∥1.
+(45)
+Here, we adopt the convention that the empty prod-
+uct QL−1
+k=L(·) equals 1.
+Note that the product QL−1
+k=ℓ+1(1+αλk) appears
+because the perturbation injected at layer ℓis sub-
+sequently amplified only by later layers.
+Proof. We proceed by induction or simply un-
+rolling the recurrence from Lemma C.9.
+For
+E0 = 0, we have:
+E1 ≤α∥δ0∥1,
+E2 ≤(1 + αλ1)E1 + α∥δ1∥1
+≤α(1 + αλ1)∥δ0∥1 + α∥δ1∥1.
+(46)
+Iterating this substitution L times yields the sum-
+mation in (45). The term ∥δℓ∥1 is introduced at
+step ℓand is subsequently scaled by the expansion
+factors (1 + αλk) for all future layers k > ℓ.
+Lemma C.11 (Exponential upper bound). For any
+non-negative sequence {λk}, the product term ad-
+mits the exponential upper bound:
+L−1
+Y
+k=ℓ+1
+(1 + αλk) ≤exp
+ 
+α
+L−1
+X
+k=ℓ+1
+λk
+!
+.
+(47)
+Proof. The result follows immediately from the
+elementary inequality 1+x ≤ex for x ≥0. Taking
+the product over k yields Q(1+αλk) ≤Q eαλk =
+eα P λk.
+C.4.3
+Main Theorem: End-to-end Expected
+Perturbation Bound
+Theorem C.12 (End-to-end perturbation upper
+bound under layer-wise random pruning). Suppose
+Assumptions A1–A3 hold. Let the network follow
+the recursion defined in (36)–(39). The expected
+ℓ1-norm perturbation at the final layer satisfies:
+E
+
+∥ˆhL −hL∥1
+
+≤α
+L−1
+X
+ℓ=0
+wℓ
+·
+q
+Ex∼Dℓ, Pℓ
+
+∥δℓ(x, Pℓ)∥2
+1
+
+,
+(48)
+where wℓdenotes the downstream propagation fac-
+tor for layer ℓ:
+wℓ≜
+L−1
+Y
+k=ℓ+1
+(1 + αλk).
+(49)
+For compactness, define the entropy-dependent lo-
+cal term
+Rℓ≜c0(mℓ, Nℓ)
++ c1(mℓ, Nℓ)
+ 1
+K + 2(log K −¯Hℓ)
+
+.
+(50)
+Substituting the single-layer bound (34) then yields
+E
+
+∥ˆhL −hL∥1
+
+≤2α
+L−1
+X
+ℓ=0
+wℓBℓ
+p
+Rℓ.
+(51)
+Finally, applying the exponential upper bound from
+Lemma C.11, we obtain:
+E
+
+∥ˆhL −hL∥1
+
+≤2α
+L−1
+X
+ℓ=0
+exp
+ 
+α
+L−1
+X
+k=ℓ+1
+λk
+!
+· Bℓ
+p
+Rℓ.
+(52)
+Proof. We commence with the unrolled discrete
+Gronwall bound established in Lemma C.10
+(Eq. 45):
+∥ˆhL −hL∥1 ≤α
+L−1
+X
+ℓ=0
+wℓ∥δℓ(hℓ, Pℓ)∥1.
+(53)
+Taking the expectation with respect to the initial-
+ization h0 ∼D0 and the sequence of independent
+pruning masks {Pℓ}, we have:
+E
+
+∥ˆhL −hL∥1
+
+≤α
+L−1
+X
+ℓ=0
+wℓE
+
+∥δℓ(hℓ, Pℓ)∥1
+
+.
+(54)
+Since f(z) = z2 is convex, Jensen’s inequality
+implies E[X] ≤
+p
+E[X2] for any non-negative
+random variable X. Applying this to the error
+term:
+E
+
+∥δℓ(hℓ, Pℓ)∥1
+
+≤
+q
+E
+
+∥δℓ(hℓ, Pℓ)∥2
+1
+
+.
+(55)
+17
+
+
+By definition, the distribution of the layer input hℓ
+is denoted by Dℓ. Under Assumption A3, the mask
+Pℓis independent of hℓand uniformly distributed.
+We can therefore rewrite the expectation over the
+joint distribution:
+E
+
+∥δℓ(hℓ, Pℓ)∥2
+1
+
+= Ex∼Dℓ, Pℓ
+
+∥δℓ(x, Pℓ)∥2
+1
+
+.
+(56)
+Substituting (55) into (54) yields the generic bound
+(48).
+To derive the explicit forms, we substitute the
+single-layer result (34) for the squared error term
+into (48), which directly yields (51). The final
+exponential form (52) follows by applying the in-
+equality Q(1+x) ≤exp(P x) to the propagation
+weights wℓ.
+C.5
+Corollaries and Design Implications
+Corollary C.13 (Stability under Depth-scaled Ini-
+tialization). Consider a scaling regime where α =
+1
+L. The error bound (52) simplifies to:
+E
+
+∥ˆhL −hL∥1
+
+≤2
+L
+L−1
+X
+ℓ=0
+exp
+ 
+1
+L
+L−1
+X
+k=ℓ+1
+λk
+!
+· Bℓ
+p
+Rℓ.
+(57)
+If the Lipschitz constants satisfy λk
+≤λmax,
+the propagation factor obeys exp(PL−1
+k=ℓ+1
+λk
+L ) ≤
+eλmax. Under the stated depth scaling, this factor
+is bounded independently of L.
+Remark C.14 (Scope of the allocation surrogate).
+For large Nℓat low removal ratios mℓ/Nℓ≪1,
+c0 is second order in the removal ratio and c1 ≈
+mℓ/Nℓ. This approximation does not apply to the
+main 50% pruning setting, where both coefficients
+approach 1/4 as Nℓgrows. Moreover, the coeffi-
+cients depend on the removal budget and cannot
+be discarded when optimizing the bound. SPARE
+uses routing concentration only as a layer-ranking
+heuristic:
+proxyℓ∝Sℓ
+(58)
+The allocation rule does not minimize the summed
+perturbation bound and omits the layer-dependent
+output scale Bℓ.
+D
+Communication cost analysis
+2 nodes →1 node: cross-node EP traffic sav-
+ings.
+In EP, each MoE layer incurs two all-to-
+all exchanges (dispatch + combine), whose acti-
+vation payload is 2 Nkdb bytes per layer, where
+N is the number of routed tokens per step (pre-
+fill: N=B×T, decode: N=B), d is hidden width,
+k is top-k routing, and b is bytes/element. When
+the EP group spans S=2 nodes and expert owner-
+ship is balanced, the expected cross-node fraction
+is pcross ≈1 −1
+2 = 1
+2. Therefore, the cross-node
+all-to-all volume per step across Lmoe MoE layers
+is
+Vcross(S=2) ≈(2 Nkdb) Lmoe · 1
+2
+= Nkdb Lmoe.
+(59)
+Plugging DeepSeek-R1-like settings (k=8,
+d=7168, b=2 bytes, Lmoe=58),
+Vcross(S=2) ≈6,651,904 N bytes
+≈6.65 MB · N
+≈6.34 MiB · N per step.
+(60)
+If pruning enables consolidating EP from S=2
+to S=1, then pcross = 0 and the cross-node traffic
+vanishes. Hence the saved cross-node communica-
+tion is simply
+∆Vcross(2 →1) ≈Vcross(S=2)
+≈6.34 MiB · N per step. (61)
+For example, in decode with batch B, N=B so the
+saving is ≈6.34 MiB × B per step.
+18

@@ -1,0 +1,2179 @@
+WaRP: Workload-Aware Request Planning for Vector Retrieval on
+Object Storage
+Ruipeng Wan
+Huazhong University of Science and Technology
+rprp@hust.edu.cn
+Xinyu Zeng
+Modalink
+xinyu@modalink.ai
+Yiming Qiao
+Tsinghua University
+qiaoym21@mails.tsinghua.edu.cn
+Huanchen Zhang∗
+Tsinghua University
+huanchen@tsinghua.edu.cn
+Abstract
+Modern vector search systems keep payload vectors in cloud object
+storage and only a compact routing index on fast local storage,
+typically using cluster-based ANN indexes. This design inherits
+a problem existing systems do not address. On object storage,
+small Range-GETs have latency dominated by fixed per-request
+overhead and are billed per request. Existing readers either issue
+one request per probed cluster, or coalesce adjacent ranges with
+hand-tuned gap or span thresholds that do not transfer across
+datasets or query workloads.
+We formulate the grouping of probed-cluster byte intervals into
+object-store requests as a global per-query optimization problem
+and present WaRP, a workload-aware request planner that solves
+it efficiently. Given the sorted byte intervals, a limit on the number
+of requests per query, and an estimate of how many object-store
+requests from one query can proceed concurrently under the tar-
+get serving configuration, WaRP searches for a merge plan that
+minimizes a concurrency-aware latency surrogate while satisfy-
+ing the request limit. Using an optimized dynamic program and
+adaptive frontier search, WaRP returns a plan within (1+𝜖) of the
+optimum, with per-query planning overhead under 10 ms even in
+the most demanding tested settings. A lightweight offline reorder-
+ing pass further improves request mergeability without changing
+the semantics of ANN search.
+We implement WaRP inside Lance’s I/O scheduler and evaluate
+it on AWS S3. We build IVFPQ indexes on seven datasets, including
+SIFT100M and DEEP100M at the 100M-vector scale. WaRP + Re-
+order improves QPS by 1.09–3.48× and reduces GETs by 2.12–5.19×
+relative to Lance, while preserving Lance’s recall.
+1 KB
+10 KB
+50 KB
+100 KB
+500 KB
+1 MB
+5 MB
+10 MB
+0
+20
+40
+60
+Latency (ms)
+Request Overhead
+Transfer Time
+Figure 1. S3 Range-GET latency. Per-request latency decomposed
+into time-to-first-byte and transfer time across payload sizes.
+1
+Introduction
+Large-scale vector search is increasingly deployed over disaggre-
+gated storage, with payload vectors placed in cloud object stores to
+reduce storage cost and decouple storage from compute [13, 15, 26,
+45, 49, 50]. In these systems, a compact routing structure remains
+on fast local storage, while query execution first selects a probe set
+and then fetches the corresponding payloads remotely. This separa-
+tion is well suited to cluster-based index families such as IVF [32]
+and IVFPQ [33], and to systems built on them such as SPFresh [55].
+Once probing finishes, the system knows which cluster payloads
+are required, but it must still decide how to translate their byte
+intervals into remote requests.
+Object-store Range-GETs have much higher fixed overhead than
+local reads and exhibit high tail latency. As Figure 1 shows, a 1 KB
+request takes roughly 25 ms, while a 1 MB request takes only about
+30 ms. Small cluster reads are therefore dominated by per-request
+overhead. Object stores also charge per API request, so fragmented
+retrieval increases both latency and GET charges. Figure 2 makes
+the resulting choice concrete. Probe selection has picked three
+cluster payloads in the same object. Reading them separately takes
+three Range-GETs. Merging the first two saves one request and
+overfetches the 0.3 MiB gap between them. Merging all three leaves
+a single request but overfetches 2.7 MiB, because the last payload
+sits 2.4 MiB away. Probe selection determines the required cluster
+payloads. Request planning groups their byte intervals to balance
+per-request overhead against overfetch.
+1
+PVLDB Reference Format:
+Ruipeng Wan, Xinyu Zeng, Yiming Qiao, Huanchen Zhang. WaRP.
+PVLDB, Vol. 20. Accept with Availability Check.
+Publication details to follow.
+PVLDB Artifact Availability:
+The source code, data, and/or other artifacts have been made available at
+https://github.com/wrp-wrp/WaRP.
+∗Corresponding author.
+This work is licensed under the Creative Commons BY-NC-ND 4.0 International
+License. Visit https://creativecommons.org/licenses/by-nc-nd/4.0/ to view a copy of
+this license. For any use beyond those covered by this license, obtain permission by
+emailing info@vldb.org. Copyright is held by the owner/author(s). Publication rights
+licensed to the VLDB Endowment.
+Proceedings of the VLDB Endowment, Vol. 20.
+Final version details to follow.
+arXiv:2610.29689v1  [cs.DB]  21 Oct 2026
+
+
+Plan
+Request Plan
+0MiB
+1MiB 1.3MiB
+1.6MiB
+4MiB
+5MiB
+Separate
+Request Count: 3
+Overfetch: 0 MiB
+0MiB
+1MiB 1.3MiB 1.6MiB
+4MiB
+5MiB
+request 1
+0MiB
+1MiB 1.3MiB 1.6MiB
+4MiB
+5MiB
+Merge Nearby
+Request Count: 2
+Overfetch: 0.3 MiB
+Merge All
+Request Count: 1
+Overfetch: 2.7 MiB
+request 1
+request 1
+request 2
+request 3
+request 2
+Figure 2. Request plans for three probed cluster payloads.
+Existing systems typically handle this stage with local coalescing
+heuristics, such as greedy merging with fixed gap thresholds [15,
+36, 57]. Such hand-tuned rules are hard to rely on because the best
+thresholds vary across datasets and query workloads. We confirm
+this empirically in Section 7.2. Careful tuning works well on one
+dataset, but performance drops sharply when the same parameters
+are applied to another. Request planning is therefore better treated
+as a global optimization problem over the ordered payload intervals
+exposed after probe selection.
+Another way to reduce per-request overhead is to cluster more
+coarsely when building the ANN index. Each remote read then
+covers more payload and amortizes the fixed overhead over a larger
+transfer. But this only shifts cost from I/O to compute and index
+maintenance without changing how requests are formed. In IVF
+terms, the index has fewer, larger clusters and the query probes
+fewer of them. As shown in Table 1, at matched recall the coarser
+setting cuts request count by 58% but enlarges the candidate set by
+nearly 50%, raising per-query compute. Larger clusters also weaken
+pruning, make updates and rewrites costlier, and limit flexibility
+under filters or mixed workloads. Tuning probe granularity is there-
+fore not a substitute for solving request planning directly.
+We propose WaRP, a workload-aware online request planner
+that addresses this trade-off, and pair it with an offline method
+that reorders IVF cluster payloads specifically for object-store re-
+quest planning. Given a request budget, an estimate of how many
+object-store requests from one query can proceed concurrently un-
+der the target serving configuration, and a request-time surrogate
+calibrated offline from object-store measurements, WaRP returns a
+merge plan provably within (1+𝜖) of the optimum, with per-query
+overhead under 10 ms even in the most demanding tested settings.
+By bounding the number of GETs per query, the request budget
+directly bounds the query’s GET charge and provides a single knob
+for balancing that charge against latency. The reordering method
+places likely co-accessed clusters nearby, shrinking the gaps that
+merged reads must bridge and reducing overfetch. Request plan-
+ning and reordering preserve probe selection and recall. For a fixed
+probe set, all methods retrieve the same clusters and differ only in
+how the selected payloads are laid out and fetched.
+We implement WaRP inside Lance’s I/O scheduler [36] and pair
+it with offline reordering of IVF cluster payloads. Across seven
+datasets on AWS S3 [3], WaRP + Reorder delivers 1.09–3.48× the
+QPS of Lance and a 2.12–5.19× GET reduction while preserving
+Lance’s recall.
+Table 1. Recall-Matched Comparison of Fine vs. Coarse Clus-
+tering on SIFT1M. Coarser clustering reduces requests but en-
+larges the candidate set, raising per-query compute.
+Setting
+Lists
+Probes
+Recall@10
+GET/q
+Cand./q
+Fine clustering
+4096
+192
+0.9973
+192
+57.4K
+Coarse clustering
+1024
+80
+0.9970
+80
+85.0K
+This paper makes four contributions. First, we identify request
+planning as a missing optimization layer between probe selection
+and payload retrieval in object-storage-backed ANN search. We
+formulate it as a global per-query optimization problem. Second,
+we make this optimization practical with an optimized dynamic
+program and adaptive frontier search. The resulting planner is
+fast enough to run on the query critical path. Third, we introduce
+offline reordering of IVF cluster payloads for object-store request
+planning, creating better merge opportunities with less overfetch
+while preserving probe selection and recall. Finally, we implement
+WaRP in Lance and evaluate its end-to-end performance across
+seven datasets on AWS S3.
+2
+Background and Motivation
+In this section, we discuss cluster-based ANN indexes and the I/O
+characteristics of cloud object storage. We also describe the execu-
+tion pipeline of cloud-based ANN queries.
+2.1
+Cluster-Based ANN Indexes
+Cluster-based ANN indexes, such as IVF [32], partition vectors
+into clusters. To answer a query, the system first selects a probe
+set by comparing the query to cluster centroids, then fetches the
+payloads of those clusters for candidate evaluation. We use cluster-
+based ANN indexes broadly to include plain IVF and its variants,
+such as IVFPQ [33] and SPFresh [55]. We also include designs that
+build an auxiliary graph or tree over the cluster centroids—using
+HNSW [37], Vamana [30], NSG [18], or a KD-tree [10]—to accelerate
+probe-set selection. These auxiliary structures change how clusters
+are selected, not how their payloads are retrieved. All such methods
+therefore remain in the cluster-based setting considered here.
+2.2
+Cloud Object-Store I/O Characteristics
+Cloud object stores provide low-cost, elastic capacity for ANN index
+payloads. Representative services include Amazon S3, Azure Blob
+Storage, and Google Cloud Storage [3, 23, 38]. Two aspects of their
+I/O behavior matter here. Each Range-GET carries substantial fixed
+overhead, and request latency is highly variable with a long tail.
+The latency decomposition in Figure 1 shows the fixed overhead
+of each Range-GET, while Figure 4b shows that both average and
+p95 query latency rise markedly as more 1 KB requests are issued
+in parallel. Merging requests reduces this fan-out but may over-
+fetch data, creating a trade-off between latency, request count, and
+transferred bytes. Request count also determines GET charge. In
+the common same-region setting, data transfer is not billed [4], so
+GET requests are the primary monetary cost. Where transferred
+bytes are billed, overfetch also incurs data-transfer charges.
+2
+
+
+Figure 3. WaRP in the query execution pipeline. Online, the request planner runs after probe selection and before object-store reads.
+Offline, a reordering pass tightens inter-cluster gaps.
+0.5
+4
+32
+0
+150
+300
+MAPE
+Conv. 4.2%
+Mono. 4.0%
+AP Same-Region
+0.5
+4
+32
+0
+150
+300
+MAPE
+Conv. 0.9%
+Mono. 1.4%
+US Same-Region
+0.5
+4
+32
+0
+600
+1200
+MAPE
+Conv. 14.9%
+Mono. 7.8%
+US to AP Cross-Region
+0.5
+4
+32
+0
+1500
+3000
+MAPE
+Conv. 22.9%
+Mono. 12.7%
+Public Internet to AP
+Range size (MiB)
+p50 latency (ms)
+Measured
+Convex
+Monotone
+(a) Surrogate fits across four deployment paths.
+30
+45
+Average
+1
+64
+128
+25
+50
+75
+p95
+Requests/query
+Latency (ms)
+(b) High tail latency.
+Figure 4. Object-store I/O on AWS S3.
+Figure 4a shows that measured single-request latency across
+four deployment paths can be approximated by simple piecewise-
+linear functions. The figure compares two such fits. The “Convex”
+fit is monotone and convex, while the more general “Monotone”
+fit only requires monotonicity. It also reports their mean absolute
+percentage error (MAPE) on request sizes excluded from fitting.
+WaRP uses the calibrated fit as the request-time surrogate when
+planning each query.
+2.3
+Execution Pipeline and Planning Challenge
+As illustrated in Figure 3, we target deployments in which cluster
+payloads remain in object storage. For each query, we use a local
+routing structure to select the nearest cluster centroids, then fetch
+payloads that miss the local cache from object storage. Even when
+an index fits in local memory, loading the entire index from object
+storage before serving queries can be slow, while a QueryNode
+serving multiple datasets may not have enough local capacity to
+keep every index resident. The resulting pipeline exposes a key step
+that has received little attention in prior work: deciding how to turn
+the required payload accesses into actual object-store requests. We
+call this step request planning. A direct implementation issues one
+Range-GET per cache-missing cluster, so its request count grows
+with cache misses. Request planning instead decides which nearby
+reads to merge into fewer requests. Optimizing this step is the
+focus of WaRP. After the planned Range-GETs complete, candidate
+evaluation or reranking proceeds.
+3
+Problem Formulation
+For each query, request planning groups the required payload inter-
+vals into one merge plan while preserving every required payload.
+Under a fixed probe set and evaluation procedure, the candidate set
+and recall therefore remain unchanged.
+Input. Given required intervals I = {[𝑙𝑖,𝑟𝑖)}𝑛
+𝑖=1 with 𝑟𝑖≤𝑙𝑖+1 for
+1 ≤𝑖< 𝑛, and a request budget 𝐾max, request planning produces at
+most 𝐾max planned ranges. Each becomes one payload GET, so this
+budget directly bounds the query’s GET charge.
+The planner scores a candidate range through a request-time
+surrogate 𝜏(ℓ), which maps planned range length ℓto the estimated
+completion time of one Range-GET. We assume 𝜏is nondecreasing,
+as every fit in Figure 4a is.
+Plan. A feasible merge plan for I partitions it into 𝐾contiguous
+groups, with 1 ≤𝐾≤𝐾max. Each group becomes one planned
+range [𝐿𝑢, 𝑅𝑢), with 𝐿𝑢the left endpoint of the first interval in
+the group and 𝑅𝑢the right endpoint of the last. The plan is the
+ordered sequence 𝜋= ([𝐿1, 𝑅1), . . . , [𝐿𝐾, 𝑅𝐾)). We write 𝐾(𝜋) = 𝐾
+for the planned range count and ℓ𝑢= 𝑅𝑢−𝐿𝑢for the byte length
+of planned range 𝑢, which may include gaps between required
+intervals assigned to the same merge.
+Objective. The quality of a plan 𝜋depends on two quantities:
+𝑊(𝜋) =
+𝐾(𝜋)
+∑︁
+𝑢=1
+𝜏(ℓ𝑢),
+𝐵(𝜋) =
+max
+1≤𝑢≤𝐾(𝜋) 𝜏(ℓ𝑢).
+𝑊(𝜋) is the sum of request-time estimates over all planned ranges.
+It is the modeled completion time at the serial endpoint, where
+3
+
+
+B — slowest-request latency
+W — aggregate time
+(a) Feasible plans
+B — slowest-request latency
+W — aggregate time
+(b) Pareto frontier
+π *
+parallel
+arg min
+π TP (π)
+π *
+serial
+WaRP
+Figure 5. From design space to Pareto frontier. Left: feasible
+merge plans for one query in the (𝐵,𝑊) plane. Right: their lower
+convex hull, with corners at the min𝑊and min 𝐵plans. The finite-
+𝑃optimum (star) is the lowest-𝑇𝑃feasible vertex.
+the 𝐾(𝜋) requests are issued one at a time. 𝐵(𝜋) is the maximum
+request-time estimate among the planned ranges. It is the modeled
+completion time at the ideal-parallel endpoint, where all requests
+start together and the query waits for the slowest one.
+𝑊(𝜋) and 𝐵(𝜋) capture the serial and ideal-parallel extremes. For
+systems between them, the request parallelism estimate 𝑃describes
+how many payload GETs from one query can progress concurrently.
+Using Graham’s bound [24], we define
+𝑇𝑃(𝜋) = 𝑊(𝜋)
+𝑃
++
+
+1 −1
+𝑃
+
+𝐵(𝜋).
+𝑇𝑃is a planning objective, not an exact latency predictor. It reduces
+to 𝑊(𝜋) at 𝑃= 1 and approaches 𝐵(𝜋) as 𝑃→∞. At planning
+time, 𝑃reflects the request parallelism expected under the target
+serving configuration.
+Request Planning Problem.
+Input: a sorted interval set I, a request budget 𝐾max, and a request
+parallelism estimate 𝑃.
+Output: a feasible plan 𝜋∗minimizing
+𝑇(𝜋) =
+
+
+𝑊(𝜋),
+serial execution,
+𝐵(𝜋),
+ideal parallel execution,
+𝑇𝑃(𝜋),
+finite-concurrency execution.
+All three objectives depend on a plan only through (𝑊(𝜋), 𝐵(𝜋)),
+and none of them increases when either metric decreases. The
+Pareto frontier in the (𝐵,𝑊) space therefore contains an
+optimal plan.
+4
+Request Planning
+This section presents WaRP’s request planner. Minimizing 𝑊and
+minimizing 𝐵are the two endpoints of the same planning problem,
+and each admits an exact algorithm. We solve both, then run Adap-
+tive Frontier Search between them, and finally relate the resulting
+merge plans to object-store charges. As shown in Figure 5, the
+feasible merge plans form a point cloud in the (𝐵,𝑊) plane, and for
+finite 𝑃an optimal plan is attained at the lower convex hull vertex
+with the smallest 𝑇𝑃.
+4.1
+Minimizing 𝑊
+At the serial endpoint, requests do not overlap, so the planning
+objective reduces to 𝑊(𝜋). The problem is therefore
+𝜋∗
+serial ∈arg min
+𝜋
+𝑊(𝜋)
+s.t.
+𝐾(𝜋) ≤𝐾max.
+4.1.1
+Basic Dynamic Program. We begin with the exact Sum-
+Minimizing DP. It reduces to a classic partition problem: cut 𝑛
+sorted intervals into at most 𝐾max contiguous groups and minimize
+the sum of request-time estimates. Let 𝑐(𝑡+ 1,𝑖) = 𝜏(𝑟𝑖−𝑙𝑡+1)
+denote the predicted time of merging required intervals 𝑡+ 1, . . . ,𝑖
+into one request. Define 𝑑𝑝[𝑖][𝑘] as the minimum sum of estimates
+to cover the first 𝑖intervals with exactly 𝑘requests. The recurrence
+is
+𝑑𝑝[𝑖][𝑘] =
+
+
+0,
+if 𝑖= 𝑘= 0,
+min
+𝑘−1≤𝑡<𝑖
+
+𝑑𝑝[𝑡][𝑘−1] + 𝑐(𝑡+1,𝑖)
+	
+,
+if 1 ≤𝑘≤𝑖,
++∞,
+otherwise.
+The optimal sum is min1≤𝑘≤𝐾max 𝑑𝑝[𝑛][𝑘], and recording each
+state’s minimizing split lets the plan be recovered by backtracking.
+The DP has 𝑛𝐾max states, each with an 𝑂(𝑛) inner search over split
+points 𝑡, for a total of 𝑂(𝑛2𝐾max) time.
+4.1.2
+Divide-and-Conquer DP Optimization. In the same-region
+setting that is our primary focus, Figure 4a shows that a convex 𝜏
+closely approximates measured single-request latency. We therefore
+use the convex fit in this setting and apply the divide-and-conquer
+optimization described below. The inner search over the final split
+point is what makes the basic DP quadratic in 𝑛. For a fixed request
+count 𝑘, let opt[𝑖][𝑘] be the smallest split point attaining 𝑑𝑝[𝑖][𝑘].
+Convexity of 𝜏makes 𝑐(𝑎,𝑏) = 𝜏(𝑟𝑏−𝑙𝑎) satisfy the quadrangle
+inequality [51, 56],
+𝑐(𝑎,𝑐) + 𝑐(𝑏,𝑑) ≤𝑐(𝑎,𝑑) + 𝑐(𝑏,𝑐)
+for all 𝑎≤𝑏≤𝑐≤𝑑,
+(1)
+which implies opt[𝑖][𝑘] ≤opt[𝑖+1][𝑘]. Divide-and-conquer DP
+optimization exploits this monotonicity. After finding the optimal
+split 𝑡∗for a midpoint row, the recursion searches only split points
+at most 𝑡∗in the left half and at least 𝑡∗in the right half. For a
+nondecreasing but nonconvex surrogate, the basic DP remains
+exact but cannot use this acceleration.
+Thresholded variant. Finite-𝑃planning in Section 4.3 repeatedly
+solves a constrained version of this DP. Given a threshold 𝛽, it
+minimizes 𝑊(𝜋) subject to 𝐵(𝜋) ≤𝛽. Equivalently, every planned
+range must have request-time estimate at most 𝛽, so a transition
+ending at interval 𝑖after split 𝑡is feasible only when 𝑐(𝑡+1,𝑖) ≤𝛽.
+Setting 𝛽= ∞recovers the unconstrained Sum-Minimizing DP.
+The threshold restricts the feasible split points but preserves their
+monotone structure. For each endpoint 𝑖, let 𝑡𝛽(𝑖) be the earliest
+split that makes the final request feasible under threshold 𝛽,
+𝑡𝛽(𝑖) = min{𝑡: 𝑐(𝑡+1,𝑖) ≤𝛽}.
+The feasible splits are therefore 𝑡𝛽(𝑖) ≤𝑡< 𝑖. Because extending
+the covered prefix cannot move this boundary to the left, 𝑡𝛽(𝑖) is
+nondecreasing in𝑖. Together with the quadrangle inequality, this im-
+plies that the smallest optimal feasible split remains nondecreasing.
+Therefore, the thresholded DP can use the same divide-and-conquer
+4
+
+
+Algorithm 1 Exact Sum-Minimizing DP with D&C optimization
+Input: Sorted intervals I = {[𝑙𝑖,𝑟𝑖)}𝑛
+𝑖=1
+Input: Request budget 𝐾max and feasible cap 𝛽
+Output: Minimum 𝑊and the corresponding merge plan
+1: function ComputeLayer(𝐿, 𝑅, 𝑜𝑝𝑡𝐿, 𝑜𝑝𝑡𝑅, 𝑘)
+2:
+if 𝐿> 𝑅then return
+3:
+𝑚𝑖𝑑←⌊(𝐿+ 𝑅)/2⌋
+4:
+𝑙𝑜←max(𝑜𝑝𝑡𝐿, 𝑘−1, 𝑡𝛽[𝑚𝑖𝑑])
+5:
+ℎ𝑖←min(𝑜𝑝𝑡𝑅, 𝑚𝑖𝑑−1, ℎ[𝑘−1])
+6:
+𝑑𝑝[𝑚𝑖𝑑][𝑘] ←+∞
+7:
+𝑡∗←𝑙𝑜
+8:
+for 𝑡←𝑙𝑜to ℎ𝑖do
+9:
+cand ←𝑑𝑝[𝑡][𝑘−1] + 𝑐(𝑡+1,𝑚𝑖𝑑)
+10:
+if cand < 𝑑𝑝[𝑚𝑖𝑑][𝑘] then
+11:
+𝑑𝑝[𝑚𝑖𝑑][𝑘] ←cand
+12:
+𝑡∗←𝑡
+13:
+prev[𝑚𝑖𝑑][𝑘] ←𝑡∗
+14:
+ComputeLayer(𝐿, 𝑚𝑖𝑑−1, 𝑜𝑝𝑡𝐿, 𝑡∗, 𝑘)
+15:
+ComputeLayer(𝑚𝑖𝑑+1, 𝑅, 𝑡∗, 𝑜𝑝𝑡𝑅, 𝑘)
+16: function DCSumDP(I, 𝐾max, 𝛽)
+17:
+𝑛←|I|
+18:
+𝐾max ←min(𝐾max,𝑛)
+19:
+Initialize 𝑑𝑝to +∞and prev to −1
+20:
+𝑑𝑝[0][0] ←0
+21:
+for 𝑖←1 to 𝑛do
+22:
+𝑡𝛽[𝑖] ←min{0 ≤𝑡< 𝑖: 𝑐(𝑡+1,𝑖) ≤𝛽}
+23:
+ℎ[0] ←0
+24:
+for 𝑘←1 to 𝐾max do
+25:
+ℎ[𝑘] ←ℎ[𝑘−1]
+26:
+𝑠←ℎ[𝑘−1] + 1
+27:
+while ℎ[𝑘] < 𝑛and 𝑐(𝑠,ℎ[𝑘]+1) ≤𝛽do
+28:
+ℎ[𝑘] ←ℎ[𝑘] + 1
+29:
+ComputeLayer(𝑘, ℎ[𝑘], 𝑘−1, ℎ[𝑘−1], 𝑘)
+30:
+𝑘∗←arg min1≤𝑘≤𝐾max 𝑑𝑝[𝑛][𝑘]
+31:
+𝜋∗←Backtrack(prev,𝑛,𝑘∗)
+32:
+return (𝑑𝑝[𝑛][𝑘∗], 𝜋∗)
+optimization, with the candidate splits for row 𝑖additionally re-
+stricted to 𝑡≥𝑡𝛽(𝑖).
+The threshold can also make some DP rows infeasible. The feasi-
+ble rows in layer 𝑘form an initial contiguous range [𝑘,ℎ𝑘], where
+ℎ𝑘is the largest interval index reachable by a feasible exactly-𝑘
+plan. Starting from ℎ0 = 0, we extend each ℎ𝑘from ℎ𝑘−1 while
+the final request remains under 𝛽, and keep it at 𝑛once all inter-
+vals are covered. For each midpoint row, we further bound the
+candidate splits by 𝑡𝛽(𝑖), ℎ𝑘−1, and the bounds inherited from the
+divide-and-conquer recursion. Algorithm 1 gives the procedure.
+Complexity. A two-pointer scan computes all 𝑡𝛽(𝑖) in 𝑂(𝑛) time.
+Since ℎ𝑘never decreases, all layer boundaries can also be found in
+𝑂(𝑛+ 𝐾max) time. Each layer’s divide-and-conquer recursion visits
+𝑂(ℎ𝑘) ≤𝑂(𝑛) rows and performs 𝑂(ℎ𝑘log𝑛) total candidate work.
+With divide-and-conquer optimization, the Sum-Minimizing DP
+therefore runs in 𝑂(𝑛𝐾max log𝑛) time and 𝑂(𝑛𝐾max) space.
+Stronger Monge-based techniques [1] can remove the log𝑛fac-
+tor in the uncapped case, but we use the divide-and-conquer form
+Algorithm 2 Exact 𝐵minimization by span-threshold search
+Input: Sorted intervals [𝑙𝑖,𝑟𝑖), budget 𝐾max
+Output: min 𝐵objective value and corresponding merge plan
+1: 𝐿←max𝑖(𝑟𝑖−𝑙𝑖),
+𝑅←𝑟𝑛−𝑙1
+2: while 𝐿< 𝑅do
+3:
+mid ←⌊(𝐿+ 𝑅)/2⌋
+4:
+if Feasible(mid) then 𝑅←mid
+5:
+else 𝐿←mid + 1
+6: 𝜋∗←greedy partition under span cap 𝐿
+7: return (𝐵(𝜋∗), 𝜋∗)
+8: function Feasible(𝜆)
+9:
+𝑘←0,
+𝑠←1
+10:
+while 𝑠≤𝑛do
+11:
+𝑘←𝑘+ 1,
+𝑖←𝑠
+12:
+while 𝑖≤𝑛and 𝑟𝑖−𝑙𝑠≤𝜆do 𝑖←𝑖+ 1
+13:
+𝑠←𝑖
+14:
+if 𝑘> 𝐾max then return false
+15:
+return true
+because it naturally extends to the bottleneck-constrained subprob-
+lems in Section 4.3. Alternatively, one can employ a Lagrangian
+relaxation of the cardinality constraint and binary-search on the
+associated penalty parameter [47], removing the linear dependence
+on 𝐾max and replacing it with a log Λ factor where Λ is the penalty
+search range. Finding the exact optimum requires a fine-grained
+search over Λ, making the constant large in practice. However,
+when an approximate solution suffices, the search can stop early,
+trading a small loss in optimality for far fewer iterations. Because
+of the cost of the fine-grained exact search, we keep D&C as the
+default exact backend. We use Lagrangian relaxation with early
+stopping only as a fast path (“+Lagrangian” in Figure 12) in the
+approximate online planner when 𝐾max is large enough that D&C’s
+linear dependence on 𝐾max dominates the planner cost.
+4.2
+Minimizing 𝐵
+Under ideal full parallelism, query completion time is determined
+by the slowest request, so the objective is
+𝜋∗
+parallel ∈
+arg min
+𝜋:𝐾(𝜋)≤𝐾max
+𝐵(𝜋).
+Since𝜏(ℓ) is nondecreasing, minimizing the maximum request-time
+estimate reduces to minimizing the maximum merged span: we
+want the smallest 𝜆such that the intervals admit a partition into at
+most 𝐾max groups each with span ≤𝜆.
+We compute this 𝜆by binary search. For a candidate 𝜆, a greedy
+left-to-right scan tests feasibility: it extends the current group with
+successive intervals while the group’s span stays ≤𝜆, and starts
+a new group whenever extending would exceed 𝜆. 𝜆is feasible
+exactly when the scan produces at most 𝐾max groups. Feasibility
+is monotone in 𝜆(a larger 𝜆admits any plan a smaller one does),
+so binary search converges on the smallest feasible 𝜆. Algorithm 2
+shows the full procedure.
+Complexity. Each feasibility test is 𝑂(𝑛), and the value-domain
+binary search takes 𝑂(𝑛log𝑈) time, where 𝑈= 𝑟𝑛−𝑙1 is the search
+range of merged spans.
+5
+
+
+4.3
+Finite 𝑃: Searching the Frontier
+We now consider the case of bounded parallelism. The objective
+𝑇𝑃(𝜋) defined in Section 3 combines𝑊and 𝐵, so neither the min𝑊
+planner from Section 4.1 nor the min 𝐵planner from Section 4.2
+is optimal on its own. We treat the bottleneck cap 𝛽as a search
+parameter and define
+𝑊∗(𝛽) =
+min
+𝜋:𝐾(𝜋)≤𝐾max, 𝐵(𝜋)≤𝛽𝑊(𝜋),
+which the thresholded Sum-Minimizing DP from Section 4.1 eval-
+uates for a single 𝛽. As 𝛽increases, the feasible set expands and
+𝑊∗(𝛽) is nonincreasing, so the evaluated plans trace a (𝐵,𝑊) fron-
+tier. Its two ends are the min 𝐵plan and the min𝑊plan (𝛽= ∞).
+The planner searches this frontier for the plan minimizing 𝑇𝑃.
+An exact solver could enumerate every distinct candidate 𝛽.
+There are 𝑂(𝑛2) distinct segment costs in the worst case, and each
+thresholded DP evaluation costs 𝑂(𝑛𝐾max log𝑛), so enumeration
+takes𝑂(𝑛3𝐾max log𝑛). This is exact but too expensive online, which
+motivates the (1+𝜖)-approximate adaptive search below.
+4.3.1
+Adaptive Frontier Search. 𝑇𝑃is linear with nonnegative coef-
+ficients on both 𝐵and 𝑊, so its minimum over the feasible (𝐵,𝑊)
+point cloud is attained at a vertex of the cloud’s lower convex hull,
+the convex lower-left boundary of the cloud. The hull can still con-
+tain many points, so we allow a (1+𝜖)-approximation: the search
+stops once no unexplored frontier segment can improve the current
+best by more than a factor of 1+𝜖. Smaller 𝜖tightens the stopping
+criterion, visiting more frontier points for a sharper bound on 𝑇𝑃.
+Larger 𝜖stops sooner with a coarser bound.
+The search starts from the two extreme plans: Algorithm 2 gives
+the min 𝐵endpoint and Algorithm 1 with 𝛽= ∞gives the min𝑊
+endpoint. These two points define the initial active segment. More
+generally, an active segment is represented by a left cap 𝛽ℓwith
+𝑊ℓ=𝑊∗(𝛽ℓ) and an evaluated plan 𝑝𝑟= (𝐵𝑟,𝑊𝑟) as its local right
+endpoint. We denote the left cap state by 𝑞ℓ= (𝛽ℓ,𝑊ℓ), although
+this pair need not correspond to an evaluated plan point. Any
+undiscovered plan in the segment has 𝐵≥𝛽ℓand 𝑊≥𝑊𝑟. For a
+point 𝑝= (𝐵,𝑊), we write𝑇𝑃(𝑝) = 𝑇𝑃(𝐵,𝑊) for the corresponding
+value of the planning objective. Since 𝑇𝑃is nondecreasing in both
+arguments,
+LB(𝑞ℓ, 𝑝𝑟) := 𝑇𝑃(𝛽ℓ,𝑊𝑟)
+lower-bounds every unexplored plan in that segment.
+The algorithm expands the segment with the smallest lower
+bound and evaluates the midpoint cap 𝛽= (𝛽ℓ+ 𝐵𝑟)/2 with the
+thresholded DP. The DP returns a witness plan 𝜋𝑚with actual point
+𝑝𝑚= (𝐵(𝜋𝑚),𝑊𝑚), where 𝐵(𝜋𝑚) ≤𝛽and𝑊𝑚=𝑊∗(𝛽). If 𝐵(𝜋𝑚) >
+𝛽ℓ, this is a new plan point inside the segment, so the algorithm
+updates the current best and splits the segment at 𝑝𝑚. Otherwise,
+𝜋𝑚was already feasible at the left cap, which implies 𝑊𝑚=𝑊ℓ. No
+frontier improvement exists on (𝛽ℓ, 𝛽], so the algorithm drops this
+interval and advances the left cap state to (𝛽,𝑊ℓ) while retaining
+the same local right endpoint. Algorithm 3 gives the procedure.
+4.3.2
+Complexity and Guarantees. Each frontier expansion eval-
+uates one thresholded Sum-Minimizing DP. The best-first search
+therefore costs 𝑂(𝑇𝑛𝐾max log𝑛), where 𝑇is the number of expan-
+sions. Each expansion either discovers a new frontier point or halves
+the unexplored 𝐵range of one segment. Only finitely many frontier
+Algorithm 3 Adaptive Frontier Search for finite 𝑃
+Input: Intervals I, budget 𝐾max, knob 𝑃, tolerance 𝜖
+Output: (1+𝜖)-approximate plan under 𝑇𝑃upon termination
+1: (𝑏𝐿, _) ←MinBPlan(I, 𝐾max)
+⊲min 𝐵, Algorithm 2
+2: (𝑊𝐿, 𝜋𝐿) ←DCSumDP(I, 𝐾max,𝑏𝐿)
+⊲min𝑊at 𝐵=𝑏𝐿
+3: 𝑝𝐿←(𝑏𝐿,𝑊𝐿)
+4: (𝑊𝑅, 𝜋𝑅) ←DCSumDP(I, 𝐾max, ∞)
+⊲min𝑊, Algorithm 1
+5: 𝑝𝑅←(𝐵(𝜋𝑅),𝑊𝑅)
+6: (𝑧best, 𝜋best) ←better of (𝑇𝑃(𝑝𝐿), 𝜋𝐿) and (𝑇𝑃(𝑝𝑅), 𝜋𝑅)
+7: H ←min-heap keyed by LB,
+H.push((𝑝𝐿, 𝑝𝑅))
+8: while H not empty do
+9:
+(𝑞ℓ, 𝑝𝑟) ←H.pop_min()
+10:
+(𝛽ℓ,𝑊ℓ) ←𝑞ℓ,
+(𝐵𝑟,𝑊𝑟) ←𝑝𝑟
+11:
+if 𝑧best ≤(1+𝜖) LB(𝑞ℓ, 𝑝𝑟) then
+12:
+return (𝑧best, 𝜋best)
+13:
+𝛽←(𝛽ℓ+ 𝐵𝑟)/2
+14:
+(𝑊𝑚, 𝜋𝑚) ←DCSumDP(I, 𝐾max, 𝛽)
+15:
+if 𝐵(𝜋𝑚) > 𝛽ℓthen
+⊲split at the new plan point
+16:
+𝑝𝑚←(𝐵(𝜋𝑚),𝑊𝑚)
+17:
+𝑧𝑚←𝑇𝑃(𝑝𝑚)
+18:
+if 𝑧𝑚< 𝑧best then
+19:
+𝑧best ←𝑧𝑚
+20:
+𝜋best ←𝜋𝑚
+21:
+H.push((𝑞ℓ, 𝑝𝑚))
+22:
+H.push((𝑝𝑚, 𝑝𝑟))
+23:
+else
+⊲𝑊∗flat on (𝛽ℓ, 𝛽]: advance left cap
+24:
+H.push(((𝛽,𝑊ℓ), 𝑝𝑟))
+25: return (𝑧best, 𝜋best)
+points exist, and repeated drops make the lower bound converge ge-
+ometrically to the objective of a feasible right-endpoint plan, which
+the current best cannot exceed. The search therefore terminates
+for 𝜖> 0. Because the heap always expands the segment with the
+smallest lower bound, the stopping test also guarantees that the
+returned plan is within a factor 1+𝜖of the optimum. Empirically,
+best-first stops after a few expansions, and with a few hundred
+intervals after probing and moderate 𝐾max, the planner finishes in
+single-digit milliseconds per query.
+Worst-case-bounded variant. Let 𝐵min > 0 be the minimum fea-
+sible 𝐵, and let 𝐵max be the 𝐵value of the min𝑊plan. These val-
+ues are given by the two endpoint plans used to initialize best-
+first search. The bounded variant evaluates the thresholded DP at
+caps 𝛽𝑗= min{𝐵max, (1+𝜖)𝑗𝐵min}, starting from 𝑗= 0 and stop-
+ping when the cap reaches 𝐵max. It returns the evaluated plan
+with the smallest 𝑇𝑃. For an optimal point 𝑝∗= (𝐵∗,𝑊∗), let 𝛽𝑗
+be the first cap no smaller than 𝐵∗. Then 𝛽𝑗≤(1+𝜖)𝐵∗, and be-
+cause 𝑝∗is feasible under 𝛽𝑗, the DP returns a plan 𝑝𝑗= (𝐵𝑗,𝑊𝑗)
+with 𝐵𝑗≤𝛽𝑗and 𝑊𝑗≤𝑊∗. The nonnegative coefficients of
+𝑇𝑃then give 𝑇𝑃(𝑝𝑗) ≤(1+𝜖)𝑇𝑃(𝑝∗). The grid contains at most
+1 + ⌈log1+𝜖(𝐵max/𝐵min)⌉caps. Its total running time is
+𝑂
+
+𝑛𝐾max log𝑛·
+
+1 + log(𝐵max/𝐵min)
+log(1 + 𝜖)
+
+.
+4.4
+Cost Accounting
+A merge plan determines both the number of payload GETs and
+the amount of data read. Major cloud object stores, such as Ama-
+6
+
+
+8
+4
+2
+7
+5
+1
+6
+9
+3
+0
+Probe Set: {1, 2, 3, 4}
+Original Layout
+3
+4
+5
+1
+2
+8
+6
+9
+Reordered Layout
+0
+7
+Figure 6. Effect of reordering. Frequently co-accessed clusters
+are placed closer together, reducing the gaps between required
+intervals; each box denotes one cluster in contiguous layout.
+zon S3, Google Cloud Storage, and Azure Blob Storage, charge
+for GET requests and may also charge for cross-region data trans-
+fer [4, 23, 38]. These services waive data-transfer fees within the
+same region. Thus, in a same-region deployment, the cost is the
+number of payload GETs multiplied by the price per GET. In a cross-
+region deployment, the cost also includes the number of bytes read
+multiplied by the data-transfer price per byte for that deployment.
+We focus on the common same-region setting.
+We formalize these two cases as follows. Let 𝑝GET be the price
+per payload GET and 𝑝byte be the data-transfer price per byte for
+that deployment. A merge plan 𝜋issues 𝐾(𝜋) payload GETs, where
+ℓ𝑢is the length of its 𝑢th planned range. Then
+Cost(𝜋) =
+
+
+𝑝GET𝐾(𝜋),
+same-region,
+𝑝GET𝐾(𝜋) + 𝑝byte
+𝐾(𝜋)
+∑︁
+𝑢=1
+ℓ𝑢,
+cross-region.
+In our end-to-end experiments, we report the cost under both pric-
+ing cases in Section 6.2.
+5
+Cluster Payload Reordering
+Request planning decides how to group required byte intervals into
+requests, but it does not change the cluster layout. By exploiting re-
+curring cluster co-access patterns, cluster payload reordering places
+frequently co-accessed clusters closer together, thereby reducing
+the gaps between required intervals. We call this property co-access
+locality. In Figure 6, the original layout needs three requests to fetch
+the required intervals without reading the large gaps between them.
+After reordering, one request can fetch all required intervals while
+overfetching only one extra cluster payload.
+5.1
+Layout Materialization and Maintenance
+Cluster reordering runs offline during index build or rewrite.
+Throughout our evaluation, we compute one cluster permutation
+for the entire IVF index. We materialize the resulting cluster
+layout by emitting payloads in that order during the existing
+payload-writing phase. Each payload is still written once, so
+reordering requires no additional rewrite or upload pass. Its only
+added work is computing the permutation, which Section 7.4
+shows takes milliseconds for thousands of clusters.
+For indexes with incremental updates, newly added data gradu-
+ally weakens co-access locality. Such indexes typically use rebuilds
+or segment merges to maintain index quality. During these opera-
+tions, the affected index data is rewritten. We recompute the cluster
+permutation and apply it when writing this data. Thus, we update
+the reordered cluster layout as part of normal index maintenance
+without a separate rewrite pass. The next two subsections explain
+how we measure co-access locality and compute the permutation.
+5.2
+Measuring Co-Access Locality
+Clusters that often appear in the same probe set should be close
+in the layout. To compare cluster layouts, we use a local query set
+to measure how often each cluster pair is selected together. We
+combine this frequency with the byte gap between the pair in each
+layout to measure co-access locality. Let 𝜎be a permutation of the
+𝐶clusters, and let Qlayout be the local query set. For clusters 𝑖and
+𝑗, we define their co-access weight as
+𝑎𝑖𝑗=
+1
+|Qlayout|
+∑︁
+𝑞∈Qlayout
+1[𝑖∈𝑆𝑞∧𝑗∈𝑆𝑞],
+(2)
+where 𝑆𝑞is the probe set of query 𝑞.
+For a permutation 𝜎, we define the weighted co-access gap as
+𝐺(𝜎) =
+∑︁
+𝑖<𝑗
+𝑎𝑖𝑗· gap𝜎(𝑖, 𝑗),
+where gap𝜎(𝑖, 𝑗) = |𝑓𝜎(𝑖) −𝑓𝜎(𝑗)| and 𝑓𝜎(𝑖) is the byte offset of
+cluster 𝑖. A smaller 𝐺(𝜎) means that frequently co-accessed clusters
+are placed closer together. This metric is independent of how 𝜎is
+constructed, allowing us to compare layouts derived from centroid
+geometry or query logs. Directly minimizing 𝐺(𝜎) is an instance of
+the minimum linear arrangement problem [20, 29] and is NP-hard,
+so we study practical reordering methods.
+5.3
+Reordering Methods
+We compute a cluster permutation before materializing the cluster
+layout. Each method uses either the cluster centroids already avail-
+able for query routing or co-access counts from a query log to place
+frequently co-accessed clusters nearby in the layout. We compare
+random projection, principal component analysis (PCA), space-
+filling curves (SFCs), and spectral ordering. Table 2 summarizes
+their computation costs for 𝐶centroids of dimension 𝑑.
+Table 2. Reordering Methods.
+Method
+Time
+Description
+Random projection
+𝑂(𝐶𝑑)
+Sort by random projection
+PCA-1D
+𝑂(𝐶𝑑2)
+Sort by first PCA axis
+PCA 𝑛-D + SFC
+𝑂(𝐶𝑑2)
+Order in top-𝑛PCA space
+Spectral (cold)
+𝑂(𝐶3)
+Spectral order from centroid similarity
+Spectral (log)
+𝑂(𝐶3)
+Spectral order from co-probe counts
+Random projection orders clusters by their projected values
+along a random direction. PCA-1D [27] instead uses the first princi-
+pal component of the cluster centroids. PCA 𝑛-D + SFC projects the
+centroids onto their top-𝑛components and orders the projected co-
+ordinates with either Z-order (Morton) [41] or a Hilbert curve [34].
+Spectral (cold) constructs a centroid-similarity graph and orders
+clusters by its Laplacian’s second eigenvector [17]. Spectral (log) ap-
+plies the same ordering to a graph weighted by empirical co-probe
+counts from Qlayout.
+We use PCA 𝑛-D + Z-order by default because it captures multi-
+dimensional centroid locality, needs no query log, and avoids the
+spectral methods’ cubic cost. Using more PCA components retains
+7
+
+
+0×
+1×
+2×
+3×
+4×
+5×
+Factor
+(a) Throughput speedup
+1M datasets
+IVF-PQ 4×
+nlist=4,096
+100M datasets
+IVF-PQ 32×
+nlist=65,536
+SIFT100M cache
+1.01×
+1.09×
+2.89×
+2.56×
+1.49×
+1.63×
+1.06×
+1.53×
+1.45×
+1.45×
+2.16×
+3.48×
+3.19×
+1.64×
+1.76×
+1.09×
+2.09×
+1.81×
+1.73×
+2.26×
+0×
+1×
+2×
+3×
+4×
+5×
+6×
+Factor
+(b) p95 latency reduction
+1M datasets
+IVF-PQ 4×
+nlist=4,096
+100M datasets
+IVF-PQ 32×
+nlist=65,536
+SIFT100M cache
+1.01×
+1.09×
+3.24×
+1.95×
+1.31×
+1.63×
+0.84×
+1.37×
+1.40×
+1.38×
+1.94×
+4.01×
+3.27×
+1.61×
+1.76×
+0.87×
+1.31×
+1.20×
+1.21×
+2.05×
+SIFT1M
+GloVe
+Open
+Image
+MSong
+GIST1M
+DEEP
+100M
+SIFT
+100M
+10%
+50%
+0×
+1×
+2×
+3×
+4×
+5×
+6×
+7×
+Factor
+(c) p99 latency reduction
+1M datasets
+IVF-PQ 4×
+nlist=4,096
+100M datasets
+IVF-PQ 32×
+nlist=65,536
+SIFT100M cache
+0.99×
+1.10×
+1.93×
+1.34×
+1.07×
+1.34×
+0.91×
+1.24×
+1.15×
+1.34×
+1.79×
+4.34×
+2.61×
+1.19×
+1.27×
+0.96×
+1.32×
+1.25×
+1.22×
+1.77×
+SIFT1M
+GloVe
+Open
+Image
+MSong
+GIST1M
+DEEP
+100M
+SIFT
+100M
+10%
+50%
+0×
+1×
+2×
+3×
+4×
+5×
+6×
+7×
+Factor
+(d) Number of GETs reduction
+1M datasets
+IVF-PQ 4×
+nlist=4,096
+100M datasets
+IVF-PQ 32×
+nlist=65,536
+SIFT100M cache
+1.09×
+1.59×
+2.60×
+2.57×
+1.98×
+2.04×
+1.92×
+1.15×
+1.14×
+1.24×
+1.98×
+5.19×
+4.27×
+2.82×
+2.79×
+2.36×
+2.52×
+2.12×
+2.22×
+2.89×
+Lance
+WaRP
+WaRP + Reorder
+Figure 7. Normalized end-to-end performance. Results for each dataset are normalized to Lance. The 10% and 50% SIFT100M cache
+results instead use cache-off SIFT100M Lance as the reference. Error bars show propagated sample standard deviations across three runs.
+64
+128
+256
+512
+1k
+2k
+4k
+8k
+I/O Concurrency Limit
+400
+800
+1600
+3200
+6400
+Latency (ms)
+plateau from 2k
+(a) Lance latency
+p50
+p95
+16
+32
+48
+64
+96
+128
+Query Concurrency (Q)
+0
+40
+80
+120
+160
+QPS
+(b) Throughput
+Lance
+WaRP
+WaRP + Reorder
+16
+32
+48
+64
+96
+128
+Query Concurrency (Q)
+0
+400
+800
+1200
+1600
+Latency (ms)
+(c) p95 end-to-end latency
+Lance
+WaRP
+WaRP + Reorder
+Figure 8. SIFT100M concurrency scaling. Panel (a) varies the I/O concurrency limit for Lance, while panels (b) and (c) vary query
+concurrency for all three methods.
+Table 3. Evaluation Datasets and Workloads.
+Name
+Domain
+Dim.
+Vectors
+Raw Size
+SIFT1M [33]
+Image
+128
+1M
+488 MB
+SIFT100M [33]
+Image
+128
+100M
+51 GB
+GloVe [44]
+Text
+100
+1.18M
+450 MB
+DEEP1M [9]
+Image
+96
+1M
+366 MB
+DEEP100M [9]
+Image
+96
+100M
+38 GB
+OpenImage [2]
+Image
+512
+1M
+1.9 GB
+MSong [11]
+Audio
+420
+0.99M
+1.6 GB
+GIST1M [33]
+Image
+960
+1M
+3.6 GB
+Random1M
+Synthetic
+128
+1M
+488 MB
+more information, but makes it harder for a one-dimensional SFC
+order to keep nearby clusters together. We choose 𝑛to balance
+these two effects. Systems with reliable query logs and tolerance
+for higher offline cost can instead use Spectral (log) to incorporate
+workload information.
+6
+End-to-End Evaluation
+In this section, we integrate WaRP into Lance’s I/O scheduler (v2.1.0-
+beta.0) [36] and evaluate end-to-end on AWS S3. Production object-
+storage vector search systems such as turbopuffer [49] and Amazon
+S3 Vectors [5] are closed services, so we cannot instrument or
+modify them. Lance is the open-source system that comes closest. It
+includes a native IVF reader and a concurrent Range-GET scheduler
+over S3, and is in production use for vector search today. Lance can
+merge adjacent ranges within a batched I/O submission using a gap
+threshold and a request-size cap. Its IVF reader, however, submits
+probed clusters separately, so these heuristics do not apply across
+clusters. We preserve this behavior in the end-to-end comparison.
+We first evaluate end-to-end performance in Section 6.2. We then
+study the effect of bounded caching in Section 6.3 and concurrency
+scaling in Section 6.4. We use microbenchmarks in Section 7 to
+examine request planning and reordering in more detail.
+6.1
+Experimental Setup
+Datasets. Table 3 lists nine datasets. Eight are real-world bench-
+marks spanning image, text, and audio embeddings from 96 to 960
+dimensions. Random1M is a synthetic stress case comprising one
+million i.i.d. Gaussian vectors with weak co-access locality. We
+evaluate end-to-end performance on both 100M-scale datasets and
+five real 1M-scale datasets. To keep the broader microbenchmark
+suite tractable, we run it on six 1M-scale datasets.
+System and measurement. All experiments run on an AWS EC2
+c7gn.8xlarge instance (32 vCPUs, 64 GB RAM, and 100 Gbps net-
+work bandwidth) in the Tokyo region, with an S3 [3] bucket in the
+same region. Lance’s concurrent Range-GET implementation [36]
+handles all object-store I/O. All runs use a closed-loop workload
+with two independent concurrency controls. Query concurrency
+𝑄sets the maximum number of active end-to-end queries, control-
+ling the query load. The I/O concurrency limit independently caps
+the number of scheduled Range-GETs kept in flight, controlling
+I/O parallelism. For the end-to-end experiments, unless otherwise
+noted, all three methods use 𝑄= 32 and an I/O concurrency limit
+of 2048. For both WaRP variants, we set the request parallelism
+estimate 𝑃to 64 and leave the request budget unbounded. The five
+8
+
+
+Table 4. End-to-end bytes, bandwidth, overfetch, and cost. Each entry reports Lance / WaRP / WaRP + Reorder.
+Metric
+SIFT1M
+GloVe
+OpenImage
+MSong
+GIST1M
+DEEP100M
+SIFT100M
+Fetched (MiB/q)
+6.5/14.1/11.2
+5.4/15.3/10.7
+21.5/23.8/22.5
+15.3/18.4/16.9
+39.5/41.4/40.3
+9.7/25.6/26.7
+10.4/25.1/33.5
+Overfetch (×)
+0.0/1.2/0.7
+0.0/1.9/1.0
+0.0/0.1/0.0
+0.0/0.2/0.1
+0.0/0.0/0.0
+0.0/1.6/1.8
+0.0/1.4/2.2
+Payload bandwidth (Gbps)
+5.4/34.4/32.7
+5.0/36.9/32.1
+18.3/30.2/31.4
+14.6/28.6/28.4
+27.8/30.9/31.0
+6.2/25.2/36.0
+6.7/23.4/38.8
+Same-region (cents)
+97.5/37.5/18.8
+98.2/38.3/23.0
+98.0/49.5/34.8
+98.1/48.1/35.2
+97.7/50.8/41.3
+222.7/194.1/88.3
+222.2/195.7/104.7
+Cross-region ($)
+6.7/12.8/10.0
+5.7/13.9/9.7
+19.8/21.4/20.1
+14.4/16.7/15.2
+35.7/36.9/35.8
+10.8/24.4/24.4
+11.4/24.0/30.5
+1M-scale datasets use 4×-compressed IVFPQ with 4,096 partitions
+and 𝑛𝑝𝑟𝑜𝑏𝑒= 128. SIFT100M and DEEP100M use 32×-compressed
+IVFPQ with 65,536 partitions, 𝑛𝑝𝑟𝑜𝑏𝑒= 256, and refinement factor
+8. For WaRP + Reorder, we use PCA 𝑛-D + Z-order and choose the
+smallest 𝑛≤8 whose top-𝑛components explain at least 35% of
+centroid variance. For each dataset, we run each method three times
+in counterbalanced order, using 200 warm-up queries followed by
+10,000 measured queries per run.
+6.2
+Overall Performance
+Across seven real-world datasets, we measure the end-to-end impact
+of request planning and reordering. Figure 8a shows that Lance’s
+p50 and p95 latencies plateau by an I/O concurrency limit of 2048,
+so this setting does not limit performance.
+Across all seven datasets in Figure 7, both WaRP variants improve
+throughput and reduce GETs relative to Lance. WaRP alone reaches
+1.06–2.89× Lance’s QPS and reduces GETs by 1.14–2.60×. Adding
+reordering widens these ranges to 1.09–3.48× and 2.12–5.19×. Both
+variants also reduce p95 and p99 latency on six of the seven datasets.
+The exception is GIST1M. Its 960-dimensional vectors make each
+cluster substantially larger, so each GET already amortizes more
+fixed overhead and fixed request overhead accounts for a smaller
+share of latency. A similar effect appears for the high-dimensional
+datasets in Section 7.1.
+Table 4 reports fetched bytes, overfetch, payload bandwidth, and
+cost for the same 10,000-query workloads. Because merging fetches
+extra bytes while increasing QPS, both WaRP variants use more
+payload bandwidth than Lance. We apply Tokyo’s S3 price of $0.0037
+per 10,000 GETs. Same-region data transfer is free, while the cross-
+region case adds $0.09/GB for transfer to Northern Virginia [4].
+Both variants lower same-region cost on all seven datasets, but
+their cross-region cost is higher than Lance’s.
+6.3
+Effect of Caching
+We also evaluate request planning with a warm cluster cache. The
+SIFT100M IVF index contains 10.3 GiB of cluster data, and we al-
+locate 10% and 50% of this size to Lance’s cluster cache. For each
+setting, a fresh process first runs the same 10,000 queries to warm
+the cache and then reports results from a second pass. In the three
+rightmost groups of Figure 7, a 10% cache reduces remote GETs
+by 4–8%, while throughput and p95 latency change little. At 50%,
+remote GETs fall by 27–43%, and all three methods improve in
+throughput and p95 latency. Both WaRP variants still outperform
+Lance at both cache sizes. Caching and request planning are there-
+fore complementary. Caching eliminates some remote reads, while
+request planning reduces the cost of those that remain.
+6.4
+Concurrency Scaling
+Finally, we test whether these gains persist as query load approaches
+saturation. Using the SIFT100M setup from Section 6.2, we first vary
+Lance’s I/O concurrency limit. As shown in Figure 8a, latency stops
+improving beyond roughly 2,000 concurrent requests. We therefore
+set the I/O concurrency limit to 2048 for the remaining experiments.
+Figure 8b and Figure 8c then vary query concurrency 𝑄from 16
+to 128. Both WaRP variants achieve higher throughput and lower
+p95 latency than Lance across all tested concurrency levels. Lance
+peaks at about 99 QPS at 𝑄= 64, whereas WaRP + Reorder reaches
+about 150 QPS at 𝑄= 96. At 𝑄= 128, WaRP + Reorder still delivers
+1.47× Lance’s QPS and reduces p95 latency by 1.46×, confirming
+that its advantage persists near saturation.
+7
+Microbenchmarks
+The remaining experiments isolate request planning and layout ef-
+fects from the rest of the ANN query pipeline. Section 7.1 examines
+the tradeoff between throughput and planned range reduction. Sec-
+tion 7.2 tests robustness to planner parameters and the deployability
+of greedy alternatives. Section 7.3 measures planner overhead and
+the contribution of each optimization layer. Section 7.4 compares
+reordering methods. Section 7.5 tests sensitivity to probe count and
+cluster granularity.
+Setup. Unless stated otherwise, the microbenchmarks use Faiss
+(faiss-cpu v1.13.2) [32] to build an IVF-Flat index and store its cluster
+payloads in a single flat file on S3. Within each experiment, all
+methods receive the same selected cluster intervals and use the
+same I/O concurrency limit. Reordered variants use PCA 𝑛-D +
+Z-order with 𝑛selected as in Section 6.2, except in Section 7.4,
+which compares the alternatives. We measure I/O completion only,
+excluding distance computation and reranking.
+Baselines. We compare WaRP with Separate, Lance, and Oracle-
+Tuned Greedy. Separate issues one Range-GET per probed cluster
+and serves as the reference for planned range reduction. Many
+storage engines expose fixed thresholds for merging nearby reads.
+Lance uses its default settings, which merge adjacent ranges when
+their gap is at most 64 KB and split merged ranges larger than
+16 MB. Oracle-Tuned Greedy tests a stronger fixed-threshold policy.
+It sweeps gap thresholds from 64 KB to 16 MB and size limits from
+1 MB to 32 MB, doubling both at each step for 54 settings in total. It
+uses measured performance on each evaluation workload to select
+the best setting, making it an optimistic reference within the tested
+grid. We also pair Lance and Oracle-Tuned Greedy with reordering
+to separate layout and request-planning effects.
+9
+
+
+20
+40
+60
+QPS
+SIFT1M
+20
+40
+60
+GloVe
+20
+40
+60
+DEEP1M
+20
+40
+60
+OpenImage
+20
+40
+60
+MSong
+20
+40
+60
+Random1M
+0
+20
+40
+60
+8090
+102
+103
+p95 latency (ms)
+0
+20
+40
+60
+8090
+102
+103
+0
+20
+40
+60
+8090
+102
+103
+0
+20
+40
+60
+8090
+102
+103
+0
+20
+40
+60
+8090
+102
+103
+0
+20
+40
+60
+8090
+102
+103
+Planned Range Reduction (%)
+Separate
+Lance
+Lance + Reorder
+WaRP
+WaRP + Reorder
+Oracle-Tuned Greedy
+Oracle-Tuned Greedy + Reorder
+Figure 9. I/O-plan throughput–reduction tradeoff. QPS (top) and p95 latency (bottom) versus planned range reduction relative to
+Separate across six 1M-scale datasets (𝑛𝑙𝑖𝑠𝑡=4096, 𝑛𝑝𝑟𝑜𝑏𝑒=128, 𝑄=4, I/O concurrency limit 64).
+7.1
+Throughput and Planned Range Reduction
+We then compare the methods at different planned range counts.
+Across six datasets, we report how QPS and p95 latency change
+with planned range reduction.
+All runs use query concurrency 𝑄=4, an I/O concurrency limit of
+64, 𝑃=16, 𝑛𝑙𝑖𝑠𝑡=4096, and 𝑛𝑝𝑟𝑜𝑏𝑒=128. To trace each WaRP curve,
+we vary 𝐾to obtain merge plans with different planned range
+counts. Each Greedy point represents one gap/span setting, while
+Lance and Separate each produce one point per dataset.
+Figure 9 shows that both too few and too many planned ranges
+hurt performance. When the count is too low, the planner merges
+distant intervals into large Range-GETs and therefore fetches more
+unnecessary bytes. Too many planned ranges create small Range-
+GETs that add per-request overhead and consume I/O slots. An in-
+termediate count maximizes QPS and minimizes p95 latency. Across
+all six datasets, WaRP + Reorder achieves the highest peak QPS.
+Lance stays close to Separate under its default settings. Reordering
+lifts it, but leaves a wide gap to WaRP + Reorder. Oracle-Tuned
+Greedy matches WaRP + Reorder on several datasets once tuned to
+its best setting. Its winning gap and span, however, differ widely
+across datasets. The second experiment in Section 7.2 fixes one
+setting in advance and tests how well it transfers.
+The combined benefit of request planning and reordering
+depends strongly on co-access locality. It is largest on SIFT1M and
+DEEP1M, where throughput reaches about 3× that of Separate,
+and smaller on GloVe. It is smallest on Random1M, whose i.i.d.
+Gaussian vectors exhibit no co-access locality and leave reordering
+with nothing to exploit. OpenImage and MSong fall below GloVe,
+reaching only 1.6–1.7× the QPS of Separate, but for a different
+reason. Under IVF-Flat their 512- and 420-dimensional vectors
+make each cluster several times larger, so every GET already
+amortizes more of its fixed overhead and merging has less left to
+recover. Product quantization could reduce per-cluster payload
+and increase the benefit of merging.
+7.2
+Parameter Robustness
+We first examine how the choice of 𝑃affects WaRP and whether a
+simple default works well across datasets and runtime conditions.
+We then test whether Greedy’s gap and span settings, once tuned
+on one workload, remain effective when the query workload or
+dataset changes.
+As defined in Section 3, 𝑃estimates how many requests from
+one query can progress concurrently. We therefore use the I/O
+concurrency limit divided by 𝑄as its default, corresponding to
+an even share of the available I/O slots among concurrent queries.
+Throughout the sweep, WaRP uses a request budget of 𝐾max=64. We
+sweep 𝑃under three runtime configurations. The relaxed setting
+uses query concurrency 𝑄=1 and an I/O concurrency limit of 64, the
+moderate setting uses 𝑄=4 and a limit of 64, and the stressed setting
+uses 𝑄=4 and a limit of 8. Figure 10 shows the results. QPS favors
+larger 𝑃as more I/O concurrency becomes available to each query.
+Stars mark the default 𝑃in each runtime configuration. Across the
+18 panels, these defaults achieve on average 97% of the best QPS
+reached by any tested 𝑃, so we can recommend this simple rule
+without per-workload tuning.
+We next test whether a Greedy policy tuned on validation queries
+still works when the workload changes. Using an IVFPQ index on
+SIFT1M with 4,096 partitions, we select the best gap and span from
+the same 54-setting grid used for Oracle-Tuned Greedy, but select
+them only on the validation workload and then keep them fixed.
+We call the resulting policy SIFT-tuned Greedy. We evaluate this
+fixed setting under four shifts. In the locality shift, the same amount
+of required data is spread over a byte span about six times wider.
+The probe-count shift increases 𝑛𝑝𝑟𝑜𝑏𝑒from 32 to 256. The joint
+shift combines these two changes, and the dataset shift applies the
+same setting to MSong. All runs use 𝑄=4 and an I/O concurrency
+limit of 64, with WaRP at 𝑃=32 and 𝐾max=128. Figure 11 shows that
+SIFT-tuned Greedy matches WaRP on the validation workload but
+falls behind WaRP after the workload or dataset shifts.
+7.3
+Planner Overhead
+WaRP plans on every query’s critical path, so its own cost has to
+stay well under the I/O it saves. A plain dynamic program does not,
+because it enumerates candidate bottleneck values exhaustively
+and takes hundreds of milliseconds. We therefore stack three opti-
+mization layers, and Figure 12 reports what each one contributes at
+10
+
+
+10
+20
+QPS
+SIFT1M
+Lance: 95 GET/q
+10
+20
+GloVe
+Lance: 112 GET/q
+10
+20
+DEEP1M
+Lance: 104 GET/q
+10
+20
+OpenImage
+Lance: 105 GET/q
+10
+20
+MSong
+Lance: 99 GET/q
+10
+20
+Random1M
+Lance: 123 GET/q
+25
+50
+QPS
+25
+50
+25
+50
+25
+50
+25
+50
+25
+50
+20
+22
+24
+26
+28
+P
+5
+10
+QPS
+20
+22
+24
+26
+28
+P
+5
+10
+20
+22
+24
+26
+28
+P
+5
+10
+20
+22
+24
+26
+28
+P
+5
+10
+20
+22
+24
+26
+28
+P
+5
+10
+20
+22
+24
+26
+28
+P
+5
+10
+Relaxed
+Q=1, limit=64
+Moderate
+Q=4, limit=64
+Stressed
+Q=4, limit=8
+WaRP + Reorder
+Oracle-Tuned Greedy + Reorder
+Lance + Reorder
+Separate
+Default P
+Figure 10. Closed-loop sensitivity to the Request Parallelism Estimate 𝑃. WaRP + Reorder uses request budget 𝐾max=64. Oracle-Tuned
+Greedy + Reorder is restricted to settings with planned range count at most 64, whereas Lance + Reorder has no such restriction. Stars mark
+𝑃equal to the I/O concurrency limit divided by 𝑄.
+60
+120
+Validation
+Locality
+Probe-count
+Joint
+Dataset
+(MSong)
+QPS ↑
+60
+120
+p95 (ms) ↓
+0
+40
+GETs per query ↓
+SIFT-tuned Greedy
+WaRP
+Figure 11. SIFT-Tuned Greedy under Shift. The first four rows
+show the validation workload and three workload shifts on SIFT1M.
+The final row transfers both policies to MSong. Points are three-
+repeat medians.
+SIFT1M
+1
+10
+100
+1k
+p95 time (ms)
+837.9
+294.6
+5.98
+1.72
+GloVe
+942.6
+324.5
+5.99
+1.72
+Baseline
++D&C
++Ada. Search
++Lagrangian
+Figure 12. Planner Overhead Breakdown. Representative p95
+planner time for 𝑛𝑝𝑟𝑜𝑏𝑒=256 and 𝐾max=128.
+the representative 𝑛𝑝𝑟𝑜𝑏𝑒=256, 𝐾max=128 setting on SIFT1M and
+GloVe. The unoptimized DP runs 838 ms on SIFT1M and 943 ms on
+GloVe. The divide-and-conquer backend (“+D&C”) cuts those to
+295 ms and 325 ms, a 2.8–2.9× saving on its own but still too slow
+for the critical path. Adaptive frontier search (“+Ada. Search”) is
+the largest speedup, dropping overhead to roughly 6 ms by replac-
+ing exhaustive enumeration with a logarithmic-step search. The
+Lagrangian fast path (“+Lagrangian”) reduces this to about 1.7 ms.
+Table 5 extends this across 𝑛𝑝𝑟𝑜𝑏𝑒and 𝐾max. At common set-
+tings with 𝑛𝑝𝑟𝑜𝑏𝑒≤256, the planner runs in 0.5–2.2 ms with all
+optimizations enabled, compared with end-to-end query latencies
+of hundreds of milliseconds. For settings where the unoptimized
+planner finishes within the 120-second limit, we use its exact 𝑇𝑃
+as ground truth. No optimized plan is more than 3.5% from that
+optimum, and the average error stays below 1.2% at every setting.
+Table 5. Planner Overhead (SIFT1M). Per-query p95 planner
+time on real probe lists. At 𝑛𝑝𝑟𝑜𝑏𝑒=512, Plain DP exceeds the 120 s
+timeout, so speedups are lower bounds.
+𝑛𝑝𝑟𝑜𝑏𝑒
+𝐾max
+Plain DP
+p95 ms
+Full Opt.
+p95 ms
+Speedup
+vs. Plain
+Error (%)
+avg./max
+128
+32
+24.61
+0.87
+28.2×
+0.77 / 3.22
+64
+10.02
+0.54
+18.5×
+0.55 / 2.86
+128
+32.30
+0.50
+64.4×
+0.59 / 1.75
+256
+64
+441.6
+1.90
+232×
+1.09 / 2.79
+128
+837.9
+1.72
+486×
+0.48 / 1.75
+256
+1368
+2.17
+630×
+0.38 / 1.22
+512
+128
+>120s
+4.72
+>25450×
+n/a
+256
+>120s
+7.17
+>16733×
+n/a
+512
+>120s
+9.90
+>12123×
+n/a
+7.4
+Reordering Method Comparison
+We compare the reordering methods introduced in Section 5.3 based
+on their offline computation time and the co-access locality they
+produce. Figure 13 shows the results. We measure computation time
+on cluster sets of size 𝐶∈{1024, 8192}, using random SIFT1M base
+vectors as simulated centroids. We measure locality on SIFT1M and
+GloVe using the normalized weighted co-access gap 𝐺(𝜎)/𝐺(𝜎id)
+defined in Section 5.2. Here, 𝜎is the permutation produced by a
+method and 𝜎id is the original cluster order, so lower values indicate
+better co-access locality. We use 𝑛𝑙𝑖𝑠𝑡=4096 and 𝑛𝑝𝑟𝑜𝑏𝑒=128, and
+fix both PCA 𝑛-D variants at 𝑛=2.
+At the smaller 𝐶=1024 setting, every method finishes quickly. At
+𝐶=8192, closer to a production configuration, the spread widens.
+The projection methods take 1.4–30 ms while the spectral methods
+take 112–143 ms. This extra spectral cost does not give consistently
+better locality. PCA 𝑛-D + Hilbert performs best on SIFT1M, while
+Spectral (log) performs best on GloVe. We deploy PCA𝑛-D + Z-order
+because it needs no query log, avoids the cubic cost of the spectral
+methods, and is easy to extend to higher 𝑛.
+7.5
+Probe Count and Cluster Granularity
+WaRP relies on merging adjacent reads, so its gain depends on
+two properties of the IVF configuration, namely the size of each
+cluster and the number of clusters probed per query. Both shift with
+11
+
+
+C=1024
+C=8192
+10−1
+100
+101
+102
+Time (ms)
+(a) Permutation Computation
+SIFT1M
+GloVe
+0.00
+0.25
+0.50
+0.75
+1.00
+G(σ)/G(σ )
+(b) Reordering Quality
+Identity
+Random proj.
+PCA-1D
+PCA n-D + Z-order
+PCA n-D + Hilbert
+Spectral (cold)
+Spectral (log)
+Figure 13. Reordering Method Comparison. Left: single-threaded
+time to compute the cluster permutation. Right: normalized co-access
+gap on SIFT1M and GloVe. Both PCA 𝑛-D variants use 𝑛=2.
+32
+64
+128
+256
+512
+nprobe
+0
+25
+50
+75
+QPS
+(a) Varying Probe Count
+nlist=1024
+nprobe=32
+nlist=2048
+nprobe=64
+nlist=4096
+nprobe=128
+0
+20
+40
+60
+(b) Varying Cluster Granularity
+90
+95
+100
+Recall (%)
+Separate
+Lance + Reorder
+WaRP + Reorder, K
+=nprobe/4
+WaRP + Reorder, K
+=nprobe/2
+Figure 14. SIFT1M Probe Count and Cluster Granularity. Left:
+𝑛𝑙𝑖𝑠𝑡=4096, 𝑛𝑝𝑟𝑜𝑏𝑒∈{32, 64, 128, 256, 512}. Right: (𝑛𝑙𝑖𝑠𝑡,𝑛𝑝𝑟𝑜𝑏𝑒) ∈
+{(1024, 32), (2048, 64), (4096, 128)} at fixed probe fraction.
+deployment choices in practice. Vector quantization at different
+compression levels changes per-cluster payload, and different recall
+targets push 𝑛𝑝𝑟𝑜𝑏𝑒up or down. We sweep these two axes on
+SIFT1M, varying 𝑛𝑝𝑟𝑜𝑏𝑒at fixed 𝑛𝑙𝑖𝑠𝑡for the first, and raising 𝑛𝑙𝑖𝑠𝑡
+and 𝑛𝑝𝑟𝑜𝑏𝑒together at fixed probe fraction for the second. All
+runs use the reordered layout, query concurrency 𝑄=4, and an
+I/O concurrency limit of 64. WaRP + Reorder uses request budgets
+𝐾max=𝑛𝑝𝑟𝑜𝑏𝑒/4 and 𝐾max=𝑛𝑝𝑟𝑜𝑏𝑒/2.
+In Figure 14a, we sweep 𝑛𝑝𝑟𝑜𝑏𝑒from 32 to 512. Separate issues
+one request per cluster, so its QPS declines sharply as 𝑛𝑝𝑟𝑜𝑏𝑒in-
+creases. With 𝐾max=𝑛𝑝𝑟𝑜𝑏𝑒/4, WaRP + Reorder merges the selected
+intervals, and its QPS declines more gradually. However, the tight
+request budget requires more aggressive merging and leaves it
+behind Separate at small 𝑛𝑝𝑟𝑜𝑏𝑒. With 𝐾max=𝑛𝑝𝑟𝑜𝑏𝑒/2, WaRP +
+Reorder stays above Separate throughout the sweep, and its advan-
+tage grows with 𝑛𝑝𝑟𝑜𝑏𝑒. In Figure 14b, each query probes the same
+fraction of the index as clusters become smaller. Separate declines
+by 3.3× as per-request overhead dominates the smaller payloads,
+whereas WaRP + Reorder declines by only 1.2× because it merges
+the resulting small reads. Thus, its advantage over Separate grows
+as cluster size decreases.
+8
+Related Work
+ANN Indexes. ANN indexes include tree-based methods (KD-
+trees [10], RP-trees [14]), hashing (LSH [22, 28]), partition methods
+(IVF/IVFPQ [32, 33], IMI [8]), and graph methods (HNSW [37],
+NSG [18]). These indexes are often paired with compression
+schemes such as PQ [33], OPQ [21], and RabitQ [19]. Disk-aware
+variants (DiskANN [30], SPANN [12], Starling [52], PipeANN [25],
+PageANN [35]) reduce random I/O on local SSDs through graph
+layout and pipelining. Dynamic and filtered variants have also
+been studied [31, 48, 54, 55, 58]. WaRP instead operates after IVF
+probe selection and optimizes retrieval of the selected clusters
+from object storage.
+Object Storage, Remote I/O, and Vector Retrieval. Within the same
+region, object-store reads incur per-request charges and substantial
+fixed latency, making request granularity and concurrency central
+to throughput. AnyBlob [16] empirically identifies a request-size
+sweet spot for analytics, while Delta Lake [7] highlights broader
+object-store limitations, including costly metadata operations and
+limited storage semantics. Vector systems use object storage at
+different points in the serving path. Weaviate [53] and Qdrant [46]
+serve active indexes from memory or local storage, while Milvus
+full-load mode [39] caches object-store-resident segments before
+search. Other designs access object storage during query process-
+ing. Milvus Tiered Storage [40] fetches data chunks or whole per-
+segment index files on demand, while turbopuffer [49] reads un-
+cached data directly from object storage and caches it locally. Such
+on-demand object-store access is useful when the full working set
+cannot remain local or when loading an entire index before serving
+queries is undesirable. For IVF indexes in this setting, WaRP reduces
+the number of object-store requests by coalescing the byte intervals
+of cache-missing cluster payloads into fewer Range-GETs. On this
+query path, Lance [36] and the published Databricks design [15]
+expose fixed gap or span thresholds for merging adjacent ranges.
+WaRP instead formulates request merging as a global optimization
+problem and provides an efficient planner. Our microbenchmarks
+in Figure 9 compare WaRP with this fixed-threshold family and
+show that WaRP + Reorder achieves the highest peak QPS across
+all six datasets.
+Data Reordering and Locality Optimization. Space-filling curves
+such as Hilbert [34] and Z-order curves [43] have long been used
+in databases to linearize multidimensional data while preserving
+spatial locality [29]. Modern data lake systems such as Apache
+Hudi [6] apply Z-order and Hilbert ordering to improve data skip-
+ping and reduce I/O for analytical queries. In the disk-based ANN
+setting, DiskANN++ [42] and Starling [52] reorder graph vertices
+within fixed-size storage pages so that each page read contains
+more useful neighbors. WaRP instead reorders variable-size IVF
+cluster payloads in a flat object-store layout to reduce the gaps
+among payloads likely to be probed together. The online planner
+can then choose variable-length Range-GETs for each query. WaRP
+therefore optimizes the layout for object-store request planning
+rather than for a fixed-size read unit.
+9
+Conclusion
+We present WaRP, a planner that optimizes how a vector index
+issues requests to object storage. It uses a request-time surrogate to
+estimate each request’s completion time and an optimized planning
+algorithm that is fast enough to run on the query path. We also
+introduce offline payload reordering to improve co-access locality
+and create more merge opportunities. Across seven datasets, WaRP
++ Reorder delivers 1.09–3.48× Lance’s QPS and a 2.12–5.19× GET
+reduction. Together, these results establish request planning as
+a practical optimization layer between ANN probe selection and
+object-store reads.
+12
+
+
+Acknowledgments
+This work was supported by the National Natural Science Founda-
+tion of China (Grant No. 62532001), Shanghai Qizhi Institute, and
+Tsinghua University - Keystone Electrical(Zhejiang) Co., Ltd Joint
+Research Center for Embodied Multimodal Artificial Intelligence
+(JCEMAI).
+References
+[1] Alok Aggarwal, Maria Klawe, Shlomo Moran, Peter Shor, and Robert Wilber.
+1986. Geometric applications of a matrix searching algorithm. In Proceedings of
+the second annual symposium on Computational geometry. 285–292.
+[2] Cecilia Aguerrebere, Mark Hildebrand, Ishwar Singh Bhati, Theodore Willke,
+and Mariano Tepper. 2024. Locally-Adaptive Quantization for Streaming Vector
+Search. arXiv:2402.02044 [cs.LG] https://arxiv.org/abs/2402.02044
+[3] Amazon Web Services. 2026. Amazon S3. https://aws.amazon.com/s3/. Accessed
+March 22, 2026.
+[4] Amazon Web Services. 2026. Amazon S3 Pricing. https://aws.amazon.com/s3/
+pricing/. Accessed August 3, 2026.
+[5] Amazon Web Services. 2026. Amazon S3 Vectors. https://aws.amazon.com/s3/
+features/vectors/. Accessed March 24, 2026.
+[6] Apache Hudi. 2021.
+Apache Hudi Z-Order and Hilbert Space Filling
+Curves. https://hudi.apache.org/blog/2021/12/29/hudi-zorder-and-hilbert-space-
+filling-curves.
+[7] Michael Armbrust, Tathagata Das, Liwen Sun, Burak Yavuz, Shixiong Zhu, Mukul
+Murthy, Joseph Torres, Herman Van Hovell, Adrian Ionescu, Alicja Łuszczak,
+et al. 2020. Delta lake: high-performance ACID table storage over cloud object
+stores. Proceedings of the VLDB Endowment 13, 12 (2020), 3411–3424.
+[8] Artem Babenko and Victor Lempitsky. 2014. The inverted multi-index. IEEE
+transactions on pattern analysis and machine intelligence 37, 6 (2014), 1247–1260.
+[9] Artem Babenko and Victor Lempitsky. 2016. Efficient indexing of billion-scale
+datasets of deep descriptors. In Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition. 2055–2063.
+[10] Jon Louis Bentley. 1975. Multidimensional binary search trees used for associative
+searching. Commun. ACM 18, 9 (1975), 509–517.
+[11] Thierry Bertin-Mahieux, Daniel PW Ellis, Brian Whitman, and Paul Lamere.
+2011. The million song dataset. (2011).
+[12] Qi Chen, Bing Zhao, Haidong Wang, Mingqin Li, Chuanjie Liu, Zengzhong Li,
+Mao Yang, and Jingdong Wang. 2021. SPANN: Highly-efficient Billion-scale
+Approximate Nearest Neighbor Search. arXiv (Cornell University) (11 2021).
+doi:10.48550/arxiv.2111.08566
+[13] Benoit Dageville, Thierry Cruanes, Marcin Zukowski, Vadim Antonov, Artin
+Avanes, Jon Bock, Jonathan Claybaugh, Daniel Engovatov, Martin Hentschel,
+Jiansheng Huang, et al. 2016. The snowflake elastic data warehouse. In Proceed-
+ings of the 2016 International Conference on Management of Data. 215–226.
+[14] Sanjoy Dasgupta and Kaushik Sinha. 2013. Randomized partition trees for exact
+nearest neighbor search. In Conference on learning theory. PMLR, 317–337.
+[15] Databricks. 2025. Decoupled by Design: Billion-Scale Vector Search. https://www.
+databricks.com/blog/decoupled-design-billion-scale-vector-search. Accessed
+March 17, 2026.
+[16] Dominik Durner, Viktor Leis, and Thomas Neumann. 2023. Exploiting cloud ob-
+ject storage for high-performance analytics. Proceedings of the VLDB Endowment
+16, 11 (2023), 2769–2782.
+[17] Miroslav Fiedler. 1973. Algebraic connectivity of graphs. Czechoslovak mathe-
+matical journal 23, 2 (1973), 298–305.
+[18] Cong Fu, Chao Xiang, Changxu Wang, and Deng Cai. 2019. Fast approximate
+nearest neighbor search with the navigating spreading-out graph. Proc. VLDB
+Endow. 12, 5 (jan 2019), 461–474. doi:10.14778/3303753.3303754
+[19] Jianyang Gao and Cheng Long. 2024. Rabitq: Quantizing high-dimensional
+vectors with a theoretical error bound for approximate nearest neighbor search.
+Proceedings of the ACM on Management of Data 2, 3 (2024), 1–27.
+[20] Michael R Garey, David S Johnson, and Larry Stockmeyer. 1974. Some simplified
+NP-complete problems. In Proceedings of the sixth annual ACM symposium on
+Theory of computing. 47–63.
+[21] Tiezheng Ge, Kaiming He, Qifa Ke, and Jian Sun. 2013. Optimized product
+quantization for approximate nearest neighbor search. In Proceedings of the IEEE
+conference on computer vision and pattern recognition. 2946–2953.
+[22] Aristides Gionis, Piotr Indyk, Rajeev Motwani, et al. 1999. Similarity search in
+high dimensions via hashing. In Vldb, Vol. 99. 518–529.
+[23] Google Cloud. 2026. Cloud Storage Pricing. https://cloud.google.com/storage/
+pricing. Accessed August 11, 2026.
+[24] Ronald L. Graham. 1969. Bounds on multiprocessing timing anomalies. SIAM
+journal on Applied Mathematics 17, 2 (1969), 416–429.
+[25] Hao Guo and Youyou Lu. 2025. Achieving {Low-Latency}{Graph-Based} vector
+search via aligning {Best-First} search algorithm with {SSD}. In 19th USENIX
+Symposium on Operating Systems Design and Implementation (OSDI 25). 171–186.
+[26] Rentong Guo, Xiaofan Luan, Long Xiang, Xiao Yan, Xiaomeng Yi, Jigao Luo,
+Qianya Cheng, Weizhi Xu, Jiarui Luo, Frank Liu, Zhenshan Cao, Yanliang Qiao,
+Ting Wang, Bo Tang, and Charles Xie. 2022. Manu: A Cloud Native Vector
+Database Management System. arXiv:2206.13843 [cs.DB] https://arxiv.org/abs/
+2206.13843
+[27] Harold Hotelling. 1933. Analysis of a complex of statistical variables into principal
+components. Journal of educational psychology 24, 6 (1933), 417.
+[28] Piotr Indyk and Rajeev Motwani. 1998. Approximate nearest neighbors: towards
+removing the curse of dimensionality. In Proceedings of the thirtieth annual ACM
+symposium on Theory of computing. 604–613.
+[29] Hosagrahar V Jagadish. 1990. Linear clustering of objects with multiple attributes.
+In Proceedings of the 1990 ACM SIGMOD international conference on Management
+of data. 332–342.
+[30] Suhas Jayaram Subramanya, Fnu Devvrit, Harsha Vardhan Simhadri, Ravishankar
+Krishnawamy, and Rohan Kadekodi. 2019. DiskANN: Fast Accurate Billion-point
+Nearest Neighbor Search on a Single Node. In Advances in Neural Information Pro-
+cessing Systems, H. Wallach, H. Larochelle, A. Beygelzimer, F. d'Alché-Buc, E. Fox,
+and R. Garnett (Eds.), Vol. 32. Curran Associates, Inc. https://proceedings.neurips.
+cc/paper_files/paper/2019/file/09853c7fb1d3f8ee67a61b6bf4a7f8e6-Paper.pdf
+[31] Mengxu Jiang, Zhi Yang, Fangyuan Zhang, Guanhao Hou, Jieming Shi, Wenchao
+Zhou, Feifei Li, and Sibo Wang. 2025. DIGRA: A Dynamic Graph Indexing for
+Approximate Nearest Neighbor Search with Range Filter. Proceedings of the ACM
+on Management of Data 3, 3 (2025), 1–26.
+[32] Jeff Johnson, Matthijs Douze, and Hervé Jégou. 2019. Billion-scale similarity
+search with GPUs. IEEE transactions on big data 7, 3 (2019), 535–547.
+[33] Herve Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization
+for Nearest Neighbor Search. IEEE Transactions on Pattern Analysis and Machine
+Intelligence 33, 1 (2011), 117–128. doi:10.1109/TPAMI.2010.57
+[34] Ibrahim Kamel and Christos Faloutsos. 1994. Hilbert R-tree: An improved R-tree
+using fractals. In Proceedings of the 20th International Conference on Very Large
+Data Bases (VLDB). 500–509.
+[35] Dingyi Kang, Dongming Jiang, Hanshen Yang, Hang Liu, and Bingzhe Li. 2025.
+Scalable Disk-Based Approximate Nearest Neighbor Search with Page-Aligned
+Graph. arXiv preprint arXiv:2509.25487 (2025).
+[36] Lance Developers. 2024. Lance: A modern columnar data format for machine
+learning. https://lancedb.github.io/lance/.
+[37] Yu A. Malkov and D. A. Yashunin. 2020. Efficient and Robust Approximate
+Nearest Neighbor Search Using Hierarchical Navigable Small World Graphs.
+IEEE Transactions on Pattern Analysis and Machine Intelligence 42, 4 (2020), 824–
+836. doi:10.1109/TPAMI.2018.2889473
+[38] Microsoft Azure. 2026. Azure Blob Storage and Bandwidth Pricing. https://azure.
+microsoft.com/en-us/pricing/details/storage/blobs/; https://azure.microsoft.com/
+en-us/pricing/details/bandwidth/. Accessed August 11, 2026.
+[39] Milvus. 2026. Milvus Architecture Overview. https://milvus.io/docs/architecture_
+overview.md. Accessed August 4, 2026.
+[40] Milvus. 2026. Tiered Storage Overview. https://milvus.io/docs/tiered-storage-
+overview.md. Accessed August 15, 2026.
+[41] Guy M Morton. 1966. A computer oriented geodetic data base and a new technique
+in file sequencing. International Business Machines Company.
+[42] Jiongkang Ni, Xiaoliang Xu, Yuxiang Wang, Can Li, Jiajie Yao, Shihai Xiao, and
+Xuecang Zhang. 2023. Diskann++: Efficient page-based search over isomor-
+phic mapped graph index using query-sensitivity entry vertex. arXiv preprint
+arXiv:2310.00402 (2023).
+[43] Jack A Orenstein. 1986. Spatial query processing in an object-oriented database
+system. In Proceedings of the 1986 ACM SIGMOD international conference on
+Management of data. 326–336.
+[44] Jeffrey Pennington, Richard Socher, and Christopher D Manning. 2014. Glove:
+Global vectors for word representation. In Proceedings of the 2014 conference on
+empirical methods in natural language processing (EMNLP). 1532–1543.
+[45] Pinecone. 2024. Inside Pinecone: Slab Architecture. https://www.pinecone.io/
+learn/slab-architecture/. Accessed March 17, 2026.
+[46] Qdrant. 2026. Storage. https://qdrant.tech/documentation/manage-data/storage/.
+Accessed August 4, 2026.
+[47] Daniel Rutschmann. 2026.
+Alien Optimization.
+https://soi.ch/wiki/alien-
+optimization/. Swiss Olympiad in Informatics Wiki, accessed 2026-03-27.
+[48] Aditi Singh, Suhas Jayaram Subramanya, Ravishankar Krishnaswamy, and Har-
+sha Vardhan Simhadri. 2021. Freshdiskann: A fast and accurate graph-based ann
+index for streaming similarity search. arXiv preprint arXiv:2105.09613 (2021).
+[49] turbopuffer. 2026. Architecture. https://turbopuffer.com/docs/architecture. Ac-
+cessed March 17, 2026.
+[50] Alexandre Verbitski, Anurag Gupta, Debanjan Saha, Murali Brahmadesam,
+Kamal Gupta, Raman Mittal, Sailesh Krishnamurthy, Sandor Maurice, Tengiz
+Kharatishvili, and Xiaofeng Bao. 2017. Amazon aurora: Design considerations
+for high throughput cloud-native relational databases. In Proceedings of the 2017
+ACM International Conference on Management of Data. 1041–1052.
+[51] Michelle L Wachs. 1989. On an efficient dynamic programming technique of F. F.
+Yao. Journal of Algorithms 10, 4 (1989), 518–530. doi:10.1016/0196-6774(89)90003-
+13
+
+
+5
+[52] Mengzhao Wang, Weizhi Xu, Xiaomeng Yi, Songlin Wu, Zhangyang Peng, Xi-
+angyu Ke, Yunjun Gao, Xiaoliang Xu, Rentong Guo, and Charles Xie. 2024. Star-
+ling: An i/o-efficient disk-resident graph index framework for high-dimensional
+vector similarity search on data segment. Proceedings of the ACM on Management
+of Data 2, 1 (2024), 1–27.
+[53] Weaviate. 2026. Indexing. https://docs.weaviate.io/weaviate/starter-guides/
+managing-resources/indexing. Accessed August 4, 2026.
+[54] Haike Xu, Magdalen Dobson Manohar, Philip A Bernstein, Badrish Chandramouli,
+Richard Wen, and Harsha Vardhan Simhadri. 2025. In-Place Updates of a Graph
+Index for Streaming Approximate Nearest Neighbor Search. arXiv preprint
+arXiv:2502.13826 (2025).
+[55] Yuming Xu, Hengyu Liang, Jin Li, Shuotao Xu, Qi Chen, Qianxi Zhang, Cheng
+Li, Ziyue Yang, Fan Yang, Yuqing Yang, et al. 2023. Spfresh: Incremental in-place
+update for billion-scale vector search. In Proceedings of the 29th Symposium on
+Operating Systems Principles. 545–561.
+[56] F Frances Yao. 1980. Efficient dynamic programming using quadrangle inequali-
+ties. In Proceedings of the twelfth annual ACM symposium on Theory of computing.
+429–435.
+[57] Xinyu Zeng, Yulong Hui, Jiahong Shen, Andrew Pavlo, Wes McKinney, and
+Huanchen Zhang. 2023. An Empirical Evaluation of Columnar Storage Formats.
+Proceedings of the VLDB Endowment 17, 2 (2023), 148–161. doi:10.14778/3626292.
+3626298
+[58] Ziyu Zhang, Yuanhao Wei, Joshua Engels, and Julian Shun. 2025. CleANN:
+Efficient Full Dynamism in Graph-based Approximate Nearest Neighbor Search.
+arXiv preprint arXiv:2507.19802 (2025).
+14
