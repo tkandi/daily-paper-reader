@@ -48,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-29</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-30</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 18 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-29 18:41:00 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-30 19:53:17 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -69,9 +69,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日速读聚焦 Transformer 理论、联邦学习个性化与可扩展稀疏预训练三条主线。</p>
-<p>最值得关注的是 Transformer 的精确编译与注意力聚类机制，以及用支持度自适应统计个性化提升联邦学习全局共识。</p>
-<p>建议普通读者优先从 Transformer 理论和联邦学习两篇入手，结合自身场景判断其对模型效率与协作训练的启发。</p>
+<p>10月30日完成18篇AI系统论文筛选，重点精读云边端可信机器学习与Mac集群分布式训练。</p>
+<p>最值得关注的是异构Cloud-Edge-IoT中的安全、隐私与鲁棒性协同，以及面向LLM和无服务器推理的自适应执行、预加载加速。</p>
+<p>普通读者可优先从可信AI综述建立全局框架，再按需追踪高效推理与工程部署实践。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -80,12 +80,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">0 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Trustworthy Distributed Machine Learning in Cloud-Edge-IoT Systems: A Heterogeneity-Aware Survey of Security, Privacy, and Robustness">Trustworthy Distributed Machine Learning in Cloud-Edge-IoT Systems: A Heterogeneity-Aware Survey of Security, Privacy, and Robustness</span></li><li><span class="dpr-home-dashboard-paper-title" title="MCCL: Training Pytorch models across a fleet of Macs at Skywalker Sound">MCCL: Training Pytorch models across a fleet of Macs at Skywalker Sound</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning to Formulate: Agentic Hardware-Software Co-Design of AI Infrastructure through Progressive Optimization and Verification">Learning to Formulate: Agentic Hardware-Software Co-Design of AI Infrastructure through Progressive Optimization and Verification</span></li></ul>
   </div>
-
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>7</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -93,12 +93,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Transformers as Generic Deep Neural Networks: Exact Compilation, the Cost of Removing Activation-Activation Products, and Multi-Agent Attention Clustering">Transformers as Generic Deep Neural Networks: Exact Compilation, the Cost of Removing Activation-Activation Products, and Multi-Agent Attention Clustering</span></li><li><span class="dpr-home-dashboard-paper-title" title="Is High Local Accuracy Enough? Geometric Consensus with Support-Adaptive Statistical Personalization for Federated Learning">Is High Local Accuracy Enough? Geometric Consensus with Support-Adaptive Statistical Personalization for Federated Learning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Nested Sparsity for Scalable Pretraining and Continual Learning">Nested Sparsity for Scalable Pretraining and Continual Learning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="JustGoal: With Only a Goal, the AI Baseline Is Above the Expert Kernels">JustGoal: With Only a Goal, the AI Baseline Is Above the Expert Kernels</span></li><li><span class="dpr-home-dashboard-paper-title" title="Request-Adaptive Execution for Efficient Hybrid LLM Inference">Request-Adaptive Execution for Efficient Hybrid LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="GearUp: DAG-aware Acceleration for Serverless Inference Serving via Slack-guided Pre-loading">GearUp: DAG-aware Acceleration for Serverless Inference Serving via Slack-guided Pre-loading</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>7</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mlsys <strong>11</strong></span></div>
 </section>
 </div>
 

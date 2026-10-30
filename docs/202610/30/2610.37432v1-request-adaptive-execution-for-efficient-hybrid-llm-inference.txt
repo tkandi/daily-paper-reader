@@ -1,0 +1,530 @@
+Title: Request-Adaptive Execution for Efficient Hybrid LLM Inference
+
+URL Source: https://arxiv.org/pdf/2610.37432v1
+
+Published Time: Wed, 28 Oct 2026 01:52:30 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# Request-Adaptive Execution for Efficient Hybrid LLM Inference 
+
+Fahao Chen 
+
+chenfh@ieee.org Shandong University China 
+
+Xuzhe Yan 
+
+Xi’an Jiaotong University China Zedekiah5571@outlook.com 
+
+Qi Zhang 
+
+Xi’an Jiaotong University China zq0204@stu.xjtu.edu.cn 
+
+Peng Li 
+
+Xi’an Jiaotong University China pengli@xjtu.edu.cn 
+
+Dongxiao Yu 
+
+Shandong University China dxyu@sdu.edu.cn 
+
+Song Guo 
+
+Hong Kong University of Science and Technology Hong Kong SAR songguo@cse.ust.hk 
+
+Abstract 
+
+Hybrid large language models (LLMs) have emerged as a promising way to combine the modeling capability of the Attention mechanism with the efficiency of state space mod-els (SSMs). However, most existing hybrid LLMs still inherit a static design philosophy: once the Attention-to-SSM lay-out is chosen, every request must follow the same hybrid execution. This one-layout-fits-all design is inefficient for real-world serving workloads, where different requests rely on contextual information in different ways. This paper presents Flex, a serving system that co-designs the model architecture and runtime for request-adaptive hy-brid LLM inference. Its model architecture pairs Attention and SSM layers within each block and uses prefill-oriented gating to select a request-specific layout that remains fixed throughout decoding. Its serving runtime preserves batch-ing efficiency under divergent layer choices through selec-tive batching and enables correct prefix reuse through hybrid-aware context caching. Experiments on six datasets show that Flex achieves a better quality-efficiency trade-off than existing static hybrid baselines. System-level evaluation fur-ther shows that Flex improves the serving throughput by up to 3.87× over baselines while substantially reducing in-ference latency. 
+
+Keywords: Large language models, State space models, Ef-ficient serving 
+
+1 Introduction 
+
+Large language models (LLMs) have become the foundation of modern AI services, powering applications such as search [31, 40], coding assistants [20], document analysis [18, 49], and autonomous agents [24, 34]. Most deployed LLMs are based on the Transformer architecture, where the attention mech-anism provides strong global-context modeling but incurs quadratic computation and growing KV-cache memory dur-ing inference [43, 50, 56]. To reduce this cost, state space models (SSMs), such as Mamba [9, 16], have been introduced as efficient sequence modeling primitives. SSMs summarize Attention Layer Reasoning Attention Layer SSM Layer SSM Layer QA      
+
+> (a) Static hybrid layout (b) Proposed dynamic hybrid layout
+> Reasoning Summarization SSM Layer SSM Layer Attention Layer Attention Layer SSM Layer Attention Layer SSM Layer Attention Layer
+
+Figure 1. (a) Hybrid LLMs use the static Attention-to-SSM layout for all requests. (b) Request-adaptive hybrid layout allows different requests to activate different Attention and SSM execution. Colored lines indicate layer selections. prior tokens into compact recurrent states and update them in linear time. However, this compact recurrent state may limit the ability to recall context-dependent information, mak-ing SSMs less effective on tasks that require precise long-range context modeling [46]. To combine the complementary strengths of attention mech-anisms and SSMs, recent works have proposed hybrid LLMs 1,which interleave Attention layers and SSM layers within the same model to balance model quality and inference ef-ficiency. Representative works such as Jamba [22], Mamba-LLaMA [38], and Nemotron-H [3] have demonstrated a bet-ter quality-efficiency trade-off than Attention-only or SSM-only architectures. A core design factor behind the perfor-mance of hybrid LLMs is the Attention-to-SSM layout , which specifies not only how many Attention and SSM layers are used, but also where these layers are placed in the model. Existing hybrid LLMs typically rely on hand-crafted ar-chitecture designs, where the Attention-to-SSM layout is se-lected based on empirical studies. In addition, this layout re-mains static for all requests once the model is constructed. For example, Jamba adopts an 𝑎/𝑚 rotation strategy, insert-ing 𝑎 Attention layers for every 𝑚 SSM layers. As illustrated 
+
+> 1We use the term “hybrid LLMs” to broadly refer to LLMs that combine Attention layers with SSM layers within the same model. 1arXiv:2610.37432v1 [cs.DC] 27 Oct 2026
+
+in Figure 1(a), such static designs assume requests with dif-ferent characteristics, e.g., summarization, QA, and reason-ing, benefit from the same hybrid structure. However, our preliminary experiments in §2.2 show that this assumption does not always hold in real-world inference workloads. A layout that achieves the best accuracy on a reasoning task such as ARC-Challenge can lead to suboptimal quality on a summarization task such as PubMed. This inconsistency arises because different workloads rely on contextual infor-mation in different ways. For example, reasoning tasks may only require selected Attention layers for option compari-son, while long-document summarization often depends more heavily on fine-grained global context modeling to identify and preserve salient information. As a result, a static Attention-to-SSM layout can either overuse Attention for simple re-quests, wasting computation, or underuse Attention for context-sensitive requests, sacrificing output quality. 
+
+Key Idea. Our key idea is to make the hybrid LLM request-adaptive: rather than fixing the Attention-to-SSM layout, the model selects an appropriate hybrid layout for each in-coming request. As illustrated in Figure 1(b), different re-quests can activate different Attention and SSM layers ac-cording to their context-modeling demands. We realize this idea through algorithm-system co-design in Flex, an infer-ence system that integrates a request-adaptive hybrid model with runtime optimizations for efficient serving. The hybrid model consists of multiple adaptive hybrid blocks, each con-taining a lightweight gate, paired Attention and SSM branches, and shared components such as the FFN. For each request, the gates select one branch per block, forming a request-specific execution layout that balances modeling capability and inference cost. A key design choice is the gating granularity. A natural token-level gating design would allow each token to inde-pendently choose whether to execute the Attention or SSM layer in each hybrid block. However, this design is ill-suited for autoregressive decoding, where newly generated tokens rely on the cached results of previous tokens, i.e., Atten-tion KVs and SSM states, to avoid recomputation. If tokens from the same request choose different layers within the same block, later tokens may not be able to directly reuse the Attention KVs or SSM states produced by earlier tokens, forcing the runtime to recompute previous tokens under the new layer choice. Flex therefore adopts prefill-oriented gat-ing mechanism (§4): during prefill, the gate uses all input tokens to make one request-level Attention and SSM choice for each hybrid block, and these choices are fixed through-out decoding. This allows the Attention KVs or SSM states built by previously generated tokens to be reused consis-tently. At the system level, request-adaptive layouts introduce two challenges: requests within the same batch may select different branches, and requests sharing a textual prefix may require incompatible layer-wise caches. The serving runtime in Flex addresses these challenges through the following two designs to preserve batching efficiency and ensure cor-rect context reuse. 
+
+Selective Batching Engine. To maintain high inference throughput, Flex must efficiently batch multiple requests for parallel execution. However, requests in the same batch may select different branches at each hybrid block, which breaks the traditional batching assumption of conventional serving engines, where all requests in a batch follow the same operator sequence [12, 21, 32]. A naive solution would either serialize or execute block computations separately. The former loses parallelism, while the latter fragments the original batch and prevents request-independent operations, such as normalization and FFN computation, from being ex-ecuted as a single compact batch [55]. Flex addresses this with selective batching engine (§5). The key idea is to keep branch-independent operations on the original packed batch, and split requests only for the branch-dependent Attention and SSM computation. At each block, it partitions requests into compact Attention and SSM sub-batches, executes them with their corresponding ker-nels, and then merges outputs back into the original batch layout. Since two branches may have different execution costs, Flex further applies load-aware branch coordination by assigning more resources to heavier branch, reducing synchronization stalls before merging. 
+
+Hybrid-Aware Context Caching. Real-world LLM serv-ing workloads often contain repeated long prefixes, such as system prompts, document contexts, and multi-turn conver-sation histories. Recomputing these prefixes for every re-quest wastes substantial prefill computation, especially in long-context scenarios. Context caching [19, 41, 45] addresses this issue by identifying matched textual prefixes and reusing their previously generated caches. Existing techniques typ-ically assume that a matched textual prefix uniquely deter-mines all reusable caches. However, this assumption no longer holds for Flex: even when two requests share the same pre-fix, they may select different Attention and SSM layers across hybrid blocks, producing different layer-wise caches. More-over, conventional cache eviction operates at the context level, where evicting a prefix removes all layer-wise caches associated with it. This coarse-grained eviction is inefficient for request-adaptive hybrid execution, because only a subset of layer caches under a matched context may be frequently reused. Evicting the whole context can reduce future cache hit ratios, while retaining it may keep many rarely used layer caches in memory. To address these limitations, Flex introduces the hybrid-aware context caching (§6). Its core mechanism, a two-level radix tree structure, decouples textual-prefix matching from layer-wise cache matching. After identifying a shared tex-tual prefix, it further determines which layer-wise caches are compatible with the current hybrid layout. Built on this structure, Flex further performs priority-based eviction at   
+
+> 2xN
+> Better Performance
+> Feed-Forward Network SSM Layer
+> xN
+> Feed-Forward Network Attention Layer
+> (a) Transformer-based LLM (b) SSM-based LLM (d) Pareto frontier of model performance.
+> Feed-Forward Network Attention Layer
+> (c) Conventional Hybrid LLM
+> Feed-Forward Network SSM Layer
+> Hybrid LLM Blocks
+> SSM-based LLM Attention-based LLM Hybrid LLMs 1:12 1:6 1:3 1:1
+
+Figure 2. Overview and quality-efficiency trade-off of con-ventional hybrid LLMs. (a)-(c) Illustrations of Attention-based, SSM-based, and conventional hybrid architectures. (d) PIQA accuracy versus model efficiency under different Attention-to-SSM layouts. All models have 3B parameters. the layer-wise cache level, accounting for context sharing potential, layer-wise reuse likelihood, and recomputation cost. As a result, Flex preserves useful shared prefixes while evicting low-value layer caches, enabling correct and effi-cient context reuse for dynamic hybrid LLM serving. 
+
+Results: We evaluate Flex on the NVIDIA H100 GPU us-ing six datasets spanning reasoning, QA, and summariza-tion tasks. Experiments show that the proposed hybrid model achieves a better quality-efficiency trade-off than homoge-neous and static hybrid baselines, obtaining the best results on 13 out of 18 quality metrics while reducing estimated TFLOPs/token by up to 67.2% relative to LLaMA. At the sys-tem level, Flex improves up to 3.87× the serving throughput of vLLM while substantially reducing time-to-first-token (TTFT) and time-per-output-token (TPOT). 
+
+2 Background and Motivation 
+
+2.1 Background Attention-based LLMs. Attention-based LLMs rely on multi-head self-attention to capture global token relationships [36]. Given the hidden representations 𝑋 , the Attention layer projects them into queries ( 𝑄 ), keys ( 𝐾 ), and values ( 𝑉 ) tensors and computes: Attn (𝑄, 𝐾 , 𝑉 ) = softmax ( 𝑄𝐾 ⊤
+
+√𝑑 ℎ
+
+) 𝑉 , (1) where 𝑑 ℎ denotes the head dimension. This dense interac-tion allows each token to directly aggregate information from previous tokens, providing strong capability for rea-soning and long-context understanding. However, the com-putation of an Attention layer grows quadratically with the prompt length during prefill [43, 50, 54, 56, 57]. During de-coding, it needs to maintain KV caches for preceding tokens, introducing increasing memory and computation costs as the context grows. 
+
+SSM-based LLMs. State space model (SSM), such as Mamba model [9, 16], provide an efficient alternative by summariz-ing historical information into compact recurrent states: 
+
+ℎ𝑡 =̄ 𝐴 𝑡 ℎ𝑡−1 +̄ 𝐵 𝑡 𝑥 𝑡 , 𝑦 𝑡 = 𝐶 ⊤𝑡 ℎ𝑡 + 𝐷𝑥 𝑡 , (2) where ℎ𝑡 is the SSM state at time 𝑡 ,̄ 𝐴 𝑡 ∈ ℝ (𝑁 ,𝑁 ) and ̄ 𝐵 𝑡 ∈ℝ(𝑁 ,1) define the input-dependent state update, 𝐶 𝑡 ∈ ℝ (𝑁 ,1) 
+
+maps the state to the output, and 𝐷 is a skip connection. Un-like conventional linear time-invariant SSMs, Mamba makes the state update input-dependent, enabling selective preser-vation of information from the input sequence [16]. Since an SSM layer compresses historical tokens into a bounded-size state, it avoids the growing Attention KV cache required by Attention-based LLMs and supports efficient long-sequence inference. Mamba-2 further improves the efficiency of selec-tive SSM computation through state-space duality [9]. How-ever, this compact recurrent state may limit the ability to recall context-dependent information, making SSMs less ef-fective on tasks that require precise long-range context mod-eling [46]. 
+
+Hybrid LLMs. Hybrid LLMs combine Attention layers and SSM layers within the same model to balance modeling ca-pability and inference efficiency, as shown in Figure 2. A key design factor is the Attention-to-SSM layout , which de-termines how frequently Attention and SSM layers are used. In Figure 2(d), we evaluate layouts of 1∶1 , 1∶3 , 1∶6 and 1∶12 ,where 1∶𝑘 layout denotes one Attention layer for every 𝑘 
+
+SSM layers. The SSM-only configuration achieves the lowest computation cost but suffers substantial accuracy degrada-tion, whereas the Attention-only configuration incurs much higher cost. Several hybrid layouts achieve higher accuracy than both endpoints with moderate computation cost, demon-strating the advantage of combining Attention and SSM lay-ers. Moreover, the performance varies noticeably across lay-outs, indicating that the hybrid layout is a critical factor in determining the quality-efficiency trade-off. 
+
+2.2 Motivation 
+
+The quality-efficiency trade-off of a hybrid LLM is largely determined by its Attention-to-SSM layouts . Existing hybrid LLMs determine this configuration based on empirical stud-ies and keep it static during model serving. For example, Jamba [22] periodically inserts Attention layers into an SSM-dominated backbone, while Nemotron-H [3] fixes a prede-fined distribution of Attention and SSM layers. Once con-structed, all requests are forced to execute the same lay-out, regardless of their input characteristics or contextual requirements. We find that such static layouts are insuffi-cient for diverse inference workloads: different tasks, and even different requests from the same task, can prefer dif-ferent uses of Attention and SSM computation.      
+
+> 3ARC-c (Accuracy) PIQA (Accuracy) PubMed (ROUGE-L) 020 40 60 80 100
+> Inference Quality  Attn:SSM
+> 1:1 1:3 1:6 1:12
+> 1:1 1:3 1:6 1:12 20 40 60 80 100
+> Throughput (tokens/s)
+> 23.83 51.09 76.33 87.11
+
+Figure 3. Quality and throughput of static hybrid LLMs with different Attention-to-SSM layouts. Set 1 Set 2 Set 3 Set 4 Set 5 Set 6    
+
+> 36 40 44 46 50
+> ARC-c Accuracy (%)
+> Attn.:SSM 1:1 1:3 1:6 1:12
+
+Figure 4. Accuracy of different static Attention-to-SSM lay-outs on six disjoint ARC-Challenge subsets. 
+
+Observation 1: No single Attention-to-SSM lay-out can achieve the best performance across dif-ferent workloads. 
+
+We first study whether a single static hybrid layout can achieve a consistently good quality-efficiency trade-off across different workloads. We use a set of static hybrid models from [37], which combine Attention layers with SSM layers under different Attention-to-SSM layouts ranging from 1∶1 
+
+to 1∶12 . We evaluate these layouts on a single NVIDIA H100 GPU using three representative datasets: ARC-Challenge for reasoning, PIQA for commonsense QA, and PubMed for long-document summarization. We report task quality together with generation throughput. As shown in Figure 3, different workloads favor differ-ent hybrid layouts. On ARC-Challenge, the 1∶6 hybrid lay-out achieves the highest accuracy, suggesting that reason-ing benefits from sufficient SSM efficiency while retaining selected Attention computation. On PIQA and PubMed, the 
+
+1∶1 hybrid layout performs best, reflecting its stronger de-mand for fine-grained long-context modeling. Meanwhile, increasing the proportion of SSM layers significantly im-proves throughput, from 23.83 tokens/s under 1∶1 to 87.11 tokens/s under 1∶12 . These results show that the Attention-to-SSM layout directly affects both task quality and serving efficiency, but no single static layout is consistently optimal across diverse workloads. 
+
+Observation 2: Even within the same workload, different requests prefer different Attention-to-SSM layouts. 
+
+Even within the same task type, different requests can still prefer different hybrid structures. To show this, we fur-ther study ARC-Challenge by partitioning the evaluation set into six disjoint subsets, each containing 100 requests, and evaluate the same four static Attention-to-SSM layouts on Serving Runtime        
+
+> Incoming Requests Request Scheduler MORPH
+> Selective Batching Engine ( §5) Hybrid-Aware Context Caching ( §6)
+> Split & Merge Attention Processing SSM Processing
+> Reuse layer-wise KVs and states for hit prefix
+> CTX1 CTX2 CTX3 CTX4
+> ✅
+> ✅
+> ✅✅✅❌❌
+> Batching requests for processing in parallel
+> Attention/SSM tokens Attention KV/SSM state
+> Block 1 Block 2 Block N
+> …
+> Prefill-Oriented Gate ( §4)
+> SSM Layer Feed-Forward Network Attention Layer
+> Activate SSM or Attention Input Tokens Output Tokens
+> Request-Adaptive Hybrid Model
+
+Figure 5. System overview of Flex. For clarity, standard components in the model, e.g., normalization, are omitted. each subset. As shown in Figure 4, the best layout changes across subsets. For example, Set 1 and Set 3 favor more Attention-heavy settings, while Set 4 and Set 6 achieve the best results under the 1∶6 hybrid layout. Set 5 instead performs best with the 1∶12 layout. Even within a single reasoning bench-mark, there is no universally optimal static hybrid struc-ture. This result suggests that the preferred Attention-to-SSM layout depends not only on the task category, but also on the specific requests within the same dataset. Therefore, a static hybrid layout is fundamentally limited, motivating a dynamic hybrid architecture that can adapt its structure to each request. 
+
+3 System Overview 
+
+Figure 5 presents an overview of Flex, an inference sys-tem that combines a request-adaptive hybrid model with an optimized serving runtime through algorithm-system co-design. 
+
+Request-adaptive hybrid model. The right part of Fig-ure 5 shows the proposed hybrid model, which consists of a stack of adaptive hybrid blocks. Each block contains a light-weight gate, paired Attention and SSM branches, and shared components such as FFNs. For each request, the gates select one branch per block, forming a request-specific hybrid lay-out that balances modeling capability and inference cost. 
+
+Serving runtime. The left part of Figure 5 presents the runtime, which addresses two challenges of dynamic hy-brid execution: requests within a batch may select differ-ent branches, and requests sharing a textual prefix may re-quire incompatible caches. The runtime incorporates two modules. The selective batching engine executes shared op-erations on the original packed batch and splits requests into Attention and SSM sub-batches for branch-specific com-putation. Hybrid-aware context caching matches both tex-tual prefixes and layer-selection histories to identify reusable Attention KV caches and SSM states. 
+
+Workflow. Given incoming requests, the runtime forms serv-ing batches and identifies candidate cached prefixes. Dur-ing prefill, the gate at each hybrid block selects one branch per request, and the runtime executes the selected branches  
+
+> 4SSM Layer Attention Layer
+> Feed-Forward Network
+> SSM Layer Attention Layer
+> Feed-Forward Network
+> Hybrid Blocks
+> SSM Layer Attention Layer
+> Feed-Forward Network
+> SSM Layer Attention Layer
+> Feed-Forward Network
+> Hybrid Blocks Prefill Phase Decoding Phase
+> Autoregressively
+> Prefill-Oriented Gate Prefill-Oriented Gate Prefill-Oriented Gate Prefill-Oriented Gate
+
+Figure 6. Illustration of the prefill-oriented gating mech-anism. The activated layers are shown with filled colors, while inactive layers are left unfilled. while reusing caches compatible with the layer-selection his-tory up to that block. The runtime records these choices and keeps them fixed throughout decoding, grouping requests accordingly and updating their Attention KV caches or SSM states until generation completes. 
+
+4 Prefill-Oriented Gating 
+
+This section presents the prefill-oriented gating mechanism of Flex. The goal is to enable request-adaptive Attention and SSM layer selection while preserving efficient autore-gressive decoding. 
+
+4.1 Gating Design 
+
+A natural way to enable dynamic hybrid execution is to make layer choices for each token. However, such token-level gating is ill-suited for autoregressive hybrid LLM serv-ing. During decoding, each newly generated token relies on the Attention KV caches or SSM state caches produced by previous tokens to avoid redundant computation. If differ-ent tokens from the same request choose different layers within the same block, later tokens may no longer be able to directly reuse the caches produced by earlier tokens. As a result, the runtime must recompute previous tokens under the new layer choice, introducing substantial overhead and complicating decoding. To avoid these problems, Flex adopts a coarse-grained prefill-oriented gating mechanism in the request-adaptive hybrid model. As shown in Figure 6, this mechanism has two key properties. First, the gate is evaluated only during prefill, where each hybrid block makes one request-level choice between the Attention layer and the SSM layer based on all input tokens. Second, the selected layer choices are fixed after prefill and directly reused throughout decoding, so generated tokens do not trigger additional gating deci-sions. This design is reasonable for both system efficiency and hybrid adaptation. From the system perspective, prefill-oriented gating preserves a consistent computation throughout model inference and newly generated tokens can directly reuse the Attention KV caches or SSM state caches produced by pre-vious tokens, avoiding the recomputation overhead. From the model perspective, the input tokens processed during prefill already encode the key characteristics of the request, such as task type, context length, and dependency require-ments [30, 52]. Our experimental results further show that such prefill information is sufficient to guide the Attention and SSM layer choices for the whole request, enabling the hybrid model to adapt its computation without repeatedly invoking the gate during decoding. In each hybrid block, the gate first aggregates the pre-fill hidden states into a compact request representation, and then feeds it into a lightweight gate network to obtain the probabilities of selecting the Attention and SSM layers. We use top-1 gating and activate the layer with the larger proba-bility. The formal definition of the gating process is provided in the supplementary manuscript. 
+
+4.2 Hybrid Model Training 
+
+The hybrid model in Flex is initialized from pretrained At-tention and SSM components [11, 23]. We use structured pruning to align their hidden dimensions [26]. When their depths differ, we select source layers using KL-divergence-based importance scores and pair the selected Attention and SSM layers to form hybrid blocks. We jointly fine-tune the gates and paired branches while freezing the shared embed-ding, FFN, and normalization modules initialized from the Attention backbone. To ensure fine-tuning quality, we use a soft routing mode to keep optimization differentiable. For the ℓ-th hybrid block, let 𝐻 ℓ−1 denote the hidden states from the previous block, and let Attn ℓ(⋅) and SSM ℓ(⋅) denote the candidate Attention and SSM layers in this block, respectively. The gate outputs the probabilities of selecting the Attention and SSM layers. Instead of activating only one layer, the block computes a weighted combination of the two branch outputs: ̃𝐻 ℓ = 𝑝 ℓ
+
+> attn
+
+Attn ℓ(𝐻 ℓ−1 ) + 𝑝 ℓ
+
+> ssm
+
+SSM ℓ(𝐻 ℓ−1 ), (3) where 𝑝 ℓ 
+
+> attn
+
+and 𝑝 ℓ 
+
+> ssm
+
+are the gate probabilities for the Atten-tion and SSM layers at the ℓ-th hybrid block, and ̃ 𝐻 ℓ is the output before the following feed-forward network. This soft routing formulation allows gradients to update the gate as well as both candidate layers. During inference, the model switches to hard routing, where each hybrid block activates only the layer with the larger gate probability. The training objective balances generation quality and in-ference efficiency. For generation quality, we use the stan-dard supervised fine-tuning loss. To encourage efficient layer selection, we add a lightweight cost-aware regularization              
+
+> 5Gate Linear
+> 𝑥 !!𝑥 !"𝑥 !#
+> 𝑥 "!𝑥 ""𝑥 "#
+> Split
+> [6, H] [6, H]
+> Attention SSM [3, H] [3, H] Attention KV Cache SSM State Cache
+> Merge
+> [3, H] [3, H] FFN Linear
+> [6, H]
+> Next Block
+> [6, H]
+> Attention 𝑄, 𝐾, 𝑉 = softmax 𝑄𝐾 !/𝑑 "𝑉 ℎ#=̅ 𝐴 #ℎ#$% + ) 𝐵 #𝑥 #,𝑦 #= 𝐶 #!ℎ#+ 𝐷𝑥 #
+
+Figure 7. Illustration of the proposed split-and-merge mechanism in selective batching engine. We ignore Layer Norm , Add , and other operations for simplicity. term: 
+
+ℒ = ℒsft + 𝜆 1𝑁 
+
+> 𝑁
+
+∑
+
+> ℓ=1
+
+(𝑝 ℓ
+
+> attn
+
+̄ 𝑐 attn + 𝑝 ℓ
+
+> ssm
+
+̄ 𝑐 ssm ) , (4) where ℒsft denotes the standard supervised fine-tuning loss for next-token prediction, 𝑁 is the number of hybrid blocks, and ̄ 𝑐 attn and ̄ 𝑐 ssm are normalized layer-level cost weights for selecting the Attention and SSM layers, respectively. The co-efficient 𝜆 controls the trade-off between generation quality and inference efficiency. This regularization is used only to bias the gate toward efficient layer choices during training. 
+
+5 Selective Batching Engine 
+
+This section introduces the design of selective batching en-gine in Flex, which supports efficient batching processing of the proposed request-adaptive hybrid model. 
+
+5.1 Split-and-Merge Execution 
+
+Given the request-adaptive layer choices produced by dy-namic hybrid execution, the key question is how to exe-cute a mixed batch without sacrificing normal batching ef-ficiency. Flex addresses this through a split-and-merge ex-ecution mechanism. As shown in Figure 7, the input tokens from different requests are first packed into a single batch tensor. For example, 𝑥 𝑗 𝑖 denotes the 𝑗 -th token of request 𝑖 ,and the two requests in the figure form a packed tensor with shape [6, 𝐻 ] . Flex keeps this packed layout for shared op-erations, such as gate network and FFN computation, and splits the batch only before the layer-specific Attention or SSM computation. Requests selecting the Attention layer are compacted into an Attention sub-batch, while requests selecting the SSM layer are compacted into an SSM sub-batch. The two sub-batches are then executed by their cor-responding kernels. Afterward, Flex merges their outputs back into the original packed batch layout, so subsequent shared operations can still be processed as a regular batch. This design confines dynamic layer selection to the Atten-tion and SSM computation inside each hybrid block. Other operations still use the standard packed tensor interface and 
+
+Prefill Decoding Attention Layer 𝒪 (𝐿𝑑 2 + 𝐿 2𝑑) 𝒪 (𝑑 2 + 𝑟𝑑) 
+
+SSM Layer 𝒪 (𝐿𝑑 2 + 𝐿𝑑 𝑠 ) 𝒪 (𝑑 2 + 𝑑 𝑠 )
+
+Table 1. Computation complexities of Attention and SSM layers. Here, 𝐿 denotes the input length in prefill, 𝑟 denotes the current cached context length during decoding, 𝑑 de-notes hidden dimension, and 𝑑 𝑠 denotes SSM state dimen-sion. therefore preserve normal batching efficiency. During pre-fill, the gate of each hybrid block is executed once to deter-mine whether each request uses the Attention or SSM layer, and the selected layer processes all input tokens of that re-quest. Meanwhile, the corresponding Attention KV or SSM state is cached. After prefill, each request records its selected layer choices across all hybrid blocks. During decoding, the gate is disabled, and Flex directly reuses the recorded layer choices to form Attention and SSM sub-batches at each block. The Attention layer reads and appends the Attention KV cache, while the SSM layer reads and updates the SSM cache. 
+
+5.2 Load-Aware Branch Coordination 
+
+Although selective batching enables the Attention and SSM layers to run independently, simply launching them on nor-mal CUDA streams is insufficient. The two branches have different execution characteristics: the Attention branch is sensitive to context length and KV access, while the SSM branch is mainly dominated by recurrent state updates. More-over, the number of tokens assigned to each branch changes across blocks and batches. As a result, one branch may fin-ish earlier than the other, forcing the merge operation to wait for the slower branch. To reduce this synchronization stall, Flex adopts load-aware branch coordination. The key idea is to estimate the relative workload of the Attention and SSM branches and assign more SM resources to the heavier branch. Guided by the computation complexity in Table 1, Flex uses light-weight profiled cost models to predict branch execution costs from simple runtime features, including the number of re-quests in each branch, input lengths during prefill, and cur-rent KV-cache lengths during decoding. Since branch coor-dination only requires relative costs, the predictor does not need exact latency estimation. In our implementation, its prediction error is within 6.32% for the Attention branch and 5.18% for the SSM branch. The profiling is a one-time effort for each model-GPU pair and can be completed effi-ciently. Detailed cost models are provided in the supplemen-tary manuscript. Based on the predicted costs, Flex partitions the schedu-lable GPU resources between the Attention and SSM sub-batches at the SM granularity. In our implementation, we                     
+
+> 6Root CTX1: You are a helpful assistant. CTX2: Keep your answers concise. KV State State State State
+> CTX3: Include a brief example. KV State State
+> You are a helpful assistant. Use simple words. CTX1: You are a helpful assistant.
+> Inference Request Context Matching
+> KV State
+> Cache Mismatching
+> KV KV Cache miss
+> State KV KV KV
+> (a) Traditional radix tree indexing of KV caches and SSM states. (b) Cache incompatibility despite a matching text prefix.
+
+Figure 8. Motivation for hybrid-aware context caching. (a) A conventional radix tree indexes Attention KV caches and SSM states by textual prefixes. (b) The incoming request matches context 1 (CTX1) but selects different layer types, resulting in a cache miss. use NVIDIA H100 SXM GPUs and empirically set the alloca-tion granularity to 𝐺 = 16 SMs, following recent intra-GPU multiplexing practice [4, 13, 55]. Of the 132 SMs available on each GPU, 128 are included in the partitioned resource pool, yielding a compact set of feasible allocations in multiples of 16 SMs. Flex rounds the target allocation to the nearest fea-sible partition and assigns the remaining schedulable SMs to the other sub-batch. If only one sub-batch is nonempty, it skips partitioning and assigns the entire resource pool to that sub-batch. This compact allocation space enables light-weight online selection while providing sufficient flexibility to balance the two computations. The detailed SM allocation rule is provided in the supplementary manuscript. The selected SM partition is implemented using NVIDIA GreenContext [8]. Flex creates separate Green Contexts and CUDA streams for the Attention and SSM sub-batches, bind-ing each stream to its assigned SM partition. Since Green-Context only constrains the SM scheduling pool, existing FlashAttention and mamba_ssm kernels can run without mod-ification. The two sub-batches are launched concurrently and synchronized with CUDA events before the merge op-eration and the next hybrid block. This implementation as-signs more compute resources to the heavier sub-batch and reduces the completion-time imbalance between them. 
+
+6 Hybrid-Aware Context Caching 
+
+This section presents the hybrid-aware context caching mech-anism in Flex, which enables correct prefix reuse when the same textual context may produce different layer-wise At-tention KV and SSM state caches. 
+
+6.1 Context Caching Mechanism 
+
+Context caching is widely used to improve LLM serving ef-ficiency by reusing previously computed caches (e.g., Atten-tion KVs and SSM states) for repeated prefixes [19, 41, 45]. For example, RadixAttention [51] organizes historical con-texts with a radix tree, where each node represents a textual prefix. When a new request arrives, the runtime searches the radix tree to find the longest matched prefix, reuses the caches associated with the matched prefix, and computes only the unmatched suffix. However, conventional RadixAt-tention cannot be directly applied to Flex. Its key assump-tion is that a matched textual prefix uniquely determines all layer-wise caches that can be reused. This assumption holds for static models because the layer type at each po-sition is fixed by the model architecture. For example, in an Attention-only model, each layer always produces a KV cache, while in an SSM-only model, each layer always pro-duces an SSM cache. In Flex, requests sharing a textual prefix may select differ-ent layer layouts depending on their full contexts. As shown in Figure 8, the incoming request matches the cached pre-fix “You are a helpful assistant.”, but requires Attention KV caches at the third and fourth blocks, where the cached en-tries are SSM states. Conventional methods treat the matched entry as a whole: it is either reused or rejected. Reusing the cached states despite the layout mismatch can introduce in-consistent intermediate representations and degrade infer-ence quality. Alternatively, rejecting the incompatible entry results in a cache miss and requires recomputing the shared prefix, losing the opportunity to exploit the textual overlap. To support correct and efficient context reuse under dy-namic hybrid execution, Flex implements hybrid-aware con-text caching using a two-level radix-tree structure. The outer-context radix tree indexes textual prefixes, while an inner-cache radix tree attached to each context node organizes layer-selection paths and their associated Attention KV caches and SSM states. Cache lookup proceeds in two steps. First, Flex locates the longest matching textual prefix in the outer-context radix tree. It then examines the inner-cache radix tree of the matched node and its ancestors to identify com-patible cache paths. Compatibility requires matching the se-quence of layer choices from the first block through the block being reused. Among these candidates, Flex selects the prefix and cache path with the lowest estimated recom-putation cost, considering both prefix length and the num-ber of reusable leading blocks. As illustrated in Figure 9, the inner-cache radix tree asso-ciated with CTX1 contains multiple execution paths. These paths share caches for the first two blocks, then branch ac-cording to the branch choices at the third and fourth blocks. For cache, Flex retains input hidden states and terminal SSM states, reconstructing Attention KV caches on demand. For an incoming request matching CTX1, Flex follows the inner-tree path consistent with its branch-selection history and reuses the corresponding caches. At the first route mis-match, the cached hidden states remain valid because all preceding branch choices match. Flex uses these states to recompute the prefix at that block and all subsequent blocks, then extends the inner-cache radix tree with the newly com-puted caches while retaining existing branches. This orga-nization supports partial cache reuse and preserves alterna-tive execution paths for future requests sharing same textual prefix.            
+
+> 7Root CTX1: You are a helpful assistant. CTX2: Keep your answers concise. CTX3: Include a brief example. KV State State State KV KV State State KV KV KV State State KV State KV KV State KV
+> Inner-Cache Radix Tree
+> Outer-Context Radix Tree
+
+Figure 9. Illustration of the proposed two-level radix-tree structure. The outer-context radix tree indexes contextual prefixes, while each inner-cache radix tree organizes alter-native layer-selection paths and their associated Attention KV and SSM state caches, enabling cache reuse along com-patible execution paths for a matched prefix. 
+
+6.2 Priority-based Eviction Policy 
+
+Hybrid-aware context caching enables correct cache reuse under dynamic hybrid execution, but also increases the num-ber of cache entries. With a fixed layer layout, conventional RadixAttention associates each textual prefix with one set of layer-wise caches. In Flex, the same context node can maintain multiple cache paths corresponding to different Attention and SSM choices. Evicting an entire context node therefore discards all these paths, potentially removing fre-quently reused caches together with rarely accessed ones. Flex instead performs eviction at the granularity of indi-vidual layer-wise cache entries. Under GPU memory pres-sure, it evicts entries from the inner-cache radix trees. An outer-context node is removed only when all its associated caches have been evicted and the node is no longer needed to represent shared textual prefixes. To determine which en-tries to retain, Flex assigns each cache 𝑐 a retention priority: 
+
+𝑃(𝑐) = 𝐻 (𝑐) ⋅ 𝑅(𝑐) 𝑀(𝑐) ⋅ 𝐷(𝑐), (5) where 𝐻 (𝑐) is its recent access frequency, 𝑅(𝑐) is the recom-putation cost saved by reusing it, 𝑀(𝑐) is its memory foot-print, and 𝐷(𝑐) is a depth factor that favors caches at earlier blocks. Flex evicts entries with the lowest priority first. This policy favors caches that provide greater expected compu-tation savings per unit of memory. The depth factor further prioritizes early-layer caches, which can form shared ances-tors of multiple execution paths in an inner-cache radix tree. 
+
+7 Implementation 
+
+We implement a prototype of Flex with approximately 6.5K lines of code using Python, PyTorch, HuggingFace Trans-formers, and CUDA/C++. The construction and fine-tuning of the request-adaptive hybrid model are implemented in PyTorch, while the serving runtime extends a vLLM-style execution loop with selective batching and hybrid-aware context caching. It caches layer hidden states and terminal SSM states, supporting Attention KV reconstruction and re-computation from the first mismatched layer. For concur-rent Attention and SSM execution, Flex uses NVIDIA Green-Context to partition SM resources and launches the two sub-batches on separate CUDA streams. It also adopts a unified paging-based memory manager for heterogeneous Atten-tion KV caches and SSM caches, following Jenga [47]. The runtime currently uses a conventional continuous batching scheduler [44], and is compatible with other scheduling poli-cies such as chunked prefill, prefill-decode disaggregation, and latency-aware scheduling [1, 12, 27, 30, 53]. Detailed im-plementation is provided in the supplementary manuscript. 
+
+8 Evaluation 
+
+8.1 Evaluation Setup Platform. We evaluate Flex on a server equipped with one NVIDIA H100 SXM GPU (80GB memory) and Intel Xeon Platinum 8458P CPUs. The server runs Ubuntu 22.04.5 LTS with NVIDIA driver 580.82.07 and CUDA runtime 12.4. We use Python 3.12.3, PyTorch 2.4.1, Transformers 4.46.0 and mamba_ssm 2.2.4. 
+
+Models and baselines. We evaluate the proposed hybrid model against both homogeneous and static hybrid LLMs. The homogeneous baselines include Llama-3 [15] as an Attention-only model and Mamba-2 [9] as an SSM-only model. The static hybrid baselines include Zamba [14], Jamba [22], and Nemotron-H [3], whose Attention-to-SSM layouts are fixed after model construction. For serving-system evaluation, we compare Flex with vLLM [21] and SGLang [51], two widely used LLM serving systems, as well as Jenga [47], which fur-ther provides memory management support for Attention KV and SSM states. All systems use the same model, work-load, and generation settings, with unrelated optimizations such as speculative decoding disabled. 
+
+Datasets and workloads. We fine-tune each model on a 10K-example subset of ShareGPT-90K and reuse the result-ing checkpoint across all evaluation tasks without task-specific fine-tuning. We evaluate model quality on six datasets cov-ering reasoning, question answering (QA), and summariza-tion. For reasoning, we use ARC-Easy and ARC-Challenge [6]. For QA, we use PIQA [2] and TruthfulQA [25]. For summa-rization, we use CNN/DailyMail [35] and PubMed [7]. 
+
+Metrics. For model quality, we report accuracy for ARC-Easy, ARC-Challenge, and PIQA, MC1 accuracy for Truth-fulQA, and ROUGE-L for CNN/DM and PubMed. For model efficiency, we estimate decoding TFLOPs per token: TFLOPs /token = 𝐹 lin  
+
+> 𝑟,𝑡
+
++4𝐿 𝑟,𝑡 ∑ℓ∈ 𝒜 𝑟 𝑛 𝑞,ℓ 𝑑 ℎ,ℓ +∑ ℓ∈ 𝒮 𝑟 𝐶 SSM 
+
+> ℓ
+
+10 12 ,
+
+(6) 
+
+> 8
+
+where 𝐹 lin  
+
+> 𝑟,𝑡
+
+counts executed linear operations, including pro-jections, FFNs, and the output head. 𝒜 𝑟 and 𝒮 𝑟 are the At-tention and SSM layers activated by request 𝑟 . 𝐿 𝑟,𝑡 is the at-tended KV length at decoding step 𝑡 , and 𝑛 𝑞,ℓ and 𝑑 ℎ,ℓ are the query-head count and head dimension. For Flex, only the selected branch at each block is counted, together with the shared operations. 𝐶 SSM  
+
+> ℓ
+
+counts convolution, state update, and readout operations beyond the linear projections [9, 16]. We count each multiply-add as two FLOPs [5, 17], omit nor-malization, activations, and softmax, and average over eval-uated decoding steps. For serving performance, we report request throughput, time-to-first-token (TTFT), time-per-output-token (TPOT), and end-to-end latency. 
+
+Other configurations. Fine-tuning uses Adam with a learn-ing rate of 2 × 10 −4 , an effective batch size of 64, and a max-imum sequence length of 4,096 tokens. We train for 1,000 optimization steps using BF16 precision and fully sharded data parallelism (FSDP), with 𝜆 = 0.2 across all model scales and benchmarks. 
+
+8.2 Overall Model Performance Quality-efficiency trade-off. Table 2 compares Flex with homogeneous and static hybrid LLMs across three model scales. Overall, Flex achieves the best results on 13 out of 18 quality metrics while maintaining competitive computa-tion cost. At the small scale, Flex obtains the best results on ARC-Easy, TruthfulQA, and PubMed, and remains close to the best baseline on ARC-Challenge and CNN/DailyMail. At the medium scale, it consistently outperforms all baselines on all six datasets. At the large scale, it achieves the best results on reasoning and QA tasks, while remaining com-petitive on summarization tasks. More importantly, Flex achieves these quality gains with substantially lower esti-mated TFLOPs/token: compared with Attention-only Llama models, it reduces computation cost by 40.5%, 33.2%, and 67.2% at the three evaluated scales, respectively. Compared with Nemotron-H, it reduces TFLOPs/token by 28.4%, 28.9%, and 58.7%. Although Mamba and some static hybrid models can be cheaper in certain settings, their quality is often less stable across tasks. These results show that request-adaptive Attention and SSM selection provides a better quality-efficiency trade-off than static hybrid layouts. We further analyze eval-uation results across different tasks. 
+
+Reasoning tasks. On ARC-Easy and ARC-Challenge, Flex performs particularly well at medium and large scales. For example, at the medium scale, Flex achieves 77.8% accuracy on ARC-Easy and 57.7% on ARC-Challenge, outperforming all static hybrid baselines. At the large scale, it further im-proves the results to 85.6% and 85.1%, respectively. These results suggest that reasoning tasks benefit from selectively activating Attention in important layers, while still using efficient SSM computation elsewhere. Static hybrid models improve over pure SSM models, but their static attention placement cannot adapt to the varying dependency patterns of different requests. 
+
+QA tasks. On PIQA and TruthfulQA, Flex also shows strong performance. At the medium scale, it achieves 83.1% on PIQA and 68.9% on TruthfulQA, outperforming all baselines. At the large scale, it reaches 85.3% on PIQA and 75.2% on Truth-fulQA. These results indicate that QA workloads do not al-ways require Attention in every layer, but still need Atten-tion in selected layers to preserve factual and contextual signals. Flex captures this behavior by adapting the Atten-tion and SSM choices to each request instead of relying on a static hybrid layout. 
+
+Summarization tasks. Summarization workloads have a stronger dependence on global context modeling. Attention-heavy models such as Llama remain competitive, especially at the large scale. Nevertheless, Flex achieves the best sum-marization results at the medium scale, reaching 23.4 ROUGE-L on CNN/DailyMail and 21.5 ROUGE-L on PubMed. At the small scale, it also achieves the best PubMed score and re-mains close to the best CNN/DailyMail result. These results show that summarization benefits from more frequent At-tention activation, but does not require all layers to be At-tention layers. Flex can allocate Attention to the layers and requests that need global context, while using SSM layers elsewhere to reduce computation. 
+
+Routing Effectiveness. We compare three routing strate-gies using the same fine-tuned checkpoint at each model scale. We collect candidate layouts from adaptive routing on held-out validation data and evaluate each as a fixed lay-out under matched inference-cost budgets. Within this can-didate set, Global Optimal (G-Optimal) selects one layout that maximizes the macro-average of normalized validation scores across datasets, while Dataset Optimal (D-Optimal) selects the best layout separately for each dataset. Both strate-gies keep their selected layouts fixed during evaluation, whereas Adaptive selects a layout for each request. As shown in Ta-ble 3, our adaptive method outperforms both static strate-gies across all 18 model-dataset combinations. Compared with D-Optimal, it achieves average gains of 4.86 percentage points in accuracy and 2.55 points in ROUGE-L. Although D-Optimal consistently improves over G-Optimal, its remain-ing gap to Adaptive demonstrates the benefit of adapting layer choices to individual requests within the same dataset. 
+
+8.3 Overall System Performance 
+
+We evaluate the system-level performance of Flex at three model scales on a single H100 GPU, using FP8 quantiza-tion for the 61B model. We compare its serving runtime with vLLM, SGLang, and Jenga, with all methods serving the same model checkpoint at each scale. We also include two ablated variants: Flex w/o Bat. disables selective batch-ing (§5), while Flex w/o Con. disables hybrid-aware context reuse (§6). We construct mixed workloads from all datasets 
+
+> 9
+
+Models Base Config ARC-E ARC-C PIQA TruthfulQA CNN/DM PubMed Model Efficiency 
+
+𝑃 𝑃 act 𝑁 attn 𝑁 ssm 𝐻 hidden Accuracy ↑ Accuracy ↑ Accuracy ↑ Accuracy (MC1) ↑ ROUGE-L ↑ ROUGE-L ↑ TFLOPs/Token Mamba 5.3B 5.3B – 64 2560 67.4 ± 0.11 35.8 ± 0.13 74.9 ± 0.14 33.3 ± 0.07 10.9 ± 0.14 14.3 ± 0.15 1.01 × 10 −2 
+
+Llama 3.2B 3.2B 28 – 3072 73.2 ± 0.08 42.4 ± 0.12 75.5 ± 0.15 42.1 ± 0.33 17.1 ± 0.27 15.9 ± 0.18 1.08 × 10 −2 
+
+Zamba 2.7B 2.7B 9 45 2560 69.4 ± 0.24 41.9 ± 0.25 78.7 ± 0.31 41.8 ± 0.17 20.5 ± 0.22 16.0 ± 0.19 7.59 × 10 −3 
+
+Jamba 3.0B 3.0B 2 26 2560 69.7 ± 0.15 47.3 ± 0.26 70.5 ± 0.32 48.8 ± 0.16 18.9 ± 0.33 18.1 ± 0.19 6.02 × 10 −3 
+
+Nemotron-H 4.5B 4.5B 4 24 3072 74.0 ± 0.24 44.6 ± 0.17 71.1 ± 0.41 49.9 ± 0.33 16.8 ± 0.19 16.5 ± 0.20 8.98 × 10 −3 
+
+OuRs 4.4B 3.2B 28 28 2560 74.7 ± 0.17 45.5 ± 0.26 76.6 ± 0.31 51.4 ± 0.19 20.1 ± 0.25 19.4 ± 0.24 6.43 × 10 −3 
+
+Mamba 8.2B 8.2B – 56 4096 72.5 ± 0.23 50.9 ± 0.19 76.6 ± 0.33 38.8 ± 0.32 16.7 ± 0.24 15.3 ± 0.25 1.71 × 10 −2 
+
+Llama 13.1B 13.1B 55 – 4096 76.7 ± 0.17 54.3 ± 0.17 79.5 ± 0.19 59.8 ± 0.24 19.5 ± 0.10 16.4 ± 0.22 2.62 × 10 −2 
+
+Zamba 7.4B 7.4B 13 68 3584 70.3 ± 0.30 45.4 ± 0.17 81.1 ± 0.22 65.6 ± 0.24 20.1 ± 0.32 16.2 ± 0.15 1.98 × 10 −2 
+
+Jamba 13.0B 13.0B 1 7 4096 72.8 ± 0.24 52.5 ± 0.22 80.3 ± 0.38 66.2 ± 0.41 19.4 ± 0.15 18.3 ± 0.18 2.68 × 10 −2 
+
+Nemotron-H 12.3B 12.3B 6 28 5120 77.3 ± 0.18 56.1 ± 0.17 82.2 ± 0.26 68.7 ± 0.41 18.3 ± 0.39 16.8 ± 0.25 2.46 × 10 −2 
+
+OuRs 14.5B 6.5B 32 32 4096 77.8 ± 0.17 57.7 ± 0.36 83.1 ± 0.28 68.9 ± 0.39 23.4 ± 0.14 21.5 ± 0.13 1.75 × 10 −2 
+
+Mamba – – – – – – – – – – – –Llama 70B 70B 80 – 8192 84.3 ± 0.16 82.7 ± 0.24 84.3 ± 0.33 63.7 ± 0.18 25.7 ± 0.09 23.6 ± 0.11 1.41 × 10 −1 
+
+Zamba – – – – – – – – – – – –Jamba 52B 12B 4 28 4096 73.7 ± 0.22 63.6 ± 0.19 83.1 ± 0.31 72.1 ± 0.17 20.5 ± 0.16 19.8 ± 0.11 2.40 × 10 −2 
+
+Nemotron-H 56B 56B 10 54 8192 85.2 ± 0.23 84.8 ± 0.17 84.4 ± 0.12 73.4 ± 0.26 20.1 ± 0.19 17.9 ± 0.28 1.12 × 10 −1 
+
+OuRs 61B 23B 32 32 8192 85.6 ± 0.21 85.1 ± 0.17 85.3 ± 0.25 75.2 ± 0.31 24.5 ± 0.27 22.3 ± 0.21 4.63 × 10 −2 
+
+Table 2. Comparison of model quality and efficiency across homogeneous, static hybrid, and our proposed request-adaptive hybrid model. 𝑃 and 𝑃 𝑎𝑐𝑡 denote the total model parameters and the activated parameters for one request, respectively. 𝑁 attn 
+
+and 𝑁 ssm denote the numbers of Attention and SSM layers. For Flex, 𝑃 counts all paired candidate branches, while 𝑃 act reports the average activated parameters under request-adaptive layer selection. All multiple-choice tasks use free-form generation with regex-based letter extraction. Chat-template-aware models receive a “letter only” system prompt and reasoning models use no_think mode. 8   
+
+> "%  %$ "!#
+
+     
+
+>  #
+
+      
+
+>  #
+
+  
+
+> "%  %$ "!#
+
+     
+
+>  #
+
+      
+
+>  #
+
+  
+
+$ ( 
+
+
+
+> "%  %$ "!#
+
+  
+
+$ ( 
+
+   
+
+>  #
+
+  
+
+$ ( 
+
+    
+
+>  #
+
+&   "  '  $ "  '  " 
+
+Figure 10. End-to-end serving performance of Flex under varying batch sizes on a single H100 GPU. Rows correspond to the 4.4B, 14.5B, and 61B models, respectively. Columns report request throughput, TTFT, and TPOT. The 61B model uses FP8 quantization to avoid out-of-memory. 
+
+10 Scale Method ARC-E ARC-C PIQA TruthfulQA CNN/DM PubMed                                                       
+
+> 4.4B G-Optimal 68.2 37.2 70.5 45.4 16.6 15.2 D-Optimal 71.3 40.4 73.6 47.3 18.3 16.5 Adaptive 74.5 45.6 76.4 51.3 20.2 19.6 14.5B G-Optimal 71.8 49.5 73.7 60.3 17.6 18.8 D-Optimal 73.4 52.6 77.2 63.5 19.2 20.6 Adaptive 77.9 57.7 83.2 68.8 23.4 21.6 61B G-Optimal 74.3 72.1 75.4 69.7 20.3 19.6 D-Optimal 79.6 76.4 80.3 72.6 21.5 20.1 Adaptive 85.4 85.0 85.3 75.4 24.6 22.1
+
+Table 3. Comparison of routing methods across model scales. in which requests share article prefixes and append differ-ent questions. We vary the number of requests processed per scheduling iteration, using batch sizes of 8, 16, 32, and 64 for the 4.4B model and 4, 8, 16, and 32 for the other two scales. We report request throughput, TTFT, and TPOT. Figure 10 shows that Flex consistently outperforms all three baselines in throughput, TTFT, and TPOT across the evaluated batch sizes and model scales. It achieves up to 
+
+3.79× , 3.87× , and 3.44× the throughput of vLLM for the 4.4B, 14.5B, and 61B models, respectively. Its throughput advan-tage over vLLM grows with batch size. Larger batches of-fer more opportunities to group requests taking the same branch, which Flex exploits through selective batching. Both ablated variants also achieve lower throughput than the full system, showing that selective batching and context reuse contribute to serving efficiency. Hybrid-aware context reuse substantially reduces TTFT on the mixed workload by avoiding repeated computation over shared article prefixes. Under dynamic layer choices, matching prefix tokens alone does not establish cache com-patibility: the cached states also depend on the execution paths that produced them. Flex uses the two-level radix tree to check both textual prefixes and execution-path compat-ibility before reusing layer-wise Attention KV caches and SSM states. At the largest tested batch size for each scale, Flex reduces TTFT by an average of 80.9%, 78.9%, and 75.2% compared with vLLM, SGLang, and Jenga, respectively. It also reduces TTFT by 59.1% on average compared with Flex w/o Con., demonstrating the benefit of context reuse. The TPOT results show the benefit of selective batching during decoding. Each request retains its layer choices af-ter prefill, allowing Flex to group requests taking the same branch into compact Attention and SSM sub-batches. At the same configurations, Flex reduces TPOT by an average of 71.6%, 63.1%, and 56.5% compared with vLLM, SGLang, and Jenga, respectively. Compared with Flex w/o Bat., it reduces TPOT by 43.6% on average, demonstrating that selective batch-ing improves decoding efficiency under request-specific layer choices. 
+
+8.4 Ablation Study Effectiveness of selective batching. We further evaluate the selective batching engine by varying the batch size from 2 to 16 on the PubMed dataset. We compare Flex with vLLM and an ablated variant, denoted as Flex w/o Coord., which retains split-and-merge batching but disables load-aware branch coordination for SM allocation between the Attention and SSM sub-batches. As shown in Figure 11, Flex consistently achieves lower end-to-end (E2E) latency than vLLM across all tested batch sizes and model scales. Its selective batching engine groups requests according to their layer choices at each block, forming compact Attention and SSM sub-batches for execution with the corresponding kernels. Averaged over all batch sizes, Flex reduces E2E latency compared with vLLM by 54.6%, 66.0%, and 59.9% for the 4.4B, 14.5B, and 61B models, respectively. At batch size 16, the corresponding re-ductions reach 61.9%, 73.2%, and 70.9%, showing a larger la-tency advantage at the upper end of the tested batch sizes. Comparing Flex with Flex w/o Coord. isolates the addi-tional benefit of load-aware branch coordination. Although split-and-merge batching groups requests by their selected layers, the Attention and SSM sub-batches can still have imbalanced workloads, and the merge operation must wait for both branches to complete. Flex coordinates SM allo-cation according to branch workloads to reduce this imbal-ance. Compared with Flex w/o Coord., the full system re-duces E2E latency by 21.7%, 28.2%, and 26.2% on average for the three model scales, respectively. For the 61B model at batch size 16, vLLM requires 33.53s, while Flex w/o Co-ord. and the full Flex require 13.77s and 9.75s, respectively. Branch coordination thus provides a further 29.2% latency reduction beyond split-and-merge batching alone in this con-figuration. 
+
+Effectiveness of hybrid-aware context caching. We eval-uate the proposed hybrid-aware context caching mechanism using a PubMed-based shared-context workload. Each arti-cle serves as a shared textual prefix, and multiple requests append different questions after the same article [47]. We vary the number of articles from 2 to 20 under a fixed cache capacity, increasing cache competition while preserving pre-fix reuse opportunities within each article. For conventional context caching [51], a context is counted as reusable only when all layer-wise caches associated with the matched pre-fix can be reused. If any Attention KV cache or SSM cache is incompatible with the current request’s layer choices, the whole context is treated as a miss. In contrast, the proposed hybrid-aware context caching indexes layer-wise caches un-der each matched context, so it can reuse compatible caches even when later layers diverge. We compare the two mech-anisms using effective cache hit rate and TTFT. As shown in Figure 12, the hit rates of both methods de-crease as the number of articles increases, because more   
+
+> 11 4 
+
+ " 
+
+>  
+>  ! 
+
+        
+
+> 4 
+
+ " 
+
+>   
+>  ! 
+
+        
+
+> 4 
+
+ " 
+
+>  4
+>  ! 
+
+      Figure 11. Ablation study of the selective batching engine and branch coordination under varying batch sizes. From left to right, the three subfigures report end-to-end latency for the 4.4B, 14.5B, and 61B hybrid models in Flex, respectively. 4    
+
+%" !  "$#       
+
+> 
+> $ $   ! $'$  ("&" ! $'$   
+
+%" !  "$#     
+
+>  
+>  #  ! $'$  ("&" ! $'$  
+
+Figure 12. Effectiveness of hybrid-aware context caching under varying numbers of shared PubMed contexts. shared contexts compete for the fixed memory capacity. Nev-ertheless, hybrid-aware context caching consistently main-tains a higher effective hit rate. Across all settings, it achieves an average hit rate of 43.4%, compared with 18.7% for the baseline, improving the hit rate by 24.7 percentage points. When the number of articles reaches 20, conventional caching method retains only a 7% hit rate, whereas hybrid-aware context caching still achieves 24%. This confirms that layer-wise cache indexing captures valid reuse opportunities that conventional prefix-level caching would discard once any layer becomes incompatible. The higher hit rate directly reduces prefill latency. As the number of articles increases, TTFT grows for both methods due to more frequent cache misses and recomputation. How-ever, TTFT grows more slowly with hybrid-aware context caching because it reuses compatible Attention KV caches and SSM state caches instead of recomputing the entire shared context. On average, hybrid-aware context caching reduces TTFT from 10.68s to 5.92s, corresponding to a 44.6% reduc-tion. At 20 articles, it reduces TTFT from 16.18s to 9.36s, a reduction of 42.2%. These results demonstrate that hybrid-aware context caching improves prefill efficiency by enabling fine-grained and correct context reuse under dynamic hy-brid execution. 
+
+Layer-wise selection. Figure 13 characterizes routing in the 28-block hybrid model in Flex across three datasets. The heatmaps show the fractions of requests selecting Attention 1 5 9 13 17 21 25 28 Attn. SSM                    
+
+> ARC-Challenge
+> 15913 17 21 25 28 Attn. SSM
+> TruthfulQA
+> 15913 17 21 25 28
+> Block ID
+> Attn. SSM
+> CNN/DM
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> 010 20 30 40
+> Top-kHybrid Layouts
+> 0% 25% 50% 75% 100%
+> CDF
+> ARC-Challenge TruthfulQA CNN/DM
+
+Figure 13. Routing patterns of the 28-block hybrid model across three datasets. Left: per-block Attention and SSM se-lection ratios. Right: cumulative request coverage by the 𝑘 
+
+most frequent hybrid layouts within each dataset. and SSM at each block. On ARC-Challenge, Attention se-lection gradually increases toward deeper blocks. On Truth-fulQA, it peaks in the early-to-middle blocks and decreases thereafter. On CNN/DailyMail, Attention selection is high-est in the middle blocks and lower toward both ends. These patterns show that the allocation of Attention and SSM com-putation varies across both block depth and workloads. The right panel illustrates cumulative request coverage by the top-𝑘 full-model layouts, ranked by frequency within each dataset. This view complements the per-block statis-tics by characterizing complete routing decisions across re-quests. For ARC-Challenge, 500 requests activate 35 distinct layouts, with the six most frequent covering over 90% of re-quests. Request-level routing therefore combines a small set of frequently selected layouts with a long tail of less com-mon choices. 
+
+9 Related Work 
+
+Hybrid LLMs. Recent works reduce the cost of long-context LLM inference by replacing part of the attention computa-tion with efficient sequence modeling modules [10, 28, 33]. SSM-based models, such as Mamba [16] and Mamba-2 [9] maintain compact recurrent states instead of full Attention KV caches. Hybrid LLMs further combine Attention and SSM layers to balance global-context modeling and inference ef-ficiency, with representative examples including Jamba [22], 
+
+> 12
+
+Zamba [14], Hymba [11], Mamba-in-Llama [38], and Nemotron-H [3]. While prior hybrid LLMs demonstrate the promise of Attention and SSM hybridization, they rely on static layouts, whereas Flex enables request-adaptive Attention and SSM layer selection within the same model. 
+
+Efficient batching. Efficient batching is central to high-throughput LLM serving. Orca [44] introduces iteration-level scheduling, while vLLM [21] improves batching capacity with PagedAttention. SGLang [51] supports structured LLM pro-gram execution, and systems such as Sarathi-Serve [1], Split-wise [27], DistServe [53], LoongServe [39], NanoFlow [55], and MuxWise [4] optimize prefill/decode scheduling or GPU resource coordination. Unlike these systems, Flex supports batches with divergent Attention and SSM layer choices and preserves efficiency through selective hybrid batching. 
+
+Context caching. Context caching reduces redundant pre-fill computation by reusing caches for repeated prefixes [19, 41, 42, 45, 48]. SGLang [51] proposes RadixAttention for prefix-based cache reuse, and works such as Parrot [24], CacheBlend [41], and Mooncake [29] exploit reuse opportunities in structured, RAG, multi-turn, or disaggregated serving scenarios. Unlike prior techniques that bind each matched prefix to a single reusable cache, Flex uses the two-level radix tree to dis-tinguish different layer-wise Attention KV and SSM state caches for the same textual prefix. 
+
+10 Conclusion 
+
+This paper presents Flex, an inference system that combines a request-adaptive hybrid model with an optimized serving runtime through algorithm-system co-design. The model uses prefill-oriented gating to select Attention or SSM branches for each request and keeps the resulting layout fixed through-out decoding. The runtime integrates selective batching and hybrid-aware context caching to support efficient mixed-branch execution and correct prefix reuse. Experiments show that the hybrid model achieves a better quality-efficiency trade-off than static hybrid baselines, while the runtime im-proves serving throughput and reduces inference latency. 
+
+References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency tradeoff in LLM inference with Sarathi-Serve. In 18th USENIX symposium on operating systems design and implementation (OSDI 24) . 117–134. [2] Yonatan Bisk, Rowan Zellers, Jianfeng Gao, Yejin Choi, et al. 2020. Piqa: Reasoning about physical commonsense in natural language. In 
+
+Proceedings of the AAAI conference on artificial intelligence , Vol. 34. 7432–7439. [3] Aaron Blakeman, Aarti Basant, Abhinav Khattar, Adithya Ren-duchintala, Akhiad Bercovich, Aleksander Ficek, Alexis Bjorlin, Ali Taghibakhshi, Amala Sanjay Deshmukh, Ameya Sunil Mahabalesh-warkar, et al. 2025. Nemotron-h: A family of accurate and efficient hybrid mamba-transformer models. arXiv preprint arXiv:2504.03624 
+
+(2025). [4] Yukang Chen, Weihao Cui, Han Zhao, Ziyi Xu, Xiaoze Fan, Xusheng Chen, Yangjie Zhou, Shixuan Sun, Bingsheng He, and Quan Chen. 2026. Towards High-Goodput LLM Serving with Prefill-decode Mul-tiplexing. In Proceedings of the 31st ACM International Conference on Architectural Support for Programming Languages and Operating Sys-tems, Volume 2 . 2030–2047. [5] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. 2023. Palm: Scal-ing language modeling with pathways. Journal of machine learning research 24, 240 (2023), 1–113. [6] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sab-harwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have solved question answering? try arc, the ai2 reasoning challenge. arXiv preprint arXiv:1803.05457 (2018). [7] Arman Cohan, Franck Dernoncourt, Doo Soon Kim, Trung Bui, Seokhwan Kim, Walter Chang, and Nazli Goharian. 2018. A discourse-aware attention model for abstractive summarization of long docu-ments. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Lan-guage Technologies, Volume 2 (Short Papers) . 615–621. [8] NVIDIA Corporation. 2025. CUDA Driver API: Green Con-texts. https://docs.nvidia.com/cuda/cuda-driver-api/group_CUDA_ GREEN_CONTEXTS.html 
+
+[9] Tri Dao and Albert Gu. 2024. Transformers are SSMs: generalized models and efficient algorithms through structured state space du-ality. In Proceedings of the 41st International Conference on Machine Learning . 10041–10071. [10] Soham De, Samuel L Smith, Anushan Fernando, Aleksandar Botev, George Cristian-Muraru, Albert Gu, Ruba Haroun, Leonard Berrada, Yutian Chen, Srivatsan Srinivasan, et al. 2024. Griffin: Mixing gated linear recurrences with local attention for efficient language models. 
+
+arXiv preprint arXiv:2402.19427 (2024). [11] Xin Dong, Yonggan Fu, Shizhe Diao, Wonmin Byeon, Zijia Chen, Ameya Mahabaleshwarkar, Shih-Yang Liu, Min-Hung Chen, Yoshi Suhara, Yingyan Celine Lin, et al. 2025. Hymba: A hybrid-head ar-chitecture for small language models. In International Conference on Learning Representations , Vol. 2025. 97729–97755. [12] Kuntai Du, Bowen Wang, Chen Zhang, Yiming Cheng, Qing Lan, Hejian Sang, Yihua Cheng, Jiayi Yao, Xiaoxuan Liu, Yifan Qiao, et al. 2025. Prefillonly: An inference engine for prefill-only workloads in large language model applications. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles . 399–414. [13] Lei Gao, Chaoyi Jiang, Hossein Entezari Zarch, Daniel Wong, and Murali Annavaram. 2025. DuetServe: Harmonizing Prefill and De-code for LLM Serving via Adaptive GPU Multiplexing. arXiv preprint arXiv:2511.04791 (2025). [14] Paolo Glorioso, Quentin Anthony, Yury Tokpanov, Anna Golubeva, Vasudev Shyam, James Whittington, Jonathan Pilault, and Beren Mil-lidge. 2024. The zamba2 suite: Technical report. arXiv preprint arXiv:2411.15242 (2024). [15] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 (2024). [16] Albert Gu and Tri Dao. 2023. Mamba: Linear-time sequence modeling with selective state spaces. arXiv preprint arXiv:2312.00752 (2023). [17] Jordan Hoffmann, Sebastian Borgeaud, Arthur Mensch, Elena Buchatskaya, Trevor Cai, Eliza Rutherford, Diego de Las Casas, Lisa Anne Hendricks, Johannes Welbl, Aidan Clark, et al. 2022. Train-ing compute-optimal large language models. In Proceedings of the 36th International Conference on Neural Information Processing Sys-tems . 30016–30030. 
+
+> 13
+
+[18] Tomoki Ito and Shun Nakagawa. 2024. Tender document analyzer with the combination of supervised learning and llm-based improver. In Companion Proceedings of the ACM Web Conference 2024 . 995–998. [19] Chao Jin, Zili Zhang, Xuanlin Jiang, Fangyue Liu, Shufan Liu, Xu-anzhe Liu, and Xin Jin. 2025. Ragcache: Efficient knowledge caching for retrieval-augmented generation. ACM Transactions on Computer Systems 44, 1 (2025), 1–27. [20] Majeed Kazemitabaar, Runlong Ye, Xiaoning Wang, Austin Zachary Henley, Paul Denny, Michelle Craig, and Tovi Grossman. 2024. Codeaid: Evaluating a classroom deployment of an llm-based pro-gramming assistant that balances student and educator needs. In Pro-ceedings of the 2024 chi conference on human factors in computing sys-tems . 1–20. [21] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th symposium on op-erating systems principles . 611–626. [22] Barak Lenz, Opher Lieber, Alan Arazi, Amir Bergman, Avshalom Manevich, Barak Peleg, Ben Aviram, Chen Almagor, Clara Fridman, Dan Padnos, et al. 2025. Jamba: Hybrid transformer-mamba lan-guage models. In International Conference on Learning Representations ,Vol. 2025. 67959–67984. [23] Yixing Li, Ruobing Xie, Zhen Yang, Xingwu Sun, Shuaipeng Li, Wei-dong Han, Zhanhui Kang, Yu Cheng, Chengzhong Xu, Di Wang, et al. 2025. Transmamba: Flexibly switching between transformer and mamba. arXiv preprint arXiv:2503.24067 (2025). [24] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient serving of LLM-based applications with semantic variable. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 929–945. [25] Stephanie Lin, Jacob Hilton, and Owain Evans. 2022. Truthfulqa: Mea-suring how models mimic human falsehoods. In Proceedings of the 60th annual meeting of the association for computational linguistics (volume 1: long papers) . 3214–3252. [26] Saurav Muralidharan, Sharath Turuvekere Sreenivas, Raviraj Joshi, Marcin Chochowski, Mostofa Patwary, Mohammad Shoeybi, Bryan Catanzaro, Jan Kautz, and Pavlo Molchanov. 2024. Compact language models via pruning and knowledge distillation. Advances in Neural Information Processing Systems 37 (2024), 41076–41102. [27] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Effi-cient generative llm inference using phase splitting. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) .IEEE, 118–132. [28] Bo Peng, Eric Alcaide, Quentin Anthony, Alon Albalak, Samuel Ar-cadinho, Stella Biderman, Huanqi Cao, Xin Cheng, Michael Chung, Leon Derczynski, et al. 2023. Rwkv: Reinventing rnns for the trans-former era. In Findings of the association for computational linguistics: EMNLP 2023 . 14048–14077. [29] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Moon-cake: Trading more storage for less computation—a KVCache-centric architecture for serving LLM chatbot. In 23rd USENIX conference on file and storage technologies (FAST 25) . 155–170. [30] Haoran Qiu, Weichao Mao, Archit Patke, Shengkun Cui, Saurabh Jha, Chen Wang, Hubertus Franke, Zbigniew T Kalbarczyk, Tamer Basar, and Ravishankar K Iyer. 2024. Efficient Interactive LLM Serving with Proxy Model-based Sequence Length Prediction. In International Con-ference on Architectural Support for Programming Languages and Op-erating Systems .[31] Abdur-Rahman Ibrahim Sayyid-Ali, Daanish Uddin Khan, and Naveed Anwar Bhatti. 2026. Are LLM Web Search Engines Sustain-able? A Web-Measurement Study of Real-Time Fetching. In Proceed-ings of the ACM Web Conference 2026 . 2083–2093. [32] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang, Yong Li, and Wei Lin. 2024. Llumnix: Dynamic scheduling for large language model serving. In 18th USENIX symposium on operating sys-tems design and implementation (OSDI 24) . 173–191. [33] Yutao Sun, Li Dong, Shaohan Huang, Shuming Ma, Yuqing Xia, Ji-long Xue, Jianyong Wang, and Furu Wei. 2023. Retentive network: A successor to transformer for large language models. arXiv preprint arXiv:2307.08621 (2023). [34] Xin Tan, Yimin Jiang, Yitao Yang, and Hong Xu. 2025. Towards end-to-end optimization of llm-based applications with ayo. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 . 1302–1316. [35] Hugging Face Team. 2024. Hugging Face Dataset cnn dailymail (CNN/DM). https://huggingface.co/datasets/cnn_dailymail 
+
+[36] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. At-tention is all you need. Advances in neural information processing systems 30 (2017). [37] Dustin Wang, Rui-Jie Zhu, Steven Abreu, Yong Shan, Taylor Kergan, Yuqi Pan, Yuhong Chou, Zheng Li, Ge Zhang, Wenhao Huang, et al. 2025. A systematic analysis of hybrid linear attention. arXiv preprint arXiv:2507.06457 (2025). [38] Junxiong Wang, Daniele Paliotta, Avner May, Alexander M Rush, and Tri Dao. 2024. The mamba in the llama: Distilling and accelerating hybrid models. Advances in Neural Information Processing Systems 37 (2024), 62432–62457. [39] Bingyang Wu, Shengyu Liu, Yinmin Zhong, Peng Sun, Xuanzhe Liu, and Xin Jin. 2024. Loongserve: Efficiently serving long-context large language models with elastic sequence parallelism. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles .640–654. [40] Shicheng Xu, Liang Pang, Huawei Shen, Xueqi Cheng, and Tat-Seng Chua. 2024. Search-in-the-chain: Interactively enhancing large lan-guage models with search for knowledge-intensive tasks. In Proceed-ings of the ACM Web Conference 2024 . 1362–1373. [41] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. Cacheblend: Fast large language model serving for rag with cached knowledge fusion. In Proceedings of the twentieth European conference on computer systems . 94–109. [42] Hancheng Ye, Zhengqi Gao, Mingyuan Ma, Qinsi Wang, Yuzhe Fu, Ming-Yu Chung, Yueqian Lin, Zhijian Liu, Jianyi Zhang, Danyang Zhuo, et al. 2026. Kvcomm: Online cross-context kv-cache communi-cation for efficient llm-based multi-agent systems. Advances in Neural Information Processing Systems 38 (2026), 17882–17928. [43] Zihao Ye, Lequn Chen, Ruihang Lai, Wuwei Lin, Yineng Zhang, Stephanie Wang, Tianqi Chen, Baris Kasikci, Vinod Grover, Arvind Krishnamurthy, et al. 2025. Flashinfer: Efficient and customizable attention engine for llm inference serving. Proceedings of Machine Learning and Systems 7 (2025). [44] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A distributed serving system for Transformer-Based generative models. In 16th USENIX symposium on operating systems design and implementation (OSDI 22) . 521–538. [45] Yifan Yu, Yu Gan, Nikhil Sarda, Lillian Tsai, Jiaming Shen, Yanqi Zhou, Arvind Krishnamurthy, Fan Lai, Hank Levy, and David Culler. 2025. Ic-cache: Efficient large language model serving via in-context caching. In Proceedings of the ACM SIGOPS 31st Symposium on Oper-ating Systems Principles . 375–398. 
+
+> 14
+
+[46] Zhihao Zhan, Jianan Zhao, Zhaocheng Zhu, and Jian Tang. 2026. Overcoming Long Context Limitations of State Space Models via Con-text Dependent Sparse Attention. Advances in Neural Information Pro-cessing Systems 38 (2026), 43752–43779. [47] Chen Zhang, Kuntai Du, Shu Liu, Woosuk Kwon, Xiangxi Mo, Yufeng Wang, Xiaoxuan Liu, Kaichao You, Zhuohan Li, Mingsheng Long, et al. 2025. JENGA: Effective memory management for serving LLM with heterogeneity. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles . 446–461. [48] Hailin Zhang, Xiaodong Ji, Yilin Chen, Fangcheng Fu, Xupeng Miao, Xiaonan Nie, Weipeng Chen, and Bin Cui. 2025. Pqcache: Product quantization-based kvcache for long context llm inference. Proceed-ings of the ACM on Management of Data 3, 3 (2025), 1–30. [49] Yichi Zhang. 2024. Detecting code comment inconsistencies using llm and program analysis. In Companion Proceedings of the 32nd ACM International Conference on the Foundations of Software Engineering .683–685. [50] Zhenyu Zhang, Shiwei Liu, Runjin Chen, Bhavya Kailkhura, Beidi Chen, and Zhangyang Wang. 2024. Q-hitter: A better token oracle for efficient llm inference via sparse-quantized kv cache. Proceedings of Machine Learning and Systems 6 (2024), 381–394. [51] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al. 2024. Sglang: Efficient execution of structured lan-guage model programs. Advances in neural information processing systems 37 (2024), 62557–62583. [52] Zangwei Zheng, Xiaozhe Ren, Fuzhao Xue, Yang Luo, Xin Jiang, and Yang You. 2023. Response length perception and sequence schedul-ing: An llm-empowered llm inference pipeline. Advances in Neural Information Processing Systems 36 (2023), 65517–65530. [53] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregat-ing prefill and decoding for goodput-optimized large language model serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 193–210. [54] Yuan Zhou, Shaojie Xiang, Lingfan Yu, Zhenyu Song, Charith Mendis, and Yida Wang. 2026. SAS: Sparse Attention Synthesizer for Efficient Language Model Inference. In Proceedings of the 21st European Confer-ence on Computer Systems . 1707–1721. [55] Kan Zhu, Yufei Gao, Yilong Zhao, Liangyu Zhao, Gefei Zuo, Yile Gu, Dedong Xie, Zihao Ye, Keisuke Kamahori, Chien-Yu Lin, et al. 2025. NanoFlow: Towards optimal large language model serving through-put. In 19th USENIX Symposium on Operating Systems Design and Im-plementation (OSDI 25) . 749–765. [56] Qianchao Zhu, Jiangfei Duan, Chang Chen, Siran Liu, Xiuhong Li, Guanyu Feng, Xin Lv, Xiao Chuanfu, Dahua Lin, and Chao Yang. 2025. Sampleattention: Near-lossless acceleration of long context llm infer-ence with adaptive structured sparse attention. Proceedings of Ma-chine Learning and Systems 7 (2025). [57] Jiaxiang Zou, Yonghao Chen, Xingyu Chen, Chenxi Xu, and Xinyu Chen. 2025. AxCore: A Quantization-Aware Approximate GEMM Unit for LLM Inference. In Proceedings of the 58th IEEE/ACM Inter-national Symposium on Microarchitecture . 839–853.

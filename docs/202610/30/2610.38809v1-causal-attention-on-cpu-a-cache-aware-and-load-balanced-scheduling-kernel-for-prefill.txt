@@ -1,0 +1,576 @@
+Title: Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill
+
+URL Source: https://arxiv.org/pdf/2610.38809v1
+
+Published Time: Fri, 30 Oct 2026 01:56:48 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# CAUSAL ATTENTION ON CPU: A C ACHE -A WARE AND LOAD -B ALANCED 
+
+# SCHEDULING KERNEL FOR PREFILL 
+
+Kwun Fung Lau 1 Frost Mitchell † 1 Kanya Mo † 1 Emani Ashok 1
+
+# ABSTRACT 
+
+Agentic AI drives significant productivity gains across diverse domains, but concurrent long-context prefills from multiple agents can saturate GPU compute resources. Although CPUs offer a viable alternative, existing CPU attention kernels fall short in adapting to multi-tier cache hierarchies and lack effective thread scheduling. To address this, we introduce CACPU, a high-performance attention kernel featuring tiered cache blocking and an in-kernel task dispatching mechanism designed for causal full-sequence prefilling. CACPU achieves up to a 2.01× speedup over PyTorch SDPA, FlexAttention, and SGLang attention kernels. Integrated into SGLang, it reduces Time to First Token (TTFT) of Llama-3.1-8B by up to 1.74× while preserving model accuracy. 
+
+# 1 INTRODUCTION 
+
+Several recent efforts have explored CPU-based accelera-tion for large language models (LLMs). Gupta et al. (2026) adapt FlashAttention to scalable vector architectures, so that the kernel scales from short to long vectors on RISC-V CPU. Na et al. (2025) exploit CPU memory and compu-tation alongside GPU resources, while Shen et al. (2023) improve CPU LLM inference through INT4 weight-only quantization and an optimized runtime. At the framework level SGLang and vLLM have introduced CPU-specific ker-nels (Li, 2026) and scheduler optimizations (Li, 2025). In this work, we specifically target causal attention mecha-nisms to accelerate the LLM serving pipelines, which will benefit agentic AI workloads on CPU architectures. Agentic AI workloads require large language models (LLMs) to process extremely long contexts, which include intermediate reasoning steps (Wei et al., 2022) and tool call outputs (Schick et al., 2023). Building upon recent ad-vancements in GPU attention kernels (Dao et al., 2022; Dao, 2024; Shah et al., 2024; Zadouri et al., 2026), we propose an optimized CPU attention kernel tailored specifically for the prefill phase to accelerate long-context processing in LLM serving frameworks. We introduce two core mechanisms: Two-Level Cache-Aware Scheduling and L3-Chunk-Scoped Cost-Prioritized Scheduling. The former minimizes redun-dant DRAM reads by partitioning sequences according to cache hierarchy budgets, while the latter addresses core workload imbalance through dynamic cost-based task dis-patch from a shared task queue. Section 3 details the algo-  
+
+> †Equal second-author contribution. 1Intel Corp., USA. Corre-spondence to: Kwun Fung Lau <kwun.fung.lau@intel.com >.Preprint.
+
+rithmic design of both mechanisms, and Section 4 presents their evaluations. To be specific, our contributions are: • We propose a cache-aware scheduling strategy to mini-mize DRAM traffic, improve cache locality, and reduce latency for long sequences. Additionally, we introduce an analytical model that derives appropriate hyperpa-rameters directly from tensor memory footprints and CPU cache capacities, eliminating the need for empiri-cal per-CPU tuning. • We extend longest-processing-time-first (LPT) schedul-ing into the runtime kernel to dynamically balance workloads across both homogeneous and heteroge-neous CPU architectures. By introducing an exact-cost analytical model and implementing a shared work queue in-kernel, our approach bypasses rigid manual thread pinning and delivers seamless portability across serving frameworks. • We identify a strong interaction effect between our two proposed optimizations. Microbenchmarks and abla-tion studies show that cache-aware scheduling alone is counterproductive on heterogeneous cores and pro-vides only marginal benefits on Xeon CPUs. In con-trast, integrating both techniques yields significant per-formance improvements. This provides a design in-sight for high-performance CPU kernel development. arXiv:2610.38809v1 [cs.LG] 28 Oct 2026 Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+# 2 RELATED WORK 
+
+As the attention mechanism constitutes the primary com-putational backbone of Large Language Models (LLMs), extensive research has focused on its optimization to fully utilize GPU capabilities. A typical example is FlashAt-tention (FA). Beginning with FA1 (Dao et al., 2022) and FA2 (Dao, 2024), the primary goal was to minimize redun-dant data transfers between high-bandwidth memory (HBM) and on-chip SRAM. With the advent of dedicated Tensor Cores, FA3 (Shah et al., 2024) extended this concept by overlapping General Matrix Multiplication (GEMM) with Softmax operations through asynchronous execution and warp specialization. Most recently, FA4 (Zadouri et al., 2026) co-designs the algorithm with the kernel pipeline to address the asymmetric hardware scaling of Blackwell-class systems. These methods yield exact outputs while signifi-cantly reducing latency. 
+
+2.1 Long Context Scenarios 
+
+Specialized attention mechanisms have also been developed to tackle long-context scenarios efficiently. Local (sliding-window) attention reduces attention complexity to process long documents (Beltagy et al., 2020); a related work also shows that biasing attention toward local image regions can also mitigate hallucination in vision-language models (An et al., 2025). Infini-Attention (Munkhdalai et al., 2024) extends this concept by incorporating a compressed mem-ory module to support streaming over unbounded context lengths with memory constraints, while Xiao et al. (2024) retain only a fixed window together with the initial attention sinks. Other approaches focus on distributed compute effi-ciency: RingAttention with Blockwise Transformers (Liu et al., 2024) overlaps peer-to-peer (P2P) Key/Value com-munication with computation in a logical ring network. To address the inherent workload imbalance in causal attention, Striped Attention (Brandon et al., 2023) redistribute blocks across accelerators to increase hardware utilization. 
+
+2.2 Serving Frameworks 
+
+To satisfy the demands of high-throughput LLM serving sys-tems, several framework-specific attention primitives have emerged. vLLM introduced PagedAttention (Kwon et al., 2023), which applies virtual memory paging principles to dynamically manage KV cache allocations. Conversely, SGLang adapts a RadixTree structure to efficiently manage and reuse shared prefix KV caches (Zheng et al., 2024). FlashInfer (Ye et al., 2025) unifies these different KV cache layouts under a single hardware-optimized kernel abstrac-tion. 
+
+2.3 Offloading Workloads to CPU 
+
+Recent work actively leverages CPU resources to mitigate the massive computational demands of LLM serving. Flex-Gen (Sheng et al., 2023) offloads attention-score compu-tation to the CPU when the KV cache resides in CPU memory, while FastDecode (He & Zhai, 2024) extends this approach by executing KV-cache-bound attention across aggregated cross-node CPU compute and memory band-width. For online serving, NEO (Jiang et al., 2025) overlaps CPU attention with GPU computation, transmitting only compact activations rather than large KV caches. Other approaches partition a single attention operation across de-vices: HGCA (Deng et al., 2025) splits dense and sparse attention between the CPU and GPU before merging them, while HybridGen (Lin et al., 2026) parallelizes attention logits using a feedback-driven dynamic scheduler. 
+
+2.4 Variants of Attention Mechanisms on CPUs 
+
+Several efforts focus on optimizing CPU-native atten-tion performance through either structural redesign or ap-proximate computation. For architectural modifications, NOSA (Huang et al., 2025) applies trainable sparse atten-tion to bound KV cache transmission. For approximation methods, IceFormer (Mao et al., 2024) approximates atten-tion using top-k candidate keys selected by nearest-neighbor search, while MagicPIG (Chen et al., 2025) samples keys and reweights them according to their sampling probabili-ties. Alternatively, NoMAD-Attention (Zhang et al., 2024) approximates matrix multiplication by turning multiply-add operations into in-register SIMD lookups, IntAtten-tion (Zhong et al., 2025) numerically approximates softmax by clipping and using lookup tables with integer normaliza-tion. SparAMX (AbouElhamayed et al., 2025) prunes low-magnitude KV values to accelerate GEMMs using hardware-accelerated Intel AMX kernels. 
+
+2.5 Our Work 
+
+While these pioneering approaches highlight promising re-search directions, many require model retraining, model architecture redesigns, or active framework adaptations. These introduce difficulties to adopt in existing agentic AI workloads. In contrast, this work aims to deliver immediate and practical performance gains for existing LLM serving systems. Specifically, we introduce a self-contained atten-tion kernel that preserves output quality while seamlessly integrating into mainstream frameworks such as PyTorch and SGLang. By maintaining full compatibility with pre-trained LLMs, our design substantially improves end-to-end prefill throughput in modern production environments. Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+# 3 BACKGROUND AND DESIGN 
+
+3.1 FlashAttention on GPU 
+
+FlashAttention (Dao et al., 2022) avoids instantiating the 
+
+N × N attention matrix by tiling Q, K, and V tensors into fast on-chip SRAM. To achieve this, it proposes the online softmax equation: 
+
+m′ ← max  m, rowmax( Sj ),l ← em−m′
+
+l + rowsum  eSj −m′ ,O ← em−m′
+
+O + eSj −m′
+
+Vj
+
+(1) where Sj = αQ bK⊤ 
+
+> j
+
+, α is the scaling factor, Qb is the query block, m is the running row maximum, l is the running normalization factor, and O is the unnormalized output accumulator. FlashAttention-2 (Dao, 2024) further improves GPU throughput by pinning O, m, l in registers while FlashAttention-3 (Shah et al., 2024) overlaps softmax operations with asynchronous GEMMs and leverages persistent kernels with load-balanced work scheduling. FlashAttention-4 (Zadouri et al., 2026) targets Blackwell’s compute-memory asymmetric scaling via emulated expo-nentials and longest-processing-time-first (LPT) (Graham, 1969) causal query scheduling. While these GPU-centric techniques yield substantial speedups, fundamental architectural differences prevent them from mapping efficiently to modern CPUs. To ad-dress this gap, we propose two key mechanisms tailored specifically for CPU execution. 
+
+3.2 Two-Level Cache-Aware Scheduling 
+
+Unlike GPU shared memory, CPU L2 and L3 caches are filled by hardware according to the order of memory accesses. Data access must be carefully scheduled to preserve locality. Dedicated loop structures are hence intro-duced to exploit the cache hierarchy of the CPU, without changing the arithmetic of the kernel. At the entry point of the kernel, we compute the working sets analytically from the CPU cache capacities. This proposed schedul-ing can be divided into 2 main parts: L3 cache and L2 cache. 
+
+L3 Cache: For short and medium length sequences, the shared cache (L3) is not a bottleneck as the key and value tensors fit entirely in L3. As the sequence grows, this stops holding. Beyond a certain sequence length, K and V blocks are evicted before the next query block reuses them, forcing repeated reads from DRAM. This results in redundant DRAM-to-L3 traffic, which is why the L3 capacity has to enter the algorithm design rather than being left to the hardware. We restructure the loop nest so that the K and V tensors brought into L3 are fully reused before they can be evicted. We group Q heads whose K and V tensors fit within a fixed fraction of L3. An outer loop is added in order to walk the groups one at a time. If a single head’s K and V already exceed the budget, we will further split the sequence as well. We parallelize the threads on the same group. Since every core on a socket shares one L3 cache, a block of K or V tensors that any thread pulls in is immediately available to all the other cores. As a result, unnecessary L3 cache eviction can be avoided, and the performance of the algorithm can be improved. Figure 1 shows the packing of K and V tensors. 
+
+L2 Cache: Once the L3-resident chunk has eliminated DRAM refetch, we move one level down. Under the natural ordering, where each q-block sweeps the entire chunk, every KV step ( j) is re-fetched from L3 once per q-block. This increases the latency of the kernel. In order to address this, we invert the two innermost loops: the loop over KV steps becomes the outer loop, while the loop over a group of G consecutive q-blocks becomes the inner loop. So a packed KV step ( j) is loaded into L2 once and reused by G q -blocks before it is evicted. Rather than manually tuning G for different CPUs, we con-servatively size it from the L2 capacity. We split the group’s resident set into two terms: shared ( U ) and per-q-block (Qb). 
+
+G = fL2 L2 − UQb
+
+(2) where fL2 is the L2 fraction, L2 means the byte size of the L2 cache, U represents the shared term, and Qb denotes the per-q-block term. 
+
+Qb = qr(Qd + Vd + m + l) (3) in which qr, Qd , Vd, m , and l denote rows of the q-block (i.e. a step of Q tensor), head dimension of the Q tensor, head dimension of the V tensor, row max and row sum respectively. Physically, this means the rows of each q-block plus the output, row max and sum should survive every KV step. For the shared term: 
+
+U = kc(Kd + Vd) + Sb (4) where kc, Kd, Vd, and Sb refer to columns of the k-block, head dimension of the K, head dimension of the V, and the score and probability tiles ( S and P ) for one q-block. In short, the shared term ( U ) represents one step of K and V sizes, while Qb refers to the sizes required per q-block. Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill  
+
+> Figure 1. Illustration of K and V tensor packing from DRAM into the L3 cache
+
+Figure 2 visualizes the concept of it. All terms are in bytes: each element count is multiplied by its element size (2 bytes for bf16 Q, K, V and P ; 4 bytes for fp32 output, m, l and 
+
+S). 
+
+3.3 L3-Chunk-Scoped Cost-Prioritized Scheduling The load-imbalance problem: The two-level cache-aware scheduling scheme described in the previous section estab-lishes a specific loop hierarchy, where the KV step serves as the outer loop and the query block ( q-block) as the inner loop. Consequently, the query group ( q-blocks) forms the natural unit of parallelism. In self-attention, contiguous partitioning works effectively as all threads execute identical workloads. This does not hold in causal attention. Since causal attention applies a lower-triangular mask, threads handling q-groups from ear-lier sequence positions skip fully masked regions and finish quickly. One example is Thread 0, which is shown in Fig- 
+
+> Figure 2. Data Retention in the L2 Cache
+
+ure 3. In contrast, threads assigned later q-groups, like the Thread 1, bear more units of work. Due to the barrier syn-chronization among the threads, faster threads have to wait for the slowest thread. This imbalance introduces severe execution stalls. 
+
+FlashAttention-4 LPT Scheduling and Its CPU Limits: 
+
+FlashAttention-4 (Zadouri et al., 2026) addresses work im-balance via LPT scheduling (Graham, 1969), assuming identical processors and monotonic tile execution costs in causal attention. Although effective for GPUs, these as-sumptions do not hold on modern CPUs with heterogeneous execution units and complex cache hierarchies. We adapt and build upon the LPT heuristic to address imbalanced workloads on modern CPUs. 
+
+Proposed solution: To extend LPT scheduling (Graham, 1969) and integrate our two-level cache-aware approach for CPUs, we introduce a lightweight dynamic scheduling scheme. Before thread assignment, the scheme calculates the execution cost of each task for a given L3 chunk. Tasks  
+
+> Figure 3. Workload imbalance across threads Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill
+
+are then stored in a shared queue, which is reconstructed per L3 chunk, and dispatched across CPU cores. The cost is defined as the exact number of non-masked tiles visited. Un-der a static causal mask, it can be derived directly from the query block index. We then sort the q-groups in descending order of cost and insert them into a lock-free shared queue. Instead of relying on static partitions, threads from different cores dynamically fetch the highest-cost remaining q-group using an atomic increment on a shared index. Threads that complete early immediately retrieve additional work from the queue, balancing the workload across all active cores and eliminating idle wait time. 
+
+C =
+
+> G−1
+
+X
+
+> n=0
+
+max (0 , min( Ln, L end ) − Lbegin )
+
+Tkv 
+
+(5) where C is the cost of the q-group, Ln refers to the longest sequence length in the n-th q-block while Lbegin and Lend 
+
+denote the start and end indices of this chunk, Tkv is the tile (step) size. A key advantage of this design is that the dynamic queue naturally adapts to heterogeneous CPU architectures. Perfor-mance cores (P-cores) finish tasks faster and consequently pull a larger share of work from the queue, inherently miti-gating load imbalance between P-cores and Efficient cores (E-cores) without requiring manual thread-to-core mapping. 
+
+3.4 Combined Scheduling Methodology 
+
+By combining the two proposed techniques described above, we establish an optimized execution scheme for causal at-tention computation. Algorithm 1 outlines the high-level structure of this approach. Unless explicitly defined, mathe-matical notations follow standard conventions in attention literature. For instance, O denotes the output tensor and B
+
+represents the batch size. For clarity, certain non-essential implementation details in the algorithm listing are simplified to provide a clear conceptual overview. 
+
+3.5 Overlapping GEMM and Softmax 
+
+Inspired by the asynchronous execution model in FlashAttention-3 (Shah et al., 2024), we design an instruction-level pipeline that interleaves GEMM and Soft-max computations on Intel Xeon processors. Specifically, we exploit instruction-level parallelism by offloading ma-trix multiplications , QK T , to Advanced Matrix Extensions (AMX) hardware accelerators, while concurrently executing online softmax vector operations on the prior score tile us-ing AVX-512 SIMD. To be specific, step j issues an AMX systolic GEMM for block Sj = QbK⊤ 
+
+> j
+
+while AVX-512 vector units simultaneously process the exponentiation and reduction of Sj−1 = QbK⊤
+
+> j−1
+
+. This fine-grained instruction 
+
+Algorithm 1 Causal Attention on CPU 
+
+Input: Tensors Q, K, V in [B,H,S,D], scale 
+
+Output: Tensor O in [B,H,S,D] Allocate global buffer: O, m, l
+
+Allocate per-thread buffer S, P
+
+for hb = 0 to hb blocks do {L3 cache-aware }
+
+Pack K and V 
+
+for c = 0 to nchunk do {L3 cache-aware }
+
+Calculate the cost of various q-groups Sort and put q-groups into an atomic queue 
+
+repeat {parfor - executed by each CPU thread }
+
+Fetch a q-group from the queue 
+
+for j = chunk start to chunk end do {L2 cache-aware }
+
+for qb = 0 to G − 1 do if Fully Masked then 
+
+Continue 
+
+end if 
+
+Sb ← scale ∗ QbKTj
+
+m′ ← max (m, rowmax (Sb)) 
+
+Pb ← exp 2( Sb − m′)
+
+l ← 2(m−m′) ∗ l + rowsum (Pb)
+
+O ← 2(m−m′) ∗ O + PbVj
+
+m ← m′
+
+end for end for until len(queue) = 0 
+
+end for 
+
+Normalize O ← O/l 
+
+end for 
+
+overlap effectively hides softmax latency behind GEMM. 
+
+# 4 EVALUATIONS 
+
+We evaluate several aspects of the proposed kernel across two hardware platforms: a server-grade Intel Xeon 6767P (Xeon 6767P) and a desktop-grade Intel Core Ultra 7 265K (265K). Throughout the evaluations, K represents 1,024 when denoting sequence lengths and Grouped-Query At-tention (GQA) 32:8 refers to 32 query heads sharing 8 key-value heads. 
+
+4.1 Kernel Performance 
+
+We evaluate and compare the performance of several at-tention kernels: PyTorch SDPA, PyTorch FlexAttention, SGLang, and the proposed CACPU kernel. Because the SGLang kernel requires hardware support for AMX, which is unavailable on the 265K processor, SGLang benchmark-ing was excluded for that CPU. Table 1 summarizes the re-sults, where the Ratio column highlights the latency speedup of the CACPU kernel relative to the best-performing alter-Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill                                                                                                                                                                                   
+
+> Table 1. Performance of different kernels on different sequence lengths using 1 batch size, 128 head dimensions INPUT (S)CPU GQA SDPA ( MS )SGLANG ( MS )FLEX ( MS )OURS (MS )RATIO
+> 4K 6767P 32:8 8.43 8.26 11.85 5.00 1.65 X
+> 8K 6767P 32:8 27.46 63.22 39.74 15.74 1.74 X
+> 16K 6767P 32:8 102.21 204.67 151.52 54.72 1.87 X
+> 32K 6767P 32:8 391.52 492.22 595.84 207.79 1.88 X
+> 64K 6767P 32:8 1562.45 1966.87 2339.86 812.10 1.92 X
+> 128K 6767P 32:8 6376.64 8147.56 9495.27 3170.23 2.01 X
+> 4K 265K 32:8 132.85 N/A 281.95 87.81 1.51 X
+> 8K 265K 32:8 503.39 N/A 1068.86 331.00 1.52 X
+> 16K 265K 32:8 1917.74 N/A 4397.27 1270.03 1.51 X
+> 32K 265K 32:8 7619.77 N/A 17634.20 4987.37 1.53 X
+> 64K 265K 32:8 31574.44 N/A 70803.12 19997.34 1.58 X
+> 128K 265K 32:8 126203.72 N/A 285030.40 79684.60 1.58 X
+> 4K 6767P -8.56 8.23 12.24 4.70 1.75 X
+> 8K 6767P -28.13 56.41 39.91 17.12 1.64 X
+> 16K 6767P -107.02 150.20 152.62 56.41 1.90 X
+> 32K 6767P -407.19 499.66 601.17 219.62 1.85 X
+> 64K 6767P -1630.19 1942.53 2381.47 838.37 1.94 X
+> 128K 6767P -6596.03 7875.30 9711.11 3279.43 2.01 X
+> 4K 265K -135.84 N/A 295.22 93.40 1.45 X
+> 8K 265K -512.18 N/A 1109.84 346.42 1.48 X
+> 16K 265K -1958.13 N/A 4515.25 1321.08 1.48 X
+> 32K 265K -8013.11 N/A 18095.46 5274.21 1.52 X
+> 64K 265K -30621.06 N/A 72183.79 20668.62 1.48 X
+> 128K 265K -126458.67 N/A 290394.24 81932.76 1.54 X
+
+native kernel for each test case. As shown in Table 1, the CACPU kernel achieves the lowest latency. On the Xeon 6767P, CACPU is already 1.65 × to 
+
+1.75 × faster than the best baseline at 4K tokens, where K and V fit entirely in L3. The advantage grows to 2.01 × at 128K tokens. At longer sequences, where K and V exceed the L3 capacity, the L3-aware grouping combined with load-balanced scheduling sustains this advantage. On the 265K, the advantage is roughly constant ( 1.45 –
+
+1.58 ×) across sequence lengths. 
+
+4.2 E2E Performance 
+
+To evaluate the real-world performance of our proposed al-gorithm, we benchmark Time-to-First-Token (TTFT) prefill throughput within the SGLang serving framework against the best baseline, which is the PyTorch SDPA. Evalua-tions were conducted across Llama-3.1-8B, Qwen3-8B, and Mistral-7B-v0.3 over varying sequence lengths. Context lengths outside a model’s native support were evaluated and marked as ’timed-only’. Due to system memory constraints on the client-grade system (265K), tests for the 128K con-text length are omitted on that platform. As shown in Figures 4, and 5, our implementation achieves consistent throughput gains across both server-grade (Xeon 6767P) and client-grade (265K) processors. Speedup scales with sequence length, highlighting the efficiency of our al-gorithm on longer contexts. The performance improvement is particularly prominent on the Xeon 6767P, reaching up to a ∼ 1.74 × speedup at a sequence length of 128K. This difference is due to the Xeon’s native AMX acceleration for other GEMM operations, whereas the 265K lacks AMX support. Other non-attention GEMM calculations on 265K occupied significant time. As the sequence length grows, the proportion of computation time consumed by the attention mechanism increases. Consequently, the advantages of the proposed algorithm become evident in these scenarios. By addressing the attention bottleneck, our kernel significantly   
+
+> Figure 4. Prefill (TTFT) results of Llama-3.1-8B on Xeon 6767P and 265K Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill
+> Figure 5. Prefill (TTFT) results on Xeon 6767P and 265K. Left: Mistral-7B-v0.3 Right: Qwen3-8B
+
+improves prefill throughput on AMX-enabled CPUs. 
+
+4.3 Analysis of L3-Chunk-Scoped Cost-Prioritized Scheduling 
+
+To evaluate the efficacy of our proposed cost-prioritized scheduling scheme, we benchmarked its performance across various input shapes against the baseline static schedule, which is the original implementation without cost calcula-tion or task sorting. We kept the other proposed techniques enabled. The results are presented in Figures 6. On a server-grade Xeon 6767P processor, the performance gains achieved by cost-prioritized scheduling scale propor-tionally with sequence length, delivering up to a 1.71 ×
+
+speedup for long sequence lengths and Multi-Head Atten-tion (MHA) configurations. On a client-grade 265K processor, the impact of dynamic scheduling is even more pronounced. Performance im-provements begin at short sequence lengths immediately, achieving a 1.72 × speedup. It then scales up to 2.45 ×
+
+for longer sequences. This significant gain is caused by the scheme’s ability to mitigate load imbalances inherent to heterogeneous architectures, which contain two distinct P-cores and E-cores. By utilizing a shared work queue, higher-throughput P-cores proactively retrieve and execute a larger portion of work items while waiting for E-cores to complete. Furthermore, because work items are sorted by the estimated cost, synchronization overhead in the final processing wave is significantly minimized. The above results demonstrate that the proposed scheduling mechanism delivers substantial performance benefits across both high-performing server platforms and heterogeneous client processors. We further compare First-In-First-Out (FIFO) scheduling with cost-prioritized scheduling. As shown in Table 2, cost-prioritized scheduling achieves higher throughput on both CPUs, delivering an average speedup of 14.33% on Xeon 6767P and 4.16% on 265K. While relying on the m-block index (Zadouri et al., 2026) yields comparable performance (within ±1% ) to our method in typical cases, Table 3 highlights scenarios where calculat-ing the exact cost of each tile becomes critical. Performance degrades when a short tail Q-group is scheduled at the very end of the tile queue. Consequently, computing individual tile costs proves to be a more robust approach.                                                                                                                                             
+
+> Figure 6. Comparative analysis of the L3-Chunk-Scoped Cost-Prioritized on Xeon 6767P (Left) and 265K (Right) Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill
+> Table 2. Causal attention latency of the Cost-Prioritized and FIFO work-queue schedules across different sequence lengths CPU SFIFO ( MS ) O URS (MS ) S PEEDUP
+> 6767P 4K 6.60 5.12 1.29 ×
+> 6767P 8K 19.21 15.53 1.24 ×
+> 6767P 16K 59.18 53.02 1.12 ×
+> 6767P 32K 212.98 206.06 1.03 ×
+> 6767P 64K 822.41 783.67 1.05 ×
+> 6767P 128K 3520.41 3119.72 1.13 ×
+> 265K 4K 92.86 89.05 1.04 ×
+> 265K 8K 351.08 331.89 1.06 ×
+> 265K 16K 1341.50 1287.81 1.04 ×
+> 265K 32K 5366.40 5049.58 1.06 ×
+> 265K 64K 21128.56 20349.51 1.04 ×
+> 265K 128K 82110.43 81328.25 1.01 ×
+> Table 3. Representative sequences demonstrating speedup under Cost-Prioritized Scheduling CPU SINDEX (MS )OURS (MS )SPEEDUP
+> 6767P 1024 0.87 0.80 1.09 ×
+> 6767P 4928 6.74 6.57 1.03 ×
+> 265K 1056 9.36 8.91 1.05 ×
+> 265K 1824 21.19 20.86 1.02 ×
+> Table 4. DRAM read (GB) of different kernels across various se-quence lengths CPU SSDPA SGLANG FLEX OURS
+> 6767P 4K 0.05 0.04 0.05 0.03
+> 6767P 8K 0.15 0.27 0.12 0.09
+> 6767P 16K 0.62 1.66 0.59 0.42
+> 6767P 32K 2.58 9.79 2.34 1.34
+> 6767P 64K 23.29 53.40 21.53 5.42
+> 6767P 128K 150.50 397.77 210.53 21.13
+> 265K 4K 1.21 N/A 0.40 0.12
+> 265K 8K 5.73 N/A 2.42 0.50
+> 265K 16K 27.03 N/A 22.95 3.17
+> 265K 32K 110.43 N/A 148.13 15.35
+> 265K 64K 439.09 N/A 768.34 108.75
+> 265K 128K 1774.27 N/A 3201.66 517.15
+
+4.4 Analysis of the Two-Level Cache-Aware Scheduling 
+
+To evaluate the effect of cache-aware scheduling, we use Intel VTune Profiler alongside hardware Performance Mon-itoring Unit (PMU) counters to track two key metrics: DRAM read volume and L3 cache hit rate. We will also show the performance of the default G value in q-block grouping.                        
+
+> Table 5. L3 Cache Hit Rate under various sequence lengths on 265K
+> SSDPA(%) FLEX(%) OURS (%) 4K 84.42 94.30 98.68
+> 8K 79.78 90.28 97.48
+> 16K 78.18 69.37 96.50
+> 32K 74.92 52.62 94.66
+> 64K 75.02 39.75 90.50
+> 128K 75.67 33.78 88.29
+
+DRAM Read Volume : We evaluated a representative shape ([1 , 32 , S, 128] with a 32:8 GQA ratio) to demonstrate the effectiveness of L3-cache-aware scheduling. As shown in Table 4, CaCPU significantly reduces DRAM reads across all sequence lengths on both CPU architectures. This re-duction confirms that our scheduling strategy effectively eliminates redundant re-reads of Key and Value tensors from main memory. 
+
+L3 Cache Hit Rate : Benchmarks were conducted on the 265K processor, whose smaller L3 cache capacity exposes memory hierarchy limits at shorter sequence lengths. Note that SGLang was excluded from this comparison due to its lack of Intel Advanced Matrix Extensions (AMX) support on this processor architecture. As shown in Table 5, our method consistently outperforms both baseline kernels in L3 hit rate across all evaluated sequence lengths. By maintain-ing an average L3 hit rate of 94.35%, CACPU demonstrates that its cache-aware design optimizes data locality for both short and long context windows. 
+
+Grouping of G q -blocks : Using the same representative GQA configuration ( [1 , 32 , S, 128] , 32:8 ratio), we evalu-ated how query-block ( q-block) grouping affects latency. As reported in the Appendix, the default G value yields com-petitive performance across sequence lengths. On average, the default G setting is only 0.58% slower than the optimal setting on the 265K and 2.34% slower on the Xeon 6767P. 
+
+4.5 Performance Compared to vLLM Attention Scheduling 
+
+vLLM has a unique attention scheduler (Li, 2025). We en-abled this scheduler and compared the vLLM kernel with CACPU to check the effects. We set the batch size to 1 and used 32 query heads. Both multi-head attention (MHA) and grouped-query attention (GQA with a 32:8 query-to-KV ratio) were benchmarked. To evaluate performance under a more computationally demanding attention mechanism, we also conducted an experiment with a head dimension of 192. As shown in Figure 7, CACPU outperforms vLLM’s backend in most cases. On the heterogeneous CPU (265K), the improvements are significant. These improvements are due to the proposed load-balanced scheduling, which mini-Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill  
+
+> Figure 7. Comparative analysis of scheduling strategies in CACPU and vLLM. Top left: Results of Xeon 6767P and 265K with MHA and Head Dim. 128. Top right: Results of Xeon 6767P and 265K with GQA(32:8) and Head Dim. 128. Bottom left: Results of Xeon 6767P and 265K with MHA and Head Dim. 192. Bottom right: Results of Xeon 6767P and 265K with GQA(32:8) and Head Dim. 192
+
+mizes synchronization time in the final wave and distributes workloads evenly through a shared queue. Because the proposed scheduler is integrated into the kernel itself, the benefits of the proposed method is transferable across dif-ferent frameworks. No extra code has to be implemented outside. 
+
+4.6 Forward Ablation Study 
+
+To evaluate the cumulative impact of our proposed tech-niques, we conducted a forward ablation study on the attention kernel using a standard benchmark shape of 
+
+[1 , 32 , S, 128] with Grouped-Query Attention (GQA 32:8). Sequence lengths ( S) were set to 64K and 128K on the 265K, and 128K and 256K on the Xeon 6767P, ensuring a sufficiently large memory footprint to trigger the L3 cache blocking optimization. Results are summarized in Table 6. As shown in Table 6, enabling cost-prioritized scheduling first yields only a 1.08 × speedup on the Xeon processor at a 128K sequence length, whereas removing it last from the fully optimized settings results in a 1.45 × slowdown (Fig-ure 6). This discrepancy reveals a strong interaction effect. Without the optimizations, execution is limited by mem-ory stalls. Cache-aware blocking eliminates this memory bottleneck, shifting the limiting factor to thread imbalance. On the client-side 265K CPU, the performance divergence between P-cores and E-cores is the major limiting factor. Enabling load-balanced scheduling immediately yields a 
+
+1.44 × latency improvement. By comparing the results with Figure 6, we find that the Two-Level Cache-Aware Schedul-ing is not an independent optimization. Enabling cache-aware scheduling by itself degrades performance, which explains why enabling the cost-prioritized scheduling at last brings significant gains (2.45 ×). Two-Level Cache-Aware Scheduling only improves latency when integrated with the cost-prioritized scheduling, as the cache blocking mecha-nism aggravates load imbalances across P and E cores. These findings demonstrate that cache-aware and cost-prioritized scheduling are complementary. These optimiza-tions act synergistically to reduce overall latency. 
+
+4.7 Stability 
+
+We verified the numerical correctness and stability of our kernel against FP64 PyTorch’s eager mode scaled dot product attention function across all tested se-quence lengths. The minimum cosine similarity achieved was 0.999, and the maximum absolute difference was 0.01 across all the mentioned input shapes. To evaluate end-to-end model numerical stability, we integrated our custom CACPU kernel into SGLang and validated the integrated Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+Table 6. Forward ablation study of the proposed algorithm across long sequences CPU S TECHNIQUE LATENCY (MS ) SPEEDUP VERSUS LAST STEP 
+
+6767P 128K ALL OFF 8512.65 -6767P 128K + L3-C HUNK -S COPED COST -PRIORITIZED SCHEDULING 7883.39 1.08 ×
+
+6767P 128K + L3 B LOCKING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 5884.57 1.34 ×
+
+6767P 128K + GEMM AND SOFTMAX OVERLAP 5239.27 1.12 ×
+
+6767P 128K + Q-G ROUPING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 3147.51 1.66 ×
+
+6767P 256K ALL OFF 30372.22 -6767P 256K + L3-C HUNK -S COPED COST -PRIORITIZED SCHEDULING 28790.63 1.05 ×
+
+6767P 256K + L3 B LOCKING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 23044.99 1.25 ×
+
+6767P 256K + GEMM AND SOFTMAX OVERLAP 20930.11 1.10 ×
+
+6767P 256K + Q-G ROUPING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 12514.80 1.67 ×
+
+265K 64K ALL OFF 31514.57 -265K 64K + L3-C HUNK -S COPED COST -PRIORITIZED SCHEDULING 21919.76 1.44 ×
+
+265K 64K + L3 B LOCKING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 22115.17 0.99 ×
+
+265K 64K + Q-G ROUPING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 20519.54 1.08 ×
+
+265K 128K ALL OFF 126582.79 -265K 128K + L3-C HUNK -S COPED COST -PRIORITIZED SCHEDULING 87411.98 1.44 ×
+
+265K 128K + L3 B LOCKING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 87808.91 1.00 ×
+
+265K 128K + Q-G ROUPING (T WO -L EVEL CACHE -A WARE SCHEDULING ) 81901.38 1.07 ×
+
+system on Llama-3.1-8B using two standard benchmarks, MMLU and RULER. Our kernel achieved an MMLU ac-curacy of 66.2%, virtually identical to the official baseline (66.7%). Similarly, RULER evaluations demonstrated con-sistent performance compared to the reference SDPA imple-mentation. 
+
+# 5 CONCLUSION 
+
+In this work, we introduce CPU-centric optimizations to FlashAttention by incorporating cache-aware and cost-prioritized scheduling mechanisms. With an aim to mini-mize redundant DRAM reads, the algorithm first partitions long-sequence Key and Value tensors into chunks that fit within the L3 cache. At the L2 cache level, query-blocks are grouped to maximize reuse of the K and V subblocks residing in L2, significantly improving latency. To validate correctness, we verified the numerical differences at the single-kernel level using cosine similarity against reference outputs. We also evaluated the kernel within multi-layer models using the MMLU and RULER benchmarks, con-firming that model accuracy and system robustness are fully preserved in end-to-end scenarios. Extensive evaluations have been conducted to demonstrate the efficiency of the proposed kernel. In microbenchmarks, our implementation consistently outperformed standard baselines, which are PyTorch SDPA, SGLang’s attention ker-nel, and PyTorch FlexAttention, by up to a 2.01 × speedup on long sequences. End-to-end evaluation using SGLang as the serving framework demonstrated corresponding im-provements in Time-to-First-Token (TTFT) across multiple models (Llama-3.1-8B, Qwen3-8B, and Mistral-7B-v0.3), revealing the kernel’s effectiveness in accelerating the LLM prefill phase. Furthermore, comparative analysis against vLLM’s framework-level attention scheduler paired with its optimized kernel shows that integrating scheduling di-rectly inside the kernel achieved performance gains, while maintaining framework portability without requiring custom framework modifications. Finally, the experimental results confirm the contributions of both proposed mechanisms. Cache-aware scheduling improves L3 cache hit rates and reduces DRAM read volume, while cost-prioritized schedul-ing delivers up to a 1.44 × speedup on a heterogeneous CPU architecture. Both optimizations interact to substantially improve latency performance. While the current algorithm effectively covers common sce-narios, there are certain limitations. The current algorithm assumes standard causal attention. Modified attention pat-terns, such as attention sinks or custom sparsity masks, change the computational cost model used for load balanc-ing and the memory access patterns. These can degrade the L2 and L3 cache locality. However, the underlying concepts are flexible. The scheduling criteria can be extended to ac-commodate prefill variants, custom masking patterns, and also decode. As the attention mechanisms evolve to support emerging LLM serving and agentic AI workloads, we will continue to improve this algorithm to support non-standard masking structures and variants of attention based on the principles proposed. Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+# REFERENCES 
+
+AbouElhamayed, A. F., Dotzel, J., Akhauri, Y., Chang, C., Gobriel, S., Mu˜ noz, J. P., Chua, V. S., Jain, N., and Abdelfattah, M. S. Sparamx: Accelerating com-pressed llms token generation on amx-powered cpus. 
+
+CoRR , abs/2502.12444, 2025. doi: 10.48550/ARXIV. 2502.12444. URL https://doi.org/10.48550/ arXiv.2502.12444 .An, W., Tian, F., Leng, S., Nie, J., Lin, H., Wang, Q., Chen, P., Zhang, X., and Lu, S. Mitigating object hallucinations in large vision-language models with assembly of global and local attention. In IEEE/CVF Conference on Computer Vision and Pattern Recognition, CVPR 2025, Nashville, TN, USA, June 11-15, 2025 ,pp. 29915–29926. Computer Vision Foundation /IEEE, 2025. doi: 10.1109/CVPR52734.2025.02784. URL https://openaccess.thecvf.com/ content/CVPR2025/html/An_Mitigating_ Object_Hallucinations_in_Large_ Vision-Language_Models_with_Assembly_ of_CVPR_2025_paper.html .Beltagy, I., Peters, M. E., and Cohan, A. Longformer: The long-document transformer. CoRR , abs/2004.05150, 2020. doi: 10.48550/ARXIV.2004.05150. URL https: //doi.org/10.48550/arXiv.2004.05150 .Brandon, W., Nrusimha, A., Qian, K., Ankner, Z., Jin, T., Song, Z., and Ragan-Kelley, J. Striped atten-tion: Faster ring attention for causal transformers. 
+
+CoRR , abs/2311.09431, 2023. doi: 10.48550/ARXIV. 2311.09431. URL https://doi.org/10.48550/ arXiv.2311.09431 .Chen, Z., Sadhukhan, R., Ye, Z., Zhou, Y., Zhang, J., Nolte, N., Tian, Y., Douze, M., Bottou, L., Jia, Z., and Chen, B. Magicpig: LSH sampling for efficient LLM gen-eration. In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net, 2025. URL https: //openreview.net/forum?id=ALzTQUgW8a .Dao, T. Flashattention-2: Faster attention with better par-allelism and work partitioning. In The Twelfth Interna-tional Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net, 2024. URL https://openreview.net/forum? id=mZn2Xyh9Ec .Dao, T., Fu, D. Y., Ermon, S., Rudra, A., and R´ e, C. Flashattention: Fast and memory-efficient exact attention with io-awareness. In Koyejo, S., Mohamed, S., Agarwal, A., Belgrave, D., Cho, K., and Oh, A. (eds.), Advances in Neural Information Processing Systems 35: Annual Conference on Neural Information Processing Systems 2022, NeurIPS 2022, New Orleans, LA, USA, November 28 - December 9, 2022 , 2022. URL http://papers. nips.cc/paper_files/paper/2022/hash/ 67d57c32e20fd0a7a302cb81d36e40d5-Abstract-Conferen html .Deng, W., Yang, Y., Du, P., Xiang, L., Lin, Z., Xu, C., Jiang, S., Lu, H., and Rao, J. HGCA: hybrid GPU-CPU attention for long context LLM inference. CoRR , abs/2507.03153, 2025. doi: 10.48550/ARXIV.2507.03153. URL https: //doi.org/10.48550/arXiv.2507.03153 .Graham, R. L. Bounds on multiprocessing timing anomalies. 
+
+SIAM Journal on Applied Mathematics , 17(2):416–429, 1969. doi: 10.1137/0117039. URL https://doi. org/10.1137/0117039 .Gupta, S. R., Papadopoulou, N., and Peric` as, M. Flashat-tention for scalable vector architectures. CoRR ,abs/2608.18656, 2026. doi: 10.48550/ARXIV.2608. 18656. URL https://doi.org/10.48550/ arXiv.2608.18656 .He, J. and Zhai, J. Fastdecode: High-throughput gpu-efficient LLM serving using heterogeneous pipelines. 
+
+CoRR , abs/2403.11421, 2024. doi: 10.48550/ARXIV. 2403.11421. URL https://doi.org/10.48550/ arXiv.2403.11421 .Huang, Y., Xiao, C., Han, X., and Liu, Z. NOSA: native and offloadable sparse attention. CoRR , abs/2510.13602, 2025. doi: 10.48550/ARXIV.2510.13602. URL https: //doi.org/10.48550/arXiv.2510.13602 .Jiang, X., Zhou, Y., Cao, S., Stoica, I., and Yu, M. NEO: saving GPU memory crisis with CPU offloading for on-line LLM inference. In Zaharia, M., Joshi, G., and Lin, Y. C. (eds.), Proceedings of the Eighth Conference on Ma-chine Learning and Systems, MLSys 2025, Santa Clara, CA, USA, May 12-15, 2025 . OpenReview.net/mlsys.org, 2025. URL https://openreview.net/forum? id=umgy9tWBLA .Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L., Yu, C. H., Gonzalez, J., Zhang, H., and Stoica, I. Effi-cient memory management for large language model serving with pagedattention. In Flinn, J., Seltzer, M. I., Druschel, P., Kaufmann, A., and Mace, J. (eds.), Pro-ceedings of the 29th Symposium on Operating Sys-tems Principles, SOSP 2023, Koblenz, Germany, Octo-ber 23-26, 2023 , pp. 611–626. ACM, 2023. doi: 10. 1145/3600006.3613165. URL https://doi.org/ 10.1145/3600006.3613165 .Li, J. [CPU] Refactor CPU attention backend. 
+
+https://github.com/vllm-project/vllm/ pull/27954 , 2025. GitHub repository. Accessed: 2026-10-12. Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+Li, S. [CPU] enable AVX512 for AMD EPYC and In-tel Cooper Lake (up to 15×). https://github. com/sgl-project/sglang/pull/25739 , 2026. GitHub repository. Accessed: 2026-10-12. Lin, M., Wang, X., Cox, G., Li, D., and Jeon, H. Hybridgen: Efficient LLM generative inference via CPU-GPU hybrid computing. CoRR , abs/2604.18529, 2026. doi: 10.48550/ ARXIV.2604.18529. URL https://doi.org/10. 48550/arXiv.2604.18529 .Liu, H., Zaharia, M., and Abbeel, P. Ringattention with blockwise transformers for near-infinite context. In The Twelfth International Conference on Learning Represen-tations, ICLR 2024, Vienna, Austria, May 7-11, 2024 .OpenReview.net, 2024. URL https://openreview. net/forum?id=WsRHpHH4s0 .Mao, Y., Ester, M., and Li, K. Iceformer: Accelerated inference with long-sequence transformers on cpus. In 
+
+The Twelfth International Conference on Learning Repre-sentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 .OpenReview.net, 2024. URL https://openreview. net/forum?id=6RR3wU4mSZ .Munkhdalai, T., Faruqui, M., and Gopal, S. Leave no context behind: Efficient infinite context transformers with infini-attention. CoRR , abs/2404.07143, 2024. doi: 10.48550/ARXIV.2404.07143. URL https://doi. org/10.48550/arXiv.2404.07143 .Na, S., Jeong, G., Ahn, B. H., Jezghani, A., Young, J., Hughes, C. J., Krishna, T., and Kim, H. Flexinfer: Flexi-ble LLM inference with CPU computations. In Zaharia, M., Joshi, G., and Lin, Y. C. (eds.), Proceedings of the Eighth Conference on Machine Learning and Sys-tems, MLSys 2025, Santa Clara, CA, USA, May 12-15, 2025 . OpenReview.net/mlsys.org, 2025. URL https: //openreview.net/forum?id=sFNRNTduKO .Schick, T., Dwivedi-Yu, J., Dess` ı, R., Raileanu, R., Lomeli, M., Hambro, E., Zettlemoyer, L., Cancedda, N., and Scialom, T. Toolformer: Language models can teach themselves to use tools. In Oh, A., Naumann, T., Glober-son, A., Saenko, K., Hardt, M., and Levine, S. (eds.), 
+
+Advances in Neural Information Processing Systems 36: Annual Conference on Neural Information Processing Systems 2023, NeurIPS 2023, New Orleans, LA, USA, December 10 - 16, 2023 , 2023. URL http://papers. nips.cc/paper_files/paper/2023/hash/ d842425e4bf79ba039352da0f658a906-Abstract-Conference. html .Shah, J., Bikshandi, G., Zhang, Y., Thakkar, V., Ramani, P., and Dao, T. Flashattention-3: Fast and accurate attention with asynchrony and low-precision. In Globersons, A., Mackey, L., Belgrave, D., Fan, A., Paquet, U., Tomczak, J. M., and Zhang, C. (eds.), 
+
+Advances in Neural Information Processing Systems 37: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024 , 2024. URL http://papers. nips.cc/paper_files/paper/2024/hash/ 7ede97c3e082c6df10a8d6103a2eebd2-Abstract-Conferen html .Shen, H., Chang, H., Dong, B., Luo, Y., and Meng, H. Efficient LLM inference on cpus. CoRR , abs/2311.00502, 2023. doi: 10.48550/ARXIV.2311.00502. URL https: //doi.org/10.48550/arXiv.2311.00502 .Sheng, Y., Zheng, L., Yuan, B., Li, Z., Ryabinin, M., Chen, B., Liang, P., R´ e, C., Stoica, I., and Zhang, C. Flexgen: High-throughput generative inference of large language models with a single GPU. In Krause, A., Brunskill, E., Cho, K., Engelhardt, B., Sabato, S., and Scarlett, J. (eds.), International Conference on Ma-chine Learning, ICML 2023, 23-29 July 2023, Hon-olulu, Hawaii, USA , volume 202 of Proceedings of Machine Learning Research , pp. 31094–31116. PMLR, 2023. URL https://proceedings.mlr.press/ v202/sheng23a.html .Wei, J., Wang, X., Schuurmans, D., Bosma, M., Ichter, B., Xia, F., Chi, E. H., Le, Q. V., and Zhou, D. Chain-of-thought prompting elicits reasoning in large language models. In Koyejo, S., Mohamed, S., Agarwal, A., Belgrave, D., Cho, K., and Oh, A. (eds.), Advances in Neural Information Processing Systems 35: Annual Conference on Neural Information Processing Systems 2022, NeurIPS 2022, New Orleans, LA, USA, November 28 - December 9, 2022 , 2022. URL http://papers. nips.cc/paper_files/paper/2022/hash/ 9d5609613524ecf4f15af0f7b31abca4-Abstract-Conferen html .Xiao, G., Tian, Y., Chen, B., Han, S., and Lewis, M. Effi-cient streaming language models with attention sinks. In 
+
+The Twelfth International Conference on Learning Repre-sentations, ICLR 2024, Vienna, Austria, May 7-11, 2024 .OpenReview.net, 2024. URL https://openreview. net/forum?id=NG7sS51zVF .Ye, Z., Chen, L., Lai, R., Lin, W., Zhang, Y., Wang, S., Chen, T., Kasikci, B., Grover, V., Krishnamurthy, A., and Ceze, L. Flashinfer: Efficient and customizable at-tention engine for LLM inference serving. In Zaharia, M., Joshi, G., and Lin, Y. C. (eds.), Proceedings of the Eighth Conference on Machine Learning and Sys-tems, MLSys 2025, Santa Clara, CA, USA, May 12-15, 2025 . OpenReview.net/mlsys.org, 2025. URL https: //openreview.net/forum?id=RXPofAsL8F .Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+Zadouri, T., Hoehnerbach, M., Shah, J., Liu, T., Thakkar, V., and Dao, T. Flashattention-4: Algorithm and kernel pipelining co-design for asymmetric hardware scaling. 
+
+CoRR , abs/2603.05451, 2026. doi: 10.48550/ARXIV. 2603.05451. URL https://doi.org/10.48550/ arXiv.2603.05451 .Zhang, T., Yi, J., Yao, B., Xu, Z., and Shrivastava, A. Nomad-attention: Efficient LLM inference on cpus through multiply-add-free attention. In Globersons, A., Mackey, L., Belgrave, D., Fan, A., Paquet, U., Tomczak, J. M., and Zhang, C. (eds.), Advances in Neural Information Processing Systems 37: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, Decem-ber 10 - 15, 2024 , 2024. URL http://papers. nips.cc/paper_files/paper/2024/hash/ ccda3c632cc8590ee60ca5ba226a4c30-Abstract-Conference. html .Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H., Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Barrett, C. W., and Sheng, Y. Sglang: Efficient execution of structured language model programs. In Globersons, A., Mackey, L., Belgrave, D., Fan, A., Paquet, U., Tomczak, J. M., and Zhang, C. (eds.), 
+
+Advances in Neural Information Processing Systems 37: Annual Conference on Neural Information Processing Systems 2024, NeurIPS 2024, Vancouver, BC, Canada, December 10 - 15, 2024 , 2024. URL http://papers. nips.cc/paper_files/paper/2024/hash/ 724be4472168f31ba1c9ac630f15dec8-Abstract-Conference. html .Zhong, W., Feng, H., Zhou, Z., Peng, H., and Yu, S. Intat-tention: A fully integer attention pipeline for efficient edge inference. CoRR , abs/2511.21513, 2025. doi: 10.48550/ARXIV.2511.21513. URL https://doi. org/10.48550/arXiv.2511.21513 .
+
+# 6 AI U SAGE DISCLOSURE 
+
+During the preparation of this paper, we used Gemini 3 and Opus 5/5.5 to refine the clarity, grammar, and format of initial human-authored drafts. Furthermore, Opus 5/5.5 was used to assist with programming tasks, such as structur-ing and drafting code for the kernel and evaluation scripts. Technical design decisions were performed by us. Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+# A SUPPLEMENTARY EXPERIMENTAL 
+
+# RESULTS 
+
+A.1 Kernel Performance 
+
+Table 7 compares kernel performance across various config-urations. To show how performance scales with sequence length, all tests are conducted with a fixed batch size of 1. 
+
+A.2 Effect of Grouping Parameter G
+
+To examine the impact of the grouping parameter G on mean latency, we vary G while holding all other parameters constant. Experiments are conducted using an input shape of [1 , 32 , S, 128] under a 32 : 8 GQA setting. The results are summarized in Table 8 and Table 9. 
+
+A.3 TFLOPS Ultilizations 
+
+We evaluate kernel TFLOPS utilization using a representa-tive input shape of [1 , 32 , S, 128] under a 32 : 8 GQA con-figuration. Peak hardware throughputs for 265K and Xeon 6767P platforms are measured using a register-resident loop. The peak TFLOPs are 3.0 TFLOPS and 158.9 TFLOPS for 265K and Xeon 6767P respectively. Tables 10 and 11 shows the details. The TFLOP ultilization(%) is calculated by using the unrounded TFLOPs, not the printed TFLOPs. 
+
+# B EVALUATION METHODOLOGY 
+
+In this section, we present the experimental setup used to evaluate the proposed algorithm. First, we outline the hard-ware platform and software environment. We then describe the benchmark input configurations and sequence shapes. Finally, we detail the kernel implementation details and outline our experimental evaluation methodology. 
+
+B.1 Hardware Infrastructure 
+
+To evaluate both the execution performance and numerical accuracy of the proposed algorithm, we conduct experi-ments across two distinct CPU architectures: • Enterprise Platform: We use Intel Xeon 6767P (Xeon 6767P) as it supports Intel Advanced Matrix Exten-sions (AMX) and AVX-512 instruction sets, which enable fused and overlapped execution of GEMM and Softmax operators. It also features a large L3 cache (336MB). • Client Platform: Intel Core Ultra 7 265K (265K) is used as it is a hybrid processor architecture (comprising P-cores and E-cores), which supports AVX2 and is equipped with a relatively small 30 MB L3 cache. Evaluating across these two platforms demonstrates how our cache-aware scheduling operates under various cache capacities and core topologies. Table 12 shows platform details. 
+
+B.2 Software Infrastructure 
+
+Table 12 also lists the versions of the primary software packages and runtimes used in our evaluation. 
+
+B.3 Input and Benchmarks 
+
+All benchmarks are evaluated using Brain Floating Point 16 (bf16 ), one primary numerical precision used in modern Large Language Model (LLM) inference. Inputs are format-ted as 4D tensors with dimensions [B, H, S, D ]. The ker-nel microbenchmarks evaluate full-sequence causal prefill, where the query and key/value tensors have equal sequence lengths. Most experiments use a batch size of 1 to isolate single-sequence kernel performance and examine its scaling with sequence length. We also evaluate across representative Multi-Head Attention (MHA, 32:32) and Grouped-Query Attention (GQA, 32:8) configurations. Sequence lengths ( S)range from 4,096 (4K) to 131,072 (128K) tokens, with head dimensions ( D) set to 128 or 192. If not specified, the input shape will be [1,32, S,128] with GQA 32:8 as this is the typical shape for models. For performance benchmarking, we adopted the following execution scheme: experiments on sequence lengths from 4K to 32K were measured over 20 iterations, while sequences of 64K and 128K were evaluated over 10 and 5 iterations respectively. The average latency across iterations is reported. 
+
+B.4 Kernels 
+
+We implement the proposed algorithm using the Py-Torch Codegen mechanism. The custom kernel is au-thored as a C++ template, which is similar to the cur-rent existing CPU FlexAttention, under PyTorch Code-gen. This allows PyTorch to serve as a unified bench-marking runtime. We selected the mainstream atten-tion kernel implementations in SGLang, vLLM and Py-Torch as our primary baselines, as they represent the cur-rent state of the art for LLM serving. The kernels ex-tracted from SGLang and vLLM are built as custom op-erators and bound via the PyTorch TORCH LIBRARY mechanism. The standard baselines, which are the torch.nn.functional.scaled dot product attention (SDPA) and torch.nn.attention.flex attention, are executed directly through the native PyTorch APIs without modification. We omit the CPU kernels from llama.cpp as baselines because they lack support for Intel AMX instructions. Initial bench-marking on our Xeon host demonstrated that llama.cpp is significantly slower. Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+B.5 Kernel Parameters 
+
+The parameters of the kernel used throughout the evaluations are listed in Table 13. 
+
+Table 7. Performance of different kernels on different sequence lengths, head dimensions, and GQA settings INPUT (S,D) CPU GQA SDPA ( MS ) SGLANG ( MS ) FLEX ( MS ) CACPU ( MS ) RATIO 
+
+4096,128 6767P - 8.56 8.23 12.24 4.70 1.75 X
+
+8192,128 6767P - 28.13 56.41 39.91 17.12 1.64 X
+
+16384,128 6767P - 107.02 150.20 152.62 56.41 1.90 X
+
+32768,128 6767P - 407.19 499.66 601.17 219.62 1.85 X
+
+65536,128 6767P - 1630.19 1942.53 2381.47 838.37 1.94 X
+
+131072,128 6767P - 6596.03 7875.30 9711.11 3279.43 2.01 X
+
+4096,128 6767P 32:8 8.43 8.26 11.85 5.00 1.65 X
+
+8192,128 6767P 32:8 27.46 63.22 39.74 15.74 1.74 X
+
+16384,128 6767P 32:8 102.21 204.67 151.52 54.72 1.87 X
+
+32768,128 6767P 32:8 391.52 492.22 595.84 207.79 1.88 X
+
+65536,128 6767P 32:8 1562.45 1966.87 2339.86 812.10 1.92 X
+
+131072,128 6767P 32:8 6376.64 8147.56 9495.27 3170.23 2.01 X
+
+4096,128 265K - 135.84 N/A 295.22 93.40 1.45 X
+
+8192,128 265K - 512.18 N/A 1109.84 346.42 1.48 X
+
+16384,128 265K - 1958.13 N/A 4515.25 1321.08 1.48 X
+
+32768,128 265K - 8013.11 N/A 18095.46 5274.21 1.52 X
+
+65536,128 265K - 30621.06 N/A 72183.79 20668.62 1.48 X
+
+131072,128 265K - 126458.67 N/A 290394.24 81932.76 1.54 X
+
+4096,128 265K 32:8 132.85 N/A 281.95 87.81 1.51 X
+
+8192,128 265K 32:8 503.39 N/A 1068.86 331.00 1.52 X
+
+16384,128 265K 32:8 1917.74 N/A 4397.27 1270.03 1.51 X
+
+32768,128 265K 32:8 7619.77 N/A 17634.20 4987.37 1.53 X
+
+65536,128 265K 32:8 31574.44 N/A 70803.12 19997.34 1.58 X
+
+131072,128 265K 32:8 126203.72 N/A 285030.40 79684.60 1.58 X
+
+4096,192 6767P - 10.22 12.18 12.88 7.66 1.33 X
+
+8192,192 6767P - 35.12 41.84 45.12 22.49 1.56 X
+
+16384,192 6767P - 137.17 185.92 175.75 77.87 1.76 X
+
+32768,192 6767P - 511.14 616.79 722.60 287.67 1.78 X
+
+65536,192 6767P - 2055.91 2415.13 2925.59 1087.57 1.89 X
+
+131072,192 6767P - 8421.99 9741.30 12581.35 4315.57 1.95 X
+
+4096,192 6767P 32:8 10.08 12.40 12.81 6.59 1.53 X
+
+8192,192 6767P 32:8 33.95 63.02 44.48 19.54 1.74 X
+
+16384,192 6767P 32:8 123.44 264.93 170.48 69.33 1.78 X
+
+32768,192 6767P 32:8 480.84 615.03 673.00 263.74 1.82 X
+
+65536,192 6767P 32:8 1946.26 2442.70 2779.70 1041.74 1.87 X
+
+131072,192 6767P 32:8 7836.07 10075.43 11645.74 4113.04 1.91 X
+
+4096,192 265K - 182.54 N/A 401.25 132.54 1.38 X
+
+8192,192 265K - 693.02 N/A 1548.61 512.69 1.35 X
+
+16384,192 265K - 2647.73 N/A 6190.52 1982.49 1.34 X
+
+32768,192 265K - 11184.75 N/A 25075.55 7882.53 1.42 X
+
+65536,192 265K - 41453.36 N/A 98865.72 31646.59 1.31 X
+
+131072,192 265K - 164391.34 N/A 401299.55 125974.93 1.30 X
+
+4096,192 265K 32:8 179.92 N/A 390.46 126.61 1.42 X
+
+8192,192 265K 32:8 683.12 N/A 1515.38 481.51 1.42 X
+
+16384,192 265K 32:8 2714.13 N/A 6099.51 1880.79 1.44 X
+
+32768,192 265K 32:8 10399.19 N/A 24386.55 7638.37 1.36 X
+
+65536,192 265K 32:8 43995.51 N/A 97933.12 30750.44 1.43 X
+
+131072,192 265K 32:8 164950.04 N/A 392480.33 123192.83 1.34 XCausal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+Table 8. Mean latency (ms) of CACPU on the Intel Core Ultra 7 265K across different grouping values 
+
+G 4K ( MS ) 8K ( MS ) 16K ( MS ) 32K ( MS ) 64K ( MS ) 128K ( MS )1 89.5 336.9 1322.1 5312.6 21726.2 87370.0 2 88.9 333.8 1306.3 5132.9 20446.6 81665.9 4 ( DEFAULT ) 89.7 333.6 1289.4 5093.8 20305.1 80543.8 6 89.0 339.9 1284.4 5067.1 20214.9 80501.8 
+
+8 89.6 334.3 1277.8 5061.8 20175.5 80563.4 10 89.8 336.7 1288.4 5045.9 20393.8 80641.7 
+
+Table 9. Mean latency (ms) of CACPU on the Xeon 6767P across different grouping values 
+
+G 4K ( MS ) 8K ( MS ) 16K ( MS ) 32K ( MS ) 64K ( MS ) 128K ( MS )1 6.44 19.85 74.40 271.60 1042.94 4947.31 2 5.45 17.57 59.38 219.10 846.81 3361.34 4 5.47 16.13 54.87 202.14 781.92 3105.14 6 5.06 16.03 53.84 200.77 771.36 3090.10 
+
+8 5.17 15.58 53.60 200.13 779.52 3135.92 10 5.04 15.47 53.93 200.70 781.33 3153.19 12 4.81 15.33 53.59 199.30 780.45 3152.97 14 5.17 15.04 53.99 198.81 777.46 3141.97 16 5.09 14.74 53.66 198.39 774.68 3147.21 18 ( DEFAULT ) 5.12 14.99 53.79 198.80 779.08 3126.17 20 5.21 14.72 53.04 198.66 775.45 3123.77 22 5.46 14.65 53.21 199.13 777.72 3246.87 24 5.31 15.18 53.11 199.28 778.61 3239.89 26 5.25 14.82 53.27 201.32 891.70 3113.52 28 5.26 15.19 53.03 201.88 912.57 3115.25 30 5.21 14.94 52.88 202.51 910.53 3144.64 32 5.32 14.48 53.15 202.01 778.40 3148.45 34 5.28 16.19 53.73 203.23 909.87 3146.87 36 5.27 15.17 54.09 201.83 909.79 3137.57 38 5.33 15.83 54.09 202.13 907.06 3142.86 40 5.28 15.42 53.85 200.50 796.31 3144.49 42 5.27 15.79 54.18 201.18 931.32 3145.02 44 5.30 15.78 54.04 201.42 900.51 3143.96 46 5.32 15.75 55.18 202.42 890.07 3137.56 48 5.32 15.35 55.36 200.02 788.51 3143.84 50 5.25 15.76 54.00 202.20 909.47 3152.78 Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+Table 10. TFLOPS utilization of different kernels across varying sequence lengths on the Xeon 6767P 
+
+S ALGORITHM TFLOP/ S TFLOP U TIL . (%) DRAM READ (GB) FLOP/B 4K SDPA 14.01 8.82 0.05 2,923.40 4K SGL ANG 16.99 10.69 0.04 3,523.08 4K FLEX 11.98 7.54 0.04 3,053.33 4K OURS 29.33 18.46 0.03 4,432.26 8K SDPA 20.85 13.12 0.15 3,740.14 8K SGL ANG 15.19 9.56 0.27 2,051.49 8K FLEX 14.47 9.11 0.12 4,620.17 8K OURS 36.46 22.94 0.09 5,911.83 16K SDPA 22.43 14.11 0.62 3,546.77 16K SGL ANG 15.49 9.75 1.66 1,327.90 16K FLEX 14.99 9.43 0.59 3,702.02 16K OURS 42.06 26.47 0.41 5,298.80 32K SDPA 23.23 14.62 2.58 3,404.06 32K SGL ANG 17.70 11.14 9.79 898.29 32K FLEX 15.02 9.45 2.34 3,762.23 32K OURS 45.25 28.47 1.34 6,578.98 64K SDPA 22.56 14.20 23.29 1,510.84 64K SGL ANG 15.88 9.99 53.40 658.87 64K FLEX 15.06 9.48 21.53 1,634.13 64K OURS 45.95 28.92 5.42 6,485.60 128K SDPA 23.45 14.76 150.50 935.15 128K SGL ANG 17.32 10.90 397.77 353.82 128K FLEX 15.48 9.74 210.53 668.50 128K OURS 45.91 28.89 21.13 6,661.50 
+
+Table 11. TFLOPS utilization of different kernels across varying sequence lengths on the 265K CPU 
+
+S ALGORITHM TFLOP/ S TFLOP U TIL . (%) DRAM READ (GB) FLOP/B 4K SDPA 1.03 34.49 1.21 113.28 4K SGL ANG N/A N/A N/A N/A 4K FLEX 0.49 16.25 0.40 343.79 4K OURS 1.57 52.17 0.12 1,161.15 8K SDPA 1.09 36.40 5.73 95.91 8K SGL ANG N/A N/A N/A N/A 8K FLEX 0.51 17.14 2.42 227.24 8K OURS 1.66 55.36 0.50 1,098.13 16K SDPA 1.15 38.22 27.03 81.34 16K SGL ANG N/A N/A N/A N/A 16K FLEX 0.50 16.67 22.95 95.80 16K OURS 1.73 57.72 3.17 693.37 32K SDPA 1.15 38.48 110.43 79.65 32K SGL ANG N/A N/A N/A N/A 32K FLEX 0.50 16.63 148.13 59.38 32K OURS 1.76 58.79 15.35 573.05 64K SDPA 1.11 37.14 439.09 80.13 64K SGL ANG N/A N/A N/A N/A 64K FLEX 0.50 16.56 768.34 45.79 64K OURS 1.76 58.65 108.75 323.54 128K SDPA 1.12 37.17 1,774.27 79.32 128K SGL ANG N/A N/A N/A N/A 128K FLEX 0.49 16.46 3,201.66 43.96 128K OURS 1.77 58.87 517.15 272.14 Causal Attention on CPU: A Cache-Aware and Load-Balanced Scheduling Kernel for Prefill 
+
+Table 12. Hardware and runtime configurations throughout the evaluation 
+
+INTEL XEON 6767P INTEL CORE ULTRA 7 265K 
+
+MICROARCHITECTURE GRANITE RAPIDS (SERVER ) ARROW LAKE -S ( HYBRID )SOCKETS × CORES 2 × 64 ; ONE SOCKET USED 1 × 20 (8 P-CORES + 12 E-CORES )SMT ENABLED NOT SUPPORTED 
+
+ISA AVX-512, AMX-BF16 AVX2, AVX-VNNI MAX . CORE FREQUENCY 3.9 GH Z 5.4 GH Z (P), 4.6 GH Z (E) L1D PER CORE 48 K IB 48 K IB (P), 32 K IB (E) L2 2 M IB 3 M IB P-CORE ; 4 M IB SHARED E-CORES 
+
+L3 336 M IB 30 M IBNUMA SNC-2: 4 NODES , 2 PER SOCKET 1 NODE 
+
+MAIN MEMORY 512G IB DDR5, 8 CHANNELS , 6400 MT/ S 48G IB DDR5, 2 CHANNELS , 8000 MT/ S
+
+THREADS USED 64, CORES 0–63 ( SOCKET 0) OR SNC N ODE 1 20, CORES 0–19 (P AND E) PLACEMENT (KERNEL BENCH .) N U M A C T L CORES 0–63, NODES 0,1; ALL CORES , SINGLE NODE ;
+
+OMP PLACES= C O R E S , OMP PROC BIND= C L O S E SAME OPEN MP BINDING 
+
+PLACEMENT (E2E BENCH .) UNPINNED UNPINNED 
+
+ALLOCATOR TCMALLOC (GPERFTOOLS 2.18.1) TCMALLOC (GPERFTOOLS 2.18.1) OS / KERNEL UBUNTU 24.04.1 UBUNTU 26.04 LTS COMPILER / BLAS GCC 13.3.0 / ONE API MKL 2026.1 GCC 15.2.0 / ONE API MKL 2026.0 PYTORCH / SGL ANG / VLLM 2.12.0 / V0.5.18 / V0.28.0 2.12.0 / V0.5.18 / V0.28.0 
+
+Table 13. Kernel parameters adopted throughout the evaluation 
+
+XEON 6767P CORE ULTRA 7 265K 
+
+Q-BLOCK ROWS qr 64 64 KV-BLOCK COLUMNS kc (TILE Tkv ) 512 512 L3 CAPACITY USED BY THE MODEL 336 M IB 30 M IBL3 BUDGET FRACTION fL3 0.8 0.8 L2 CAPACITY USED BY THE MODEL 2 M IB ( PER -CORE L2) 1 M IB (E-CORE SHARE OF THE 4 M IB CLUSTER L2) L2 BUDGET FRACTION fL2 0.65 0.65

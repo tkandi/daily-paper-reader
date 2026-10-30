@@ -1,0 +1,299 @@
+Title: MCCL: Training Pytorch models across a fleet of Macs at Skywalker Sound
+
+URL Source: https://arxiv.org/pdf/2610.39029v1
+
+Published Time: Fri, 30 Oct 2026 02:15:20 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# MCCL: T RAINING PYTORCH MODELS ACROSS A FLEET OF MACS AT 
+
+# SKYWALKER SOUND 
+
+Kevin Sasso 1 Chris Fiegel 1 Francis Aitken 1 Nicolas Tsingos 1 Nicholas Tong 1
+
+## ABSTRACT 
+
+Skywalker Sound, a premier audio post-production facility, operates more than 200 M4 Max Mac Studios on a 10 Gb Ethernet network. When not in use by artists, these machines sit idle, representing massive untapped unified memory and compute capacity. While these fleets are excellent candidates for distributed machine learning alongside existing NVIDIA GPU clusters, PyTorch lacks an accelerated distributed backend for Apple’s Metal Performance Shaders (MPS). To bridge this gap, we introduce the Metal Communication Collective Library (MCCL), the first open-source MPS backend for multi-node PyTorch training over switched Ethernet. We evaluate its performance and scalability across 24 nodes, demonstrating that large all-reduce operations reach 98–99.7% of TCP goodput. Training a 113.5M-parameter Vision Transformer (ViT) scales from 198 to 4,568 samples/s, achieving 95.9% parallel efficiency. Benchmarked against an NVIDIA A100 GPU, one M4 Max Mac equals roughly 1.7 × the throughput of FP32 matrix multiplication, and 5.5 Macs match an A100 using TF32. Harnessing 100 idle Macs for 12 hours nightly offsets approximately $200,000 annually in equivalent cloud compute costs. Our results demonstrate that existing Mac infrastructure can be seamlessly repurposed for high performance distributed training without abandoning the standard PyTorch codebase. 
+
+## 1 INTRODUCTION 
+
+Skywalker Sound, the renowned audio post-production fa-cility behind the iconic soundtracks of Star Wars , Jurassic Park , Indiana Jones and many others, operates more than 200 Apple M4 Max Mac Studios (40-core GPU, 128 GB uni-fied memory) on a single 10 Gb Ethernet network backed by central ZFS storage. By day, they operate as Digital Audio Workstations to create soundtracks; by night, we estimate that at least 100 of them sit idle for 12 hours, representing 438,000 Mac-hours a year. Our machine learning team builds custom audio models for tasks such as stem separation, denoising, and upmixing, and trains them mostly on NVIDIA GPU clusters that are shared across teams and often fully booked. We wanted to use the idle Macs for exploratory prototyping and longer overnight training runs, with the same PyTorch code we run on our GPU clusters. PyTorch, however, has no distributed backend for MPS tensors, and its CPU backend, Gloo, works only if gradients are copied to CPU memory by hand, which stalls the GPU on every exchange (Section 2). Apple-specific frameworks such as MLX provide their own collectives, but adopting one would mean maintaining a second codebase. 
+
+> 1Skywalker Sound, Nicasio, California, USA. Correspondence to: Kevin Sasso <ksasso@skysound.com>.
+
+To fill this gap, we created MCCL (https: //github.com/mps-ddp/mccl ), an open-source 
+
+ProcessGroup that registers as backend="mccl" 
+
+and runs our unmodified models under PyTorch Lightning and Ray. Prior distributed ML on Apple silicon runs over Thunderbolt. It includes inference across meshes of four to six machines (Katharopoulos, 2025; exo labs, 2024; MLX contributors, 2026; crystech, 2026) and, as the largest training result we are aware of, a 1.7M-parameter model trained with MLX on 16 Mac minis cabled into a Thunderbolt ring (van der Ouderaa et al., 2025). The prior multi-Mac PyTorch training we found used three machines (jasonappah, 2026). Our evaluation uses 24 Mac Studios on a switched network, with models of up to 113.5M parameters. MCCL lets our team run the same training jobs across all the accelerator hardware we already own, which matters as GPU capacity, both on our own clusters and in the cloud, remains contended and expensive. We expected the 10 Gb network to be the main obstacle, but a pipelined TCP ring reached 98–99.7% of TCP goodput early in development, and most of our effort went instead into the handoff between CPU and GPU (Section 4). With 100 machines idle each night, the fleet provides roughly 18 A100 GPUs’ worth of training capacity at little added cost, or about $200,000 a year in equivalent cloud compute. 1          
+
+> 1Assumes 100 Mac Studios idle 12 hours a night (438,000 Mac-hours a year), one A100 with TF32 matmul matching about 5.5 Macs on our ViT benchmark (Section 5.2), and AWS EC2 Capacity arXiv:2610.39029v1 [cs.DC] 28 Oct 2026 MCCL: PyTorch Training Across a Fleet of Macs
+> ZFS storage SMB or NFS loader threads MPS forward
+> and backward
+> MCCL all-reduce peer Macs over 10 GbE
+> audio batch buckets gradients one 128 GB unified memory pool
+> Ray places one PyTorch worker on each available Mac
+> Figure 1. One MCCL training step on a Mac Studio node: audio batches stream from ZFS storage, forward and backward run on the MPS GPU in unified memory, and MCCL averages each finished gradient bucket in place across peers while the GPU keeps working.
+
+This paper makes four contributions. • MCCL , an open-source PyTorch ProcessGroup 
+
+for MPS tensors over switched Ethernet, which runs un-modified DistributedDataParallel code un-der PyTorch Lightning and Ray (Section 4). • An in-place handoff design for unified memory , in which CPU threads reduce MPS gradient buckets di-rectly while backward computation continues, and per-bucket Metal shared events enforce the ordering that prevents races without synchronizing the entire GPU (Section 4). • An evaluation on 24 Mac Studios , to our knowledge the largest reported distributed PyTorch training on Apple silicon, showing all-reduce at 98–99.7% of TCP goodput, about 94% of communication overlapped with backward computation, and 95.9% scaling ef-ficiency on a 113.5M-parameter ViT (Section 5). • Lessons from scaling past two nodes , including a buffer-reuse race that disappeared whenever we added a print() , a ring-ordering deadlock, and a silent gradient bug in PyTorch’s MPS reflect-padding kernel that affects STFT losses on long audio (Section 6). 
+
+## 2 PRELIMINARIES : M ULTI -N ODE 
+
+## PYTORCH ON UNIFIED MEMORY 
+
+What a ProcessGroup does and why overlap mat-ters. In data-parallel training, every worker holds a full copy of the model, computes gradients on its slice of the batch, and averages them with other workers be-fore the optimizer step. The averaging goes through a 
+
+ProcessGroup (PyTorch contributors, 2026f), the plugin selected by init_process_group(backend=...) ,which exposes asynchronous collectives ( all-reduce , broad-cast , allgather , reduce-scatter , barrier ). PyTorch does not wait for backward pass to finish before it starts averaging. It packs gradients into ∼25 MB buckets as backward walks  
+
+> Block pricing for p4de.24xlarge of $20.37/hr for eight A100 80 GB GPUs, or $2.546 per GPU-hour ( https://aws.amazon. com/ec2/capacityblocks/pricing/ , accessed October 20, 2026). Excludes energy and time lost to preemption.
+
+from the last layer to the first (Li et al., 2020) and launches each bucket’s all-reduce the moment it is full. If the network engine can run without stalling the GPU, early buckets fin-ish while the GPU is still working on earlier layers, and only the last bucket is exposed communication . We choose Ray to decide which Macs join a job; the process group decides 
+
+how they exchange tensors once it starts. 
+
+Macs are left out. CUDA, ROCm, Intel, Ascend, and Gaudi devices all join PyTorch through the same c10d:: Backend interface (PyTorch contributors, 2026e) (Ta-ble 1), but Apple’s GPU has no such backend. On macOS, stock PyTorch offers only Gloo, which oper-ates on CPU memory. Wrapping an MPS model in 
+
+DistributedDataParallel with Gloo fails before the first training step completes, and staging each bucket to the CPU by hand works only by draining the MPS stream for every bucket. Apple’s MLX provides its own collectives, but as a separate framework it does not interoperate with PyTorch’s MPS stream or caching allocator. MLX’s Eth-ernet and MPI paths reduce on the CPU, while its fastest path, Thunderbolt RDMA, requires a direct link between every pair of Macs, which limits a fully connected cluster to about six Macs. MCCL also supports Thunderbolt, but we target switched Ethernet because Thunderbolt requires direct cabling and our workstations span dozens of rooms.                                        
+
+> Table 1. How distributed backends handle gradients across acceler-ators. Backend Device How gradients get averaged NCCL /RCCL CUDA /ROCm GPU kernels &DMA over NVLink, RDMA, or TCP XCCL /HCCL XPU / NPU / HPU vendor c10d::Backend plug-ins (Intel, Ascend, Gaudi) Gloo / MPI CPU RAM CPU-only; stock PyTorch fails on MPS models, and manual staging stalls the GPU MLX mx.array separate framework; Ethernet TCP/MPI paths are CPU-bound, not PyTorch MPS MCCL (Ours) Apple MPS averages in place in unified mem-ory; Metal shared events order GPU and CPU MCCL: PyTorch Training Across a Fleet of Macs GPU stream CPU engine
+> backward writes bksignal krest of backward wait koptimizer reads bk
+> reduce + send/receive bkin place signal k
+> O1 O2 O3: PyTorch thread is the sole stream committer
+> Figure 2. How one gradient bucket bkchanges hands without stopping the GPU. A ticket signal queued right after the kernels that write
+> bktells the CPU it may start (O1); a second ticket raised when the ring finishes gates the optimizer’s read (O2); only PyTorch’s thread ever commits the GPU stream (O3).
+
+Unified memory, shared events, and wire rate. On an M4 Max, the CPU and GPU share the same 128 GB of DRAM, with no PCIe bus between them, so a CPU thread can average a GPU gradient in place. Sharing memory costs little bandwidth. On single-die Apple silicon, the CPU and GPU each reach about 90% of the advertised unified-memory bandwidth (Beischl et al., 2026; Hübner et al., 2025). What sharing does require is explicit order-ing. Atomic operations are not coherent across the two devices (Beischl et al., 2026), and PyTorch queues GPU ker-nels asynchronously onto a single MPS command stream, so a CPU thread cannot tell from memory alone whether the GPU has finished writing a buffer. Metal shared events (MTLSharedEvent ) supply that signal with a counter that the GPU stream and CPU threads can both raise and wait on without draining the device (Apple, 2026b). The network sets the other limit. 10 Gb Ethernet carries 1.25 GB/s at line rate; with 9000-byte jumbo frames, a TCP socket delivers at most 1.238 GB/s of tensor payload, which we call TCP goodput . Because a ring all-reduce sends each byte around the ring twice ( 2( N −1) /N wire bytes per tensor byte), we report bus bandwidth (NVIDIA, 2016b), which compares directly against TCP goodput at any cluster size. Small messages are limited instead by latency, chiefly the 0.59 ms switch round trip. 
+
+## 3 CLUSTER SETUP AND SOFTWARE STACK 
+
+Our controlled testbed (Figure 1) is a 24-node slice of Sky-walker Sound’s workstation fleet. Each node is an Apple M4 Max Mac Studio (16 CPU cores, 40-core GPU, 128 GB unified memory) on a single 10 Gb Ethernet switch, con-figured with 9000-byte jumbo frames and 32 MiB socket buffers. The nodes run PyTorch 2.14.0 and MCCL 6.8.0 (commit 64a359b ) on macOS 26.4 or 26.5.1. We launch jobs with Ray Train (Moritz et al., 2018), the same launcher we use on our NVIDIA clusters. A Linux head node runs the Ray 2.56.1 controller and places Py-Torch Lightning 2.1.0 workers (Falcon & The PyTorch Lightning team, 2019) with a SPREAD placement group, so each worker lands on a different Mac and a job across dozens of machines starts with one command rather than a torchrun invocation on every Mac. The job script is identical to the one we run on GPUs, apart from the head node it connects to. Neither framework supports this setup as shipped, and each refuses one thing. Ray discovers GPUs through CUDA, so every Mac reports zero GPUs (Ray project, 2023). We instead give each Mac one unit of a custom resource (pool:mac ) and have every worker request it, which both makes Macs schedulable and caps each machine at one worker, so two workers never compete for the same GPU and memory. Lightning treats MPS as a single-device ac-celerator and rejects parallel strategies on it (Lightning AI, 2026; Ray project, 2025), and its stock DDP strategy passes CUDA device_ids , which the MPS process group does not accept. A small custom strategy pins each worker to the mps device, returns device_ids=None , and drops the NCCL environment variables Ray sets for GPU jobs. With these changes, importing mccl registers the mccl 
+
+backend for MPS tensors, and a training job on the Mac fleet runs the same way it does on our CUDA clusters, with the same Ray Train script, the same Lightning module, and 
+
+DistributedDataParallel with mccl in place of NCCL. 
+
+## 4 MCCL D ESIGN : T HE SHARED -M EMORY 
+
+## HANDOFF 
+
+Halfway through a backward pass, the GPU finishes com-puting a 25 MB gradient bucket for the later layers of the model while continuing to compute gradients for earlier layers. MCCL must average that bucket across 24 Macs on CPU threads before the optimizer step, under two con-straints. The CPU cannot read the bucket until the GPU has finished writing it, and the optimizer cannot read it until the network has finished averaging it. 
+
+4.1 In-Place Reduction in Unified Memory 
+
+When PyTorch allocates an MPS tensor in shared Metal stor-age (Apple, 2026a), the GPU’s MTLBuffer and the CPU’s MCCL: PyTorch Training Across a Fleet of Macs 
+
+pointer are the same DRAM pages, and since PyTorch 2.12 every MPS tensor is allocated this way (PyTorch contrib-utors, 2026a). MCCL works on those bytes directly. It takes the CPU pointer to the gradient bucket, streams slices out over TCP, and uses Apple Accelerate ( vDSP ) to add in-coming slices from peer Macs into the bucket, accumulating fp16 and bf16 in fp32. vDSP runs on the CPU’s SIMD units, and its element-wise adds are far faster than the 1.238 GB/s the network delivers, so the reduction never limits the ring. When the ring finishes, the averaged gradients are already where the optimizer expects them. We reduce in place not to save memory bandwidth, which the M4 Max has in abundance, but to keep the GPU run-ning. Copying a bucket to a separate CPU buffer would require draining the GPU command stream for every bucket; working in place with event tickets lets backward continue. Before PyTorch 2.12, tensors could live in device-only mem-ory that the CPU cannot address, and MCCL must take that slower path, blitting each bucket through a shared staging buffer and waiting for the copy. The ablation in Section 5.1 forces the same path and shows what it costs. 
+
+4.2 Per-Bucket Shared-Event Ordering 
+
+When PyTorch hands MCCL a bucket pointer, the GPU usually has not written the bucket yet. To keep the CPU and GPU in step without stalling either one, MCCL enforces three rules (Figure 2): 
+
+O1 Producer ordering: the CPU engine does not read bucket bk until the GPU kernels that write bk have completed. 
+
+O2 Consumer ordering: the GPU’s optimizer kernel does not read bk until the CPU engine has written the final reduced slice into memory. 
+
+O3 Single-thread stream ownership: only PyTorch’s main thread encodes or commits commands on PyTorch’s MPS stream. O1 and O2 are enforced by two ticket counters backed by Metal’s MTLSharedEvent (Apple, 2026b), and bucket k
+
+passes through three hands. PyTorch’s thread queues the kernels that write it, encodes a signal on producer ticket k,flushes the command buffer, and moves on to bucket k+1 
+
+without waiting. When the GPU finishes those kernels, the ticket increments, and MCCL’s CPU thread, which has been waiting on it, sends bucket k into the TCP ring. When the ring completes, the CPU thread raises consumer ticket k.When PyTorch later calls wait() before the optimizer step, it encodes a GPU-side wait on that ticket ahead of the optimizer kernels, so nothing blocks on the CPU. MCCL holds bucket k until wait() returns, so PyTorch’s caching allocator cannot reuse its MTLBuffer while the CPU is still writing the reduced slice. We considered two simpler designs. Calling torch.mps. synchronize() before each bucket satisfies O1 and O2, but it drains the GPU 18 times per ViT step, removing the overlap that bucketing is meant to provide. Committing PyTorch’s MPS stream from MCCL’s background thread avoids that stall but violates O3, and in our tests it crashed in-side Metal because PyTorch’s stream wrapper is not thread-safe. PyTorch’s public torch.mps.Event covers only half of this ordering. A CPU thread can wait on an event recorded by the GPU stream, which satisfies O1, but as of PyTorch 2.14, which we use, no public API lets a CPU thread signal an event that GPU work then waits on, which O2 requires. PyTorch 2.15 adds public MPS streams and 
+
+Tensor.record_stream (Hugging Face, 2026); these may simplify parts of MCCL’s integration with PyTorch’s MPS stream, such as buffer lifetime tracking, and we plan to evaluate them once 2.15 is stable. 
+
+4.3 Pipelined TCP Ring and Tree Transport 
+
+Once the CPU thread owns a bucket, MCCL uses conven-tional algorithms, sending buckets above 256 KiB around a pipelined ring (Patarasuk & Yuan, 2009) and smaller mes-sages through a log 2 N recursive-doubling tree (Thakur et al., 2005). The harder problem is that Macs finish back-ward at different times. MCCL has no per-bucket barrier to line them up, and a ring sender is gated only by its own receives, so a rank that finishes backward a few millisec-onds early can run almost the entire reduce-scatter before its slower neighbor has consumed anything. Left unchecked, that rank would push a whole DDP bucket into the receiver. 
+
+Parking and credits. A dedicated reader thread per peer lets the slower rank accept data before it is ready to use it. The reader demultiplexes each incoming frame by its operation, sequence number, and tensor ID and parks it until the receiving rank posts the matching step, up to a fixed park limit. To bound that buffer, the receiver sends a 1-byte credit back to the sender after consuming each chunk of 1 MB or more, which caps the sender’s lead at the pipeline depth plus two chunks. The park buffer therefore holds a few chunks rather than a whole bucket, and a fast Mac runs ahead by that bounded amount instead of waiting for its neighbors. The same mechanism makes a per-collective barrier unnecessary. The TCPStore barrier it replaces would cost one set plus 23 serial round trips on rank 0 for every collective at 24 nodes. 
+
+Issue order. Collectives must also enter the ring in the same order on every rank. In an early version with two pool threads, a plain mutex let one Mac start bucket k+1 while its neighbor was still in bucket k, and each then waited indefinitely for the other’s traffic (Section 6). MCCL now assigns each collective a ticket on the thread that called it, MCCL: PyTorch Training Across a Fleet of Macs 4 8 12 16 20 24            
+
+> Macs
+> 0.0 0.2 0.4 0.6 0.8 1.0 1.2 1.4
+> bus bandwidth (GB/s)
+> (a) Allreduce bandwidth
+> TCP goodput 10 GbE line rate 16 MB 64 MB 256 MB
+> 4812 16 20 24
+> Macs
+> 90 92 94 96 98 100
+> % of TCP goodput
+> (b) Efficiency across the cluster
+> 16 MB 64 MB 256 MB N=4 N=8 N=16 N=24 0.0 0.5 1.0 1.5 2.0 2.5
+> step time (s)  94% hidden 94% hidden 94% hidden 94% hidden
+> 18 x 25 MB buckets produced by GPU work
+> compute only communication only overlapped (DDP-style) serialized
+
+Figure 3. Scaling from 4 to 24 Macs. Left and center: for training-sized buckets (16–256 MB), all-reduce bus bandwidth stays flat at 98–99.7% of the 10 GbE TCP ceiling through 24 nodes. Right: in a bucketed training step, MCCL hides 94% of communication behind GPU backward ; blitting through a Metal staging pool and waiting for completion ( MCCL_UNIFIED_COLLECTIVE=0 ) eliminates that overlap. 
+
+PyTorch’s main thread, and admits collectives to the wire strictly in ticket order. 
+
+## 5 CONTROLLED EVALUATION 
+
+We evaluate three aspects in order. The first is whether the ring saturates the 10 Gb link, the second is whether that traffic stays hidden behind backward computation, and the third is whether training converges correctly at every cluster size. We use microbenchmarks to answer the first two. For the third, we train on CIFAR-10 rather than on our audio data, because a communication backend is indifferent to what the gradients represent. Its behavior depends only on the bytes exchanged per step and the backward time avail-able to overlap them. CIFAR-10 is public and inexpensive, so others can rerun these experiments on their own Macs and use the results to estimate how a model with similar gradient volume, such as an audio VAE, a stem separator, or a diffusion refiner, would scale. Here, we use two models. A 113.5M-parameter Vision Transformer is the throughput and communication stress case, and its 454 MB of gradi-ents per step is roughly three times what our audio VAE exchanges. A 31.6M-parameter GroupNorm ResNet tests convergence across cluster sizes. We close with correctness, shared storage, and sustained reliability. 
+
+5.1 Wire Scaling and Compute Overlap 
+
+We first checked whether the 10 Gb network limits all-reduce throughput as the cluster grows. In a ring, each Mac exchanges data only with its two neighbors, so adding Macs adds hops but not per-link traffic. Consistent with this, 16–256 MB buckets move at 1.21–1.23 GB/s of bus band-width from 4 to 24 Macs, 98–99.7% of the 1.238 GB/s that jumbo-frame TCP can carry on a 10 Gb link (Figure 3, left and center). Small messages behave differently. A 1 MB all-reduce across 24 Macs puts only 42 KB on each hop, so the 0.59 ms switch round trip dominates, which is why MCCL sends messages under 256 KiB over a recursive-doubling tree. We next measured how much of that traffic is hidden be-hind backward computation, using a synthetic step with eighteen 25 MB buckets timed four ways, as compute alone, communication alone, overlapped, and serialized (Figure 3, right). From 4 to 24 Macs, about 94% of communication time is overlapped with backward . At 24 Macs, 0.74 s of all-reduce traffic over 1.09 s of GPU work adds 45 ms to the step, a 4.1% overhead. When we disable the in-place path ( MCCL_UNIFIED_COLLECTIVE=0 ), each bucket is copied through a Metal staging buffer and waited on, the same path a tensor in device-only memory would take before PyTorch 2.12, and overlap drops to zero. 
+
+5.2 Training Throughput and Convergence 
+
+A custom Vision Transformer is our stress test, with 113.5M parameters, batch 256 per Mac, and eighteen 25 MB buck-ets per step. Seventeen of those buckets finish averaging while the GPU is still working on earlier layers, so the opti-mizer only ever waits for the last one. Going from 1 to 24 Macs adds 55 ms to a 1,290 ms step. Throughput reaches 
+
+4,568 samples/s , 95.9% of linear. The strongest alternative in stock PyTorch is a manual Gloo reducer, which synchronizes the MPS stream after 
+
+backward , copies each bucket to the CPU, and reduces it with Gloo. That path takes 2,398 ms per step at 24 Macs (2,562 samples/s), so MCCL is 1.78 × faster on the same hardware. To benchmark against our on-prem NVIDIA GPU clusters, we ran the same script on NVIDIA A100 80 GB GPUs at batch 256 per device. With TF32 mat-mul ( high ), one A100 reaches 1,088 samples/s (about 5.5 Macs ) and two reach 2,028 , so 24 Macs deliver 2.25 × atwo-A100 server. With fp32 matmul ( highest , matching the Macs), one A100 drops to 340 samples/s , about 1.7×
+
+one Mac. Turning on bf16 would help the A100s more than the Macs, where an 8192 2 GEMM only moves from 13.4 to 15.1 TFLOP/s between fp32 and bf16. MCCL: PyTorch Training Across a Fleet of Macs 1 4 8 12 16 24 Macs (batch 256 each)           
+
+> 0
+> 1000
+> 2000
+> 3000
+> 4000 samples / s
+> (a) Training throughput with MCCL and Gloo
+> manual CPU-staged Gloo linear from 1 Mac 1 A100 (fp32 matmul) 1 A100 (TF32 matmul) 2 A100s (TF32 matmul) MCCL (measured)
+> 14812 16 24 Macs
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> 1200
+> 1400 step time (ms) 100.0% 97.1% 96.6% 96.3% 96.0% 95.9%
+> (b) Where each MCCL step spends time
+> compute (1-Mac step) exposed communication
+
+Figure 4. Vision Transformer throughput (113.5M parameters, batch 256 per device, 454 MB of fp32 gradients per step) from 1 to 24 Mac Studios, against manual CPU-staged Gloo and NVIDIA A100 80 GB GPUs with TF32 or fp32 matmul. 100 150 200 250 300 350 400       
+
+> optimizer step
+> 1.0 1.2 1.4 1.6 1.8 2.0
+> validation loss
+> (a) Validation loss vs. step (batch 64/Mac)
+> 100 150 200 250 300 350 400
+> optimizer step
+> 25 30 35 40 45 50 55 60 65
+> validation accuracy (%)
+> (b) Validation accuracy vs. step (batch 64/Mac)
+> N=1 N=4 N=8 N=16 N=24
+
+Figure 5. Validation loss and accuracy vs. optimizer step for a 31.6M-parameter GroupNorm ResNet on CIFAR-10, from 1 to 24 Macs at batch 64 per Mac (global batch 64 to 1,536), with the AdamW learning rate scaled as 4 × 10 −4 · K0.45 for K Macs. All cluster sizes converge stably, and larger clusters make more progress per step because each step averages over more examples. 
+
+Throughput is useful only if training still converges, and a 113.5M-parameter ViT overfits 32 ×32 CIFAR-10 at large global batches, so we test convergence with a 31.6M-parameter ResNet (Figure 5). GroupNorm keeps normaliza-tion independent of per-rank batch size, and the model is a lighter communication case than the ViT, with five 25 MB buckets rather than eighteen and a shorter backward pass to hide them behind. Every run takes 400 optimizer steps at batch 64 per Mac, with the AdamW learning rate scaled as 
+
+4×10 −4 ·K0.45 for K Macs, so the global batch grows from 64 at one Mac to 1,536 at 24. All runs converge without divergence or instability. After 400 steps, validation loss falls from 1.60 at one Mac to 1.04 at 24, and test accuracy rises from 42.0% to 63.2%, consistent with the larger global batch at each step. 
+
+5.3 Studio Storage and Sustained Reliability 
+
+Our audio data lives on central ZFS servers that the Macs mount over SMB or NFS. NFS lists directories faster on a cold start (0.9 vs. 10.6 s for thousands of files), while SMB streams data faster once loading begins (757 vs. 538 MB/s per Mac). Precomputing the file list into a manifest re-moves the cold SMB walk, and after that neither protocol changes step time. To isolate transport correctness under sustained load, we ran a 10-minute stress test across all 24 Macs. It completed 17,784 back-to-back all-reduces per rank, 0.34 TB of traffic per Mac, with no bit errors, while MCCL used 0.31 of one CPU core. Our longest internal training runs span over 3 weeks with no deadlocks or train-ing instability. 
+
+## 6 LESSONS FROM SCALING PAST TWO 
+
+## NODES 
+
+Our early development used two nodes and mainly ran smoke tests of gradient correctness on synthetic data. Scal-ing to 24 nodes with real datasets exposed three problems that did not appear with two nodes. We describe how we found each one and what we changed as others building distributed training on Apple silicon are likely to face the same issues. 
+
+6.1 Unified-Memory Races and Ring Ordering Buffer-reuse race in unified memory. At 24 nodes, we observed occasional corrupted gradients that disappeared whenever we added a print() to investigate. The cause was a temporary GPU tensor that an early version of MCCL allocated, copied out of, and released when the call returned. Under load, PyTorch’s caching allocator handed the same 
+
+MTLBuffer to the next collective while the earlier copy was still pending in the command queue, and MCCL’s CPU thread wrote incoming network bytes over a buffer the GPU had not finished reading. Our unit tests never caught it, because tensor.item() and print() both drain the MPS stream between collectives. MCCL now receives di-rectly into the caller’s output tensor and never allocates temporary GPU buffers on its background thread, and it holds every bucket until wait() returns (Section 4.2). We now also test asynchronous bursts with every host synchro-nization removed, and all 640 operations per rank across 24 Macs are exact. 
+
+Cross-rank bucket ordering in the ring. At 24 nodes, the ring occasionally deadlocked. PyTorch can finish two buckets a few microseconds apart, and early versions of MCCL let worker threads pick up ready buckets in whatever order the OS scheduled them. One rank would sometimes start bucket 2 while its neighbor started bucket 1, and each waited on the other. MCCL now stamps every collective with a sequence number on PyTorch’s main thread and ad-mits work to the transport only in that order. MCCL: PyTorch Training Across a Fleet of Macs 8,192 65,535 65,536 65,537 131,072 480,000 
+
+> signal length T (samples)
+> N=1,C=1 N=1,C=2 N=1,C=4 N=2,C=1 N=2,C=2 N=4,C=1
+> 216
+> F.pad(mode='re fl ect') backward on MPS vs CPU
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> cos(grad MPS, grad CPU)
+
+Figure 6. Cosine similarity between MPS and CPU float64 ref-erence gradients for F.pad(...,mode="reflect") . Forward 
+
+outputs are exact everywhere; on MPS, the backward pass is exact up to 65,535 samples ( 216 −1), fails above 216 for N =1 , C =1 except at exact multiples of 216 , and fails at every length ≥ 216 whenever 
+
+N > 1 or C> 1.
+
+Table 2. Centered STFT backward accuracy and 300-step waveform-recovery loss (initial loss 1.821) for signals with 
+
+T ≥ 216 samples (batch 2, window 2048, hop 512). STFT backend (MPS) Min cos( ∇) Final loss Fwd+bwd PyTorch torch.stft −0.002 5.525 1.1 ms 
+
+mps-spectro (default) † −0.002 5.525 0.8 ms 
+
+mps-spectro (Metal) 1.000 0.924 0.8 ms 
+
+MCCL Accelerate / vDSP 0.997 0.921 13.7 ms CPU float64 reference 1.000 0.924 14.7 ms  
+
+> †Default shape rule falls back to torch.stft .
+
+6.2 A Silent MPS Gradient Bug Above 216 Samples 
+
+The most time-consuming problem we encountered was out-side MCCL. Our audio models train with multi-resolution centered short-time Fourier transform (STFT) losses (Ya-mamoto et al., 2020), and models trained on short clips converged normally on MPS. When we moved our VAE to 1.6 s crops (76,800 samples at 48 kHz), training stopped im-proving, with no errors or NaN values to indicate a problem. Because the same code trained correctly on our NVIDIA clusters, we compared each layer’s backward pass on MPS against a CPU float64 reference. The comparison pinned the fault on the MPS backward ker-nel for F.pad(...,mode="reflect") , which every centered torch.stft calls (Figure 6). The forward pass is bit-exact, but the backward pass is exact only up to 65,535 samples ( 216 −1). Above that length, a single mono signal (N =1 , C=1 ) receives wrong gradients at every length ex-cept exact multiples of 216 , and any input with more than one batch element or channel fails at every length of 216 or more, a pattern consistent with an indexing overflow at 216 
+
+elements. Table 2 shows the effect on training. With native MPS gra-dients, and with the default mps-spectro path, which hands these shapes back to torch.stft , a 300-step waveform-recovery loss rises from 1.821 to 5.525 instead of falling to 0.924. Forcing the custom Metal kernels in 
+
+mps-spectro (ssmall256, 2026) restores exact gradients at 0.8 ms per call, and MCCL ships an independent Ap-ple Accelerate STFT as a permanent reference check. The bug affected every PyTorch version we used, from 2.11 through 2.14, because PyTorch delegated this kernel to Ap-ple’s MPSGraph (PyTorch contributors, 2026c). This was only recently fixed upstream by moving reflection padding to native Metal kernels (PyTorch contributors, 2026d). We now run every new model through this check before training it across the cluster. It executes each layer’s forward 
+
+and backward pass on both MPS and CPU float64 at production tensor shapes and flags any output or gradient whose cosine similarity to the CPU reference falls below 0.99 or whose relative error, ∥xMPS − xCPU ∥2/∥xCPU ∥2,exceeds 10 −3.
+
+## 7 FROM 24 M ACS TO HUNDREDS 
+
+Our evaluation used up to 24 nodes, and the facility has more than 200. Assuming 100 machines are idle each night, the fleet corresponds to roughly 18 A100 GPUs with TF32 matmul, and with all 200 available, roughly 35. Reaching that scale requires solving two problems that do not appear at 24 nodes. The first problem is hop count. A flat ring splits each bucket into N pieces and sends them 2( N −1) hops, and each hop pays a fixed switch cost regardless of message size, 306 μs in our model and consistent with the measured 0.59 ms round trip. A latency-plus-bandwidth model (Hockney, 1994) fit-ted to the 4–24 Mac data matches every measured bucket of 16 MB or more within 1.9%. The model predicts that a stan-dard 25 MB bucket stays bandwidth-bound up to roughly 70 Macs, beyond which a flat ring spends more time wait-ing on switch hops than moving bytes. It also predicts that raising PyTorch’s bucket_cap_mb to 50 MB moves the crossover past 128 Macs and holds 1.23 GB/s at 100 nodes. These values extrapolate the 4–24 Mac measurements and are not measurements at 70 or 100 nodes. For the full fleet, the standard answer is a two-level ring (Jia et al., 2018; Mikami et al., 2018), which reduces within groups of 10–16 Macs on the same switch and then across switches. The second problem is that the workstations belong to artists first, so the training pool must grow and shrink with the studio’s schedule. An empty room does not mean an idle machine, because some editors work from home and connect to their workstations remotely. A daemon on each Mac would therefore need to detect active use on the machine MCCL: PyTorch Training Across a Fleet of Macs 
+
+itself, characterizing active Pro Tools sessions or a remote login, before joining the Mac to Ray, and remove it as soon as either appears. We leave the design of this availability detection to future work. Recovery when a Mac leaves is a separate problem. Ray Train’s elastic training (Ray project, 2026) lets a job spec-ify a range of workers rather than a fixed count. When a Mac leaves, the job restarts from its latest checkpoint with the remaining workers, and when more Macs become available, it resizes the worker group to include them, so a job loses at most the work since its last checkpoint. We have not yet tested elastic training with MCCL. Each Mac would also cache dataset shards on its local SSD, so that 200 workers starting at once do not overload a single ZFS vol-ume. Finally, MCCL already implements the allgather 
+
+and reduce_scatter calls that sharded FSDP train-ing (Zhao et al., 2023) needs, though every job in this paper keeps a full model copy per Mac. 
+
+## 8 LIMITATIONS 
+
+MCCL hides communication only when the backward pass is long relative to gradient volume. At batch 64 per Mac, the ResNet’s 126 MB of gradients cannot be fully hidden at 24 nodes, and per-step time rises from 227 ms to 305 ms. Models with small per-device batches therefore need larger batches, gradient accumulation, or reduced-precision gradi-ents to scale well on our network. The network itself is the larger constraint. NVIDIA train-ing systems connect GPUs with NVLink and NVSwitch at up to 900 GB/s within a node and InfiniBand at up to 400 Gb/s between nodes (van der Ouderaa et al., 2025), and NCCL (NVIDIA, 2016a) moves data over these links with RDMA rather than kernel TCP. Our Macs share a single 10 Gb Ethernet switch, which delivers 1.238 GB/s of TCP goodput per link and costs 0.59 ms per round trip. Large buckets still fill that link, but every collective pays the round trip, so small or frequent messages are latency-bound long before they are bandwidth-bound. Faster links would re-quire Thunderbolt network adapters, since the Mac Studio’s built-in port is 10 GbE, and we have not evaluated lower-latency Ethernet or switched RDMA. Our measurements stop at 24 nodes on one switch, and the predictions in Section 7 are extrapolations. MCCL also does not yet handle preemption itself. A timeout or peer failure errors all in-flight collectives, and recovery relies on restarting from the last checkpoint. Finally, we have not evaluated distributed inference, al-though MCCL exposes the collectives it needs. Our mea-surements suggest how the common strategies would fare. Replicated inference, in which each Mac holds a full model copy and serves its own requests, needs no per-request col-lectives and should scale with the number of Macs, and 128 GB of unified memory fits large models on a single machine. Pipeline-parallel inference sends one small ac-tivation per stage boundary per token, so each boundary would add on the order of half a switch round trip, about 0.3 ms. Tensor-parallel inference is the poor fit. It requires two all-reduces per transformer layer per token, each paying at least one 0.59 ms round trip regardless of message size, so a 32-layer model would spend roughly 38 ms per token on communication alone, capping decoding near 26 tokens per second per sequence. On this network, we would there-fore start with replicated and pipeline-parallel inference and measure both before trying tensor parallelism. 
+
+## 9 CONCLUSION 
+
+MCCL lets us run the same PyTorch Lightning code on our Mac fleet that we run on our NVIDIA clusters. On 24 Mac Studios over 10 GbE, it reaches 98–99.7% of TCP good-put, overlaps about 94% of communication with backward 
+
+computation, and scales a 113.5M-parameter ViT at 95.9% efficiency. The main contribution is not a new collective algorithm, but a way to reduce gradients directly in unified memory without stalling the GPU. Per-bucket Metal shared events coordinate the CPU network threads with PyTorch’s asynchronous MPS stream. Scaling to 24 nodes also exposed problems we had not en-countered in smaller tests, including a buffer-reuse race, a ring-ordering deadlock, and a silent MPS gradient bug. We have tested MCCL on 24 of the facility’s more than 200 Macs. Using the full fleet will require hierarchical collec-tives, local data caching, and a way to release workstations when artists need them. These are the next problems we plan to address. 
+
+Availability. MCCL is open source at https:// github.com/mps-ddp/mccl .
+
+## APPENDIX : R ELATED WORK 
+
+Custom PyTorch backends and Apple-silicon ML. Py-Torch’s c10d::Backend plugin API (PyTorch contrib-utors, 2026e) is how every non-NVIDIA accelerator joins 
+
+torch.distributed : RCCL for AMD (AMD, 2026), oneCCL for Intel XPUs (Intel, 2026), HCCL plugins for As-cend and Gaudi (Ascend contributors, 2026; Intel Gaudi / Habana Labs, 2026), and UCC at HPC sites (UCX / Meta contributors, 2024). None of them targets MPS, and the CPU options on macOS (Gloo (Meta, 2017), Horovod/MPI (Sergeev & Del Balso, 2018)) only move host buffers. Apple’s MLX (Hannun et al., 2023; Katharopou-los, 2025) ships TCP ring , OpenMPI, and Thunderbolt 5 RDMA ( jaccl ) collectives, but for its own graph rather MCCL: PyTorch Training Across a Fleet of Macs 
+
+than PyTorch. Two recent PyTorch pull requests target MPS collectives over Thunderbolt 5 RDMA: #181087 was closed without merging, and TCCL is an open proposal that needs Thunderbolt 5 cables and macOS 26.2 (PyTorch contribu-tors, 2026b; radimurban, 2026). MCCL instead targets the Mac workstations and switched 10 Gb Ethernet a studio al-ready has. Exo (exo labs, 2024) targets distributed inference rather than training. 
+
+Collective algorithms and overlap. Pipelined rings and recursive-doubling trees are classic (Patarasuk & Yuan, 2009; Thakur et al., 2005); NCCL and follow-on work tune them to specific fabrics and hierarchies (NVIDIA, 2016a; Hu et al., 2025; Shah et al., 2023; De Sensi et al., 2024; Cho et al., 2019), PyTorch buckets gradients to overlap trans-fers with backward (Li et al., 2020), and ZeRO/FSDP shard model state (Rajbhandari et al., 2020; Zhao et al., 2023). MCCL does not add a new ring algorithm. Its contribution is the unified-memory handoff that lets a CPU TCP engine average MPS gradient buckets in place while PyTorch’s GPU stream keeps running. 
+
+## REFERENCES 
+
+AMD. RCCL: ROCm communication collectives library. 
+
+https://github.com/ROCm/rccl , 2026. Apple. Choosing a resource storage mode for Apple GPUs. Metal documentation, https: //developer.apple.com/documentation/ metal/choosing-a-resource-storage-mode-for-apple-gpus , 2026a. Apple. MTLSharedEvent. Metal documenta-tion, https://developer.apple.com/ documentation/metal/mtlsharedevent ,2026b. Ascend contributors. ProcessGroupHCCL: Huawei As-cend collective communication backend for PyTorch (torch_npu ). https://github.com/Ascend/ pytorch , 2026. Beischl, A., Morozov, M., Jungmair, M., Haussmann, L., and Neumann, T. Evaluating Apple silicon for data pro-cessing. In Proceedings of the 22nd International Work-shop on Data Management on New Hardware (DaMoN ’26) . ACM, 2026. doi: 10.1145/3789237.3809127. Cho, M., Finkler, U., Serrano, M., Kung, D., and Hunter, H. BlueConnect: Decomposing all-reduce for deep learning on heterogeneous network hierarchy. IBM Journal of Research and Development , 63:1:1–1:11, 2019. doi: 10. 1147/JRD.2019.2947013. crystech. GenMLX. https://github.com/ crystech/GenMLX , 2026. De Sensi, D., Bonato, T., Saam, D., and Hoefler, T. Swing: Short-cutting rings for higher bandwidth allreduce. In 
+
+21st USENIX Symposium on Networked Systems Design and Implementation (NSDI) , pp. 1445–1462, 2024. exo labs. exo: Run your own AI cluster at home with everyday devices. https://github.com/exo-explore/exo , 2024. Falcon, W. and The PyTorch Lightning team. PyTorch Lightning. https://github.com/Lightning-AI/pytorch-lightning , 2019. Hannun, A., Digani, J., Katharopoulos, A., and Collobert, R. MLX: Efficient and flexible machine learning on Ap-ple silicon. https://github.com/ml-explore/ mlx , 2023. Hockney, R. W. The communication challenge for MPP: Intel Paragon and Meiko CS-2. Parallel Computing , 20: 389–398, 1994. doi: 10.1016/S0167-8191(06)80021-9. Hu, Z., Shen, S., Bonato, T., Jeaugey, S., Alexander, C., Spada, E., Dinan, J., Hammond, J., and Hoefler, T. De-mystifying NCCL: An in-depth analysis of GPU commu-nication protocols and algorithms, 2025. Hübner, P., Hu, A., Peng, I., and Markidis, S. Apple vs. oranges: Evaluating the Apple silicon M-series SoCs for HPC performance and efficiency. In IEEE Interna-tional Parallel and Distributed Processing Symposium Workshops (IPDPSW) , pp. 45–54, 2025. Hugging Face. MPS in PyTorch 2.15. Hugging Face blog, October 20, 2026, [URL] , 2026. Intel. oneAPI collective communications library (oneCCL) and PyTorch ProcessGroupXCCL. https: //github.com/uxlfoundation/oneCCL and 
+
+https://github.com/intel/torch-ccl ,2026. Intel Gaudi / Habana Labs. Habana collective commu-nications library (HCCL) PyTorch backend. https: //docs.habana.ai/en/latest/PyTorch/ PyTorch_Scaling_Guide/Distributed_ Backend_Initialization.html , 2026. jasonappah. Distributed PyTorch training across Apple sili-con Macs. https://github.com/jasonappah/ cv , 2026. Jia, X., Song, S., He, W., Wang, Y., Rong, H., Zhou, F., Xie, L., Guo, Z., Yang, Y., Yu, L., Chen, T., Hu, G., Shi, S., and Chu, X. Highly scalable deep learning training system with mixed-precision: Training ImageNet in four minutes, 2018. MCCL: PyTorch Training Across a Fleet of Macs 
+
+Katharopoulos, A. Thunderbolt RDMA communica-tions backend (JACCL). GitHub pull request ml-explore/mlx#2808, merged 2025-12-17, 2025. Li, S., Zhao, Y., Varma, R., Salpekar, O., Noordhuis, P., Li, T., Paszke, A., Smith, J., Vaughan, B., Damania, P., and Chintala, S. PyTorch distributed: Experiences on accelerating data parallel training. Proceedings of the VLDB Endowment , 13(12):3005–3018, 2020. Lightning AI. MPS training (basic). Py-Torch Lightning 2.6 documentation, https: //lightning.ai/docs/pytorch/stable/ accelerators/mps_basic.html , 2026. “The MPSAccelerator only supports 1 device at a time.”. Meta. Gloo: Collective communications library. https: //github.com/pytorch/gloo , 2017. Mikami, H., Suganuma, H., U-chupala, P., Tanaka, Y., and Kageyama, Y. Massively distributed SGD: ImageNet/ResNet-50 training in a flash, 2018. MLX contributors. Hardware bottleneck: AppleThunder-boltRDMA hard limit of 100 MRs caps JACCL multi-node scaling. GitHub issue ml-explore/mlx#3162, 2026. Moritz, P., Nishihara, R., Wang, S., Tumanov, A., Liaw, R., Liang, E., Elibol, M., Yang, Z., Paul, W., Jordan, M. I., and Stoica, I. Ray: A distributed framework for emerging AI applications. In 13th USENIX Symposium on Operating Systems Design and Implementation (OSDI) ,pp. 561–577, 2018. NVIDIA. NCCL: NVIDIA collective communications library. https://github.com/NVIDIA/nccl ,2016a. NVIDIA. nccl-tests: Performance reported by NCCL tests. 
+
+https://github.com/NVIDIA/nccl-tests/ blob/master/doc/PERFORMANCE.md , 2016b. Patarasuk, P. and Yuan, X. Bandwidth optimal all-reduce al-gorithms for clusters of workstations. Journal of Parallel and Distributed Computing , 69(2):117–124, 2009. PyTorch contributors. All MPS tensors are now allocated in unified memory. GitHub pull request pytorch/py-torch#175818; released in PyTorch 2.12.0, 2026a. PyTorch contributors. [MPS] RDMA for distributed MPS. GitHub pull request pytorch/pytorch#181087, 2026b. Opened 2026-04-22; closed without merging. PyTorch contributors. [MPS] reflection_pad1d backward returns wrong gradients when input length > 65536 and not a multiple of 65536. GitHub issue pytorch/py-torch#196949, 2026c. PyTorch contributors. [MPS] migrate reflection/replica-tion pad to Metal. GitHub pull request pytorch/py-torch#196985, 2026d. PyTorch contributors. Custom backends and out-of-tree distributed training integration. PyTorch documentation, 
+
+https://docs.pytorch.org/docs/main/ distributed/custom_backends.html and 
+
+https://docs.pytorch.org/docs/main/ accelerator/distributed.html , 2026e. PyTorch contributors. Distributed communication package – torch.distributed. PyTorch 2.14 docu-mentation, https://docs.pytorch.org/docs/ 2.14/distributed.html , 2026f. Synchronous and asynchronous collective operations. radimurban. [MPS] TCCL – Thunderbolt collective com-munication library. GitHub pull request pytorch/py-torch#189856, 2026. Opened 2026-07-14; open and unmerged as of 2026-10-20. Rajbhandari, S., Rasley, J., Ruwase, O., and He, Y. ZeRO: Memory optimizations toward training trillion parameter models. In International Conference for High Perfor-mance Computing, Networking, Storage and Analysis (SC) , pp. 1–16, 2020. Ray project. [Core] identify Mac M1/M2 GPUs as valid GPUs. GitHub issue ray-project/ray#39136, 2023. Ray project. [Train] support for lightning.pytorch 
+
+on the mps backend. GitHub issue ray-project/ray#49858, 2025. Ray project. Elastic training. Ray Train documentation, 
+
+https://docs.ray.io/en/latest/train/ user-guides/elastic-training.html ,2026. Sergeev, A. and Del Balso, M. Horovod: Fast and easy distributed deep learning in TensorFlow, 2018. Shah, A., Chidambaram, V., Cowan, M., Maleki, S., Musu-vathi, M., Mytkowicz, T., Nelson, J., Saarikivi, O., and Singh, R. TACCL: Guiding collective algorithm synthesis using communication sketches. In 20th USENIX Sympo-sium on Networked Systems Design and Implementation (NSDI) , pp. 593–612, 2023. ssmall256. mps-spectro: Drop-in torch.stft /
+
+torch.istft replacements for Apple silicon. https: //github.com/ssmall256/mps-spectro , ver-sion 0.3.0, 2026. Thakur, R., Rabenseifner, R., and Gropp, W. Optimiza-tion of collective communication operations in MPICH. 
+
+International Journal of High Performance Computing Applications , 19(1):49–66, 2005. MCCL: PyTorch Training Across a Fleet of Macs 
+
+UCX / Meta contributors. Torch-UCC: Unified col-lective communication library ProcessGroup for Py-Torch. https://github.com/openucx/torch-ucc , 2024. van der Ouderaa, T. F. A., Baioumy, M., Beton, M., Howes, S., Vrabie, G., and Cheema, A. Towards large scale training on Apple silicon. In ES-FoMo III: 3rd Workshop on Efficient Systems for Foundation Models, ICML , 2025. Yamamoto, R., Song, E., and Kim, J.-M. Parallel Wave-GAN: A fast waveform generation model based on gen-erative adversarial networks with multi-resolution spec-trogram. In IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP) , pp. 6199–6203, 2020. Zhao, Y., Gu, A., Varma, R., Luo, L., Huang, C.-C., Xu, M., Wright, L., Shojanazeri, H., Ott, M., Shleifer, S., Desmaison, A., Balioglu, C., Damania, P., Nguyen, B., Chauhan, G., Hao, Y., Mathews, A., and Li, S. PyTorch FSDP: Experiences on scaling fully sharded data parallel. 
+
+Proceedings of the VLDB Endowment , 16(12):3848–3860, 2023.
